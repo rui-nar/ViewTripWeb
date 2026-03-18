@@ -35,3 +35,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Reflex
+.web/
+.reflex/
+
+# App data (local dev)
+data/
