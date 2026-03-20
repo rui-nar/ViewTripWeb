@@ -22,8 +22,8 @@ TokenStore._TOKEN_FILE = __import__("pathlib").Path(DATA_DIR) / "tokens.json"
 _config = Config(CONFIG_FILE)
 _cache = ActivityCache(os.path.join(DATA_DIR, "cache"))
 
-USER_ID = "default"
-
+# Shared mutable reference for the FastAPI geo endpoint (updated by ProjectState)
+_active_project: list = []  # [Project] or []
 
 class ProjectState(rx.State):
     """Manages the open project."""
@@ -74,6 +74,7 @@ class ProjectState(rx.State):
     def _refresh_item_list(self):
         if not self._project:
             self.item_names = []
+            _active_project.clear()
             return
         names = []
         for item in self._project.items:
@@ -81,8 +82,22 @@ class ProjectState(rx.State):
                 act = self._project.activity_by_id(item.activity_id)
                 names.append(act.name if act else f"Activity {item.activity_id}")
             elif item.segment:
-                names.append(f"[{item.segment.transport_type}] segment")
+                names.append(f"[{item.segment.segment_type}] segment")
         self.item_names = names
+        _active_project.clear()
+        _active_project.append(self._project)
+
+    def add_from_cache(self, selected_ids: list[str]):
+        id_set = set(selected_ids)
+        to_add = [a for a in _cache.load() if str(a.id) in id_set]
+        if not to_add:
+            return
+        if not self._project:
+            self._project = Project(name="My Trip")
+            self.project_name = "My Trip"
+        self._project.add_activities(to_add)
+        self.is_dirty = True
+        self._refresh_item_list()
 
 
 class StravaState(rx.State):
@@ -93,32 +108,53 @@ class StravaState(rx.State):
     activities: list[dict] = []
     is_loading: bool = False
     error_message: str = ""
+    selected_ids: list[str] = []
 
-    def on_load(self):
-        token = TokenStore.load_token(USER_ID)
+    def toggle_activity(self, activity_id: str):
+        if activity_id in self.selected_ids:
+            self.selected_ids = [x for x in self.selected_ids if x != activity_id]
+        else:
+            self.selected_ids = self.selected_ids + [activity_id]
+
+    def add_selected_to_project(self):
+        ids = self.selected_ids
+        self.selected_ids = []
+        return ProjectState.add_from_cache(ids)
+
+    async def _user_id(self) -> str:
+        """Return the authenticated user's stable ID for TokenStore keying."""
+        from app.auth.state import AuthState
+        auth = await self.get_state(AuthState)
+        return auth.user_id_str if auth.is_authenticated else "default"
+
+    async def on_load(self):
+        token = TokenStore.load_token(await self._user_id())
         self.is_authenticated = token is not None
 
     def start_oauth(self):
         oauth = OAuth2Session(_config)
         self.auth_url = oauth.authorization_url(scope="activity:read_all")
 
-    def handle_callback(self, code: str):
+    async def handle_callback(self, code: str):
         if not code:
             return
         oauth = OAuth2Session(_config)
         token = oauth.exchange_code(code)
-        TokenStore.save_token(USER_ID, token)
+        TokenStore.save_token(await self._user_id(), token)
         self.is_authenticated = True
         self.auth_url = ""
         return rx.redirect("/")
 
-    @rx.background
+    @rx.event(background=True)
     async def fetch_activities(self):
         async with self:
             self.is_loading = True
             self.error_message = ""
         try:
-            api = StravaAPI(_config, USER_ID)
+            from app.auth.state import AuthState
+            auth = await self.get_state(AuthState)
+            user_id = auth.user_id_str if auth.is_authenticated else "default"
+            api = StravaAPI(_config, user_id)
             raw = api.get_activities(per_page=100)
             cached = _cache.merge(raw)
             _cache.save(cached)
@@ -127,7 +163,7 @@ class StravaState(rx.State):
                     {
                         "id": str(a.id),
                         "name": a.name,
-                        "type": a.sport_type,
+                        "type": a.type,
                         "date": str(a.start_date_local)[:10],
                     }
                     for a in cached
@@ -138,6 +174,65 @@ class StravaState(rx.State):
         finally:
             async with self:
                 self.is_loading = False
+
+
+_PROJECTS_DIR = os.path.join(DATA_DIR, "projects")
+
+
+class ProjectPickerState(rx.State):
+    """Lists saved projects and handles project selection / creation / upload."""
+
+    saved_projects: list[dict] = []
+    new_project_name: str = ""
+    picker_error: str = ""
+
+    def on_load(self):
+        """Scan DATA_DIR/projects/ for .gettracks files."""
+        os.makedirs(_PROJECTS_DIR, exist_ok=True)
+        entries = []
+        for fname in sorted(os.listdir(_PROJECTS_DIR)):
+            if fname.endswith(ProjectIO.EXTENSION):
+                full = os.path.join(_PROJECTS_DIR, fname)
+                entries.append({"name": fname[: -len(ProjectIO.EXTENSION)], "path": full})
+        self.saved_projects = entries
+        self.picker_error = ""
+
+    def set_new_project_name(self, value: str):
+        self.new_project_name = value
+
+    def create_project(self):
+        name = self.new_project_name.strip() or "My Trip"
+        project_state = ProjectState
+        return [
+            ProjectState.new_project(name),
+            rx.redirect("/"),
+        ]
+
+    def open_saved(self, path: str):
+        return [
+            ProjectState.open_project(path),
+            rx.redirect("/"),
+        ]
+
+    @rx.event
+    async def handle_upload(self, files: list[rx.UploadFile]):
+        """Accept an uploaded .gettracks file, save it, and open it."""
+        self.picker_error = ""
+        if not files:
+            return
+        f = files[0]
+        contents = await f.read()
+        safe_name = os.path.basename(f.filename or "imported.gettracks")
+        if not safe_name.endswith(ProjectIO.EXTENSION):
+            safe_name += ProjectIO.EXTENSION
+        dest = os.path.join(_PROJECTS_DIR, safe_name)
+        os.makedirs(_PROJECTS_DIR, exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(contents)
+        return [
+            ProjectState.open_project(dest),
+            rx.redirect("/"),
+        ]
 
 
 class ExportState(rx.State):
