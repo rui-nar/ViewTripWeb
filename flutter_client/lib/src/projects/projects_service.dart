@@ -1,6 +1,7 @@
 /// Projects service — wraps /api/projects/* endpoints.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../api/client.dart';
@@ -29,11 +30,17 @@ class ProjectsService {
       'POST',
       Uri.parse('${api.baseUrl}/api/projects/import'),
     )
-      ..headers['Authorization'] = 'Bearer ${api._token}'
+      ..headers['Authorization'] = 'Bearer ${api.tokenForUpload}'
       ..files.add(await http.MultipartFile.fromPath('file', file.path));
     final streamed = await request.send();
     final res = await http.Response.fromStream(streamed);
     if (res.statusCode != 201) throw ApiException(res.statusCode, res.body);
-    return {};
+    if (res.body.isEmpty) return {};
+    final decoded = jsonDecode(res.body);
+    return decoded as Map<String, dynamic>;
   }
+
+  /// Convenience wrapper used by [ProjectsNotifier] on native platforms.
+  Future<Map<String, dynamic>> importFileByPath(String path) =>
+      importFile(File(path));
 }

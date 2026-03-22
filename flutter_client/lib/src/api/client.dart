@@ -17,6 +17,10 @@ class ApiClient {
   void clearToken() => _token = null;
   bool get isAuthenticated => _token != null;
 
+  /// Exposes the current JWT for multipart upload requests built outside
+  /// this class (e.g. ProjectsNotifier on web where dart:io is unavailable).
+  String? get tokenForUpload => _token;
+
   Map<String, String> get _headers => {
     'Content-Type': 'application/json',
     if (_token != null) 'Authorization': 'Bearer $_token',

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from api.deps import get_current_user
-from src.project.io import ProjectIO
+from src.project.project_io import ProjectIO
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 

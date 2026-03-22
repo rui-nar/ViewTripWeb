@@ -42,6 +42,21 @@ class ProjectIO:
             json.dump(data, fh, indent=2, ensure_ascii=False)
 
     @staticmethod
+    def to_dict(project: Project) -> Dict[str, Any]:
+        """Return the same data structure as :meth:`save` but as a dict."""
+        return {
+            "version": project.version,
+            "name": project.name,
+            "filter_state": {
+                "start_date": project.filter_state.start_date,
+                "end_date": project.filter_state.end_date,
+                "activity_types": project.filter_state.activity_types,
+            },
+            "items": [ProjectIO._serialise_item(i) for i in project.items],
+            "activities": [a.to_strava_dict() for a in project.activities],
+        }
+
+    @staticmethod
     def load(path: str) -> Project:
         """Deserialise a .gettracks file and return a :class:`Project`."""
         with open(path, encoding="utf-8") as fh:

@@ -35,14 +35,26 @@ class AuthService {
   }
 
   Future<Map<String, dynamic>> register(
-      String username, String password, {String displayName = ''}) async {
+    String username,
+    String password, {
+    String displayName = '',
+    String email = '',
+  }) async {
     final data = await api.post('/api/auth/register', {
       'username': username,
       'password': password,
       'display_name': displayName,
+      if (email.isNotEmpty) 'email': email,
     });
     _persist(data['access_token'] as String);
     return data['user'] as Map<String, dynamic>;
+  }
+
+  /// Fetches the current user's profile from the server.
+  /// Requires a valid token to already be set on [api].
+  Future<Map<String, dynamic>> getMe() async {
+    final data = await api.get('/api/auth/me');
+    return data as Map<String, dynamic>;
   }
 
   Future<void> logout() async {
