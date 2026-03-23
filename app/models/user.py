@@ -1,4 +1,6 @@
 """Extended user model stored alongside reflex-local-auth's LocalUser."""
+from typing import Optional
+
 import sqlmodel
 
 
@@ -22,3 +24,15 @@ class UserInfo(sqlmodel.SQLModel, table=True):
 
     # TODO: Apple Sign-In — add apple_sub field when implemented
     # TODO: Facebook Login — add facebook_id field when implemented
+
+
+class StravaToken(sqlmodel.SQLModel, table=True):
+    """Stores per-user Strava OAuth tokens."""
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    user_info_id: int = sqlmodel.Field(
+        foreign_key="userinfo.id", unique=True, index=True
+    )
+    access_token: str = sqlmodel.Field(default="")
+    refresh_token: str = sqlmodel.Field(default="")
+    expires_at: float = sqlmodel.Field(default=0.0)  # Unix timestamp

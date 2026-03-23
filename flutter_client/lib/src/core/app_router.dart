@@ -10,6 +10,8 @@ import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
+import '../projects/strava_import_screen.dart';
+import '../projects/strava_import_notifier.dart';
 
 GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
@@ -53,6 +55,17 @@ GoRouter buildRouter(BuildContext context) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
           return AppScreen(projectName: projectName);
+        },
+      ),
+      GoRoute(
+        path: '/strava-import',
+        builder: (context, state) {
+          final projectName =
+              state.uri.queryParameters['project'] ?? '';
+          return ChangeNotifierProvider(
+            create: (_) => StravaImportNotifier(),
+            child: StravaImportScreen(projectName: projectName),
+          );
         },
       ),
     ],

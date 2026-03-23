@@ -9,8 +9,10 @@ import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import 'project_notifier.dart';
+import 'segment_dialog.dart';
 
 // ── AppScreen ─────────────────────────────────────────────────────────────────
 
@@ -39,6 +41,35 @@ class _AppScreenState extends State<AppScreen> {
     if (mounted) context.go('/login');
   }
 
+  Future<void> _syncStrava() async {
+    final name = widget.projectName;
+    try {
+      final result = await api.post(
+        '/api/projects/${Uri.encodeComponent(name)}/strava/sync',
+        {},
+      ) as Map<String, dynamic>;
+      if (!mounted) return;
+      final added = result['added'] as int? ?? 0;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(added > 0
+              ? 'Synced — added $added ${added == 1 ? 'activity' : 'activities'}'
+              : 'Already up to date'),
+        ),
+      );
+      if (added > 0) {
+        // Reload the project to show the new activities
+        context.read<ProjectNotifier>().load(name);
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      final msg = e.statusCode == 400
+          ? 'Connect Strava first (go to Projects)'
+          : 'Sync failed: ${e.body}';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = context.watch<ProjectNotifier>();
@@ -52,6 +83,17 @@ class _AppScreenState extends State<AppScreen> {
         ),
         title: Text(title.isEmpty ? 'ViewTripWeb' : title),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.playlist_add),
+            tooltip: 'Import activities from Strava',
+            onPressed: () => context.go(
+                '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.sync),
+            tooltip: 'Sync from Strava',
+            onPressed: _syncStrava,
+          ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
@@ -74,9 +116,19 @@ class _AppScreenState extends State<AppScreen> {
                   ),
                 ),
                 Expanded(
-                  child: MapPanel(
-                    notifier: notifier,
-                    mapController: _mapController,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: MapPanel(
+                          notifier: notifier,
+                          mapController: _mapController,
+                        ),
+                      ),
+                      SizedBox(
+                        height: 160,
+                        child: ElevationChart(activities: notifier.activities),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -102,6 +154,7 @@ class _AppScreenState extends State<AppScreen> {
                         notifier: notifier,
                         mapController: _mapController,
                         scrollController: scrollController,
+                        showElevationChart: true,
                       ),
                     );
                   },
@@ -249,15 +302,17 @@ class ActivityPanel extends StatelessWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final ScrollController? scrollController;
+  final bool showElevationChart;
 
   const ActivityPanel({
     super.key,
     required this.notifier,
     required this.mapController,
     this.scrollController,
+    this.showElevationChart = false,
   });
 
-  IconData _iconForType(String? type) {
+  IconData _iconForActivityType(String? type) {
     switch (type?.toLowerCase()) {
       case 'run':
         return Icons.directions_run;
@@ -267,6 +322,21 @@ class ActivityPanel extends StatelessWidget {
         return Icons.hiking;
       default:
         return Icons.map;
+    }
+  }
+
+  IconData _iconForSegmentType(String? type) {
+    switch (type?.toLowerCase()) {
+      case 'flight':
+        return Icons.flight;
+      case 'train':
+        return Icons.train;
+      case 'bus':
+        return Icons.directions_bus;
+      case 'boat':
+        return Icons.directions_boat;
+      default:
+        return Icons.route;
     }
   }
 
@@ -288,10 +358,23 @@ class ActivityPanel extends StatelessWidget {
     }
   }
 
+  /// Returns the Activity dict for an activity item, or null if not found.
+  Map<String, dynamic>? _activityForItem(
+      Map<String, dynamic> item, List<Map<String, dynamic>> activities) {
+    final id = item['activity_id'];
+    if (id == null) return null;
+    try {
+      return activities.firstWhere((a) => a['id'] == id);
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final activities = notifier.activities;
+    final items = notifier.items;
 
     // ── Aggregate stats ───────────────────────────────────────────────────────
     double totalDistM = 0;
@@ -311,9 +394,7 @@ class ActivityPanel extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
           decoration: BoxDecoration(
             border: Border(
-              bottom: BorderSide(
-                color: theme.dividerColor,
-              ),
+              bottom: BorderSide(color: theme.dividerColor),
             ),
           ),
           child: Column(
@@ -328,69 +409,163 @@ class ActivityPanel extends StatelessWidget {
               Row(
                 children: [
                   _StatChip(
-                      label:
-                          '${(totalDistM / 1000).toStringAsFixed(1)} km'),
+                      label: '${(totalDistM / 1000).toStringAsFixed(1)} km'),
                   const SizedBox(width: 8),
                   _StatChip(label: _formatDuration(totalMovingSec)),
                   const SizedBox(width: 8),
                   _StatChip(
-                      label:
-                          '${totalElevGain.toStringAsFixed(0)} m elev'),
+                      label: '${totalElevGain.toStringAsFixed(0)} m elev'),
                 ],
               ),
             ],
           ),
         ),
 
-        // ── Activity list ─────────────────────────────────────────────────────
+        // ── Items list (activities + segments, reorderable) ───────────────────
         Expanded(
-          child: activities.isEmpty && !notifier.isLoading
+          child: items.isEmpty && !notifier.isLoading
               ? Center(
                   child: Text(
                     notifier.error != null
                         ? 'Error: ${notifier.error}'
-                        : 'No activities',
+                        : 'No activities — use sync or import',
                     style: theme.textTheme.bodySmall,
+                    textAlign: TextAlign.center,
                   ),
                 )
-              : ListView.separated(
-                  controller: scrollController,
-                  itemCount: activities.length,
-                  separatorBuilder: (_, __) =>
-                      const Divider(height: 1, indent: 56),
+              : ReorderableListView.builder(
+                  scrollController: scrollController,
+                  onReorder: (oldIndex, newIndex) {
+                    // ReorderableListView passes newIndex after removal,
+                    // but our backend uses the original "before" semantics.
+                    final to = newIndex > oldIndex ? newIndex - 1 : newIndex;
+                    notifier.reorderItems(oldIndex, to);
+                  },
+                  itemCount: items.length,
                   itemBuilder: (context, i) {
-                    final a = activities[i];
-                    final type = a['type'] as String?;
-                    final name =
-                        a['name'] as String? ?? 'Activity ${i + 1}';
-                    final distM =
-                        (a['distance'] as num? ?? 0).toDouble();
-                    final movingSec = a['moving_time'];
-                    return ListTile(
-                      leading: Icon(
-                        _iconForType(type),
-                        color: theme.colorScheme.primary,
-                      ),
-                      title: Text(name,
-                          style: theme.textTheme.bodyMedium),
-                      subtitle: Text(
-                        '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                      onTap: () => _flyToActivity(a),
-                    );
+                    final item = items[i];
+                    final isActivity = item['item_type'] == 'activity';
+
+                    if (isActivity) {
+                      final a = _activityForItem(item, activities);
+                      if (a == null) {
+                        return ListTile(
+                          key: ValueKey('item_$i'),
+                          leading: const Icon(Icons.help_outline),
+                          title: const Text('Unknown activity'),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            onPressed: () => notifier.removeItem(i),
+                          ),
+                        );
+                      }
+                      final type = a['type'] as String?;
+                      final name = a['name'] as String? ?? 'Activity';
+                      final distM = (a['distance'] as num? ?? 0).toDouble();
+                      final movingSec = a['moving_time'];
+                      return ListTile(
+                        key: ValueKey('item_$i'),
+                        leading: Icon(
+                          _iconForActivityType(type),
+                          color: theme.colorScheme.primary,
+                        ),
+                        title:
+                            Text(name, style: theme.textTheme.bodyMedium),
+                        subtitle: Text(
+                          '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          tooltip: 'Remove from project',
+                          onPressed: () => notifier.removeItem(i),
+                        ),
+                        onTap: () => _flyToActivity(a),
+                      );
+                    } else {
+                      // Segment item
+                      final seg = item['segment'] as Map<String, dynamic>? ?? {};
+                      final segId = seg['id'] as String? ?? '';
+                      final segType = seg['segment_type'] as String?;
+                      final label = seg['label'] as String? ?? segType ?? 'Segment';
+                      return ListTile(
+                        key: ValueKey('item_$i'),
+                        leading: Icon(
+                          _iconForSegmentType(segType),
+                          color: theme.colorScheme.secondary,
+                        ),
+                        title: Text(label,
+                            style: theme.textTheme.bodyMedium
+                                ?.copyWith(fontStyle: FontStyle.italic)),
+                        subtitle: Text(segType ?? '',
+                            style: theme.textTheme.bodySmall),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit_outlined, size: 18),
+                              tooltip: 'Edit segment',
+                              onPressed: () => _showSegmentDialog(
+                                context,
+                                notifier,
+                                editSegment: seg,
+                                insertAfterIndex: null,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, size: 18),
+                              tooltip: 'Delete segment',
+                              onPressed: () =>
+                                  notifier.deleteSegment(segId),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
                   },
                 ),
         ),
 
-        // ── Elevation chart ───────────────────────────────────────────────────
-        Padding(
-          padding: const EdgeInsets.all(8),
-          child: ElevationChart(activities: activities),
-        ),
+        // ── "Add segment" button between items ────────────────────────────────
+        if (items.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Add connecting segment'),
+              onPressed: () => _showSegmentDialog(
+                context,
+                notifier,
+                insertAfterIndex: items.length - 1,
+              ),
+            ),
+          ),
+
+        // ── Elevation chart (narrow layout only) ─────────────────────────────
+        if (showElevationChart)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: ElevationChart(activities: activities),
+          ),
       ],
     );
   }
+}
+
+Future<void> _showSegmentDialog(
+  BuildContext context,
+  ProjectNotifier notifier, {
+  Map<String, dynamic>? editSegment,
+  int? insertAfterIndex,
+}) async {
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => SegmentDialog(
+      notifier: notifier,
+      editSegment: editSegment,
+      insertAfterIndex: insertAfterIndex,
+    ),
+  );
 }
 
 // ── ElevationChart ────────────────────────────────────────────────────────────

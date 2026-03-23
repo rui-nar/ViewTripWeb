@@ -1,21 +1,30 @@
-"""REST projects endpoints — list, create, open, delete projects.
+"""REST projects endpoints — list, create, open, delete, and manage projects.
 
 Routes:
-    GET    /api/projects/          — list saved projects for current user
-    POST   /api/projects/          — create new project
-    GET    /api/projects/{name}    — get project data (GeoJSON + metadata)
-    DELETE /api/projects/{name}    — delete a project
-    POST   /api/projects/import    — upload a .gettracks file
+    GET    /api/projects/                       — list saved projects for current user
+    POST   /api/projects/                       — create new project
+    GET    /api/projects/{name}                 — get project data (GeoJSON + metadata)
+    DELETE /api/projects/{name}                 — delete a project
+    POST   /api/projects/import                 — upload a .gettracks file
+    POST   /api/projects/{name}/activities      — add activities to project
+    DELETE /api/projects/{name}/items/{index}   — remove item at index
+    PUT    /api/projects/{name}/items/reorder   — move item from/to index
+    POST   /api/projects/{name}/segments        — create a connecting segment
+    PUT    /api/projects/{name}/segments/{id}   — update a segment
+    DELETE /api/projects/{name}/segments/{id}   — delete a segment
 """
 from __future__ import annotations
 
 import os
-from typing import Annotated
+import uuid
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from api.deps import get_current_user
+from src.models.activity import Activity
+from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -110,3 +119,174 @@ async def import_project(
     with open(dest, "wb") as fh:
         fh.write(contents)
     return {"name": fname[: -len(ProjectIO.EXTENSION)], "filename": fname}
+
+
+# ── Activity management ────────────────────────────────────────────────────────
+
+class AddActivitiesRequest(BaseModel):
+    activities: List[Dict[str, Any]]
+
+
+@router.post("/{name}/activities")
+def add_activities(
+    name: str,
+    body: AddActivitiesRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Add specific activities (by strava dict list) to a project."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    activities: List[Activity] = []
+    for raw in body.activities:
+        try:
+            activities.append(Activity.from_strava_api(raw))
+        except Exception:
+            pass
+
+    project = ProjectIO.load(path)
+    added = project.add_activities(activities)
+    ProjectIO.save(project, path)
+    return {"added": added, "total": len(project.activities)}
+
+
+# ── Item management (delete + reorder) ────────────────────────────────────────
+
+@router.delete("/{name}/items/{index}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(
+    name: str,
+    index: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Remove the item at *index* from the project's ordered list."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    project = ProjectIO.load(path)
+    if index < 0 or index >= len(project.items):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Index out of range")
+    project.remove_item(index)
+    ProjectIO.save(project, path)
+
+
+class ReorderRequest(BaseModel):
+    from_index: int
+    to_index: int
+
+
+@router.put("/{name}/items/reorder")
+def reorder_items(
+    name: str,
+    body: ReorderRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Move item from *from_index* to *to_index*."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    project = ProjectIO.load(path)
+    project.move_item(body.from_index, body.to_index)
+    ProjectIO.save(project, path)
+    return [ProjectIO._serialise_item(i) for i in project.items]
+
+
+# ── Segment CRUD ───────────────────────────────────────────────────────────────
+
+class SegmentBody(BaseModel):
+    segment_type: str = "flight"
+    label: str = ""
+    start_lat: float = 0.0
+    start_lon: float = 0.0
+    end_lat: float = 0.0
+    end_lon: float = 0.0
+    insert_after_index: Optional[int] = None  # POST only
+
+
+@router.post("/{name}/segments", status_code=status.HTTP_201_CREATED)
+def create_segment(
+    name: str,
+    body: SegmentBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Create a new connecting segment and insert it into the project."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    seg = ConnectingSegment(
+        id=str(uuid.uuid4()),
+        segment_type=body.segment_type,
+        label=body.label,
+        start=SegmentEndpoint(lat=body.start_lat, lon=body.start_lon),
+        end=SegmentEndpoint(lat=body.end_lat, lon=body.end_lon),
+    )
+    item = ProjectItem(item_type="segment", segment=seg)
+
+    project = ProjectIO.load(path)
+    insert_at = len(project.items)  # default: append
+    if body.insert_after_index is not None:
+        insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
+    project.items.insert(insert_at, item)
+    ProjectIO.save(project, path)
+    return {"id": seg.id}
+
+
+@router.put("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT)
+def update_segment(
+    name: str,
+    seg_id: str,
+    body: SegmentBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Update fields of an existing connecting segment."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    project = ProjectIO.load(path)
+    for item in project.items:
+        if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
+            item.segment.segment_type = body.segment_type
+            item.segment.label = body.label
+            item.segment.start = SegmentEndpoint(lat=body.start_lat, lon=body.start_lon)
+            item.segment.end = SegmentEndpoint(lat=body.end_lat, lon=body.end_lon)
+            ProjectIO.save(project, path)
+            return
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+
+
+@router.delete("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_segment(
+    name: str,
+    seg_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Remove a connecting segment from the project."""
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    project = ProjectIO.load(path)
+    original_len = len(project.items)
+    project.items = [
+        i for i in project.items
+        if not (i.item_type == "segment" and i.segment and i.segment.id == seg_id)
+    ]
+    if len(project.items) == original_len:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+    ProjectIO.save(project, path)

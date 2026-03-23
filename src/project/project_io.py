@@ -25,6 +25,11 @@ class ProjectIO:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def new(name: str) -> Project:
+        """Create a blank in-memory project with the given name."""
+        return Project(name=name)
+
+    @staticmethod
     def save(project: Project, path: str) -> None:
         """Serialise *project* to *path* as indented JSON."""
         data: Dict[str, Any] = {
@@ -43,7 +48,24 @@ class ProjectIO:
 
     @staticmethod
     def to_dict(project: Project) -> Dict[str, Any]:
-        """Return the same data structure as :meth:`save` but as a dict."""
+        """Return project data as a dict suitable for the REST API.
+
+        Differs from :meth:`save` in one way: ``elevation_profile`` is
+        converted from the storage format ``{"distances_km": [...], "elevations_m": [...]}``
+        to a list of ``[dist_km, elev_m]`` pairs so the Flutter client can
+        iterate over them directly.
+        """
+        def _ep_pairs(a: Activity) -> Any:
+            if not a.elevation_profile:
+                return None
+            return [list(pair) for pair in zip(a.elevation_profile[0], a.elevation_profile[1])]
+
+        activities_out = []
+        for a in project.activities:
+            d = a.to_strava_dict()
+            d["elevation_profile"] = _ep_pairs(a)
+            activities_out.append(d)
+
         return {
             "version": project.version,
             "name": project.name,
@@ -53,7 +75,7 @@ class ProjectIO:
                 "activity_types": project.filter_state.activity_types,
             },
             "items": [ProjectIO._serialise_item(i) for i in project.items],
-            "activities": [a.to_strava_dict() for a in project.activities],
+            "activities": activities_out,
         }
 
     @staticmethod
