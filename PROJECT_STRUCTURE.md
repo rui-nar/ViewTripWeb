@@ -1,145 +1,122 @@
-# GetTracks Project Structure
+# ViewTripWeb — Project Structure
 
-## Overview
-
-This document describes the organization of the GetTracks project.
-
-## Directory Structure
+## Directory Layout
 
 ```
-GetTracks/
-├── .venv/                    # Python virtual environment (generated)
-├── .git/                     # Git repository
-├── .vscode/                  # VS Code settings
-├── .pytest_cache/            # Pytest cache (generated)
+ViewTripWeb/
 │
-├── assets/                   # Design and image assets
-│   ├── app_icon.png
-│   └── app_icon.svg
+├── api/                          # FastAPI route handlers
+│   ├── auth.py                   # Google auth endpoints
+│   ├── deps.py                   # JWT dependency (get_current_user)
+│   ├── geo.py                    # GET /api/geo/project — GeoJSON builder
+│   ├── projects.py               # Projects + items + segments CRUD
+│   ├── router.py                 # Mounts all routers onto the FastAPI app
+│   └── strava.py                 # Strava OAuth + activity sync
 │
-├── config/                   # Configuration and setup scripts
-│   ├── config.json          # Application configuration
-│   ├── setup.bat            # Setup script (Windows)
-│   └── launch.bat           # Launch script (Windows)
+├── app/                          # Reflex web app (admin / auth scaffold)
+│   ├── app.py                    # Reflex app entry point
+│   ├── api/                      # Legacy Reflex API routes
+│   ├── auth/                     # Google OAuth state (Reflex)
+│   ├── components/               # Reflex UI components
+│   ├── models/
+│   │   └── user.py               # UserInfo + StravaToken SQLModel tables
+│   └── pages/                    # Reflex pages (login, project picker, etc.)
 │
-├── docs/                     # Documentation
-│   ├── architecture.md       # System architecture
-│   ├── DEVELOPMENT_PLAN.md   # Development roadmap
-│   └── features.md           # Feature list
+├── src/                          # Core business logic (shared by API and tests)
+│   ├── api/
+│   │   └── strava_client.py      # StravaAPI — HTTP client with retry + rate limiting
+│   ├── auth/
+│   │   ├── oauth.py              # OAuth2Session — Strava OAuth flow
+│   │   └── token_store.py        # Token persistence (file-based, desktop legacy)
+│   ├── config/
+│   │   └── settings.py           # Config — dot-notation access to config.json
+│   ├── exceptions/
+│   │   └── errors.py             # Custom exception hierarchy
+│   ├── filters/
+│   │   └── filter_engine.py      # FilterCriteria + FilterEngine.apply()
+│   ├── models/
+│   │   ├── activity.py           # Activity model + from_strava_api()
+│   │   ├── great_circle.py       # SLERP great-circle arc for connecting segments
+│   │   └── project.py            # Project, ProjectItem, ConnectingSegment models
+│   ├── project/
+│   │   └── project_io.py         # ProjectIO — load/save/new/to_dict for .gettracks files
+│   └── utils/
+│       └── logging.py            # Logging setup
 │
-├── scripts/                  # Utility scripts
-│   ├── convert_icon.py       # Icon conversion
-│   ├── release.py            # Release management
-│   └── version.py            # Version management
+├── flutter_client/               # Flutter web frontend
+│   ├── lib/
+│   │   ├── main.dart             # App entry point + provider setup
+│   │   └── src/
+│   │       ├── api/
+│   │       │   └── client.dart   # ApiClient — HTTP + auth headers
+│   │       ├── auth/
+│   │       │   ├── auth_notifier.dart
+│   │       │   ├── auth_service.dart
+│   │       │   ├── login_screen.dart
+│   │       │   └── register_screen.dart
+│   │       ├── core/
+│   │       │   └── app_router.dart   # go_router routes + auth guard
+│   │       ├── map/              # Shared map utilities
+│   │       ├── projects/
+│   │       │   ├── app_screen.dart           # Main project screen (map + panel)
+│   │       │   ├── project_notifier.dart     # Project state + CRUD methods
+│   │       │   ├── project_service.dart      # API calls for project data
+│   │       │   ├── projects_notifier.dart    # Project list state
+│   │       │   ├── projects_screen.dart      # Project picker screen
+│   │       │   ├── projects_service.dart     # API calls for project list
+│   │       │   ├── segment_dialog.dart       # Add/edit connecting segment dialog
+│   │       │   ├── strava_import_notifier.dart
+│   │       │   └── strava_import_screen.dart # Strava activity browser + import
+│   │       └── shared/           # Shared widgets
+│   └── pubspec.yaml
 │
-├── src/                      # Application source code
-│   ├── api/                  # Strava API client
-│   │   └── strava_client.py
-│   ├── auth/                 # Authentication
-│   │   ├── oauth.py
-│   │   ├── token_store.py
-│   │   └── callback_handler.py
-│   ├── config/               # Configuration management
-│   │   └── settings.py
-│   ├── exceptions/           # Custom exceptions
-│   │   └── errors.py
-│   ├── gui/                  # GUI components
-│   │   └── main_window.py
-│   ├── models/               # Data models
-│   │   └── activity.py
-│   ├── utils/                # Utility functions
-│   │   └── logging.py
-│   └── __init__.py
+├── alembic/                      # Database migrations
+│   └── versions/
+│       └── d19c0b0b1c1e_add_stravatoken_table.py
 │
-├── tests/                    # Test suite
-│   ├── test_config.py
-│   ├── test_exceptions.py
-│   ├── test_gui.py
-│   ├── test_logging.py
-│   ├── test_main.py
-│   ├── test_oauth.py
-│   ├── test_oauth_real.py
-│   ├── test_strava_client.py
-│   ├── test_gui_launch.py
-│   └── __init__.py
+├── config/
+│   ├── config.example.json       # Template — copy to config.json and fill in credentials
+│   └── config.json               # Gitignored — Strava API credentials
 │
-├── main.py                   # Application entry point
-├── setup.bat                 # Setup script (Windows) - root launcher
-├── launch.bat                # Launch script (Windows) - root launcher
-├── README.md                 # Project readme
-├── requirements.txt          # Python dependencies
-└── .gitignore               # Git ignore rules
+├── data/                         # Gitignored — runtime data
+│   └── users/{user_id}/
+│       └── projects/             # Per-user .gettracks project files
+│
+├── docs/
+│   ├── architecture.md           # System architecture overview
+│   ├── DEVELOPMENT_PLAN.md       # Feature roadmap
+│   └── features.md               # Implemented features reference
+│
+├── tests/                        # Python test suite (pytest)
+│
+├── alembic.ini                   # Alembic configuration
+├── docker-compose.yml            # Docker Compose for self-hosting
+├── Dockerfile                    # Container image definition
+├── requirements-web.txt          # Python dependencies (web / production)
+├── rxconfig.py                   # Reflex configuration
+├── PROJECT_STRUCTURE.md          # This file
+└── README.md                     # Getting started guide
 ```
 
-## File Description
+## Key Concepts
 
-### Root Level
+### Data Storage
 
-- **main.py**: Main application entry point. Configures paths and launches the GUI.
-- **setup.bat**: Windows setup script to create virtual environment and install dependencies.
-- **launch.bat**: Windows launcher script to run the application.
-- **requirements.txt**: Python package dependencies.
-- **README.md**: Project documentation and usage guide.
+User project files are stored as `.gettracks` JSON files under `data/users/{user_id}/projects/`. Each file contains:
+- Ordered `items` list (activities + connecting segments)
+- `activities` dict keyed by Strava activity ID
+- Per-activity `elevation_profile` as `[[dist_km, elev_m], ...]`
 
-### `/assets`
+### Auth Flow
 
-Design assets and icons used by the application.
+1. User logs in via Reflex Google OAuth → `UserInfo` row created in SQLite
+2. Reflex session issues a JWT used as `Authorization: Bearer` on all Flutter API calls
+3. Strava OAuth: Flutter opens browser → user authorises → callback stores `StravaToken` row in DB
 
-### `/config`
+### GeoJSON Generation
 
-Application configuration and setup files:
-- **config.json**: Strava API credentials and app settings
-- **setup.bat**: Alternative setup script location
-- **launch.bat**: Alternative launcher location
-
-### `/docs`
-
-Documentation files:
-- **architecture.md**: System design and architecture
-- **DEVELOPMENT_PLAN.md**: Feature roadmap and development phases
-- **features.md**: Feature overview and capabilities
-
-### `/scripts`
-
-Utility scripts for development and maintenance:
-- **convert_icon.py**: Convert icons between formats
-- **release.py**: Release management automation
-- **version.py**: Version management utilities
-
-### `/src`
-
-Core application source code organized by module:
-
-- **api/**: Strava API interaction
-- **auth/**: OAuth2 authentication and token management
-- **config/**: Configuration management
-- **exceptions/**: Custom exception definitions
-- **gui/**: PyQt6-based graphical user interface
-- **models/**: Data models (Activity, etc.)
-- **utils/**: Utility functions (logging, etc.)
-
-### `/tests`
-
-Test suite including:
-- **Unit tests** for individual modules
-- **Integration tests** (test_oauth_real.py, test_gui_launch.py)
-- **GUI tests** for UI components
-
-## Configuration
-
-Application configuration is stored in `config/config.json` and includes:
-- Strava API credentials (`client_id`, `client_secret`, `redirect_uri`)
-- Application settings (debug mode, logging level, cache/logs directories)
-
-## Getting Started
-
-1. Run `setup.bat` to create virtual environment and install dependencies
-2. Run `launch.bat` to start the application
-3. Or manually: `.venv\Scripts\python.exe main.py`
-
-## Development
-
-- All source code is in `/src`
-- Tests are in `/tests` - run with `pytest`
-- Documentation in `/docs`
-- Utility scripts in `/scripts`
+`GET /api/geo/project` reads the project file and produces a GeoJSON FeatureCollection:
+- Activity tracks: decoded from `summary_polyline` (Google encoded polyline)
+- Fallback: straight line from `start_latlng` → `end_latlng` when no polyline
+- Connecting segments: SLERP great-circle arc via `great_circle_points()`
+- Coordinates in `[lon, lat]` order (GeoJSON standard)

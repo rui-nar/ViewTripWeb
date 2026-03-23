@@ -5,8 +5,9 @@ services:
       - "3000:3000"   # Reflex frontend
       - "8000:8000"   # Reflex backend API
     volumes:
-      - /volume1/docker/viewtripweb/data:/data       # projects, tokens, cache
+      - /volume1/docker/viewtripweb/data:/app/data      # per-user project files
       - /volume1/docker/viewtripweb/config:/app/config  # config.json with Strava credentials
     environment:
-      - GETTRACKS_DATA_DIR=/data
+      - STRAVA_REDIRECT_URI=https://your-domain/api/strava/callback
+      - FRONTEND_ORIGIN=https://your-domain
     restart: unless-stopped

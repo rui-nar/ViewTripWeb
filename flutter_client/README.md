@@ -1,17 +1,47 @@
 # viewtrip_client
 
-A new Flutter project.
+Flutter web frontend for ViewTripWeb.
 
-## Getting Started
+## Prerequisites
 
-This project is a starting point for a Flutter application.
+- Flutter SDK ≥ 3.0
+- Dart SDK ≥ 3.0
+- Backend running at `http://localhost:8000` (see root README)
 
-A few resources to get you started if this is your first Flutter project:
+## Running
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter pub get
+flutter run -d chrome --web-port 5500
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The app connects to the backend at `http://localhost:8000`. To change this, edit `lib/src/api/client.dart`.
+
+## Building for Production
+
+```bash
+flutter build web --release
+```
+
+Output in `build/web/` — serve as static files behind a web server or CDN.
+
+## Screens
+
+| Route | Screen |
+|---|---|
+| `/login` | Google OAuth login |
+| `/register` | Email/password registration |
+| `/projects` | Project picker + Strava connect card |
+| `/app?project={name}` | Main project screen (map + activity panel) |
+| `/strava-import?project={name}` | Strava activity browser + import |
+
+## Key Packages
+
+| Package | Purpose |
+|---|---|
+| `flutter_map` | Interactive map (OpenStreetMap) |
+| `flutter_map_cancellable_tile_provider` | Cancel in-flight tile requests |
+| `fl_chart` | Elevation profile chart |
+| `go_router` | Navigation + auth guard |
+| `provider` | State management |
+| `url_launcher` | Open Strava OAuth URL in browser |

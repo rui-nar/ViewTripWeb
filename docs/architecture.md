@@ -2,284 +2,242 @@
 
 ## Current Status
 
-**Phase**: 5 (Filtering & Selection) ✅ Complete
-**Next Phase**: 6/7 (GPS Track Visualization & GPX Processing)
+**Release**: v0.7.0
+**Stack**: Flutter Web (frontend) + Reflex/FastAPI (backend) + SQLite
+
+---
 
 ## Technology Stack
 
-- **Language**: Python 3.9+
-- **GUI Framework**: PyQt6 + PyQt6-WebEngine
-- **HTTP Client**: requests (for Strava API)
-- **Authentication**: OAuth 2.0 with custom callback handler
-- **Token Storage**: keyring (secure credentials storage)
-- **Map Rendering**: Folium (HTML/Leaflet, embedded in QWebEngineView)
-- **Data Models**: dataclasses (Python 3.7+)
-- **Logging**: Python standard logging
-- **Testing**: pytest + unittest.mock
+| Layer | Technology |
+|---|---|
+| Frontend | Flutter Web — Dart, flutter_map, provider, go_router |
+| Backend | Python 3.11, Reflex (FastAPI wrapper), SQLModel |
+| Database | SQLite (managed by Reflex/Alembic) |
+| Auth | Google OAuth via Reflex + JWT (PyJWT) for API calls |
+| Strava | OAuth 2.0, per-user token in `StravaToken` DB table |
+| Maps | flutter_map + OpenStreetMap tiles |
+| Charts | fl_chart (elevation profile) |
 
-## Project Structure
+---
+
+## System Architecture
 
 ```
-src/
-├── api/              # Strava API client (rate limiting, retry)
-├── auth/             # OAuth and token management
-├── config/           # Configuration management
-├── exceptions/       # Custom exceptions
-├── filters/          # FilterEngine + FilterCriteria
-├── gui/              # PyQt6 UI components
-│   ├── main_window.py
-│   └── filter_widget.py
-├── models/           # Data classes (Activity)
-├── utils/            # Utilities (logging)
-└── visualization/    # Map widget (Folium + QWebEngineView)
-
-config/              # Configuration files
-docs/                # Documentation
-scripts/             # Utility scripts
-tests/               # Test suite
-assets/              # Application icon and design assets
+┌─────────────────────────────────────────────────────────┐
+│  Browser                                                │
+│                                                         │
+│  ┌─────────────────────────┐                            │
+│  │   Flutter Web App       │                            │
+│  │   (compiled Dart/JS)    │                            │
+│  │                         │                            │
+│  │  Screens:               │   HTTP + JWT Bearer        │
+│  │  - Login / Register     │ ──────────────────────►    │
+│  │  - Projects list        │                        ┌───┴──────────────────┐
+│  │  - App screen           │ ◄──────────────────── │  Reflex + FastAPI     │
+│  │  - Strava import        │   JSON responses       │  Python 3.11         │
+│  └─────────────────────────┘                        │                      │
+│                                                      │  Routers:            │
+│                                                      │  /api/projects/      │
+│                                                      │  /api/geo/           │
+│                                                      │  /api/strava/        │
+│                                                      │  /api/auth/          │
+│                                                      │                      │
+│                                                      │  ┌────────────────┐  │
+│                                                      │  │   SQLite DB     │  │
+│                                                      │  │  UserInfo       │  │
+│                                                      │  │  StravaToken    │  │
+│                                                      │  └────────────────┘  │
+│                                                      │                      │
+│                                                      │  data/users/*/       │
+│                                                      │  projects/*.gettracks│
+│                                                      └──────────────────────┘
+└─────────────────────────────────────────────────────────┘
 ```
 
-## Application Architecture
+---
 
-### 1. **Authentication Layer** (✅ Implemented)
+## Backend Layers
 
-**Components:**
-- `src/auth/oauth.py` - OAuth2Session for Strava OAuth flow
-- `src/auth/callback_handler.py` - Local HTTP server for OAuth callbacks
-  (per-instance state via factory method — thread-safe, no class-level shared state)
-- `src/auth/token_store.py` - Secure token storage using keyring
+### 1. Authentication (`api/auth.py`, `api/deps.py`)
 
-**Flow:**
-1. User clicks "Authenticate with Strava"
-2. App starts local callback server on port 8000
-3. Browser opens Strava OAuth authorization page
-4. User grants permissions
-5. Callback handler receives authorization code
-6. Code exchanged for access token via `urlencode`-safe URL
-7. Token stored securely in system keyring
+- Google OAuth handled by Reflex's `reflex-google-auth`
+- On successful Google login, `UserInfo` row is created/fetched
+- `create_access_token(user_info)` → signed JWT (PyJWT, HS256)
+- All API endpoints require `Authorization: Bearer <jwt>` via `get_current_user()` dependency
+- Strava OAuth: user identity passed as JWT in OAuth `state` param so stateless callback can resolve the user
 
-### 2. **API Client Layer** (✅ Implemented)
+### 2. Projects (`api/projects.py`)
 
-**Components:**
-- `src/api/strava_client.py` - StravaAPI class + RateLimiter class
+REST endpoints for project lifecycle and item management:
+- CRUD for projects (list, create, get, delete, import `.gettracks`)
+- Activities: add selected activities from Strava
+- Items: delete by index, reorder (from/to index)
+- Segments: create, update, delete connecting segments (flight/train/bus/boat)
 
-**RateLimiter:**
-- Sliding-window counter: max 100 requests per 15-minute window
-- `collections.deque` of `time.monotonic()` timestamps
-- Thread-safe via `threading.Lock` (held during sleep to prevent double-booking)
-- `current_usage` property for observability
+All project data stored as `.gettracks` JSON files per user under `data/users/{user_id}/projects/`.
 
-**Retry Logic in `request()`:**
-- HTTP 429: wait `max(Retry-After, 60)` seconds, retry
-- HTTP 5xx: exponential backoff (1s, 2s, 4s), up to `max_retries` attempts
-- HTTP 4xx (not 429): raise `APIError` immediately, no retry
-- Exhausted retries: raise `APIError` with attempt count
+### 3. GeoJSON (`api/geo.py`)
 
-**Implemented Methods:**
-- `get_activities(**params)` - Fetch user's activities
+`GET /api/geo/project?name=`:
+- Loads project file, iterates ordered `items`
+- Activities: decodes `summary_polyline` (Google encoded polyline via `polyline` lib) → `[[lon, lat], ...]`
+  - Fallback: two-point line from `start_latlng`/`end_latlng` if no polyline
+- Segments: SLERP great-circle arc via `great_circle_points()` → `[[lon, lat], ...]`
+- Returns GeoJSON FeatureCollection with `type` property (`"activity"` or `"segment"`) on each Feature
 
-**Pending Methods:**
-- `get_activity_details(activity_id)` - Full activity data
-- `get_activity_streams(activity_id)` - GPS coordinates and metrics
+### 4. Strava (`api/strava.py`)
 
-### 3. **Data Model Layer** (✅ Partial)
+- **Connect**: builds Strava OAuth URL, appends JWT as `state`
+- **Callback**: exchanges code, stores/updates `StravaToken` row in DB, redirects to Flutter origin
+- **Status/Disconnect**: read/delete token row
+- **Activities** (`GET /api/strava/activities`): paginated browse with `start_date`, `end_date`, `types` filters and `in_project` flag
+- **Sync** (`POST /api/projects/{name}/strava/sync`): fetches all Strava activities (200/page), merges new ones into project
 
-**Models Created:**
-- `Activity` - Strava activity with full metadata
-  - Basic info: id (Optional[int]), name, type
-  - Distance and time metrics
-  - Heart rate data
-  - Engagement metrics
-  - Timestamps and timezone
-  - Optional GPS: start_latlng, end_latlng
-  - Factory: `from_strava_api(data: dict)`
+Token refresh: `StravaAPI.token_data` is set directly (bypasses file-based `TokenStore`); refreshed token persisted back to DB after each request.
 
-**Pending Models:**
-- `Track` - GPX track with GPS route points
-- `Project` - Session for merge operations
+### 5. Core Business Logic (`src/`)
 
-### 4. **Filter Layer** (✅ Implemented)
+| Module | Purpose |
+|---|---|
+| `src/api/strava_client.py` | StravaAPI — HTTP client with retry + rate limiting |
+| `src/auth/oauth.py` | OAuth2Session — Strava authorization URL + code exchange |
+| `src/config/settings.py` | Config — dot-notation access to `config/config.json` |
+| `src/filters/filter_engine.py` | FilterCriteria + FilterEngine.apply() |
+| `src/models/activity.py` | Activity model — `from_strava_api()`, `to_strava_dict()`, `to_dict()` |
+| `src/models/project.py` | Project, ProjectItem, ConnectingSegment, SegmentEndpoint |
+| `src/models/great_circle.py` | SLERP great-circle arc generation |
+| `src/project/project_io.py` | ProjectIO — load/save/new + `to_dict()` serialisation |
 
-**Components:**
-- `src/filters/filter_engine.py` - `FilterCriteria` dataclass + `FilterEngine` class
+---
 
-**FilterCriteria:**
-- `start_date: Optional[datetime]` — None = no lower bound
-- `end_date: Optional[datetime]` — None = no upper bound
-- `activity_types: Optional[Set[str]]` — None = all types; empty set = nothing passes
-- `is_empty()` — True when no constraints active
+## Frontend Architecture (Flutter)
 
-**FilterEngine:**
-- `apply(activities, criteria)` — stateless, returns new filtered list
-  - Strips tzinfo from `start_date_local` before comparison (safe with tz-naive QDate inputs)
-  - Case-insensitive type matching
-- `extract_activity_types(activities)` — sorted unique types for UI population
+### State Management
 
-### 5. **GUI Layer** (✅ Implemented)
+Provider pattern — each screen has a `ChangeNotifier`:
 
-**Modules:**
-- `src/gui/main_window.py` - Primary window + worker threads
-- `src/gui/filter_widget.py` - Compact horizontal filter bar
+| Notifier | Responsibility |
+|---|---|
+| `AuthNotifier` | Login/logout/session restore; holds current user + JWT |
+| `ProjectsNotifier` | Project list; create/delete; Strava connect status |
+| `ProjectNotifier` | Open project data (activities, items, geo); all CRUD ops |
+| `StravaImportNotifier` | Strava activity browser state (filters, selection, add) |
 
-**Layout:**
+### Routing (`app_router.dart`)
+
+`GoRouter` with auth guard:
+- `/login`, `/register` — public
+- `/projects` — project picker + Strava connect card
+- `/app?project={name}` — main project screen
+- `/strava-import?project={name}` — Strava activity import screen
+
+### App Screen Layout
+
+**Wide (≥720 px):**
 ```
-┌─────────────────────┬────────────────────────────────┐
-│ [Auth] [Fetch]      │  Activity Details               │
-│ [Sel All] [Clear]   │                                 │
-│ ┌─ Filters ───────┐ ├────────────────────────────────┤
-│ │ Date | Types    │ │  Map (hidden until activities   │
-│ │ [Apply][Clear]  │ │  are loaded or selected)        │
-│ └─────────────────┘ │                                 │
-│ Activity List        │                                │
-└─────────────────────┴────────────────────────────────┘
+┌─────────────────┬──────────────────────────────────────┐
+│  ActivityPanel  │  FlutterMap (OpenStreetMap tiles)    │
+│  (280 px)       │  + Polyline layer                    │
+│                 ├──────────────────────────────────────┤
+│  - Stats header │  ElevationChart (160 px, fl_chart)   │
+│  - Reorderable  │                                      │
+│    items list   │                                      │
+│  - Add segment  │                                      │
+└─────────────────┴──────────────────────────────────────┘
 ```
 
-**Components:**
-- `MainWindow` - Application window (1200×800 min)
-- `ActivityListWidget` - Activity list with click-to-select
-- `ActivityDetailsWidget` - Full metadata panel
-- `FilterWidget` - Date range + type checkboxes + Apply/Clear
-- `OAuthAuthenticationWorker` - OAuth flow in QThread
-- `FetchActivitiesWorker` - Activity fetch in QThread
-
-**State management:**
-- `_all_activities` — master list from last fetch; never mutated by filters
-- `_filter_engine` — stateless FilterEngine instance
-- Filter signal → `_on_filters_changed` → re-apply + update list + map
-
-**Map widget behaviour:**
-- Hidden at startup (no white-box flash)
-- Shown when activities are fetched (all-activities overview)
-- Shown when a single activity is selected (focused view)
-- Hidden when filter produces zero results
-- Temp HTML file managed via Qt `destroyed` signal (not `__del__`)
-
-### 6. **Map Visualization Layer** (✅ Partial)
-
-**Components:**
-- `src/visualization/map_widget.py` - Folium map in QWebEngineView
-
-**Current capability:**
-- Start/end point markers per activity
-- Activity type color coding
-- CartoDB positron / dark_matter tile layers
-- Null-safe: activities without GPS are silently skipped
-
-**Pending:**
-- GPS polyline tracks (requires `get_activity_streams()`)
-- Elevation profile overlay
-
-### 7. **Configuration Layer** (✅ Implemented)
-
-**File**: `config/config.json`
-
-```json
-{
-  "strava": {
-    "client_id": "...",
-    "client_secret": "...",
-    "redirect_uri": "http://localhost:8000/callback"
-  },
-  "app": {
-    "debug": false,
-    "log_level": "INFO",
-    "cache_dir": "cache",
-    "logs_dir": "logs"
-  }
-}
+**Narrow (<720 px):**
+```
+┌──────────────────────────────────────────────────────┐
+│  FlutterMap (full screen)                            │
+│                                                      │
+│  ┌─ DraggableScrollableSheet ───────────────────┐   │
+│  │  ActivityPanel (with elevation chart)         │   │
+│  └──────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────┘
 ```
 
-- `src/config/settings.py` — dot-notation access, auto-discovers config file
-- Validates Strava credentials before launching GUI
+---
 
-### 8. **Error Handling** (✅ Implemented)
+## Database Schema
 
-**Custom Exceptions** (`src/exceptions/errors.py`):
-- `GetTracksException` — base
-- `ConfigurationError`, `AuthenticationError`, `TokenError`
-- `APIError`, `ValidationError`, `ExportError`, `GPXError`
+```sql
+-- Managed by Reflex / SQLModel
+CREATE TABLE userinfo (
+    id          INTEGER PRIMARY KEY,
+    email       TEXT UNIQUE NOT NULL,
+    ...         -- Google profile fields
+);
 
-### 9. **Logging & Utilities** (✅ Implemented)
+CREATE TABLE stravatoken (
+    id              INTEGER PRIMARY KEY,
+    user_info_id    INTEGER UNIQUE REFERENCES userinfo(id),
+    access_token    TEXT,
+    refresh_token   TEXT,
+    expires_at      REAL    -- Unix timestamp
+);
+```
 
-- `src/utils/logging.py` — file + console logging, per-module loggers
+Migrations managed via Alembic (`reflex db makemigrations` / `reflex db migrate`).
+
+---
 
 ## Data Flow
 
-### Activity Fetch + Filter Flow
+### Open Project
 ```
-User clicks "Fetch Activities"
-  └─> FetchActivitiesWorker (QThread)
-       └─> StravaAPI._ensure_token()
-       └─> RateLimiter.acquire()  ← NEW
-       └─> requests.request() with retry  ← NEW
-       └─> Activity.from_strava_api() for each
-       └─> MainWindow.on_activities_fetched()
-            └─> _all_activities = activities
-            └─> FilterWidget.populate_types()
-            └─> ActivityListWidget.set_activities(all)
-            └─> MapWidget.display_activities(all)
-
-User clicks "Apply" in FilterWidget
-  └─> FilterWidget.build_criteria()  ← NEW
-       └─> FilterCriteria(start_date, end_date, types)
-  └─> MainWindow._on_filters_changed(criteria)  ← NEW
-       └─> FilterEngine.apply(_all_activities, criteria)
-       └─> ActivityListWidget.set_activities(filtered)
-       └─> MapWidget.display_activities(filtered)
+Flutter: context.go('/app?project=foo')
+  └─> ProjectNotifier.load('foo')
+       └─> parallel:
+            ├─ GET /api/projects/foo  →  {activities, items, ...}
+            └─ GET /api/geo/project?name=foo  →  GeoJSON FeatureCollection
+       └─> MapPanel renders polylines
+       └─> ActivityPanel renders reorderable items list
+       └─> ElevationChart concatenates elevation_profile from all activities
 ```
 
-## Security Model
-
-- OAuth tokens in system keyring (encrypted at OS level)
-- Automatic token refresh; invalid tokens deleted
-- HTTPS enforced by Strava
-- OAuth redirect URL built with `urlencode` (no injection risk)
-- No secrets in logs
-
-## Testing Architecture
-
+### Import from Strava
 ```
-tests/
-├── test_config.py           # Configuration loading
-├── test_exceptions.py       # Exception hierarchy
-├── test_logging.py          # Logging setup
-├── test_main.py             # Entry point
-├── test_oauth.py            # OAuth flow (mocked)
-├── test_strava_client.py    # API client: token, retry, rate-limit (mocked)
-├── test_filter_engine.py    # FilterCriteria + FilterEngine (comprehensive)
-├── test_gui.py              # GUI component logic
-├── test_gui_launch.py       # Full GUI smoke test
-└── test_oauth_real.py       # Real Strava auth (manual)
+Flutter: context.go('/strava-import?project=foo')
+  └─> StravaImportNotifier.load(projectName: 'foo')
+       └─> GET /api/strava/activities?project=foo&per_page=100
+            └─> StravaAPI.get_activities() with date/type params
+            └─> FilterEngine.apply() for type filter
+            └─> in_project flag per activity
+  └─> User selects activities → StravaImportNotifier.addSelected('foo')
+       └─> POST /api/projects/foo/activities {activities: [...]}
+            └─> Activity.from_strava_api() for each
+            └─> project.add_activities() → saves .gettracks file
 ```
 
-## Performance Considerations
+### Strava OAuth
+```
+Flutter: GET /api/strava/connect → {url: "https://www.strava.com/oauth/authorize?...&state=JWT"}
+  └─> url_launcher opens URL in browser
+       └─> User authorises on Strava
+       └─> Strava redirects to /api/strava/callback?code=...&state=JWT
+            └─> decode JWT → user_info_id
+            └─> OAuth2Session.exchange_code(code) → token_data
+            └─> upsert StravaToken row in DB
+            └─> RedirectResponse to Flutter origin /?strava=connected
+```
 
-**Current:**
-- Activity list fetches up to 50 items per request
-- QThread workers prevent UI freezes
-- Rate limiter prevents Strava 429s proactively
-- Retry loop handles transient failures transparently
-- Filter applied in-memory (no re-fetch needed)
+---
 
-**Planned:**
-- Pagination for >50 activities
-- Local JSON caching of activity data
-- Lazy loading of GPS stream data
-- Background sync
+## Security
 
-## Extensibility Points
+- JWT signed with `SECRET_KEY` (env var or config); HS256
+- Strava OAuth state param carries JWT — callback verifies signature before trusting user identity
+- All project endpoints scoped to authenticated user's directory (`data/users/{sub}/`)
+- `config/config.json` gitignored; secrets never in source or logs
+- HTTPS enforced by Strava on OAuth redirect
 
-1. **New Filter Dimensions** — add fields to `FilterCriteria`, logic to `FilterEngine.apply()`
-2. **Export Formats** — add to a future `src/export/` module
-3. **Map Backends** — swap Folium for another renderer in `MapWidget`
-4. **Additional APIs** — duplicate `src/auth/` + `src/api/` pattern
-5. **GPX Processing** — new `src/gpx/` module (Phase 7)
+---
 
-## Known Limitations
+## Known Limitations / Future Work
 
-1. Activity list limited to 50 items (no pagination yet)
-2. Map shows start/end markers only (no GPS polylines until stream API integrated)
-3. No activity caching (every fetch hits Strava API)
-4. No Track or Project models yet
-5. No GPX export
+- No GPX export yet (data model ready; export module not implemented)
+- Activity pagination on import screen is per-page only (no infinite scroll)
+- No offline mode / activity caching
+- Single-server SQLite (no horizontal scaling without switching to Postgres)
