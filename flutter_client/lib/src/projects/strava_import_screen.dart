@@ -305,21 +305,27 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
               child: Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: ElevatedButton.icon(
-                  onPressed: notifier.isLoading ||
-                          notifier.selectedIds.isEmpty
-                      ? null
-                      : () => _addSelected(notifier),
-                  icon: const Icon(Icons.add),
-                  label: Text(
-                    notifier.selectedIds.isEmpty
-                        ? 'Select activities to add'
-                        : 'Add ${notifier.selectedIds.length} to project',
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 48),
-                  ),
-                ),
+                child: Builder(builder: (context) {
+                  final newCount = notifier.activities
+                      .where((a) =>
+                          notifier.selectedIds.contains(a['id'] as int) &&
+                          a['in_project'] != true)
+                      .length;
+                  return ElevatedButton.icon(
+                    onPressed: notifier.isLoading || newCount == 0
+                        ? null
+                        : () => _addSelected(notifier),
+                    icon: const Icon(Icons.add),
+                    label: Text(
+                      newCount == 0
+                          ? 'Select activities to add'
+                          : 'Add $newCount to project',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                  );
+                }),
               ),
             ),
           );
