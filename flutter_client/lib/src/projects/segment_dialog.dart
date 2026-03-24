@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../map/great_circle.dart';
 import '../map/location_picker_dialog.dart';
 import 'project_notifier.dart';
 
@@ -46,6 +47,25 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
     // Auto-populate from adjacent activities if creating new segment
     if (seg == null) _autoPopulate();
+
+    // Update arc preview whenever any coordinate field changes
+    _startLatCtrl.addListener(_updatePreview);
+    _startLonCtrl.addListener(_updatePreview);
+    _endLatCtrl.addListener(_updatePreview);
+    _endLonCtrl.addListener(_updatePreview);
+    _updatePreview();
+  }
+
+  void _updatePreview() {
+    final lat1 = double.tryParse(_startLatCtrl.text.trim());
+    final lon1 = double.tryParse(_startLonCtrl.text.trim());
+    final lat2 = double.tryParse(_endLatCtrl.text.trim());
+    final lon2 = double.tryParse(_endLonCtrl.text.trim());
+    if (lat1 != null && lon1 != null && lat2 != null && lon2 != null) {
+      widget.notifier.setPreviewArc(greatCirclePoints(lat1, lon1, lat2, lon2));
+    } else {
+      widget.notifier.setPreviewArc(null);
+    }
   }
 
   String _fmt(dynamic v) {
@@ -99,6 +119,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   @override
   void dispose() {
+    widget.notifier.setPreviewArc(null);
     _labelCtrl.dispose();
     _startLatCtrl.dispose();
     _startLonCtrl.dispose();
@@ -111,7 +132,11 @@ class _SegmentDialogState extends State<SegmentDialog> {
     required String title,
     required TextEditingController latCtrl,
     required TextEditingController lonCtrl,
+    required bool isStart,
   }) async {
+    // Determine the "other" endpoint so the picker can show a live arc preview
+    final otherLatCtrl = isStart ? _endLatCtrl   : _startLatCtrl;
+    final otherLonCtrl = isStart ? _endLonCtrl   : _startLonCtrl;
     final result = await showDialog<LatLonResult>(
       context: context,
       builder: (_) => LocationPickerDialog(
@@ -119,6 +144,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
         initialLat: double.tryParse(latCtrl.text.trim()),
         initialLon: double.tryParse(lonCtrl.text.trim()),
         geo: widget.notifier.geo,
+        notifier: widget.notifier,
+        otherLat: double.tryParse(otherLatCtrl.text.trim()),
+        otherLon: double.tryParse(otherLonCtrl.text.trim()),
+        isStart: isStart,
       ),
     );
     if (result != null && mounted) {
@@ -220,6 +249,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
                       title: 'Pick start location',
                       latCtrl: _startLatCtrl,
                       lonCtrl: _startLonCtrl,
+                      isStart: true,
                     ),
                   ),
                 ],
@@ -264,6 +294,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
                       title: 'Pick end location',
                       latCtrl: _endLatCtrl,
                       lonCtrl: _endLonCtrl,
+                      isStart: false,
                     ),
                   ),
                 ],

@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../api/client.dart';
 import 'project_service.dart';
@@ -53,11 +54,20 @@ class ProjectNotifier extends ChangeNotifier {
     }
   }
 
+  /// Live arc preview while a SegmentDialog is open.
+  List<LatLng>? previewArc;
+
+  void setPreviewArc(List<LatLng>? arc) {
+    previewArc = arc;
+    notifyListeners();
+  }
+
   void clear() {
     projectName = null;
     activities = [];
     items = [];
     geo = null;
+    previewArc = null;
     isLoading = false;
     error = null;
     notifyListeners();

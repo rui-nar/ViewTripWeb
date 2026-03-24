@@ -327,6 +327,16 @@ class _MapPanelState extends State<MapPanel> {
         ),
         if (polylines.isNotEmpty)
           PolylineLayer(polylines: polylines),
+        if (notifier.previewArc != null)
+          PolylineLayer(
+            polylines: [
+              Polyline(
+                points: notifier.previewArc!,
+                color: const Color(0xCC6366F1), // indigo, semi-transparent
+                strokeWidth: 2.5,
+              ),
+            ],
+          ),
       ],
     );
   }
