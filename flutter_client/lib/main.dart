@@ -26,7 +26,30 @@ void main() async {
   await GoogleSignIn.instance.initialize(
     serverClientId: kIsWeb ? null : _kGoogleServerClientId,
   );
-  runApp(const ViewTripApp());
+  runApp(
+    // MultiProvider lives here — above ViewTripApp — so its providers are
+    // never reconstructed by theme changes. Only the Builder inside
+    // ViewTripApp (which watches ThemeNotifier) rebuilds on theme toggles.
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider<ThemeNotifier>(
+          create: (_) => ThemeNotifier(),
+        ),
+        ChangeNotifierProvider<AuthNotifier>(
+          create: (_) => AuthNotifier(AuthService())..init(),
+        ),
+        ChangeNotifierProxyProvider<AuthNotifier, ProjectsNotifier>(
+          create: (_) => ProjectsNotifier(ProjectsService()),
+          update: (_, auth, previous) =>
+              previous!..onAuthChanged(auth.user != null),
+        ),
+        ChangeNotifierProvider<ProjectNotifier>(
+          create: (_) => ProjectNotifier(ProjectService()),
+        ),
+      ],
+      child: const ViewTripApp(),
+    ),
+  );
 }
 
 class ViewTripApp extends StatefulWidget {
@@ -41,41 +64,18 @@ class _ViewTripAppState extends State<ViewTripApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MultiProvider(
-      providers: [
-        ChangeNotifierProvider<ThemeNotifier>(
-          create: (_) => ThemeNotifier(),
-        ),
-        ChangeNotifierProvider<AuthNotifier>(
-          // ..init() restores a persisted JWT session immediately on creation.
-          create: (_) => AuthNotifier(AuthService())..init(),
-        ),
-        ChangeNotifierProxyProvider<AuthNotifier, ProjectsNotifier>(
-          create: (_) => ProjectsNotifier(ProjectsService()),
-          // Reload projects on login; clear them on logout.
-          update: (_, auth, previous) =>
-              previous!..onAuthChanged(auth.user != null),
-        ),
-        ChangeNotifierProvider<ProjectNotifier>(
-          create: (_) => ProjectNotifier(ProjectService()),
-        ),
-      ],
-      child: Builder(
-        builder: (innerContext) {
-          final themeMode = innerContext.watch<ThemeNotifier>().mode;
-          // Router is created once and reused — recreating it on every theme
-          // change would destroy the navigation stack.
-          _router ??= buildRouter(innerContext);
-          return MaterialApp.router(
-            title: 'ViewTripWeb',
-            theme: lightTheme,
-            darkTheme: darkTheme,
-            themeMode: themeMode,
-            routerConfig: _router!,
-            debugShowCheckedModeBanner: false,
-          );
-        },
-      ),
+    // Only the theme mode is watched here — this is the only widget that
+    // rebuilds on theme change, and it only affects MaterialApp.router params.
+    final themeMode = context.watch<ThemeNotifier>().mode;
+    // Router is created once and reused — recreating it would destroy nav stack.
+    _router ??= buildRouter(context);
+    return MaterialApp.router(
+      title: 'ViewTripWeb',
+      theme: lightTheme,
+      darkTheme: darkTheme,
+      themeMode: themeMode,
+      routerConfig: _router!,
+      debugShowCheckedModeBanner: false,
     );
   }
 }
