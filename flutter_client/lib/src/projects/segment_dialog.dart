@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../map/location_picker_dialog.dart';
 import 'project_notifier.dart';
 
 class SegmentDialog extends StatefulWidget {
@@ -106,6 +107,28 @@ class _SegmentDialogState extends State<SegmentDialog> {
     super.dispose();
   }
 
+  Future<void> _pickLocation({
+    required String title,
+    required TextEditingController latCtrl,
+    required TextEditingController lonCtrl,
+  }) async {
+    final result = await showDialog<LatLonResult>(
+      context: context,
+      builder: (_) => LocationPickerDialog(
+        title: title,
+        initialLat: double.tryParse(latCtrl.text.trim()),
+        initialLon: double.tryParse(lonCtrl.text.trim()),
+        geo: widget.notifier.geo,
+      ),
+    );
+    if (result != null && mounted) {
+      setState(() {
+        latCtrl.text = result.lat.toStringAsFixed(6);
+        lonCtrl.text = result.lon.toStringAsFixed(6);
+      });
+    }
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
@@ -184,7 +207,23 @@ class _SegmentDialogState extends State<SegmentDialog> {
               ),
               const SizedBox(height: 16),
               // Start
-              const Text('Start'),
+              Row(
+                children: [
+                  const Text('Start'),
+                  const Spacer(),
+                  TextButton.icon(
+                    icon: const Icon(Icons.location_on_outlined, size: 16),
+                    label: const Text('Pick on map'),
+                    style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact),
+                    onPressed: () => _pickLocation(
+                      title: 'Pick start location',
+                      latCtrl: _startLatCtrl,
+                      lonCtrl: _startLonCtrl,
+                    ),
+                  ),
+                ],
+              ),
               Row(
                 children: [
                   Expanded(
@@ -212,7 +251,23 @@ class _SegmentDialogState extends State<SegmentDialog> {
               ),
               const SizedBox(height: 12),
               // End
-              const Text('End'),
+              Row(
+                children: [
+                  const Text('End'),
+                  const Spacer(),
+                  TextButton.icon(
+                    icon: const Icon(Icons.location_on_outlined, size: 16),
+                    label: const Text('Pick on map'),
+                    style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact),
+                    onPressed: () => _pickLocation(
+                      title: 'Pick end location',
+                      latCtrl: _endLatCtrl,
+                      lonCtrl: _endLonCtrl,
+                    ),
+                  ),
+                ],
+              ),
               Row(
                 children: [
                   Expanded(
