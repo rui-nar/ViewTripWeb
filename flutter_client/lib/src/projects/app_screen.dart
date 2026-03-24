@@ -367,7 +367,7 @@ class _MapPanelState extends State<MapPanel> {
 
 // ── ActivityPanel ─────────────────────────────────────────────────────────────
 
-class ActivityPanel extends StatelessWidget {
+class ActivityPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final ScrollController? scrollController;
@@ -380,6 +380,21 @@ class ActivityPanel extends StatelessWidget {
     this.scrollController,
     this.showElevationChart = false,
   });
+
+  @override
+  State<ActivityPanel> createState() => _ActivityPanelState();
+}
+
+class _ActivityPanelState extends State<ActivityPanel> {
+  // activityById cache — rebuilt only when the activities list reference changes.
+  List<Map<String, dynamic>>? _lastActivities;
+  Map<dynamic, Map<String, dynamic>> _activityById = {};
+
+  void _refreshActivityById(List<Map<String, dynamic>> activities) {
+    if (identical(activities, _lastActivities)) return;
+    _lastActivities = activities;
+    _activityById = {for (final a in activities) a['id']: a};
+  }
 
   static IconData _iconForActivityType(String? type) {
     switch (type?.toLowerCase()) {
@@ -423,18 +438,20 @@ class ActivityPanel extends StatelessWidget {
     if (raw is List && raw.length >= 2) {
       final lat = (raw[0] as num).toDouble();
       final lon = (raw[1] as num).toDouble();
-      mapController.move(LatLng(lat, lon), 13.0);
+      widget.mapController.move(LatLng(lat, lon), 13.0);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final notifier = widget.notifier;
     final theme = Theme.of(context);
     final activities = notifier.activities;
     final items = notifier.items;
-    final activityById = <dynamic, Map<String, dynamic>>{
-      for (final a in activities) a['id']: a,
-    };
+
+    _refreshActivityById(activities);
+    final activityById = _activityById;
+
     // Pre-compute styles used inside itemBuilder so copyWith is not called
     // for every item on every rebuild.
     final segmentTitleStyle =
@@ -493,7 +510,7 @@ class ActivityPanel extends StatelessWidget {
                   ),
                 )
               : ReorderableListView.builder(
-                  scrollController: scrollController,
+                  scrollController: widget.scrollController,
                   onReorder: (oldIndex, newIndex) {
                     // ReorderableListView passes newIndex after removal,
                     // but our backend uses the original "before" semantics.
@@ -599,7 +616,7 @@ class ActivityPanel extends StatelessWidget {
           ),
 
         // ── Elevation chart (narrow layout only) ─────────────────────────────
-        if (showElevationChart)
+        if (widget.showElevationChart)
           Padding(
             padding: const EdgeInsets.all(8),
             child: ElevationChart(activities: activities),
