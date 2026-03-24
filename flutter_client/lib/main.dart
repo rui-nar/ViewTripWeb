@@ -7,6 +7,7 @@ import 'src/projects/projects_service.dart';
 import 'src/projects/projects_notifier.dart';
 import 'src/projects/project_service.dart';
 import 'src/projects/project_notifier.dart';
+import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
 import 'src/core/theme.dart';
 
@@ -22,6 +23,9 @@ class ViewTripApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        ChangeNotifierProvider<ThemeNotifier>(
+          create: (_) => ThemeNotifier(),
+        ),
         ChangeNotifierProvider<AuthNotifier>(
           // ..init() restores a persisted JWT session immediately on creation.
           create: (_) => AuthNotifier(AuthService())..init(),
@@ -37,20 +41,17 @@ class ViewTripApp extends StatelessWidget {
         ),
       ],
       child: Builder(
-        builder: (context) => MaterialApp.router(
-          title: 'ViewTripWeb',
-
-          // Light / dark themes follow the OS preference automatically.
-          // TODO: Replace ThemeMode.system with a ThemeNotifier backed by
-          // shared_preferences once the Settings screen is added, so users
-          // can override the system preference (Light / Dark / System).
-          theme: lightTheme,
-          darkTheme: darkTheme,
-          themeMode: ThemeMode.system,
-
-          routerConfig: buildRouter(context),
-          debugShowCheckedModeBanner: false,
-        ),
+        builder: (context) {
+          final themeMode = context.watch<ThemeNotifier>().mode;
+          return MaterialApp.router(
+            title: 'ViewTripWeb',
+            theme: lightTheme,
+            darkTheme: darkTheme,
+            themeMode: themeMode,
+            routerConfig: buildRouter(context),
+            debugShowCheckedModeBanner: false,
+          );
+        },
       ),
     );
   }

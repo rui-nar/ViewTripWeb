@@ -1,10 +1,7 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
-import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import 'projects_notifier.dart';
 
@@ -17,64 +14,6 @@ class ProjectsScreen extends StatefulWidget {
 
 class _ProjectsScreenState extends State<ProjectsScreen> {
   final _nameCtrl = TextEditingController();
-  bool _stravaConnected = false;
-  bool _stravaLoading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadStravaStatus();
-    // If the user just returned from the Strava OAuth flow, show a snackbar.
-    if (kIsWeb) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final uri = Uri.base;
-        if (uri.queryParameters['strava'] == 'connected') {
-          _loadStravaStatus();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Strava connected!')),
-          );
-        } else if (uri.queryParameters['strava'] == 'error') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Strava connection failed.')),
-          );
-        }
-      });
-    }
-  }
-
-  Future<void> _loadStravaStatus() async {
-    if (!mounted) return;
-    setState(() => _stravaLoading = true);
-    try {
-      final data = await api.get('/api/strava/status') as Map<String, dynamic>;
-      if (mounted) setState(() => _stravaConnected = data['connected'] == true);
-    } catch (_) {
-      // ignore — status not critical
-    } finally {
-      if (mounted) setState(() => _stravaLoading = false);
-    }
-  }
-
-  Future<void> _connectStrava() async {
-    try {
-      final data = await api.get('/api/strava/connect') as Map<String, dynamic>;
-      final url = Uri.parse(data['url'] as String);
-      await launchUrl(url, mode: LaunchMode.externalApplication);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open Strava: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _disconnectStrava() async {
-    try {
-      await api.delete('/api/strava/disconnect');
-      if (mounted) setState(() => _stravaConnected = false);
-    } catch (_) {}
-  }
 
   @override
   void dispose() {
@@ -116,6 +55,11 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: () => context.push('/settings'),
+          ),
           // Avatar (Google users)
           if (auth.user?.avatarUrl.isNotEmpty == true)
             Padding(
@@ -294,56 +238,6 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                   ),
                 ),
 
-                const SizedBox(height: 16),
-
-                // ── Strava ────────────────────────────────────────────────
-                _SectionCard(
-                  title: 'Strava',
-                  icon: Icons.directions_run,
-                  child: _stravaLoading
-                      ? const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 8),
-                          child: Center(child: CircularProgressIndicator()),
-                        )
-                      : Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (_stravaConnected) ...[
-                              Row(
-                                children: [
-                                  Icon(Icons.check_circle,
-                                      color: theme.colorScheme.primary,
-                                      size: 18),
-                                  const SizedBox(width: 8),
-                                  Text('Connected',
-                                      style: theme.textTheme.bodyMedium),
-                                  const Spacer(),
-                                  TextButton(
-                                    onPressed: _disconnectStrava,
-                                    child: const Text('Disconnect'),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Open a project and use the sync button in the toolbar to import your Strava activities.',
-                                style: theme.textTheme.bodySmall,
-                              ),
-                            ] else ...[
-                              Text(
-                                'Connect your Strava account to sync activities directly into a project.',
-                                style: theme.textTheme.bodySmall,
-                              ),
-                              const SizedBox(height: 16),
-                              OutlinedButton.icon(
-                                onPressed: _connectStrava,
-                                icon: const Icon(Icons.link),
-                                label: const Text('Connect Strava'),
-                              ),
-                            ],
-                          ],
-                        ),
-                ),
               ],
             ),
           ),

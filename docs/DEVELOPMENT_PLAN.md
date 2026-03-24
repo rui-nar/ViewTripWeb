@@ -72,10 +72,6 @@ Flutter:
 #### Segment Arc Preview
 - Show the great-circle arc on the map while editing a segment in the dialog
 
-#### Advanced Filters
-- Filter Strava import by distance, duration, elevation gain
-- Save and restore filter presets between sessions
-
 #### Settings Screen
 - Manage Strava connection
 - Set default date range for import

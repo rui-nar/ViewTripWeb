@@ -34,6 +34,9 @@ dependencies:
   # Open URLs in browser (Strava OAuth connect)
   url_launcher: ^6.3.0
 
+  # Persist user preferences (theme mode)
+  shared_preferences: ^2.3.2
+
   # Map + charts
   flutter_map: ^7.0.0
   flutter_map_cancellable_tile_provider: ^3.0.2

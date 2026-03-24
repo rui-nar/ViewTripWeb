@@ -12,6 +12,7 @@ import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
+import '../settings/settings_screen.dart';
 
 GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
@@ -67,6 +68,10 @@ GoRouter buildRouter(BuildContext context) {
             child: StravaImportScreen(projectName: projectName),
           );
         },
+      ),
+      GoRoute(
+        path: '/settings',
+        builder: (context, state) => const SettingsScreen(),
       ),
     ],
   );
