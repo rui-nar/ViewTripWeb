@@ -66,7 +66,16 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
               padding: const EdgeInsets.only(right: 4),
               child: CircleAvatar(
                 radius: 16,
-                backgroundImage: NetworkImage(auth.user!.avatarUrl),
+                child: ClipOval(
+                  child: Image.network(
+                    auth.user!.avatarUrl,
+                    width: 32,
+                    height: 32,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.person, size: 20),
+                  ),
+                ),
               ),
             ),
           TextButton(

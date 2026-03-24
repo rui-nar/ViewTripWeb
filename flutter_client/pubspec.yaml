@@ -49,3 +49,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+flutter_map:
+  suppress_osm_warning: true

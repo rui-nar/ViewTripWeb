@@ -213,17 +213,20 @@ class _SegmentDialogState extends State<SegmentDialog> {
               // Segment type
               const Text('Type'),
               const SizedBox(height: 6),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'flight', icon: Icon(Icons.flight), label: Text('Flight')),
-                  ButtonSegment(value: 'train',  icon: Icon(Icons.train),  label: Text('Train')),
-                  ButtonSegment(value: 'bus',    icon: Icon(Icons.directions_bus), label: Text('Bus')),
-                  ButtonSegment(value: 'boat',   icon: Icon(Icons.directions_boat), label: Text('Boat')),
-                ],
-                selected: {_segmentType},
-                onSelectionChanged: (s) =>
-                    setState(() => _segmentType = s.first),
-                multiSelectionEnabled: false,
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'flight', icon: Icon(Icons.flight), label: Text('Flight')),
+                    ButtonSegment(value: 'train',  icon: Icon(Icons.train),  label: Text('Train')),
+                    ButtonSegment(value: 'bus',    icon: Icon(Icons.directions_bus), label: Text('Bus')),
+                    ButtonSegment(value: 'boat',   icon: Icon(Icons.directions_boat), label: Text('Boat')),
+                  ],
+                  selected: {_segmentType},
+                  onSelectionChanged: (s) =>
+                      setState(() => _segmentType = s.first),
+                  multiSelectionEnabled: false,
+                ),
               ),
               const SizedBox(height: 16),
               // Label
