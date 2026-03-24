@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -85,7 +86,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final themeNotifier = context.watch<ThemeNotifier>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(
+        leading: BackButton(onPressed: () => context.pop()),
+        title: const Text('Settings'),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Center(
