@@ -121,7 +121,7 @@ class _AppScreenState extends State<AppScreen> {
           IconButton(
             icon: const Icon(Icons.playlist_add),
             tooltip: 'Import activities from Strava',
-            onPressed: () => context.go(
+            onPressed: () => context.push(
                 '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
           ),
           IconButton(
