@@ -506,13 +506,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 style: _projectTitleStyle,
               ),
               const SizedBox(height: 6),
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
                 children: [
                   _StatChip(
                       label: '${(totalDistM / 1000).toStringAsFixed(1)} km'),
-                  const SizedBox(width: 8),
                   _StatChip(label: _formatDuration(totalMovingSec)),
-                  const SizedBox(width: 8),
                   _StatChip(
                       label: '${totalElevGain.toStringAsFixed(0)} m elev'),
                 ],
