@@ -381,7 +381,7 @@ class ActivityPanel extends StatelessWidget {
     this.showElevationChart = false,
   });
 
-  IconData _iconForActivityType(String? type) {
+  static IconData _iconForActivityType(String? type) {
     switch (type?.toLowerCase()) {
       case 'run':
         return Icons.directions_run;
@@ -394,7 +394,7 @@ class ActivityPanel extends StatelessWidget {
     }
   }
 
-  IconData _iconForSegmentType(String? type) {
+  static IconData _iconForSegmentType(String? type) {
     switch (type?.toLowerCase()) {
       case 'flight':
         return Icons.flight;
@@ -409,7 +409,7 @@ class ActivityPanel extends StatelessWidget {
     }
   }
 
-  String _formatDuration(dynamic seconds) {
+  static String _formatDuration(dynamic seconds) {
     if (seconds == null) return '--';
     final total = (seconds as num).toInt();
     final h = total ~/ 3600;
@@ -435,6 +435,10 @@ class ActivityPanel extends StatelessWidget {
     final activityById = <dynamic, Map<String, dynamic>>{
       for (final a in activities) a['id']: a,
     };
+    // Pre-compute styles used inside itemBuilder so copyWith is not called
+    // for every item on every rebuild.
+    final segmentTitleStyle =
+        theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
 
     // Aggregate stats are pre-computed in ProjectNotifier._updateStats().
     final totalDistM    = notifier.totalDistanceM;
@@ -549,9 +553,7 @@ class ActivityPanel extends StatelessWidget {
                           _iconForSegmentType(segType),
                           color: theme.colorScheme.secondary,
                         ),
-                        title: Text(label,
-                            style: theme.textTheme.bodyMedium
-                                ?.copyWith(fontStyle: FontStyle.italic)),
+                        title: Text(label, style: segmentTitleStyle),
                         subtitle: Text(segType ?? '',
                             style: theme.textTheme.bodySmall),
                         trailing: Row(
