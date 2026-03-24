@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
 
@@ -28,8 +29,15 @@ void main() async {
   runApp(const ViewTripApp());
 }
 
-class ViewTripApp extends StatelessWidget {
+class ViewTripApp extends StatefulWidget {
   const ViewTripApp({super.key});
+
+  @override
+  State<ViewTripApp> createState() => _ViewTripAppState();
+}
+
+class _ViewTripAppState extends State<ViewTripApp> {
+  GoRouter? _router;
 
   @override
   Widget build(BuildContext context) {
@@ -53,14 +61,17 @@ class ViewTripApp extends StatelessWidget {
         ),
       ],
       child: Builder(
-        builder: (context) {
-          final themeMode = context.watch<ThemeNotifier>().mode;
+        builder: (innerContext) {
+          final themeMode = innerContext.watch<ThemeNotifier>().mode;
+          // Router is created once and reused — recreating it on every theme
+          // change would destroy the navigation stack.
+          _router ??= buildRouter(innerContext);
           return MaterialApp.router(
             title: 'ViewTripWeb',
             theme: lightTheme,
             darkTheme: darkTheme,
             themeMode: themeMode,
-            routerConfig: buildRouter(context),
+            routerConfig: _router!,
             debugShowCheckedModeBanner: false,
           );
         },
