@@ -175,37 +175,40 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                           ),
                         );
                       }
-                      return ListView.separated(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: notifier.projects.length,
-                        separatorBuilder: (_, __) =>
-                            const Divider(height: 1),
-                        itemBuilder: (context, i) {
-                          final project = notifier.projects[i];
-                          final name =
-                              project['name'] as String? ?? 'Untitled';
-                          return ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 0, vertical: 4),
-                            leading: Icon(Icons.map_outlined,
-                                color: theme.colorScheme.primary),
-                            title: Text(name,
-                                style: theme.textTheme.bodyMedium),
-                            trailing: ElevatedButton(
-                              onPressed: () {
-                                final encoded = Uri.encodeComponent(name);
-                                context.go('/app?project=$encoded');
-                              },
-                              style: ElevatedButton.styleFrom(
-                                minimumSize: const Size(72, 36),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16),
-                              ),
-                              child: const Text('Open'),
-                            ),
-                          );
-                        },
+                      return Column(
+                        children: [
+                          for (int i = 0;
+                              i < notifier.projects.length;
+                              i++) ...[
+                            if (i > 0) const Divider(height: 1),
+                            Builder(builder: (context) {
+                              final project = notifier.projects[i];
+                              final name =
+                                  project['name'] as String? ?? 'Untitled';
+                              return ListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 0, vertical: 4),
+                                leading: Icon(Icons.map_outlined,
+                                    color: theme.colorScheme.primary),
+                                title: Text(name,
+                                    style: theme.textTheme.bodyMedium),
+                                trailing: ElevatedButton(
+                                  onPressed: () {
+                                    final encoded =
+                                        Uri.encodeComponent(name);
+                                    context.go('/app?project=$encoded');
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                    minimumSize: const Size(72, 36),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16),
+                                  ),
+                                  child: const Text('Open'),
+                                ),
+                              );
+                            }),
+                          ],
+                        ],
                       );
                     },
                   ),
