@@ -396,6 +396,18 @@ class _ActivityPanelState extends State<ActivityPanel> {
     _activityById = {for (final a in activities) a['id']: a};
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _refreshActivityById(widget.notifier.activities);
+  }
+
+  @override
+  void didUpdateWidget(ActivityPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _refreshActivityById(widget.notifier.activities);
+  }
+
   static IconData _iconForActivityType(String? type) {
     switch (type?.toLowerCase()) {
       case 'run':
@@ -449,7 +461,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final activities = notifier.activities;
     final items = notifier.items;
 
-    _refreshActivityById(activities);
     final activityById = _activityById;
 
     // Pre-compute styles used inside itemBuilder so copyWith is not called
