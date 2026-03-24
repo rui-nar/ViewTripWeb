@@ -1,7 +1,7 @@
 /// Login screen — email/password + Google Sign-In, link to register.
 library;
 
-import 'dart:async';
+import 'dart:async' show StreamSubscription;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -15,9 +15,6 @@ import 'google_button_stub.dart'
     if (dart.library.html) 'google_button_web.dart';
 
 import 'auth_notifier.dart';
-
-const _kWebClientId =
-    '544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -36,20 +33,12 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    unawaited(
-      GoogleSignIn.instance.initialize(
-        // serverClientId must be null on web — GIS reads the client ID from
-        // <meta name="google-signin-client_id"> in web/index.html.
-        // On Android/iOS it is required to receive an idToken.
-        serverClientId: kIsWeb ? null : _kWebClientId,
-      ).then((_) {
-        _googleSignInSub = GoogleSignIn.instance.authenticationEvents.listen(
-          _handleAuthEvent,
-          onError: _handleAuthError,
-        );
-        GoogleSignIn.instance.attemptLightweightAuthentication();
-      }),
+    // GoogleSignIn.instance.initialize() is called once in main() before runApp.
+    _googleSignInSub = GoogleSignIn.instance.authenticationEvents.listen(
+      _handleAuthEvent,
+      onError: _handleAuthError,
     );
+    GoogleSignIn.instance.attemptLightweightAuthentication();
   }
 
   @override

@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
 
 import 'src/auth/auth_service.dart';
@@ -11,8 +13,18 @@ import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
 import 'src/core/theme.dart';
 
-void main() {
+// Server client ID used on Android/iOS to receive an idToken.
+// On web, GIS reads the client ID from <meta name="google-signin-client_id">
+// in web/index.html — so serverClientId must be null on web.
+const _kGoogleServerClientId =
+    '544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com';
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Initialize GoogleSignIn exactly once before the widget tree starts.
+  await GoogleSignIn.instance.initialize(
+    serverClientId: kIsWeb ? null : _kGoogleServerClientId,
+  );
   runApp(const ViewTripApp());
 }
 
