@@ -12,9 +12,17 @@ class StravaImportNotifier extends ChangeNotifier {
   bool isLoading = false;
   String? error;
 
+  /// Whether the last result was served from the server-side cache.
+  bool lastResultCached = false;
+
+  /// Total count of filtered activities returned by the last load.
+  int totalCount = 0;
+
   /// Fetch activities from the backend, optionally with date/type filters.
+  ///
   /// Pass [projectName] so the backend can mark activities already in the project.
-  Future<void> load({String? projectName}) async {
+  /// Pass [refresh] = true to bypass the server-side cache and re-fetch from Strava.
+  Future<void> load({String? projectName, bool refresh = false}) async {
     isLoading = true;
     error = null;
     notifyListeners();
@@ -39,15 +47,22 @@ class StravaImportNotifier extends ChangeNotifier {
       if (projectName != null) {
         params['project'] = projectName;
       }
-      params['per_page'] = '100';
+      if (refresh) {
+        params['refresh'] = 'true';
+      }
 
       final query = params.entries
           .map((e) =>
               '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
           .join('&');
 
-      final raw = await api.get('/api/strava/activities?$query') as List<dynamic>;
-      final fetched = raw.cast<Map<String, dynamic>>();
+      final envelope =
+          await api.get('/api/strava/activities?$query') as Map<String, dynamic>;
+
+      final fetched =
+          (envelope['activities'] as List<dynamic>).cast<Map<String, dynamic>>();
+      lastResultCached = envelope['cached'] == true;
+      totalCount = (envelope['total'] as int?) ?? fetched.length;
 
       // Pre-select activities already in project
       final inProject = fetched
@@ -59,7 +74,7 @@ class StravaImportNotifier extends ChangeNotifier {
       selectedIds.clear();
       selectedIds.addAll(inProject);
 
-      // Collect distinct types
+      // Collect distinct types from this result set
       final types = <String>{};
       for (final a in fetched) {
         final t = a['type'] as String?;

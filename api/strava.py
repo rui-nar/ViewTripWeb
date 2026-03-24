@@ -6,10 +6,12 @@ Routes:
     GET    /api/strava/status               — {"connected": bool}
     DELETE /api/strava/disconnect           — removes stored Strava token
     GET    /api/strava/activities           — browse user's Strava activities (with filters)
+    GET    /api/strava/cache/status         — cache age + activity count
     POST   /api/projects/{name}/strava/sync — syncs Strava activities into a project
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import date, datetime, timezone
@@ -50,6 +52,71 @@ def _projects_dir(user_id: str) -> str:
     path = os.path.join(_DATA_DIR, "users", user_id, "projects")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _user_dir(user_id: str) -> str:
+    path = os.path.join(_DATA_DIR, "users", user_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+# ── Activity cache ─────────────────────────────────────────────────────────────
+
+# How long a cached activity list is considered fresh (seconds).
+_CACHE_TTL = int(os.environ.get("STRAVA_CACHE_TTL", 3600))
+
+_CACHE_FILENAME = "strava_cache.json"
+
+
+def _cache_path(user_id: str) -> str:
+    return os.path.join(_user_dir(user_id), _CACHE_FILENAME)
+
+
+def _load_cache(user_id: str) -> Dict[str, Any] | None:
+    """Return the cached payload if it exists and is within TTL, else None."""
+    path = _cache_path(user_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        age = time.time() - float(data.get("fetched_at", 0))
+        if age > _CACHE_TTL:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_cache(user_id: str, raw_activities: List[Dict[str, Any]]) -> None:
+    """Persist the raw Strava activity list to the user's cache file."""
+    path = _cache_path(user_id)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"fetched_at": time.time(), "activities": raw_activities}, fh)
+
+
+def _invalidate_cache(user_id: str) -> None:
+    """Delete the cached activity list so the next request re-fetches from Strava."""
+    path = _cache_path(user_id)
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def _fetch_all_strava(client: StravaAPI) -> List[Dict[str, Any]]:
+    """Paginate through all Strava activities and return the raw list."""
+    all_raw: List[Dict[str, Any]] = []
+    page = 1
+    while True:
+        batch = client.get_activities(per_page=200, page=page)
+        if not isinstance(batch, list) or not batch:
+            break
+        all_raw.extend(batch)
+        if len(batch) < 200:
+            break
+        page += 1
+    return all_raw
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -202,18 +269,26 @@ def strava_activities(
     start_date: Optional[str] = None,   # YYYY-MM-DD
     end_date: Optional[str] = None,     # YYYY-MM-DD
     types: Optional[str] = None,        # comma-separated, e.g. "Run,Ride"
-    page: int = 1,
-    per_page: int = 50,
     project: Optional[str] = None,      # project name to compute in_project
+    refresh: bool = False,              # bypass cache and re-fetch from Strava
 ):
     """Browse the current user's Strava activities with optional filters.
 
+    Activities are served from a per-user cache (default TTL: 1 hour).
+    The full history is fetched and cached on the first request (or when
+    the cache is stale).  Subsequent calls apply filters in-memory — no
+    extra Strava API calls.
+
+    Pass ``refresh=true`` to force a full re-fetch and rebuild the cache.
+
     Returns a list of activity dicts (same shape as Activity.to_strava_dict())
-    plus an ``in_project`` boolean for each if *project* is given.
+    plus an ``in_project`` boolean for each if *project* is given, and a top-
+    level ``cached`` boolean indicating whether the cache was used.
     """
     user_info_id = int(current_user["sub"])
     user_id = current_user["sub"]
 
+    cached = False
     with rx.session() as sess:
         token_row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
@@ -224,51 +299,62 @@ def strava_activities(
                 detail="Strava not connected",
             )
 
-        client = _strava_client_for_token(token_row)
+        # Try to serve from cache
+        raw_list: Optional[List[Dict[str, Any]]] = None
+        if not refresh:
+            cache = _load_cache(user_id)
+            if cache is not None:
+                raw_list = cache["activities"]
+                cached = True
 
-        # Build Strava query params
-        strava_params: Dict[str, Any] = {"page": page, "per_page": min(per_page, 100)}
-        if start_date:
-            try:
-                d = date.fromisoformat(start_date)
-                strava_params["after"] = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
-            except ValueError:
-                pass
-        if end_date:
-            try:
-                d = date.fromisoformat(end_date)
-                strava_params["before"] = int(datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
-            except ValueError:
-                pass
+        # Cache miss or forced refresh — fetch everything from Strava
+        if raw_list is None:
+            client = _strava_client_for_token(token_row)
+            raw_list = _fetch_all_strava(client)
+            _save_cache(user_id, raw_list)
+            _save_refreshed_token(sess, token_row, client)
 
-        raw_list = client.get_activities(**strava_params)
-        if not isinstance(raw_list, list):
-            raw_list = []
+    # Parse raw dicts → Activity objects
+    activities: List[Activity] = []
+    for raw in raw_list:
+        try:
+            activities.append(Activity.from_strava_api(raw))
+        except Exception:
+            pass
 
-        activities: List[Activity] = []
-        for raw in raw_list:
-            try:
-                activities.append(Activity.from_strava_api(raw))
-            except Exception:
-                pass
+    # Apply date filters
+    if start_date:
+        try:
+            sd = date.fromisoformat(start_date)
+            cutoff = datetime(sd.year, sd.month, sd.day, tzinfo=timezone.utc)
+            activities = [a for a in activities if a.start_date >= cutoff]
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            ed = date.fromisoformat(end_date)
+            cutoff = datetime(ed.year, ed.month, ed.day, 23, 59, 59, tzinfo=timezone.utc)
+            activities = [a for a in activities if a.start_date <= cutoff]
+        except ValueError:
+            pass
 
-        # Apply type filter client-side (Strava API doesn't support type filter)
-        if types:
-            type_set = {t.strip() for t in types.split(",") if t.strip()}
-            criteria = FilterCriteria(activity_types=type_set)
-            activities = FilterEngine.apply(activities, criteria)
+    # Apply type filter
+    if types:
+        type_set = {t.strip() for t in types.split(",") if t.strip()}
+        criteria = FilterCriteria(activity_types=type_set)
+        activities = FilterEngine.apply(activities, criteria)
 
-        # Determine which activity IDs are already in the project
-        in_project_ids: set = set()
-        if project:
-            pdir = _projects_dir(user_id)
-            path = os.path.join(pdir, project + ProjectIO.EXTENSION)
-            if os.path.exists(path):
-                proj = ProjectIO.load(path)
-                in_project_ids = {a.id for a in proj.activities if a.id is not None}
+    # Sort newest first (cache order may vary)
+    activities.sort(key=lambda a: a.start_date, reverse=True)
 
-        # Persist refreshed token if needed
-        _save_refreshed_token(sess, token_row, client)
+    # Determine which activity IDs are already in the project
+    in_project_ids: set = set()
+    if project:
+        pdir = _projects_dir(user_id)
+        proj_path = os.path.join(pdir, project + ProjectIO.EXTENSION)
+        if os.path.exists(proj_path):
+            proj = ProjectIO.load(proj_path)
+            in_project_ids = {a.id for a in proj.activities if a.id is not None}
 
     result = []
     for a in activities:
@@ -276,7 +362,24 @@ def strava_activities(
         d["in_project"] = a.id in in_project_ids
         result.append(d)
 
-    return result
+    return {"activities": result, "total": len(result), "cached": cached}
+
+
+@router.get("/api/strava/cache/status")
+def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]):
+    """Return metadata about the current user's activity cache."""
+    user_id = current_user["sub"]
+    path = _cache_path(user_id)
+    if not os.path.exists(path):
+        return {"cached": False, "count": 0, "age_seconds": None}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        age = time.time() - float(data.get("fetched_at", 0))
+        count = len(data.get("activities", []))
+        return {"cached": True, "count": count, "age_seconds": round(age)}
+    except Exception:
+        return {"cached": False, "count": 0, "age_seconds": None}
 
 
 @router.post("/api/projects/{name}/strava/sync")
@@ -305,21 +408,9 @@ def strava_sync(
 
         client = _strava_client_for_token(token_row)
 
-        # Paginate through all activities
-        all_raw: List[Dict[str, Any]] = []
-        page = 1
-        while True:
-            batch = client.get_activities(per_page=200, page=page)
-            if not batch:  # empty list → done
-                break
-            if isinstance(batch, list):
-                all_raw.extend(batch)
-                if len(batch) < 200:
-                    break
-                page += 1
-            else:
-                # Unexpected response format — stop
-                break
+        # Fetch all activities from Strava and update cache
+        all_raw = _fetch_all_strava(client)
+        _save_cache(user_id, all_raw)
 
         activities = []
         for raw in all_raw:

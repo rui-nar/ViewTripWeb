@@ -121,13 +121,26 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                             ),
                           ],
                           const Spacer(),
+                          if (notifier.lastResultCached && !notifier.isLoading)
+                            Tooltip(
+                              message: 'Showing cached results. Tap Refresh↺ to re-fetch from Strava.',
+                              child: Padding(
+                                padding: const EdgeInsets.only(right: 4),
+                                child: Icon(Icons.cloud_done_outlined,
+                                    size: 16,
+                                    color: theme.colorScheme.onSurface
+                                        .withValues(alpha: 0.4)),
+                              ),
+                            ),
                           TextButton.icon(
                             icon: const Icon(Icons.refresh, size: 18),
                             label: const Text('Refresh'),
                             onPressed: notifier.isLoading
                                 ? null
-                                : () =>
-                                    notifier.load(projectName: widget.projectName),
+                                : () => notifier.load(
+                                      projectName: widget.projectName,
+                                      refresh: true,
+                                    ),
                           ),
                         ],
                       ),
@@ -159,7 +172,8 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                     child: Row(
                       children: [
                         Text(
-                          '${notifier.selectedIds.length} / ${notifier.activities.length} selected',
+                          '${notifier.selectedIds.length} / ${notifier.activities.length} selected'
+                          '${notifier.totalCount > notifier.activities.length ? ' (${notifier.totalCount} total)' : ''}',
                           style: theme.textTheme.bodySmall,
                         ),
                         const Spacer(),
