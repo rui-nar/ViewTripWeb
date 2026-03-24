@@ -696,6 +696,13 @@ class _ElevationChartState extends State<ElevationChart> {
     }
   }
 
+  static Widget _elevLeftTitle(double value, TitleMeta meta) =>
+      Text('${value.toInt()} m', style: const TextStyle(fontSize: 9));
+
+  static Widget _elevBottomTitle(double value, TitleMeta meta) =>
+      Text('${value.toStringAsFixed(0)} km',
+          style: const TextStyle(fontSize: 9));
+
   void _compute(List<Map<String, dynamic>> activities) {
     final spots = <FlSpot>[];
     double offsetKm = 0;
@@ -750,20 +757,14 @@ class _ElevationChartState extends State<ElevationChart> {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 40,
-                getTitlesWidget: (value, meta) => Text(
-                  '${value.toInt()} m',
-                  style: const TextStyle(fontSize: 9),
-                ),
+                getTitlesWidget: _elevLeftTitle,
               ),
             ),
             bottomTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 22,
-                getTitlesWidget: (value, meta) => Text(
-                  '${value.toStringAsFixed(0)} km',
-                  style: const TextStyle(fontSize: 9),
-                ),
+                getTitlesWidget: _elevBottomTitle,
               ),
             ),
             topTitles: const AxisTitles(
