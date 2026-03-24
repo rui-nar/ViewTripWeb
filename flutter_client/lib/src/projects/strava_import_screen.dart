@@ -77,6 +77,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
       builder: (context, notifier, _) {
         return Scaffold(
             appBar: AppBar(
+              leading: BackButton(onPressed: () => context.pop()),
               title: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
