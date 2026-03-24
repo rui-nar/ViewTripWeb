@@ -329,38 +329,40 @@ class _MapPanelState extends State<MapPanel> {
       _fitBoundsOnce(allPoints);
     }
 
-    return FlutterMap(
-      mapController: widget.mapController,
-      options: const MapOptions(
-        initialCenter: LatLng(0, 0),
-        initialZoom: 2,
+    return RepaintBoundary(
+      child: FlutterMap(
+        mapController: widget.mapController,
+        options: const MapOptions(
+          initialCenter: LatLng(0, 0),
+          initialZoom: 2,
+        ),
+        children: [
+          TileLayer(
+            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            userAgentPackageName: 'com.viewtrip.client',
+            tileProvider: _tileProvider,
+          ),
+          if (polylines.isNotEmpty)
+            PolylineLayer(polylines: polylines),
+          // Preview arc uses ValueListenableBuilder so only this layer rebuilds
+          // when the segment dialog updates coordinates — not the whole map.
+          ValueListenableBuilder<List<LatLng>?>(
+            valueListenable: notifier.previewArcNotifier,
+            builder: (_, arc, __) {
+              if (arc == null) return const SizedBox.shrink();
+              return PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: arc,
+                    color: const Color(0xCC6366F1),
+                    strokeWidth: 2.5,
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
       ),
-      children: [
-        TileLayer(
-          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          userAgentPackageName: 'com.viewtrip.client',
-          tileProvider: _tileProvider,
-        ),
-        if (polylines.isNotEmpty)
-          PolylineLayer(polylines: polylines),
-        // Preview arc uses ValueListenableBuilder so only this layer rebuilds
-        // when the segment dialog updates coordinates — not the whole map.
-        ValueListenableBuilder<List<LatLng>?>(
-          valueListenable: notifier.previewArcNotifier,
-          builder: (_, arc, __) {
-            if (arc == null) return const SizedBox.shrink();
-            return PolylineLayer(
-              polylines: [
-                Polyline(
-                  points: arc,
-                  color: const Color(0xCC6366F1), // indigo, semi-transparent
-                  strokeWidth: 2.5,
-                ),
-              ],
-            );
-          },
-        ),
-      ],
     );
   }
 }
