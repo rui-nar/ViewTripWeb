@@ -673,8 +673,13 @@ class _ElevationChartState extends State<ElevationChart> {
     }
     _spots = spots;
     if (spots.isNotEmpty) {
-      _minY = spots.map((s) => s.y).reduce((a, b) => a < b ? a : b);
-      _maxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
+      double minY = spots.first.y, maxY = spots.first.y;
+      for (final s in spots) {
+        if (s.y < minY) minY = s.y;
+        if (s.y > maxY) maxY = s.y;
+      }
+      _minY = minY;
+      _maxY = maxY;
     }
   }
 
