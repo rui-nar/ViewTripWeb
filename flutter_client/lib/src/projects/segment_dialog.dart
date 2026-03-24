@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../map/great_circle.dart';
@@ -29,6 +31,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
   late TextEditingController _endLatCtrl;
   late TextEditingController _endLonCtrl;
   bool _saving = false;
+  Timer? _previewDebounce;
 
   @override
   void initState() {
@@ -48,12 +51,21 @@ class _SegmentDialogState extends State<SegmentDialog> {
     // Auto-populate from adjacent activities if creating new segment
     if (seg == null) _autoPopulate();
 
-    // Update arc preview whenever any coordinate field changes
-    _startLatCtrl.addListener(_updatePreview);
-    _startLonCtrl.addListener(_updatePreview);
-    _endLatCtrl.addListener(_updatePreview);
-    _endLonCtrl.addListener(_updatePreview);
-    _updatePreview();
+    // Update arc preview whenever any coordinate field changes.
+    // Debounced so greatCirclePoints() is not called on every keystroke.
+    _startLatCtrl.addListener(_schedulePreviewUpdate);
+    _startLonCtrl.addListener(_schedulePreviewUpdate);
+    _endLatCtrl.addListener(_schedulePreviewUpdate);
+    _endLonCtrl.addListener(_schedulePreviewUpdate);
+    _updatePreview(); // immediate on open (fields may be pre-filled)
+  }
+
+  void _schedulePreviewUpdate() {
+    _previewDebounce?.cancel();
+    _previewDebounce = Timer(
+      const Duration(milliseconds: 250),
+      _updatePreview,
+    );
   }
 
   void _updatePreview() {
@@ -119,6 +131,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   @override
   void dispose() {
+    _previewDebounce?.cancel();
     widget.notifier.setPreviewArc(null);
     _labelCtrl.dispose();
     _startLatCtrl.dispose();
