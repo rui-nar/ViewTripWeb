@@ -21,13 +21,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadStravaStatus();
     if (kIsWeb) {
+      // Single postFrameCallback handles both status load and OAuth snackbar.
+      // Previously _loadStravaStatus() was called unconditionally in initState
+      // AND again inside this callback on strava=connected, causing two
+      // concurrent requests on every OAuth return.
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        _loadStravaStatus(); // always load once
         final uri = Uri.base;
         final stravaParam = uri.queryParameters['strava'];
         if (stravaParam == 'connected') {
-          _loadStravaStatus();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Strava connected!')),
           );
@@ -42,6 +45,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           );
         }
       });
+    } else {
+      _loadStravaStatus();
     }
   }
 
