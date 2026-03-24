@@ -9,60 +9,44 @@ class StravaImportNotifier extends ChangeNotifier {
   DateTime? endDate;
   List<String> allTypes = [];
   final Set<String> selectedTypes = {};
+
   bool isLoading = false;
+  bool isLoadingMore = false;
   String? error;
 
   /// Whether the last result was served from the server-side cache.
   bool lastResultCached = false;
 
-  /// Total count of filtered activities returned by the last load.
+  /// Total matching activities across all pages.
   int totalCount = 0;
 
-  /// Fetch activities from the backend, optionally with date/type filters.
+  bool _hasMore = false;
+  bool get hasMore => _hasMore;
+
+  int _currentPage = 1;
+  String? _lastProjectName;
+
+  // ── Load (first page / reset) ───────────────────────────────────────────────
+
+  /// Fetch page 1 from the backend, resetting the list.
   ///
-  /// Pass [projectName] so the backend can mark activities already in the project.
-  /// Pass [refresh] = true to bypass the server-side cache and re-fetch from Strava.
+  /// Pass [refresh] = true to bypass the server-side cache.
   Future<void> load({String? projectName, bool refresh = false}) async {
+    _currentPage = 1;
+    _lastProjectName = projectName;
     isLoading = true;
     error = null;
     notifyListeners();
 
     try {
-      final params = <String, String>{};
-      if (startDate != null) {
-        params['start_date'] =
-            '${startDate!.year.toString().padLeft(4, '0')}-'
-            '${startDate!.month.toString().padLeft(2, '0')}-'
-            '${startDate!.day.toString().padLeft(2, '0')}';
-      }
-      if (endDate != null) {
-        params['end_date'] =
-            '${endDate!.year.toString().padLeft(4, '0')}-'
-            '${endDate!.month.toString().padLeft(2, '0')}-'
-            '${endDate!.day.toString().padLeft(2, '0')}';
-      }
-      if (selectedTypes.isNotEmpty) {
-        params['types'] = selectedTypes.join(',');
-      }
-      if (projectName != null) {
-        params['project'] = projectName;
-      }
-      if (refresh) {
-        params['refresh'] = 'true';
-      }
+      final envelope = await _fetchPage(
+        page: 1,
+        projectName: projectName,
+        refresh: refresh,
+      );
 
-      final query = params.entries
-          .map((e) =>
-              '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
-          .join('&');
-
-      final envelope =
-          await api.get('/api/strava/activities?$query') as Map<String, dynamic>;
-
-      final fetched =
-          (envelope['activities'] as List<dynamic>).cast<Map<String, dynamic>>();
-      lastResultCached = envelope['cached'] == true;
-      totalCount = (envelope['total'] as int?) ?? fetched.length;
+      final fetched = _parseActivities(envelope);
+      _applyEnvelopeMeta(envelope);
 
       // Pre-select activities already in project
       final inProject = fetched
@@ -74,13 +58,7 @@ class StravaImportNotifier extends ChangeNotifier {
       selectedIds.clear();
       selectedIds.addAll(inProject);
 
-      // Collect distinct types from this result set
-      final types = <String>{};
-      for (final a in fetched) {
-        final t = a['type'] as String?;
-        if (t != null && t.isNotEmpty) types.add(t);
-      }
-      allTypes = types.toList()..sort();
+      _rebuildTypes(activities);
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
     } finally {
@@ -88,6 +66,97 @@ class StravaImportNotifier extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  // ── Load more (append next page) ────────────────────────────────────────────
+
+  /// Append the next page of results to [activities].
+  Future<void> loadMore() async {
+    if (!_hasMore || isLoading || isLoadingMore) return;
+
+    isLoadingMore = true;
+    notifyListeners();
+
+    try {
+      final envelope = await _fetchPage(
+        page: _currentPage + 1,
+        projectName: _lastProjectName,
+        refresh: false,
+      );
+
+      final more = _parseActivities(envelope);
+      _applyEnvelopeMeta(envelope);
+      _currentPage += 1;
+
+      // Mark new activities in-project without clearing existing selection
+      for (final a in more) {
+        if (a['in_project'] == true) {
+          selectedIds.add(a['id'] as int);
+        }
+      }
+
+      activities = [...activities, ...more];
+      _rebuildTypes(activities);
+    } on Exception catch (e) {
+      error = e.toString().replaceFirst('Exception: ', '');
+    } finally {
+      isLoadingMore = false;
+      notifyListeners();
+    }
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> _fetchPage({
+    required int page,
+    String? projectName,
+    bool refresh = false,
+  }) async {
+    final params = <String, String>{'page': '$page', 'per_page': '50'};
+    if (startDate != null) {
+      params['start_date'] =
+          '${startDate!.year.toString().padLeft(4, '0')}-'
+          '${startDate!.month.toString().padLeft(2, '0')}-'
+          '${startDate!.day.toString().padLeft(2, '0')}';
+    }
+    if (endDate != null) {
+      params['end_date'] =
+          '${endDate!.year.toString().padLeft(4, '0')}-'
+          '${endDate!.month.toString().padLeft(2, '0')}-'
+          '${endDate!.day.toString().padLeft(2, '0')}';
+    }
+    if (selectedTypes.isNotEmpty) {
+      params['types'] = selectedTypes.join(',');
+    }
+    if (projectName != null) params['project'] = projectName;
+    if (refresh) params['refresh'] = 'true';
+
+    final query = params.entries
+        .map((e) =>
+            '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
+
+    return await api.get('/api/strava/activities?$query') as Map<String, dynamic>;
+  }
+
+  List<Map<String, dynamic>> _parseActivities(Map<String, dynamic> envelope) =>
+      (envelope['activities'] as List<dynamic>).cast<Map<String, dynamic>>();
+
+  void _applyEnvelopeMeta(Map<String, dynamic> envelope) {
+    lastResultCached = envelope['cached'] == true;
+    totalCount = (envelope['total'] as int?) ?? 0;
+    _hasMore = envelope['has_more'] == true;
+  }
+
+  void _rebuildTypes(List<Map<String, dynamic>> list) {
+    final types = <String>{};
+    for (final a in list) {
+      final t = a['type'] as String?;
+      if (t != null && t.isNotEmpty) types.add(t);
+    }
+    allTypes = types.toList()..sort();
+  }
+
+  // ── Selection ───────────────────────────────────────────────────────────────
 
   void toggleSelect(int id) {
     if (selectedIds.contains(id)) {
@@ -122,6 +191,8 @@ class StravaImportNotifier extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  // ── Add to project ──────────────────────────────────────────────────────────
 
   /// POST selected activities to the project. Returns count added.
   Future<int> addSelected(String projectName) async {

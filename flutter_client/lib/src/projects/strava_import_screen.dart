@@ -208,8 +208,48 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                                       style: theme.textTheme.bodyMedium),
                                 )
                               : ListView.builder(
-                                  itemCount: notifier.activities.length,
+                                  // +1 for the Load more / spinner row
+                                  itemCount: notifier.activities.length + 1,
                                   itemBuilder: (context, i) {
+                                    // Last item: Load more button or spinner
+                                    if (i == notifier.activities.length) {
+                                      if (notifier.isLoadingMore) {
+                                        return const Padding(
+                                          padding: EdgeInsets.symmetric(vertical: 16),
+                                          child: Center(child: CircularProgressIndicator()),
+                                        );
+                                      }
+                                      if (notifier.hasMore) {
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 8),
+                                          child: OutlinedButton(
+                                            onPressed: () => notifier.loadMore(),
+                                            child: Text(
+                                              'Load more '
+                                              '(${notifier.activities.length} / ${notifier.totalCount})',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      // All loaded — show count footer
+                                      if (notifier.activities.isNotEmpty) {
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(vertical: 12),
+                                          child: Center(
+                                            child: Text(
+                                              'All ${notifier.totalCount} activities loaded',
+                                              style: theme.textTheme.bodySmall?.copyWith(
+                                                color: theme.colorScheme.onSurface
+                                                    .withValues(alpha: 0.4),
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      return const SizedBox.shrink();
+                                    }
+
                                     final a = notifier.activities[i];
                                     final id = a['id'] as int;
                                     final inProject =

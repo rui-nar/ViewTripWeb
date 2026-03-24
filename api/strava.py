@@ -271,19 +271,26 @@ def strava_activities(
     types: Optional[str] = None,        # comma-separated, e.g. "Run,Ride"
     project: Optional[str] = None,      # project name to compute in_project
     refresh: bool = False,              # bypass cache and re-fetch from Strava
+    page: int = 1,                      # 1-based page number
+    per_page: int = 50,                 # items per page (max 200)
 ):
     """Browse the current user's Strava activities with optional filters.
 
     Activities are served from a per-user cache (default TTL: 1 hour).
-    The full history is fetched and cached on the first request (or when
-    the cache is stale).  Subsequent calls apply filters in-memory — no
-    extra Strava API calls.
+    Filters (date, type) are applied in-memory so filter changes are instant.
+    Results are paginated: use ``page`` / ``per_page`` to walk through them.
 
     Pass ``refresh=true`` to force a full re-fetch and rebuild the cache.
 
-    Returns a list of activity dicts (same shape as Activity.to_strava_dict())
-    plus an ``in_project`` boolean for each if *project* is given, and a top-
-    level ``cached`` boolean indicating whether the cache was used.
+    Response shape:
+        {
+          "activities": [...],   # page slice, each with "in_project" flag
+          "total":     int,      # total matching activities (all pages)
+          "page":      int,
+          "per_page":  int,
+          "has_more":  bool,
+          "cached":    bool,
+        }
     """
     user_info_id = int(current_user["sub"])
     user_id = current_user["sub"]
@@ -356,13 +363,29 @@ def strava_activities(
             proj = ProjectIO.load(proj_path)
             in_project_ids = {a.id for a in proj.activities if a.id is not None}
 
+    total = len(activities)
+
+    # Paginate
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    offset = (page - 1) * per_page
+    page_activities = activities[offset: offset + per_page]
+    has_more = (offset + per_page) < total
+
     result = []
-    for a in activities:
+    for a in page_activities:
         d = a.to_strava_dict()
         d["in_project"] = a.id in in_project_ids
         result.append(d)
 
-    return {"activities": result, "total": len(result), "cached": cached}
+    return {
+        "activities": result,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "has_more": has_more,
+        "cached": cached,
+    }
 
 
 @router.get("/api/strava/cache/status")
