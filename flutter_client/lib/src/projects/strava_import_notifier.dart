@@ -100,7 +100,7 @@ class StravaImportNotifier extends ChangeNotifier {
       }
 
       activities = [...activities, ...more];
-      _rebuildTypes(activities);
+      _mergeTypes(more); // incremental — only scan the new page
       _recomputeNewCount();
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
@@ -166,6 +166,18 @@ class StravaImportNotifier extends ChangeNotifier {
       if (t != null && t.isNotEmpty) types.add(t);
     }
     allTypes = types.toList()..sort();
+  }
+
+  /// Merge types from a newly fetched page into the existing [allTypes] list
+  /// without re-scanning the full accumulated activities list.
+  void _mergeTypes(List<Map<String, dynamic>> newPage) {
+    final existing = allTypes.toSet();
+    bool changed = false;
+    for (final a in newPage) {
+      final t = a['type'] as String?;
+      if (t != null && t.isNotEmpty && existing.add(t)) changed = true;
+    }
+    if (changed) allTypes = existing.toList()..sort();
   }
 
   // ── Selection ───────────────────────────────────────────────────────────────
