@@ -1,5 +1,9 @@
 /// Main app screen — map + activity panel for an open project.
+// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 library;
+
+// dart:html is intentional — ViewTripWeb targets Flutter Web only.
+import 'dart:html' as html;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -39,6 +43,33 @@ class _AppScreenState extends State<AppScreen> {
   Future<void> _logout() async {
     await context.read<AuthNotifier>().logout();
     if (mounted) context.go('/login');
+  }
+
+  Future<void> _exportGpx() async {
+    final name = widget.projectName;
+    try {
+      final res = await api.getRaw(
+        '/api/projects/${Uri.encodeComponent(name)}/export',
+      );
+      // Determine filename from Content-Disposition or fall back to project name
+      String filename = '$name.gpx';
+      final cd = res.headers['content-disposition'] ?? '';
+      final match = RegExp(r'filename="([^"]+)"').firstMatch(cd);
+      if (match != null) filename = match.group(1)!;
+
+      // Trigger browser download via a temporary anchor element
+      final blob = html.Blob([res.bodyBytes], 'application/gpx+xml');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', filename)
+        ..click();
+      html.Url.revokeObjectUrl(url);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Export failed: ${e.body}')),
+      );
+    }
   }
 
   Future<void> _syncStrava() async {
@@ -83,6 +114,11 @@ class _AppScreenState extends State<AppScreen> {
         ),
         title: Text(title.isEmpty ? 'ViewTripWeb' : title),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.download),
+            tooltip: 'Export as GPX',
+            onPressed: _exportGpx,
+          ),
           IconButton(
             icon: const Icon(Icons.playlist_add),
             tooltip: 'Import activities from Strava',

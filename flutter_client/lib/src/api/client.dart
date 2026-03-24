@@ -54,6 +54,14 @@ class ApiClient {
     return _handle(res);
   }
 
+  /// Fetch a binary resource and return the raw response.
+  /// Use this for file downloads where the body is not JSON.
+  Future<http.Response> getRaw(String path) async {
+    final res = await http.get(Uri.parse('$baseUrl$path'), headers: _headers);
+    if (res.statusCode >= 200 && res.statusCode < 300) return res;
+    throw ApiException(res.statusCode, res.body);
+  }
+
   dynamic _handle(http.Response res) {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (res.body.isEmpty) return null;

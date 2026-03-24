@@ -6,6 +6,7 @@ Routes:
     GET    /api/projects/{name}                 — get project data (GeoJSON + metadata)
     DELETE /api/projects/{name}                 — delete a project
     POST   /api/projects/import                 — upload a .gettracks file
+    GET    /api/projects/{name}/export          — download project as GPX file
     POST   /api/projects/{name}/activities      — add activities to project
     DELETE /api/projects/{name}/items/{index}   — remove item at index
     PUT    /api/projects/{name}/items/reorder   — move item from/to index
@@ -15,15 +16,23 @@ Routes:
 """
 from __future__ import annotations
 
+import io
 import os
+import re
 import uuid
 from typing import Annotated, Any, Dict, List, Optional
 
+import gpxpy
+import gpxpy.gpx
+import polyline as polyline_lib
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
 from src.models.activity import Activity
+from src.models.great_circle import great_circle_points
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 
@@ -119,6 +128,97 @@ async def import_project(
     with open(dest, "wb") as fh:
         fh.write(contents)
     return {"name": fname[: -len(ProjectIO.EXTENSION)], "filename": fname}
+
+
+# ── GPX export ─────────────────────────────────────────────────────────────────
+
+# How many great-circle points to interpolate per connecting segment.
+_SEGMENT_GPX_POINTS = 50
+
+# Safe filename characters
+_SAFE_NAME = re.compile(r"[^\w\-. ]")
+
+
+@router.get("/{name}/export")
+def export_project_gpx(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Build and stream the project as a GPX file.
+
+    Each project item (activity or connecting segment) becomes one <trkseg>
+    inside a single <trk>.  The caller receives a GPX attachment.
+
+    Track points are derived from:
+    - Activities: decoded from ``summary_polyline`` (Google encoded polyline)
+      with ``start_date_local`` as the timestamp of the first point.
+      Falls back to a two-point segment using start_latlng / end_latlng.
+    - Connecting segments: SLERP great-circle arc (50 points).
+    """
+    user_id = current_user["sub"]
+    pdir = _projects_dir(user_id)
+    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    project = ProjectIO.load(path)
+
+    gpx = gpxpy.gpx.GPX()
+    gpx.name = project.name
+    gpx.creator = "ViewTripWeb"
+
+    track = gpxpy.gpx.GPXTrack(name=project.name)
+    gpx.tracks.append(track)
+
+    for item in project.items:
+        if item.item_type == "activity":
+            act = project.activity_by_id(item.activity_id) if item.activity_id else None
+            if act is None:
+                continue
+
+            seg = gpxpy.gpx.GPXTrackSegment()
+
+            if act.summary_polyline:
+                decoded = polyline_lib.decode(act.summary_polyline)  # [(lat, lon), ...]
+                for idx, (lat, lon) in enumerate(decoded):
+                    pt = gpxpy.gpx.GPXTrackPoint(lat, lon)
+                    if idx == 0 and act.start_date_local:
+                        pt.time = act.start_date_local
+                    seg.points.append(pt)
+            elif act.start_latlng and act.end_latlng:
+                pt_start = gpxpy.gpx.GPXTrackPoint(act.start_latlng[0], act.start_latlng[1])
+                if act.start_date_local:
+                    pt_start.time = act.start_date_local
+                pt_end = gpxpy.gpx.GPXTrackPoint(act.end_latlng[0], act.end_latlng[1])
+                seg.points.append(pt_start)
+                seg.points.append(pt_end)
+            else:
+                continue  # no GPS data at all — skip
+
+            if seg.points:
+                track.segments.append(seg)
+
+        elif item.item_type == "segment" and item.segment:
+            cs = item.segment
+            arc = great_circle_points(
+                cs.start.lat, cs.start.lon,
+                cs.end.lat,   cs.end.lon,
+                n_points=_SEGMENT_GPX_POINTS,
+            )
+            seg = gpxpy.gpx.GPXTrackSegment()
+            for lat, lon in arc:
+                seg.points.append(gpxpy.gpx.GPXTrackPoint(lat, lon))
+            track.segments.append(seg)
+
+    gpx_xml = gpx.to_xml()
+    safe = _SAFE_NAME.sub("_", project.name)
+    filename = f"{safe}.gpx"
+
+    return StreamingResponse(
+        io.BytesIO(gpx_xml.encode("utf-8")),
+        media_type="application/gpx+xml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Activity management ────────────────────────────────────────────────────────
