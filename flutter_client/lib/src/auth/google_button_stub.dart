@@ -3,7 +3,5 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 
-Widget buildGoogleSignInButton(GoogleSignIn googleSignIn) =>
-    const SizedBox.shrink();
+Widget buildGoogleSignInButton() => const SizedBox.shrink();

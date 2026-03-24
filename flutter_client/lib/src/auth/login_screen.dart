@@ -1,6 +1,8 @@
 /// Login screen — email/password + Google Sign-In, link to register.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -29,30 +31,50 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordCtrl = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   bool _obscurePassword = true;
-
-  final _googleSignIn = GoogleSignIn(
-    // serverClientId must be null on web — GIS reads the client ID from
-    // <meta name="google-signin-client_id"> in web/index.html.
-    // On Android/iOS it is required to receive an idToken.
-    serverClientId: kIsWeb ? null : _kWebClientId,
-    scopes: ['email', 'profile', 'openid'],
-  );
+  StreamSubscription<GoogleSignInAuthenticationEvent>? _googleSignInSub;
 
   @override
   void initState() {
     super.initState();
-    // Listen for account changes from renderButton() (web) or signIn() (mobile).
-    _googleSignIn.onCurrentUserChanged.listen(_handleGoogleAccount);
+    unawaited(
+      GoogleSignIn.instance.initialize(
+        // serverClientId must be null on web — GIS reads the client ID from
+        // <meta name="google-signin-client_id"> in web/index.html.
+        // On Android/iOS it is required to receive an idToken.
+        serverClientId: kIsWeb ? null : _kWebClientId,
+      ).then((_) {
+        _googleSignInSub = GoogleSignIn.instance.authenticationEvents.listen(
+          _handleAuthEvent,
+          onError: _handleAuthError,
+        );
+        GoogleSignIn.instance.attemptLightweightAuthentication();
+      }),
+    );
   }
 
   @override
   void dispose() {
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
+    _googleSignInSub?.cancel();
     super.dispose();
   }
 
   // ── Handlers ──────────────────────────────────────────────────────────────────
+
+  void _handleAuthEvent(GoogleSignInAuthenticationEvent event) {
+    if (event is GoogleSignInAuthenticationEventSignIn) {
+      _handleGoogleAccount(event.user);
+    }
+  }
+
+  void _handleAuthError(Object error) {
+    if (error is GoogleSignInException &&
+        error.code == GoogleSignInExceptionCode.canceled) {
+      return;
+    }
+    _showError('Google sign-in failed: $error');
+  }
 
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
@@ -66,11 +88,11 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   /// Called when Google Sign-In produces an account — works for both
-  /// renderButton (web) and signIn() (Android/iOS).
-  Future<void> _handleGoogleAccount(GoogleSignInAccount? account) async {
-    if (account == null) return;
+  /// renderButton (web) and authenticate() (Android/iOS).
+  Future<void> _handleGoogleAccount(GoogleSignInAccount account) async {
     try {
-      final idToken = (await account.authentication).idToken;
+      // authentication is a synchronous getter in v7 (no await needed)
+      final idToken = account.authentication.idToken;
       if (idToken == null || idToken.isEmpty) {
         _showError('Google sign-in: no ID token received.');
         return;
@@ -87,9 +109,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
   /// Mobile-only: trigger the native Google account picker.
   Future<void> _mobileGoogleSignIn() async {
+    if (!GoogleSignIn.instance.supportsAuthenticate()) return;
     try {
-      await _googleSignIn.signIn(); // fires onCurrentUserChanged on success
-    } catch (e) {
+      await GoogleSignIn.instance.authenticate(
+        scopeHint: ['email', 'profile', 'openid'],
+      );
+      // Result delivered via authenticationEvents stream → _handleAuthEvent
+    } on GoogleSignInException catch (e) {
+      if (e.code == GoogleSignInExceptionCode.canceled) return;
       _showError('Google sign-in failed: $e');
     }
   }
@@ -232,7 +259,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       // Web:    Google's own renderButton() (GIS — correct flow)
                       // Mobile: our OutlinedButton calling signIn()
                       kIsWeb
-                          ? buildGoogleSignInButton(_googleSignIn)
+                          ? buildGoogleSignInButton()
                           : Consumer<AuthNotifier>(
                               builder: (_, auth, __) => OutlinedButton.icon(
                                 onPressed: auth.isLoading
