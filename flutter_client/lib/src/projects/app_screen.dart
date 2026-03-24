@@ -392,6 +392,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
   List<Map<String, dynamic>>? _lastActivities;
   Map<dynamic, Map<String, dynamic>> _activityById = {};
 
+  // Theme-derived styles cached in didChangeDependencies so copyWith is not
+  // called on every build().
+  TextStyle? _segmentTitleStyle;
+  TextStyle? _projectTitleStyle;
+
   void _refreshActivityById(List<Map<String, dynamic>> activities) {
     if (identical(activities, _lastActivities)) return;
     _lastActivities = activities;
@@ -408,6 +413,16 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void didUpdateWidget(ActivityPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     _refreshActivityById(widget.notifier.activities);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final theme = Theme.of(context);
+    _segmentTitleStyle =
+        theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
+    _projectTitleStyle =
+        theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold);
   }
 
   static IconData _iconForActivityType(String? type) {
@@ -465,10 +480,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
     final activityById = _activityById;
 
-    // Pre-compute styles used inside itemBuilder so copyWith is not called
-    // for every item on every rebuild.
-    final segmentTitleStyle =
-        theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
+    // Styles are pre-computed in didChangeDependencies() — no copyWith in build().
 
     // Aggregate stats are pre-computed in ProjectNotifier._updateStats().
     final totalDistM    = notifier.totalDistanceM;
@@ -491,8 +503,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
             children: [
               Text(
                 notifier.projectName ?? '',
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.bold),
+                style: _projectTitleStyle,
               ),
               const SizedBox(height: 6),
               Row(
@@ -583,7 +594,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                           _iconForSegmentType(segType),
                           color: theme.colorScheme.secondary,
                         ),
-                        title: Text(label, style: segmentTitleStyle),
+                        title: Text(label, style: _segmentTitleStyle),
                         subtitle: Text(segType ?? '',
                             style: theme.textTheme.bodySmall),
                         trailing: Row(
