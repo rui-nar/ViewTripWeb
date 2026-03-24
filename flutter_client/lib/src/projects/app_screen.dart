@@ -625,53 +625,76 @@ Future<void> _showSegmentDialog(
 
 // ── ElevationChart ────────────────────────────────────────────────────────────
 
-class ElevationChart extends StatelessWidget {
+class ElevationChart extends StatefulWidget {
   final List<Map<String, dynamic>> activities;
 
   const ElevationChart({super.key, required this.activities});
 
   @override
-  Widget build(BuildContext context) {
-    // Concatenate elevation profiles from all activities.
-    // elevation_profile shape: list of [distance_km, elevation_m] pairs.
+  State<ElevationChart> createState() => _ElevationChartState();
+}
+
+class _ElevationChartState extends State<ElevationChart> {
+  List<FlSpot> _spots = const [];
+  double _minY = 0;
+  double _maxY = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _compute(widget.activities);
+  }
+
+  @override
+  void didUpdateWidget(ElevationChart oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.activities, widget.activities)) {
+      _compute(widget.activities);
+    }
+  }
+
+  void _compute(List<Map<String, dynamic>> activities) {
     final spots = <FlSpot>[];
     double offsetKm = 0;
-
     for (final a in activities) {
       final profile = a['elevation_profile'];
       if (profile is! List || profile.isEmpty) continue;
-
       for (final point in profile) {
         if (point is! List || point.length < 2) continue;
-        final distKm = (point[0] as num).toDouble() + offsetKm;
-        final elevM = (point[1] as num).toDouble();
-        spots.add(FlSpot(distKm, elevM));
+        spots.add(FlSpot(
+          (point[0] as num).toDouble() + offsetKm,
+          (point[1] as num).toDouble(),
+        ));
       }
-
-      // Advance offset by the last distance in this activity's profile.
       final last = profile.last;
       if (last is List && last.isNotEmpty) {
         offsetKm += (last[0] as num).toDouble();
       }
     }
+    _spots = spots;
+    if (spots.isNotEmpty) {
+      _minY = spots.map((s) => s.y).reduce((a, b) => a < b ? a : b);
+      _maxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
+    }
+  }
 
-    if (spots.isEmpty) {
+  @override
+  Widget build(BuildContext context) {
+    if (_spots.isEmpty) {
       return const SizedBox(
         height: 40,
         child: Center(child: Text('No elevation data')),
       );
     }
 
-    final minY = spots.map((s) => s.y).reduce((a, b) => a < b ? a : b);
-    final maxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
-    final yPad = ((maxY - minY) * 0.1).clamp(10.0, double.infinity);
+    final yPad = ((_maxY - _minY) * 0.1).clamp(10.0, double.infinity);
 
     return SizedBox(
       height: 160,
       child: LineChart(
         LineChartData(
-          minY: minY - yPad,
-          maxY: maxY + yPad,
+          minY: _minY - yPad,
+          maxY: _maxY + yPad,
           gridData: const FlGridData(show: false),
           borderData: FlBorderData(show: false),
           titlesData: FlTitlesData(
@@ -702,7 +725,7 @@ class ElevationChart extends StatelessWidget {
           ),
           lineBarsData: [
             LineChartBarData(
-              spots: spots,
+              spots: _spots,
               isCurved: true,
               color: const Color(0xFFF97316),
               barWidth: 2,
