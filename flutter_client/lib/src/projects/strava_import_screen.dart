@@ -42,7 +42,8 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     }
   }
 
-  Future<void> _addSelected(StravaImportNotifier notifier) async {
+  Future<void> _addSelected(BuildContext ctx) async {
+    final notifier = ctx.read<StravaImportNotifier>();
     final added = await notifier.addSelected(widget.projectName);
     if (!mounted) return;
     if (notifier.error == null) {
@@ -57,7 +58,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     }
   }
 
-  String _formatDate(StravaImportNotifier n) {
+  static String _formatDate(StravaImportNotifier n) {
     if (n.startDate == null && n.endDate == null) return 'All dates';
     if (n.startDate != null && n.endDate != null) {
       return '${_fmtDay(n.startDate!)} – ${_fmtDay(n.endDate!)}';
@@ -66,267 +67,330 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     return 'Until ${_fmtDay(n.endDate!)}';
   }
 
-  String _fmtDay(DateTime d) =>
+  static String _fmtDay(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Consumer<StravaImportNotifier>(
-      builder: (context, notifier, _) {
-        return Scaffold(
-            appBar: AppBar(
-              leading: BackButton(onPressed: () => context.pop()),
-              title: Column(
+    return Scaffold(
+      // AppBar is fully static — projectName comes from widget, no notifier.
+      appBar: AppBar(
+        leading: BackButton(onPressed: () => context.pop()),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Import from Strava'),
+            Text(
+              widget.projectName,
+              style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.7)),
+            ),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          // ── Filter bar ───────────────────────────────────────────────────
+          // Consumer scoped here: rebuilds on load/filter changes only, NOT
+          // on checkbox toggles (those only change selectedIds + newCount).
+          Consumer<StravaImportNotifier>(
+            builder: (ctx, notifier, _) => Container(
+              color: theme.colorScheme.surfaceContainerHighest,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Import from Strava'),
-                  Text(
-                    widget.projectName,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.7)),
+                  Row(
+                    children: [
+                      ActionChip(
+                        avatar: const Icon(Icons.date_range, size: 16),
+                        label: Text(_formatDate(notifier)),
+                        onPressed: notifier.isLoading
+                            ? null
+                            : () => _pickDateRange(notifier),
+                      ),
+                      if (notifier.startDate != null ||
+                          notifier.endDate != null) ...[
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 18),
+                          tooltip: 'Clear date filter',
+                          onPressed: () {
+                            notifier.setDateRange(null, null);
+                            notifier.load(projectName: widget.projectName);
+                          },
+                        ),
+                      ],
+                      const Spacer(),
+                      if (notifier.lastResultCached && !notifier.isLoading)
+                        Tooltip(
+                          message:
+                              'Showing cached results. Tap Refresh↺ to re-fetch from Strava.',
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: Icon(Icons.cloud_done_outlined,
+                                size: 16,
+                                color: theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.4)),
+                          ),
+                        ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('Refresh'),
+                        onPressed: notifier.isLoading
+                            ? null
+                            : () => notifier.load(
+                                  projectName: widget.projectName,
+                                  refresh: true,
+                                ),
+                      ),
+                    ],
                   ),
+                  if (notifier.allTypes.isNotEmpty)
+                    Wrap(
+                      spacing: 6,
+                      children: notifier.allTypes.map((type) {
+                        final selected =
+                            notifier.selectedTypes.contains(type);
+                        return FilterChip(
+                          key: ValueKey(type),
+                          label: Text(type),
+                          selected: selected,
+                          onSelected: (_) {
+                            notifier.toggleType(type);
+                            notifier.load(projectName: widget.projectName);
+                          },
+                        );
+                      }).toList(),
+                    ),
                 ],
               ),
             ),
-            body: Column(
-              children: [
-                // ── Filter bar ────────────────────────────────────────────
-                Container(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Date range chip
-                      Row(
-                        children: [
-                          ActionChip(
-                            avatar: const Icon(Icons.date_range, size: 16),
-                            label: Text(_formatDate(notifier)),
-                            onPressed: notifier.isLoading
-                                ? null
-                                : () => _pickDateRange(notifier),
-                          ),
-                          if (notifier.startDate != null ||
-                              notifier.endDate != null) ...[
-                            const SizedBox(width: 8),
-                            IconButton(
-                              icon: const Icon(Icons.close, size: 18),
-                              tooltip: 'Clear date filter',
-                              onPressed: () {
-                                notifier.setDateRange(null, null);
-                                notifier.load(projectName: widget.projectName);
-                              },
-                            ),
-                          ],
-                          const Spacer(),
-                          if (notifier.lastResultCached && !notifier.isLoading)
-                            Tooltip(
-                              message: 'Showing cached results. Tap Refresh↺ to re-fetch from Strava.',
-                              child: Padding(
-                                padding: const EdgeInsets.only(right: 4),
-                                child: Icon(Icons.cloud_done_outlined,
-                                    size: 16,
-                                    color: theme.colorScheme.onSurface
-                                        .withValues(alpha: 0.4)),
-                              ),
-                            ),
-                          TextButton.icon(
-                            icon: const Icon(Icons.refresh, size: 18),
-                            label: const Text('Refresh'),
-                            onPressed: notifier.isLoading
-                                ? null
-                                : () => notifier.load(
-                                      projectName: widget.projectName,
-                                      refresh: true,
-                                    ),
-                          ),
-                        ],
-                      ),
-                      // Activity type chips
-                      if (notifier.allTypes.isNotEmpty)
-                        Wrap(
-                          spacing: 6,
-                          children: notifier.allTypes.map((type) {
-                            final selected =
-                                notifier.selectedTypes.contains(type);
-                            return FilterChip(
-                              label: Text(type),
-                              selected: selected,
-                              onSelected: (_) {
-                                notifier.toggleType(type);
-                                notifier.load(projectName: widget.projectName);
-                              },
-                            );
-                          }).toList(),
-                        ),
-                    ],
-                  ),
-                ),
+          ),
 
-                // ── Selection controls ────────────────────────────────────
-                if (notifier.activities.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    child: Row(
-                      children: [
-                        Text(
-                          '${notifier.selectedIds.length} / ${notifier.activities.length} selected'
-                          '${notifier.totalCount > notifier.activities.length ? ' (${notifier.totalCount} total)' : ''}',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                        const Spacer(),
-                        TextButton(
-                          onPressed: notifier.selectAll,
-                          child: const Text('Select all'),
-                        ),
-                        TextButton(
-                          onPressed: notifier.clearSelection,
-                          child: const Text('Clear'),
-                        ),
-                      ],
+          // ── Selection count row ──────────────────────────────────────────
+          // Selector on (selectedLen, activitiesLen, totalCount) — rebuilds
+          // on checkbox taps and load, but NOT on filter chip taps alone.
+          Selector<StravaImportNotifier, (int, int, int)>(
+            selector: (_, n) =>
+                (n.selectedIds.length, n.activities.length, n.totalCount),
+            builder: (ctx, counts, __) {
+              final (selectedLen, activitiesLen, total) = counts;
+              if (activitiesLen == 0) return const SizedBox.shrink();
+              final notifier = ctx.read<StravaImportNotifier>();
+              return Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 4),
+                child: Row(
+                  children: [
+                    Text(
+                      '$selectedLen / $activitiesLen selected'
+                      '${total > activitiesLen ? ' ($total total)' : ''}',
+                      style: theme.textTheme.bodySmall,
                     ),
-                  ),
-
-                // ── Activity list ─────────────────────────────────────────
-                Expanded(
-                  child: notifier.isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : notifier.error != null
-                          ? Center(
-                              child: Padding(
-                                padding: const EdgeInsets.all(24),
-                                child: Text(notifier.error!,
-                                    style: TextStyle(
-                                        color: theme.colorScheme.error)),
-                              ),
-                            )
-                          : notifier.activities.isEmpty
-                              ? Center(
-                                  child: Text('No activities found.',
-                                      style: theme.textTheme.bodyMedium),
-                                )
-                              : ListView.builder(
-                                  // +1 for the Load more / spinner row
-                                  itemCount: notifier.activities.length + 1,
-                                  itemBuilder: (context, i) {
-                                    // Last item: Load more button or spinner
-                                    if (i == notifier.activities.length) {
-                                      if (notifier.isLoadingMore) {
-                                        return const Padding(
-                                          padding: EdgeInsets.symmetric(vertical: 16),
-                                          child: Center(child: CircularProgressIndicator()),
-                                        );
-                                      }
-                                      if (notifier.hasMore) {
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 16, vertical: 8),
-                                          child: OutlinedButton(
-                                            onPressed: () => notifier.loadMore(),
-                                            child: Text(
-                                              'Load more '
-                                              '(${notifier.activities.length} / ${notifier.totalCount})',
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                      // All loaded — show count footer
-                                      if (notifier.activities.isNotEmpty) {
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(vertical: 12),
-                                          child: Center(
-                                            child: Text(
-                                              'All ${notifier.totalCount} activities loaded',
-                                              style: theme.textTheme.bodySmall?.copyWith(
-                                                color: theme.colorScheme.onSurface
-                                                    .withValues(alpha: 0.4),
-                                              ),
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                      return const SizedBox.shrink();
-                                    }
-
-                                    final a = notifier.activities[i];
-                                    final id = a['id'] as int;
-                                    final inProject =
-                                        a['in_project'] == true;
-                                    final selected =
-                                        notifier.selectedIds.contains(id);
-                                    final type = a['type'] as String? ?? '';
-                                    final name = a['name'] as String? ?? '';
-                                    final distRaw = a['distance'] as num?;
-                                    final dist = distRaw != null
-                                        ? '${(distRaw / 1000).toStringAsFixed(1)} km'
-                                        : '';
-                                    final dateStr =
-                                        (a['start_date_local'] as String? ?? '')
-                                            .split('T')
-                                            .first;
-
-                                    return ListTile(
-                                      leading: Checkbox(
-                                        value: selected,
-                                        onChanged: (_) =>
-                                            notifier.toggleSelect(id),
-                                      ),
-                                      title: Text(
-                                        name,
-                                        style: inProject && !selected
-                                            ? TextStyle(
-                                                color: theme
-                                                    .colorScheme.onSurface
-                                                    .withValues(alpha: 0.4))
-                                            : null,
-                                      ),
-                                      subtitle: Text('$type  $dist  $dateStr'),
-                                      trailing: inProject
-                                          ? Tooltip(
-                                              message: 'Already in project',
-                                              child: Icon(Icons.check,
-                                                  size: 16,
-                                                  color: theme
-                                                      .colorScheme.primary),
-                                            )
-                                          : null,
-                                      onTap: () => notifier.toggleSelect(id),
-                                    );
-                                  },
-                                ),
-                ),
-              ],
-            ),
-
-            // ── Bottom bar ────────────────────────────────────────────────
-            bottomNavigationBar: SafeArea(
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Builder(builder: (context) {
-                  final newCount = notifier.newCount;
-                  return ElevatedButton.icon(
-                    onPressed: notifier.isLoading || newCount == 0
-                        ? null
-                        : () => _addSelected(notifier),
-                    icon: const Icon(Icons.add),
-                    label: Text(
-                      newCount == 0
-                          ? 'Select activities to add'
-                          : 'Add $newCount to project',
+                    const Spacer(),
+                    TextButton(
+                      onPressed: notifier.selectAll,
+                      child: const Text('Select all'),
                     ),
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 48),
+                    TextButton(
+                      onPressed: notifier.clearSelection,
+                      child: const Text('Clear'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+
+          // ── Activity list body ───────────────────────────────────────────
+          // Consumer for structural changes (isLoading, error, activities).
+          // Individual tiles use their own Selector for selection state so
+          // only the tapped tile rebuilds on each checkbox tap.
+          Expanded(
+            child: Consumer<StravaImportNotifier>(
+              builder: (ctx, notifier, _) {
+                if (notifier.isLoading) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (notifier.error != null) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(notifier.error!,
+                          style:
+                              TextStyle(color: theme.colorScheme.error)),
                     ),
                   );
-                }),
+                }
+                if (notifier.activities.isEmpty) {
+                  return Center(
+                    child: Text('No activities found.',
+                        style: theme.textTheme.bodyMedium),
+                  );
+                }
+                return ListView.builder(
+                  // +1 for the Load more / spinner / footer row
+                  itemCount: notifier.activities.length + 1,
+                  itemBuilder: (context, i) {
+                    if (i == notifier.activities.length) {
+                      return _LoadMoreFooter(
+                        notifier: notifier,
+                        theme: theme,
+                      );
+                    }
+                    final a = notifier.activities[i];
+                    final id = a['id'] as int;
+                    return _ActivityTile(
+                      key: ValueKey(id),
+                      activity: a,
+                      onToggle: () => notifier.toggleSelect(id),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+
+      // ── Bottom bar ────────────────────────────────────────────────────────
+      // Selector on (newCount, isLoading) — rebuilds only when those change,
+      // NOT on every checkbox tap that doesn't change the count.
+      bottomNavigationBar: Selector<StravaImportNotifier, (int, bool)>(
+        selector: (_, n) => (n.newCount, n.isLoading),
+        builder: (ctx, state, __) {
+          final (newCount, isLoading) = state;
+          return SafeArea(
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: ElevatedButton.icon(
+                onPressed: isLoading || newCount == 0
+                    ? null
+                    : () => _addSelected(ctx),
+                icon: const Icon(Icons.add),
+                label: Text(
+                  newCount == 0
+                      ? 'Select activities to add'
+                      : 'Add $newCount to project',
+                ),
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 48),
+                ),
               ),
             ),
           );
+        },
+      ),
+    );
+  }
+}
+
+// ── _ActivityTile ─────────────────────────────────────────────────────────────
+// Uses Selector<bool> scoped to selectedIds.contains(id) so only THIS tile
+// rebuilds when its selection state changes, not the whole list.
+
+class _ActivityTile extends StatelessWidget {
+  final Map<String, dynamic> activity;
+  final VoidCallback onToggle;
+
+  const _ActivityTile({
+    super.key,
+    required this.activity,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final id = activity['id'] as int;
+    final inProject = activity['in_project'] == true;
+    final type = activity['type'] as String? ?? '';
+    final name = activity['name'] as String? ?? '';
+    final distRaw = activity['distance'] as num?;
+    final dist =
+        distRaw != null ? '${(distRaw / 1000).toStringAsFixed(1)} km' : '';
+    final dateStr =
+        (activity['start_date_local'] as String? ?? '').split('T').first;
+
+    return Selector<StravaImportNotifier, bool>(
+      selector: (_, n) => n.selectedIds.contains(id),
+      builder: (context, selected, __) {
+        final theme = Theme.of(context);
+        return ListTile(
+          leading: Checkbox(
+            value: selected,
+            onChanged: (_) => onToggle(),
+          ),
+          title: Text(
+            name,
+            style: inProject && !selected
+                ? TextStyle(
+                    color: theme.colorScheme.onSurface
+                        .withValues(alpha: 0.4))
+                : null,
+          ),
+          subtitle: Text('$type  $dist  $dateStr'),
+          trailing: inProject
+              ? Tooltip(
+                  message: 'Already in project',
+                  child: Icon(Icons.check,
+                      size: 16, color: theme.colorScheme.primary),
+                )
+              : null,
+          onTap: onToggle,
+        );
       },
     );
+  }
+}
+
+// ── _LoadMoreFooter ───────────────────────────────────────────────────────────
+
+class _LoadMoreFooter extends StatelessWidget {
+  final StravaImportNotifier notifier;
+  final ThemeData theme;
+
+  const _LoadMoreFooter({required this.notifier, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    if (notifier.isLoadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (notifier.hasMore) {
+      return Padding(
+        padding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: OutlinedButton(
+          onPressed: notifier.loadMore,
+          child: Text(
+            'Load more '
+            '(${notifier.activities.length} / ${notifier.totalCount})',
+          ),
+        ),
+      );
+    }
+    if (notifier.activities.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Center(
+          child: Text(
+            'All ${notifier.totalCount} activities loaded',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color:
+                  theme.colorScheme.onSurface.withValues(alpha: 0.4),
+            ),
+          ),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
   }
 }
