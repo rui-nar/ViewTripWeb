@@ -14,6 +14,10 @@ class StravaImportNotifier extends ChangeNotifier {
   bool isLoadingMore = false;
   String? error;
 
+  /// Count of selected activities not yet in the project.
+  /// Pre-computed so the bottom bar never iterates the full list on each tap.
+  int newCount = 0;
+
   /// Whether the last result was served from the server-side cache.
   bool lastResultCached = false;
 
@@ -59,6 +63,7 @@ class StravaImportNotifier extends ChangeNotifier {
       selectedIds.addAll(inProject);
 
       _rebuildTypes(activities);
+      _recomputeNewCount();
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
     } finally {
@@ -96,6 +101,7 @@ class StravaImportNotifier extends ChangeNotifier {
 
       activities = [...activities, ...more];
       _rebuildTypes(activities);
+      _recomputeNewCount();
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
     } finally {
@@ -147,6 +153,12 @@ class StravaImportNotifier extends ChangeNotifier {
     _hasMore = envelope['has_more'] == true;
   }
 
+  void _recomputeNewCount() {
+    newCount = activities.where((a) =>
+      selectedIds.contains(a['id'] as int) && a['in_project'] != true
+    ).length;
+  }
+
   void _rebuildTypes(List<Map<String, dynamic>> list) {
     final types = <String>{};
     for (final a in list) {
@@ -164,16 +176,19 @@ class StravaImportNotifier extends ChangeNotifier {
     } else {
       selectedIds.add(id);
     }
+    _recomputeNewCount();
     notifyListeners();
   }
 
   void selectAll() {
     selectedIds.addAll(activities.map((a) => a['id'] as int));
+    _recomputeNewCount();
     notifyListeners();
   }
 
   void clearSelection() {
     selectedIds.clear();
+    newCount = 0;
     notifyListeners();
   }
 

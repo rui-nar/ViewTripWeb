@@ -307,11 +307,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: Builder(builder: (context) {
-                  final newCount = notifier.activities
-                      .where((a) =>
-                          notifier.selectedIds.contains(a['id'] as int) &&
-                          a['in_project'] != true)
-                      .length;
+                  final newCount = notifier.newCount;
                   return ElevatedButton.icon(
                     onPressed: notifier.isLoading || newCount == 0
                         ? null
