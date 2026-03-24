@@ -749,14 +749,17 @@ class _StatChip extends StatelessWidget {
 
   const _StatChip({required this.label});
 
+  static const _borderRadius = BorderRadius.all(Radius.circular(12));
+  static const _padding = EdgeInsets.symmetric(horizontal: 8, vertical: 3);
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: _padding,
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: _borderRadius,
       ),
       child: Text(label, style: theme.textTheme.labelSmall),
     );
