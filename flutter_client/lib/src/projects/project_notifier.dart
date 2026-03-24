@@ -19,6 +19,11 @@ class ProjectNotifier extends ChangeNotifier {
   bool isLoading = false;
   String? error;
 
+  // Cached aggregate stats — computed once in load(), not on every build.
+  double totalDistanceM = 0;
+  int totalMovingSeconds = 0;
+  double totalElevationGainM = 0;
+
   /// Loads project details and GeoJSON concurrently.
   Future<void> load(String name) async {
     if (name.isEmpty) return;
@@ -46,6 +51,7 @@ class ProjectNotifier extends ChangeNotifier {
           ? rawItems.cast<Map<String, dynamic>>()
           : [];
       geo = results[1];
+      _updateStats();
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
@@ -54,12 +60,28 @@ class ProjectNotifier extends ChangeNotifier {
     }
   }
 
+  void _updateStats() {
+    double dist = 0;
+    int moving = 0;
+    double elev = 0;
+    for (final a in activities) {
+      dist   += (a['distance']              as num? ?? 0).toDouble();
+      moving += (a['moving_time']           as num? ?? 0).toInt();
+      elev   += (a['total_elevation_gain']  as num? ?? 0).toDouble();
+    }
+    totalDistanceM      = dist;
+    totalMovingSeconds  = moving;
+    totalElevationGainM = elev;
+  }
+
   /// Live arc preview while a SegmentDialog is open.
-  List<LatLng>? previewArc;
+  /// Uses a ValueNotifier so updates don't trigger a full notifyListeners().
+  final ValueNotifier<List<LatLng>?> previewArcNotifier = ValueNotifier(null);
+
+  List<LatLng>? get previewArc => previewArcNotifier.value;
 
   void setPreviewArc(List<LatLng>? arc) {
-    previewArc = arc;
-    notifyListeners();
+    previewArcNotifier.value = arc; // no notifyListeners() — only arc layer rebuilds
   }
 
   void clear() {
@@ -67,10 +89,19 @@ class ProjectNotifier extends ChangeNotifier {
     activities = [];
     items = [];
     geo = null;
-    previewArc = null;
+    previewArcNotifier.value = null;
+    totalDistanceM = 0;
+    totalMovingSeconds = 0;
+    totalElevationGainM = 0;
     isLoading = false;
     error = null;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    previewArcNotifier.dispose();
+    super.dispose();
   }
 
   // ── Item management ────────────────────────────────────────────────────────

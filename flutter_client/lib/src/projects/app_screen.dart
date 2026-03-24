@@ -221,6 +221,17 @@ class MapPanel extends StatefulWidget {
 
 class _MapPanelState extends State<MapPanel> {
   bool _fittedBounds = false;
+  // Polyline + bounds cache — only rebuilt when geo reference changes.
+  Map<String, dynamic>? _lastGeo;
+  List<Polyline> _cachedPolylines = [];
+  List<LatLng> _cachedAllPoints = [];
+  late final NetworkTileProvider _tileProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    _tileProvider = NetworkTileProvider();
+  }
 
   List<Polyline> _buildPolylines(Map<String, dynamic> geo) {
     final features = geo['features'];
@@ -304,9 +315,15 @@ class _MapPanelState extends State<MapPanel> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    // Recompute polylines only when the geo reference changes.
     final geo = notifier.geo;
-    final polylines = geo != null ? _buildPolylines(geo) : <Polyline>[];
-    final allPoints = _allPoints(polylines);
+    if (!identical(geo, _lastGeo)) {
+      _lastGeo = geo;
+      _cachedPolylines = geo != null ? _buildPolylines(geo) : [];
+      _cachedAllPoints = _allPoints(_cachedPolylines);
+    }
+    final polylines = _cachedPolylines;
+    final allPoints = _cachedAllPoints;
 
     if (allPoints.isNotEmpty) {
       _fitBoundsOnce(allPoints);
@@ -322,20 +339,27 @@ class _MapPanelState extends State<MapPanel> {
         TileLayer(
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
           userAgentPackageName: 'com.viewtrip.client',
-          tileProvider: NetworkTileProvider(),
+          tileProvider: _tileProvider,
         ),
         if (polylines.isNotEmpty)
           PolylineLayer(polylines: polylines),
-        if (notifier.previewArc != null)
-          PolylineLayer(
-            polylines: [
-              Polyline(
-                points: notifier.previewArc!,
-                color: const Color(0xCC6366F1), // indigo, semi-transparent
-                strokeWidth: 2.5,
-              ),
-            ],
-          ),
+        // Preview arc uses ValueListenableBuilder so only this layer rebuilds
+        // when the segment dialog updates coordinates — not the whole map.
+        ValueListenableBuilder<List<LatLng>?>(
+          valueListenable: notifier.previewArcNotifier,
+          builder: (_, arc, __) {
+            if (arc == null) return const SizedBox.shrink();
+            return PolylineLayer(
+              polylines: [
+                Polyline(
+                  points: arc,
+                  color: const Color(0xCC6366F1), // indigo, semi-transparent
+                  strokeWidth: 2.5,
+                ),
+              ],
+            );
+          },
+        ),
       ],
     );
   }
@@ -403,33 +427,19 @@ class ActivityPanel extends StatelessWidget {
     }
   }
 
-  /// Returns the Activity dict for an activity item, or null if not found.
-  Map<String, dynamic>? _activityForItem(
-      Map<String, dynamic> item, List<Map<String, dynamic>> activities) {
-    final id = item['activity_id'];
-    if (id == null) return null;
-    try {
-      return activities.firstWhere((a) => a['id'] == id);
-    } catch (_) {
-      return null;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final activities = notifier.activities;
     final items = notifier.items;
+    final activityById = <dynamic, Map<String, dynamic>>{
+      for (final a in activities) a['id']: a,
+    };
 
-    // ── Aggregate stats ───────────────────────────────────────────────────────
-    double totalDistM = 0;
-    int totalMovingSec = 0;
-    double totalElevGain = 0;
-    for (final a in activities) {
-      totalDistM += (a['distance'] as num? ?? 0).toDouble();
-      totalMovingSec += (a['moving_time'] as num? ?? 0).toInt();
-      totalElevGain += (a['total_elevation_gain'] as num? ?? 0).toDouble();
-    }
+    // Aggregate stats are pre-computed in ProjectNotifier._updateStats().
+    final totalDistM    = notifier.totalDistanceM;
+    final totalMovingSec = notifier.totalMovingSeconds;
+    final totalElevGain = notifier.totalElevationGainM;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -492,10 +502,10 @@ class ActivityPanel extends StatelessWidget {
                     final isActivity = item['item_type'] == 'activity';
 
                     if (isActivity) {
-                      final a = _activityForItem(item, activities);
+                      final a = activityById[item['activity_id']];
                       if (a == null) {
                         return ListTile(
-                          key: ValueKey('item_$i'),
+                          key: ValueKey('act_${item['activity_id']}'),
                           leading: const Icon(Icons.help_outline),
                           title: const Text('Unknown activity'),
                           trailing: IconButton(
@@ -509,7 +519,7 @@ class ActivityPanel extends StatelessWidget {
                       final distM = (a['distance'] as num? ?? 0).toDouble();
                       final movingSec = a['moving_time'];
                       return ListTile(
-                        key: ValueKey('item_$i'),
+                        key: ValueKey('act_${item['activity_id']}'),
                         leading: Icon(
                           _iconForActivityType(type),
                           color: theme.colorScheme.primary,
@@ -534,7 +544,7 @@ class ActivityPanel extends StatelessWidget {
                       final segType = seg['segment_type'] as String?;
                       final label = seg['label'] as String? ?? segType ?? 'Segment';
                       return ListTile(
-                        key: ValueKey('item_$i'),
+                        key: ValueKey('seg_$segId'),
                         leading: Icon(
                           _iconForSegmentType(segType),
                           color: theme.colorScheme.secondary,
