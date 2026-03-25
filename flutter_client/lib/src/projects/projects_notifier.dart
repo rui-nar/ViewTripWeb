@@ -45,6 +45,21 @@ class ProjectsNotifier extends ChangeNotifier {
     }
   }
 
+  Future<void> delete(String name) async {
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+    try {
+      await api.delete('/api/projects/${Uri.encodeComponent(name)}');
+      _projects = _projects.where((p) => p['name'] != name).toList();
+    } on Exception catch (e) {
+      _error = _msg(e);
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> create(String name) async {
     if (name.trim().isEmpty) return;
     _isLoading = true;

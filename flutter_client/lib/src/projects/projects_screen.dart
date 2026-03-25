@@ -21,6 +21,31 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
     super.dispose();
   }
 
+  Future<void> _confirmDelete(String name) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete project?'),
+        content: Text('Delete "$name"? This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+                foregroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      context.read<ProjectsNotifier>().delete(name);
+    }
+  }
+
   Future<void> _logout() async {
     await context.read<AuthNotifier>().logout();
     if (mounted) context.go('/login');
@@ -192,18 +217,36 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                                     color: theme.colorScheme.primary),
                                 title: Text(name,
                                     style: theme.textTheme.bodyMedium),
-                                trailing: ElevatedButton(
-                                  onPressed: () {
-                                    final encoded =
-                                        Uri.encodeComponent(name);
-                                    context.go('/app?project=$encoded');
-                                  },
-                                  style: ElevatedButton.styleFrom(
-                                    minimumSize: const Size(72, 36),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16),
-                                  ),
-                                  child: const Text('Open'),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(
+                                          Icons.delete_outline,
+                                          size: 20),
+                                      tooltip: 'Delete project',
+                                      color: theme.colorScheme.error,
+                                      onPressed: () =>
+                                          _confirmDelete(name),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    ElevatedButton(
+                                      onPressed: () {
+                                        final encoded =
+                                            Uri.encodeComponent(name);
+                                        context.go(
+                                            '/app?project=$encoded');
+                                      },
+                                      style: ElevatedButton.styleFrom(
+                                        minimumSize:
+                                            const Size(72, 36),
+                                        padding:
+                                            const EdgeInsets.symmetric(
+                                                horizontal: 16),
+                                      ),
+                                      child: const Text('Open'),
+                                    ),
+                                  ],
                                 ),
                               );
                             }),
