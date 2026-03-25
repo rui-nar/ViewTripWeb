@@ -221,11 +221,14 @@ class MapPanel extends StatefulWidget {
 
 class _MapPanelState extends State<MapPanel> {
   bool _fittedBounds = false;
-  // Polyline + bounds cache — only rebuilt when geo reference changes.
+  // Polyline + bounds cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
+  dynamic _lastSelectedId = _sentinel;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   late final NetworkTileProvider _tileProvider;
+
+  static const _sentinel = Object(); // distinct from null
 
   @override
   void initState() {
@@ -233,7 +236,7 @@ class _MapPanelState extends State<MapPanel> {
     _tileProvider = NetworkTileProvider();
   }
 
-  List<Polyline> _buildPolylines(Map<String, dynamic> geo) {
+  List<Polyline> _buildPolylines(Map<String, dynamic> geo, dynamic selectedId) {
     final features = geo['features'];
     if (features is! List) return [];
 
@@ -256,12 +259,20 @@ class _MapPanelState extends State<MapPanel> {
       if (points.isEmpty) continue;
 
       final isSegment = props['type'] == 'segment';
+      final activityId = props['activity_id'];
+      final isSelected = selectedId != null && activityId == selectedId;
+      final hasSelection = selectedId != null;
+
       polylines.add(Polyline(
         points: points,
         color: isSegment
             ? const Color(0xFF888888)
-            : const Color(0xFFF97316),
-        strokeWidth: isSegment ? 2.0 : 3.0,
+            : isSelected
+                ? const Color(0xFFEF4444)              // red — selected
+                : hasSelection
+                    ? const Color(0x60F97316)          // dimmed — others
+                    : const Color(0xFFF97316),         // full orange — no selection
+        strokeWidth: isSegment ? 2.0 : isSelected ? 5.0 : 2.5,
       ));
     }
     return polylines;
@@ -301,8 +312,8 @@ class _MapPanelState extends State<MapPanel> {
   @override
   void didUpdateWidget(MapPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Reset fit flag when the project changes so new data gets fitted.
-    if (oldWidget.notifier.projectName != widget.notifier.projectName) {
+    // Reset fit flag when a different notifier instance is passed (new project).
+    if (oldWidget.notifier != widget.notifier) {
       _fittedBounds = false;
     }
   }
@@ -311,11 +322,13 @@ class _MapPanelState extends State<MapPanel> {
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
 
-    // Recompute polylines only when the geo reference changes.
+    // Recompute polylines only when geo or selection changes.
     final geo = notifier.geo;
-    if (!identical(geo, _lastGeo)) {
+    final selectedId = notifier.selectedActivityId;
+    if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
       _lastGeo = geo;
-      _cachedPolylines = geo != null ? _buildPolylines(geo) : [];
+      _lastSelectedId = selectedId;
+      _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
       _cachedAllPoints = _allPoints(_cachedPolylines);
     }
     final polylines = _cachedPolylines;
@@ -338,12 +351,20 @@ class _MapPanelState extends State<MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              // Subdomain rotation triples parallel connection budget (~18 vs ~6).
+              urlTemplate:
+                  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              subdomains: const ['a', 'b', 'c'],
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
+              maxNativeZoom: 19,
             ),
             if (polylines.isNotEmpty)
-              PolylineLayer(polylines: polylines),
+              PolylineLayer(
+                polylines: polylines,
+                // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
+                simplificationTolerance: 0.5,
+              ),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<LatLng>?>(
@@ -466,6 +487,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
   }
 
   void _flyToActivity(Map<String, dynamic> activity) {
+    // Highlight the tapped activity on the map (toggle if already selected).
+    widget.notifier.selectActivity(activity['id']);
     final raw = activity['start_latlng'];
     if (raw is List && raw.length >= 2) {
       final lat = (raw[0] as num).toDouble();
