@@ -29,8 +29,6 @@ class AppScreen extends StatefulWidget {
 }
 
 class _AppScreenState extends State<AppScreen> {
-  final MapController _mapController = MapController();
-
   @override
   void initState() {
     super.initState();
@@ -145,54 +143,23 @@ class _AppScreenState extends State<AppScreen> {
               children: [
                 SizedBox(
                   width: 280,
-                  child: ActivityPanel(
-                    notifier: notifier,
-                    mapController: _mapController,
-                  ),
+                  child: ActivityPanel(notifier: notifier),
                 ),
                 Expanded(
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: MapPanel(
-                          notifier: notifier,
-                          mapController: _mapController,
-                        ),
-                      ),
-                      SizedBox(
-                        height: 160,
-                        child: ElevationChart(activities: notifier.activities),
-                      ),
-                    ],
-                  ),
+                  child: _DebugInfoPanel(notifier: notifier),
                 ),
               ],
             );
           } else {
-            // ── Narrow layout: map fills screen + bottom sheet overlay ───
-            return Stack(
+            // ── Narrow layout: stacked ───────────────────────────────────
+            return Column(
               children: [
-                MapPanel(
-                  notifier: notifier,
-                  mapController: _mapController,
+                Expanded(
+                  child: _DebugInfoPanel(notifier: notifier),
                 ),
-                DraggableScrollableSheet(
-                  initialChildSize: 0.35,
-                  minChildSize: 0.12,
-                  maxChildSize: 0.85,
-                  builder: (context, scrollController) {
-                    return Material(
-                      elevation: 8,
-                      borderRadius: const BorderRadius.vertical(
-                          top: Radius.circular(16)),
-                      child: ActivityPanel(
-                        notifier: notifier,
-                        mapController: _mapController,
-                        scrollController: scrollController,
-                        showElevationChart: true,
-                      ),
-                    );
-                  },
+                SizedBox(
+                  height: constraints.maxHeight * 0.4,
+                  child: ActivityPanel(notifier: notifier),
                 ),
               ],
             );
@@ -260,7 +227,8 @@ class _MapPanelState extends State<MapPanel> {
 
       final isSegment = props['type'] == 'segment';
       final activityId = props['activity_id'];
-      final isSelected = selectedId != null && activityId == selectedId;
+      final isSelected = selectedId != null &&
+          activityId?.toString() == selectedId.toString();
       final hasSelection = selectedId != null;
 
       polylines.add(Polyline(
@@ -351,10 +319,8 @@ class _MapPanelState extends State<MapPanel> {
           ),
           children: [
             TileLayer(
-              // Subdomain rotation triples parallel connection budget (~18 vs ~6).
               urlTemplate:
-                  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-              subdomains: const ['a', 'b', 'c'],
+                  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
@@ -395,14 +361,14 @@ class _MapPanelState extends State<MapPanel> {
 
 class ActivityPanel extends StatefulWidget {
   final ProjectNotifier notifier;
-  final MapController mapController;
+  final MapController? mapController;
   final ScrollController? scrollController;
   final bool showElevationChart;
 
   const ActivityPanel({
     super.key,
     required this.notifier,
-    required this.mapController,
+    this.mapController,
     this.scrollController,
     this.showElevationChart = false,
   });
@@ -493,7 +459,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     if (raw is List && raw.length >= 2) {
       final lat = (raw[0] as num).toDouble();
       final lon = (raw[1] as num).toDouble();
-      widget.mapController.move(LatLng(lat, lon), 13.0);
+      widget.mapController?.move(LatLng(lat, lon), 13.0);
     }
   }
 
@@ -589,11 +555,21 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       final name = a['name'] as String? ?? 'Activity';
                       final distM = (a['distance'] as num? ?? 0).toDouble();
                       final movingSec = a['moving_time'];
+                      final isSelected =
+                          item['activity_id']?.toString() ==
+                          notifier.selectedActivityId?.toString();
                       return ListTile(
                         key: ValueKey('act_${item['activity_id']}'),
+                        tileColor: isSelected
+                            ? theme.colorScheme.primaryContainer
+                                .withValues(alpha: 0.45)
+                            : null,
                         leading: Icon(
                           _iconForActivityType(type),
-                          color: theme.colorScheme.primary,
+                          color: isSelected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.primary
+                                  .withValues(alpha: 0.7),
                         ),
                         title:
                             Text(name, style: theme.textTheme.bodyMedium),
@@ -690,6 +666,78 @@ Future<void> _showSegmentDialog(
       insertAfterIndex: insertAfterIndex,
     ),
   );
+}
+
+// ── _DebugInfoPanel ───────────────────────────────────────────────────────────
+
+class _DebugInfoPanel extends StatelessWidget {
+  final ProjectNotifier notifier;
+
+  const _DebugInfoPanel({required this.notifier});
+
+  static String _fmt(double meters) =>
+      '${(meters / 1000).toStringAsFixed(2)} km';
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selected = notifier.selectedActivityId;
+    final activity = selected == null
+        ? null
+        : notifier.activities.cast<Map<String, dynamic>?>().firstWhere(
+              (a) => a!['id']?.toString() == selected.toString(),
+              orElse: () => null,
+            );
+
+    return Container(
+      color: theme.colorScheme.surfaceContainerLow,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.all(24),
+      child: selected == null
+          ? Text(
+              'Tap an activity in the list',
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
+              ),
+            )
+          : activity == null
+              ? Text(
+                  'Selected ID: $selected\n(not found in activities list)',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.error,
+                    fontFamily: 'monospace',
+                  ),
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      activity['name'] as String? ?? '(no name)',
+                      style: theme.textTheme.headlineSmall,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      _fmt((activity['distance'] as num? ?? 0).toDouble()),
+                      style: theme.textTheme.displaySmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'ID: $selected  •  type: ${activity['type'] ?? '?'}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontFamily: 'monospace',
+                        color:
+                            theme.colorScheme.onSurface.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
 }
 
 // ── ElevationChart ────────────────────────────────────────────────────────────
