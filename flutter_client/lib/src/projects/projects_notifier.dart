@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show kIsWeb, ChangeNotifier;
+import 'package:flutter/foundation.dart' show ChangeNotifier;
 import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 
@@ -76,37 +76,37 @@ class ProjectsNotifier extends ChangeNotifier {
     }
   }
 
-  /// Cross-platform file import:
-  /// - Web: reads bytes via file_picker (no dart:io) → multipart POST directly
-  /// - Native: uses file path → ProjectsService.importFile(File)
-  ///
-  /// Returns the imported project name on success, or null on cancel/failure.
-  Future<String?> importFile() async {
+  /// Step 1 of import: open file picker and return the bytes + suggested name.
+  /// Returns null if the user cancels.
+  Future<({List<int> bytes, String defaultName})?> pickProjectFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['gettracks'],
-      // Load bytes immediately on web; use path on native.
-      withData: kIsWeb,
+      withData: true,
     );
     if (result == null || result.files.isEmpty) return null;
-
     final picked = result.files.first;
+    final bytes = picked.bytes;
+    if (bytes == null) return null;
+    final rawName = picked.name;
+    final defaultName = rawName.endsWith('.gettracks')
+        ? rawName.substring(0, rawName.length - '.gettracks'.length)
+        : rawName;
+    return (bytes: bytes, defaultName: defaultName);
+  }
+
+  /// Step 2 of import: upload [bytes] as project [name].
+  /// Returns the saved project name on success, null on failure.
+  Future<String?> uploadProjectFile({
+    required List<int> bytes,
+    required String name,
+  }) async {
     _isLoading = true;
     _error = null;
     notifyListeners();
-
     try {
-      Map<String, dynamic> data;
-      if (kIsWeb) {
-        final bytes = picked.bytes;
-        if (bytes == null) throw Exception('Could not read file bytes');
-        data = await _uploadBytes(bytes: bytes, filename: picked.name);
-      } else {
-        // Avoid importing dart:io at the top level (breaks web compilation).
-        // We use a dynamic import bridge via the service which already imports it.
-        data = await _uploadNative(picked.path!);
-      }
-      // Refresh list after a successful import.
+      final data =
+          await _uploadBytes(bytes: bytes, filename: '$name.gettracks');
       await load();
       return data['name'] as String?;
     } on Exception catch (e) {
@@ -142,17 +142,6 @@ class ProjectsNotifier extends ChangeNotifier {
     }
     if (res.body.isEmpty) return {};
     return jsonDecode(res.body) as Map<String, dynamic>;
-  }
-
-  /// Native path-based upload delegated to [ProjectsService].
-  /// Called only on Android / iOS — dart:io is safe here at runtime.
-  Future<Map<String, dynamic>> _uploadNative(String path) async {
-    // Conditional import would be cleaner, but using a simple dynamic
-    // evaluation keeps the file platform-agnostic at the library level.
-    // The dart:io import lives inside projects_service.dart which is
-    // compiled out on web (only this method references it and it is never
-    // reached when kIsWeb is true).
-    return await _service.importFileByPath(path);
   }
 
   // ── Error helper ──────────────────────────────────────────────────────────────

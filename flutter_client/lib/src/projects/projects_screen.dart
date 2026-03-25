@@ -21,6 +21,39 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
     super.dispose();
   }
 
+  Future<String?> _askImportName(
+      BuildContext ctx, String defaultName) async {
+    final ctrl = TextEditingController(text: defaultName);
+    final name = await showDialog<String>(
+      context: ctx,
+      builder: (dlgCtx) => AlertDialog(
+        title: const Text('Project name'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration:
+              const InputDecoration(hintText: 'Enter a name for this project'),
+          textInputAction: TextInputAction.done,
+          onSubmitted: (v) =>
+              Navigator.of(dlgCtx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dlgCtx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () =>
+                Navigator.of(dlgCtx).pop(ctrl.text.trim()),
+            child: const Text('Import'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    return (name == null || name.isEmpty) ? null : name;
+  }
+
   Future<void> _confirmDelete(String name) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -276,8 +309,21 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                           onPressed: notifier.isLoading
                               ? null
                               : () async {
+                                  final picked =
+                                      await notifier.pickProjectFile();
+                                  if (picked == null || !context.mounted) {
+                                    return;
+                                  }
+                                  final name = await _askImportName(
+                                      context, picked.defaultName);
+                                  if (name == null || !context.mounted) {
+                                    return;
+                                  }
                                   final result =
-                                      await notifier.importFile();
+                                      await notifier.uploadProjectFile(
+                                    bytes: picked.bytes,
+                                    name: name,
+                                  );
                                   if (result != null && context.mounted) {
                                     context.go(
                                         '/app?project=${Uri.encodeComponent(result)}');
