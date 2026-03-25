@@ -675,16 +675,25 @@ class _Stage1MapPanel extends StatefulWidget {
 
 class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final NetworkTileProvider _tileProvider;
+  late final MapController _mapController;
 
   @override
   void initState() {
     super.initState();
     _tileProvider = NetworkTileProvider();
+    _mapController = MapController();
+  }
+
+  @override
+  void dispose() {
+    _mapController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return FlutterMap(
+      mapController: _mapController,
       options: const MapOptions(
         initialCenter: LatLng(48.0, 10.0),
         initialZoom: 4,
