@@ -764,6 +764,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     final geo = notifier.geo;
     final selectedId = notifier.selectedActivityId;
     if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
+      if (!identical(geo, _lastGeo)) _fittedBounds = false; // refit on new geo
       _lastGeo = geo;
       _lastSelectedId = selectedId;
       _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
