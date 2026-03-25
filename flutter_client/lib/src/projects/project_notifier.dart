@@ -19,6 +19,15 @@ class ProjectNotifier extends ChangeNotifier {
   bool isLoading = false;
   String? error;
 
+  /// The activity currently highlighted on the map. Null = no selection.
+  dynamic selectedActivityId;
+
+  void selectActivity(dynamic id) {
+    // Toggle off if already selected.
+    selectedActivityId = selectedActivityId == id ? null : id;
+    notifyListeners();
+  }
+
   // Cached aggregate stats — computed once in load(), not on every build.
   double totalDistanceM = 0;
   int totalMovingSeconds = 0;
@@ -33,6 +42,7 @@ class ProjectNotifier extends ChangeNotifier {
     activities = [];
     items = [];
     geo = null;
+    selectedActivityId = null;
     notifyListeners();
 
     try {
