@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import 'project_notifier.dart';
 import 'strava_import_notifier.dart';
 
 class StravaImportScreen extends StatefulWidget {
@@ -47,6 +48,9 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     final added = await notifier.addSelected(widget.projectName);
     if (!mounted) return;
     if (notifier.error == null) {
+      // Reload the project so the newly-added activities appear immediately
+      // in the activity list when we pop back to AppScreen.
+      context.read<ProjectNotifier>().load(widget.projectName);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Added $added activities to project.')),
       );
