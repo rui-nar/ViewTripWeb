@@ -680,6 +680,10 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final MapController _mapController;
   bool _fittedBounds = false;
 
+  // Polyline cache — only rebuilt when the geo reference changes.
+  Map<String, dynamic>? _lastGeo;
+  List<Polyline> _cachedPolylines = [];
+
   @override
   void initState() {
     super.initState();
@@ -707,10 +711,43 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     });
   }
 
+  List<Polyline> _buildPolylines(Map<String, dynamic> geo) {
+    final features = geo['features'];
+    if (features is! List) return [];
+    final polylines = <Polyline>[];
+    for (final feature in features) {
+      if (feature is! Map) continue;
+      final props = feature['properties'] as Map? ?? {};
+      final geometry = feature['geometry'] as Map? ?? {};
+      final coords = geometry['coordinates'];
+      if (coords is! List) continue;
+      final points = <LatLng>[];
+      for (final c in coords) {
+        if (c is List && c.length >= 2) {
+          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+        }
+      }
+      if (points.isEmpty) continue;
+      final isSegment = props['type'] == 'segment';
+      polylines.add(Polyline(
+        points: points,
+        color: isSegment ? const Color(0xFF888888) : const Color(0xFFF97316),
+        strokeWidth: isSegment ? 2.0 : 2.5,
+      ));
+    }
+    return polylines;
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
     if (!notifier.isLoading) _fitBoundsOnce(notifier.activities);
+
+    final geo = notifier.geo;
+    if (!identical(geo, _lastGeo)) {
+      _lastGeo = geo;
+      _cachedPolylines = geo != null ? _buildPolylines(geo) : [];
+    }
 
     return FlutterMap(
       mapController: _mapController,
@@ -725,89 +762,12 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           tileProvider: _tileProvider,
           maxNativeZoom: 19,
         ),
-        PolylineLayer(
-          polylines: [
-            Polyline(
-              points: const [LatLng(48.8566, 2.3522), LatLng(52.5200, 13.4050)],
-              color: const Color(0xFFF97316),
-              strokeWidth: 2.5,
-            ),
-          ],
-          simplificationTolerance: 0.5,
-        ),
+        if (_cachedPolylines.isNotEmpty)
+          PolylineLayer(
+            polylines: _cachedPolylines,
+            simplificationTolerance: 0.5,
+          ),
       ],
-    );
-  }
-}
-
-// ── _DebugInfoPanel ───────────────────────────────────────────────────────────
-
-class _DebugInfoPanel extends StatelessWidget {
-  final ProjectNotifier notifier;
-
-  const _DebugInfoPanel({required this.notifier});
-
-  static String _fmt(double meters) =>
-      '${(meters / 1000).toStringAsFixed(2)} km';
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final selected = notifier.selectedActivityId;
-    final activity = selected == null
-        ? null
-        : notifier.activities.cast<Map<String, dynamic>?>().firstWhere(
-              (a) => a!['id']?.toString() == selected.toString(),
-              orElse: () => null,
-            );
-
-    return Container(
-      color: theme.colorScheme.surfaceContainerLow,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.all(24),
-      child: selected == null
-          ? Text(
-              'Tap an activity in the list',
-              style: theme.textTheme.titleMedium?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.4),
-              ),
-            )
-          : activity == null
-              ? Text(
-                  'Selected ID: $selected\n(not found in activities list)',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.error,
-                    fontFamily: 'monospace',
-                  ),
-                )
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      activity['name'] as String? ?? '(no name)',
-                      style: theme.textTheme.headlineSmall,
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      _fmt((activity['distance'] as num? ?? 0).toDouble()),
-                      style: theme.textTheme.displaySmall?.copyWith(
-                        color: theme.colorScheme.primary,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'ID: $selected  •  type: ${activity['type'] ?? '?'}',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                        color:
-                            theme.colorScheme.onSurface.withValues(alpha: 0.5),
-                      ),
-                    ),
-                  ],
-                ),
     );
   }
 }

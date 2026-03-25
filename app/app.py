@@ -7,7 +7,7 @@ import reflex_local_auth  # noqa: F401 — ensures local-auth models are registe
 
 from app.pages import index, strava_import, export, oauth_callback
 from app.pages import login, register, project_picker
-from app.api.geo import geo_project, map_html
+from app.api.geo import map_html
 from app.auth.state import AuthState
 from api.router import api as rest_api  # Flutter / native-client REST API
 
@@ -16,20 +16,18 @@ def api_transformer(app):
     """Mount REST API and legacy geo routes alongside the Reflex ASGI app.
 
     Request routing:
-        /api/auth/*     → FastAPI (JWT auth — used by Flutter)
-        /api/projects/* → FastAPI (project CRUD — used by Flutter)
-        /api/geo/*      → Starlette (GeoJSON / map tiles — used by Reflex web)
+        /api/*          → FastAPI (JWT auth, project CRUD, GeoJSON — used by Flutter)
+        /api/geo/map    → Starlette legacy map HTML page (used by Reflex web only)
         everything else → Reflex ASGI app
     """
-    geo_app = Starlette(routes=[
-        Route("/api/geo/project", geo_project),
+    legacy_geo_app = Starlette(routes=[
         Route("/api/geo/map", map_html),
     ])
 
     async def combined(scope, receive, send):
         path = scope.get("path", "")
-        if path.startswith("/api/geo/"):
-            await geo_app(scope, receive, send)
+        if path == "/api/geo/map":
+            await legacy_geo_app(scope, receive, send)
         elif path.startswith("/api/"):
             await rest_api(scope, receive, send)
         else:
