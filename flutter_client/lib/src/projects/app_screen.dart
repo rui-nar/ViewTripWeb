@@ -700,16 +700,24 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     super.dispose();
   }
 
-  void _fitBoundsOnce(List<Map<String, dynamic>> activities) {
-    if (_fittedBounds || activities.isEmpty) return;
-    final raw = activities.first['start_latlng'];
-    if (raw is! List || raw.length < 2) return;
+  void _fitBoundsOnce(List<LatLng> points) {
+    if (_fittedBounds || points.isEmpty) return;
     _fittedBounds = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _mapController.move(
-        LatLng((raw[0] as num).toDouble(), (raw[1] as num).toDouble()),
-        10.0,
+      double minLat = points.first.latitude, maxLat = points.first.latitude;
+      double minLon = points.first.longitude, maxLon = points.first.longitude;
+      for (final p in points) {
+        if (p.latitude < minLat) minLat = p.latitude;
+        if (p.latitude > maxLat) maxLat = p.latitude;
+        if (p.longitude < minLon) minLon = p.longitude;
+        if (p.longitude > maxLon) maxLon = p.longitude;
+      }
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+          padding: const EdgeInsets.all(32),
+        ),
       );
     });
   }
@@ -753,8 +761,6 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
-    if (!notifier.isLoading) _fitBoundsOnce(notifier.activities);
-
     final geo = notifier.geo;
     final selectedId = notifier.selectedActivityId;
     if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
@@ -763,24 +769,49 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
     }
 
-    return FlutterMap(
-      mapController: _mapController,
-      options: const MapOptions(
-        initialCenter: LatLng(48.0, 10.0),
-        initialZoom: 4,
-      ),
+    if (!notifier.isLoading) {
+      _fitBoundsOnce(_cachedPolylines.expand((p) => p.points).toList());
+    }
+
+    return Stack(
       children: [
-        TileLayer(
-          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          userAgentPackageName: 'com.viewtrip.client',
-          tileProvider: _tileProvider,
-          maxNativeZoom: 19,
-        ),
-        if (_cachedPolylines.isNotEmpty)
-          PolylineLayer(
-            polylines: _cachedPolylines,
-            simplificationTolerance: 0.5,
+        FlutterMap(
+          mapController: _mapController,
+          options: const MapOptions(
+            initialCenter: LatLng(48.0, 10.0),
+            initialZoom: 4,
           ),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.viewtrip.client',
+              tileProvider: _tileProvider,
+              maxNativeZoom: 19,
+            ),
+            if (_cachedPolylines.isNotEmpty)
+              PolylineLayer(
+                polylines: _cachedPolylines,
+                simplificationTolerance: 0.5,
+              ),
+            ValueListenableBuilder<List<LatLng>?>(
+              valueListenable: notifier.previewArcNotifier,
+              builder: (_, arc, __) {
+                if (arc == null) return const SizedBox.shrink();
+                return PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: arc,
+                      color: const Color(0xCC6366F1),
+                      strokeWidth: 2.5,
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+        if (notifier.isLoading)
+          const Center(child: CircularProgressIndicator()),
       ],
     );
   }
