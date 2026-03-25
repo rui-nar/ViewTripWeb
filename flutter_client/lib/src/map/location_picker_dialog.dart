@@ -52,17 +52,28 @@ class LocationPickerDialog extends StatefulWidget {
 
 class _LocationPickerDialogState extends State<LocationPickerDialog> {
   LatLng? _picked;
+  late final NetworkTileProvider _tileProvider;
+  late final MapController _mapController;
 
   @override
   void initState() {
     super.initState();
+    _tileProvider = NetworkTileProvider();
+    _mapController = MapController();
     if (widget.initialLat != null && widget.initialLon != null) {
       _picked = LatLng(widget.initialLat!, widget.initialLon!);
     }
   }
 
+  @override
+  void dispose() {
+    _mapController.dispose();
+    super.dispose();
+  }
+
   void _onTap(LatLng latlng) {
     setState(() => _picked = latlng);
+    _mapController.move(latlng, _mapController.camera.zoom);
     // Drive live arc preview on the main map if both endpoints are known
     final notifier = widget.notifier;
     final oLat = widget.otherLat;
@@ -166,6 +177,7 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
             Expanded(
               child: ClipRect(
                 child: FlutterMap(
+                  mapController: _mapController,
                   options: MapOptions(
                     initialCenter: _center,
                     initialZoom: _zoom,
@@ -174,9 +186,11 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
                   children: [
                     TileLayer(
                       urlTemplate:
-                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                          'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                      subdomains: const ['a', 'b', 'c'],
                       userAgentPackageName: 'com.viewtrip.client',
-                      tileProvider: NetworkTileProvider(),
+                      tileProvider: _tileProvider,
+                      maxNativeZoom: 19,
                     ),
                     if (polylines.isNotEmpty)
                       PolylineLayer(polylines: polylines),
