@@ -100,8 +100,13 @@ class _AppScreenState extends State<AppScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final notifier = context.watch<ProjectNotifier>();
-    final title = notifier.projectName ?? widget.projectName;
+    // Only rebuild AppScreen (AppBar + LayoutBuilder) when the title changes.
+    // ActivityPanel and MapPanel subscribe to the notifier themselves via Consumer,
+    // so they still react to every notifyListeners() without pulling the AppBar
+    // through an unnecessary rebuild on every selectActivity() call.
+    final title = context.select<ProjectNotifier, String>(
+      (n) => n.projectName ?? widget.projectName,
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -143,19 +148,31 @@ class _AppScreenState extends State<AppScreen> {
               children: [
                 SizedBox(
                   width: 280,
-                  child: ActivityPanel(notifier: notifier),
+                  child: Consumer<ProjectNotifier>(
+                    builder: (_, n, __) => ActivityPanel(notifier: n),
+                  ),
                 ),
-                Expanded(child: _Stage1MapPanel(notifier: notifier)),
+                Expanded(
+                  child: Consumer<ProjectNotifier>(
+                    builder: (_, n, __) => _Stage1MapPanel(notifier: n),
+                  ),
+                ),
               ],
             );
           } else {
             // ── Narrow layout: stacked ───────────────────────────────────
             return Column(
               children: [
-                Expanded(child: _Stage1MapPanel(notifier: notifier)),
+                Expanded(
+                  child: Consumer<ProjectNotifier>(
+                    builder: (_, n, __) => _Stage1MapPanel(notifier: n),
+                  ),
+                ),
                 SizedBox(
                   height: constraints.maxHeight * 0.4,
-                  child: ActivityPanel(notifier: notifier),
+                  child: Consumer<ProjectNotifier>(
+                    builder: (_, n, __) => ActivityPanel(notifier: n),
+                  ),
                 ),
               ],
             );
