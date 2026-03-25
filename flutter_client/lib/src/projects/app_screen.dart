@@ -780,6 +780,9 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           options: const MapOptions(
             initialCenter: LatLng(48.0, 10.0),
             initialZoom: 4,
+            interactionOptions: InteractionOptions(
+              flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+            ),
           ),
           children: [
             TileLayer(

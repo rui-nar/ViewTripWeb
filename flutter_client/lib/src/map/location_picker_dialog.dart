@@ -182,12 +182,14 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
                     initialCenter: _center,
                     initialZoom: _zoom,
                     onTap: (_, latlng) => _onTap(latlng),
+                    interactionOptions: const InteractionOptions(
+                      flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+                    ),
                   ),
                   children: [
                     TileLayer(
                       urlTemplate:
-                          'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      subdomains: const ['a', 'b', 'c'],
+                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.viewtrip.client',
                       tileProvider: _tileProvider,
                       maxNativeZoom: 19,
