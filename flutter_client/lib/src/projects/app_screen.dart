@@ -311,10 +311,6 @@ class _MapPanelState extends State<MapPanel> {
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
 
-    if (notifier.isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
     // Recompute polylines only when the geo reference changes.
     final geo = notifier.geo;
     if (!identical(geo, _lastGeo)) {
@@ -325,41 +321,50 @@ class _MapPanelState extends State<MapPanel> {
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
 
-    if (allPoints.isNotEmpty) {
+    if (allPoints.isNotEmpty && !notifier.isLoading) {
       _fitBoundsOnce(allPoints);
     }
 
-    return FlutterMap(
-      mapController: widget.mapController,
-      options: const MapOptions(
-        initialCenter: LatLng(0, 0),
-        initialZoom: 2,
-      ),
+    // FlutterMap stays mounted throughout loading so the MapController stays
+    // attached and tiles don't get torn down on every load.  A spinner is
+    // overlaid on top while data is in flight.
+    return Stack(
       children: [
-        TileLayer(
-          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          userAgentPackageName: 'com.viewtrip.client',
-          tileProvider: _tileProvider,
+        FlutterMap(
+          mapController: widget.mapController,
+          options: const MapOptions(
+            initialCenter: LatLng(0, 0),
+            initialZoom: 2,
+          ),
+          children: [
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.viewtrip.client',
+              tileProvider: _tileProvider,
+            ),
+            if (polylines.isNotEmpty)
+              PolylineLayer(polylines: polylines),
+            // Preview arc uses ValueListenableBuilder so only this layer rebuilds
+            // when the segment dialog updates coordinates — not the whole map.
+            ValueListenableBuilder<List<LatLng>?>(
+              valueListenable: notifier.previewArcNotifier,
+              builder: (_, arc, __) {
+                if (arc == null) return const SizedBox.shrink();
+                return PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: arc,
+                      color: const Color(0xCC6366F1),
+                      strokeWidth: 2.5,
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
         ),
-        if (polylines.isNotEmpty)
-          PolylineLayer(polylines: polylines),
-        // Preview arc uses ValueListenableBuilder so only this layer rebuilds
-        // when the segment dialog updates coordinates — not the whole map.
-        ValueListenableBuilder<List<LatLng>?>(
-          valueListenable: notifier.previewArcNotifier,
-          builder: (_, arc, __) {
-            if (arc == null) return const SizedBox.shrink();
-            return PolylineLayer(
-              polylines: [
-                Polyline(
-                  points: arc,
-                  color: const Color(0xCC6366F1),
-                  strokeWidth: 2.5,
-                ),
-              ],
-            );
-          },
-        ),
+        if (notifier.isLoading)
+          const Center(child: CircularProgressIndicator()),
       ],
     );
   }
