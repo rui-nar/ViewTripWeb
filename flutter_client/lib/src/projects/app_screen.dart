@@ -164,11 +164,21 @@ class _AppScreenState extends State<AppScreen> {
                   ),
                 ),
                 Expanded(
-                  child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => _Stage1MapPanel(
-                      notifier: n,
-                      mapController: _mapController,
-                    ),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Consumer<ProjectNotifier>(
+                          builder: (_, n, __) => _Stage1MapPanel(
+                            notifier: n,
+                            mapController: _mapController,
+                          ),
+                        ),
+                      ),
+                      Consumer<ProjectNotifier>(
+                        builder: (_, n, __) =>
+                            ElevationChart(activities: n.activities),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -191,6 +201,7 @@ class _AppScreenState extends State<AppScreen> {
                     builder: (_, n, __) => ActivityPanel(
                       notifier: n,
                       mapController: _mapController,
+                      showElevationChart: true,
                     ),
                   ),
                 ),
