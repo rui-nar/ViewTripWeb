@@ -145,14 +145,14 @@ class _AppScreenState extends State<AppScreen> {
                   width: 280,
                   child: ActivityPanel(notifier: notifier),
                 ),
-                const Expanded(child: _Stage1MapPanel()),
+                Expanded(child: _Stage1MapPanel(notifier: notifier)),
               ],
             );
           } else {
             // ── Narrow layout: stacked ───────────────────────────────────
             return Column(
               children: [
-                const Expanded(child: _Stage1MapPanel()),
+                Expanded(child: _Stage1MapPanel(notifier: notifier)),
                 SizedBox(
                   height: constraints.maxHeight * 0.4,
                   child: ActivityPanel(notifier: notifier),
@@ -667,7 +667,9 @@ Future<void> _showSegmentDialog(
 // ── _Stage1MapPanel — bare TileLayer, no controller, no polylines ─────────────
 
 class _Stage1MapPanel extends StatefulWidget {
-  const _Stage1MapPanel();
+  final ProjectNotifier notifier;
+
+  const _Stage1MapPanel({required this.notifier});
 
   @override
   State<_Stage1MapPanel> createState() => _Stage1MapPanelState();
@@ -676,6 +678,7 @@ class _Stage1MapPanel extends StatefulWidget {
 class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final NetworkTileProvider _tileProvider;
   late final MapController _mapController;
+  bool _fittedBounds = false;
 
   @override
   void initState() {
@@ -690,8 +693,25 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     super.dispose();
   }
 
+  void _fitBoundsOnce(List<Map<String, dynamic>> activities) {
+    if (_fittedBounds || activities.isEmpty) return;
+    final raw = activities.first['start_latlng'];
+    if (raw is! List || raw.length < 2) return;
+    _fittedBounds = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _mapController.move(
+        LatLng((raw[0] as num).toDouble(), (raw[1] as num).toDouble()),
+        10.0,
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final notifier = widget.notifier;
+    if (!notifier.isLoading) _fitBoundsOnce(notifier.activities);
+
     return FlutterMap(
       mapController: _mapController,
       options: const MapOptions(
