@@ -680,9 +680,12 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final MapController _mapController;
   bool _fittedBounds = false;
 
-  // Polyline cache — only rebuilt when the geo reference changes.
+  // Polyline cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
+  dynamic _lastSelectedId = _sentinel;
   List<Polyline> _cachedPolylines = [];
+
+  static const _sentinel = Object();
 
   @override
   void initState() {
@@ -711,10 +714,11 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     });
   }
 
-  List<Polyline> _buildPolylines(Map<String, dynamic> geo) {
+  List<Polyline> _buildPolylines(Map<String, dynamic> geo, dynamic selectedId) {
     final features = geo['features'];
     if (features is! List) return [];
     final polylines = <Polyline>[];
+    final hasSelection = selectedId != null;
     for (final feature in features) {
       if (feature is! Map) continue;
       final props = feature['properties'] as Map? ?? {};
@@ -729,10 +733,18 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       }
       if (points.isEmpty) continue;
       final isSegment = props['type'] == 'segment';
+      final isSelected = hasSelection &&
+          props['activity_id']?.toString() == selectedId.toString();
       polylines.add(Polyline(
         points: points,
-        color: isSegment ? const Color(0xFF888888) : const Color(0xFFF97316),
-        strokeWidth: isSegment ? 2.0 : 2.5,
+        color: isSegment
+            ? const Color(0xFF888888)
+            : isSelected
+                ? const Color(0xFFEF4444)
+                : hasSelection
+                    ? const Color(0x60F97316)
+                    : const Color(0xFFF97316),
+        strokeWidth: isSegment ? 2.0 : isSelected ? 5.0 : 2.5,
       ));
     }
     return polylines;
@@ -744,9 +756,11 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     if (!notifier.isLoading) _fitBoundsOnce(notifier.activities);
 
     final geo = notifier.geo;
-    if (!identical(geo, _lastGeo)) {
+    final selectedId = notifier.selectedActivityId;
+    if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
       _lastGeo = geo;
-      _cachedPolylines = geo != null ? _buildPolylines(geo) : [];
+      _lastSelectedId = selectedId;
+      _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
     }
 
     return FlutterMap(
