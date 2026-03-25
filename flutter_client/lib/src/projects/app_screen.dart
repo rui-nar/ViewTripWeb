@@ -568,34 +568,37 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       final name = a['name'] as String? ?? 'Activity';
                       final distM = (a['distance'] as num? ?? 0).toDouble();
                       final movingSec = a['moving_time'];
-                      final isSelected =
-                          item['activity_id']?.toString() ==
-                          notifier.selectedActivityId?.toString();
-                      return ListTile(
-                        key: ValueKey('act_${item['activity_id']}'),
-                        tileColor: isSelected
-                            ? theme.colorScheme.primaryContainer
-                                .withValues(alpha: 0.45)
-                            : null,
-                        leading: Icon(
-                          _iconForActivityType(type),
-                          color: isSelected
-                              ? theme.colorScheme.primary
-                              : theme.colorScheme.primary
-                                  .withValues(alpha: 0.7),
+                      final activityId = item['activity_id'];
+                      return Selector<ProjectNotifier, bool>(
+                        key: ValueKey('act_$activityId'),
+                        selector: (_, n) =>
+                            activityId?.toString() ==
+                            n.selectedActivityId?.toString(),
+                        builder: (_, isSelected, __) => ListTile(
+                          tileColor: isSelected
+                              ? theme.colorScheme.primaryContainer
+                                  .withValues(alpha: 0.45)
+                              : null,
+                          leading: Icon(
+                            _iconForActivityType(type),
+                            color: isSelected
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.primary
+                                    .withValues(alpha: 0.7),
+                          ),
+                          title:
+                              Text(name, style: theme.textTheme.bodyMedium),
+                          subtitle: Text(
+                            '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            tooltip: 'Remove from project',
+                            onPressed: () => notifier.removeItem(i),
+                          ),
+                          onTap: () => _flyToActivity(a),
                         ),
-                        title:
-                            Text(name, style: theme.textTheme.bodyMedium),
-                        subtitle: Text(
-                          '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 18),
-                          tooltip: 'Remove from project',
-                          onPressed: () => notifier.removeItem(i),
-                        ),
-                        onTap: () => _flyToActivity(a),
                       );
                     } else {
                       // Segment item
