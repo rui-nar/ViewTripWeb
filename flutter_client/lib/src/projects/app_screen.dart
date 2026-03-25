@@ -29,12 +29,20 @@ class AppScreen extends StatefulWidget {
 }
 
 class _AppScreenState extends State<AppScreen> {
+  final MapController _mapController = MapController();
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ProjectNotifier>().load(widget.projectName);
     });
+  }
+
+  @override
+  void dispose() {
+    _mapController.dispose();
+    super.dispose();
   }
 
   Future<void> _logout() async {
@@ -149,12 +157,18 @@ class _AppScreenState extends State<AppScreen> {
                 SizedBox(
                   width: 280,
                   child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => ActivityPanel(notifier: n),
+                    builder: (_, n, __) => ActivityPanel(
+                      notifier: n,
+                      mapController: _mapController,
+                    ),
                   ),
                 ),
                 Expanded(
                   child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => _Stage1MapPanel(notifier: n),
+                    builder: (_, n, __) => _Stage1MapPanel(
+                      notifier: n,
+                      mapController: _mapController,
+                    ),
                   ),
                 ),
               ],
@@ -165,13 +179,19 @@ class _AppScreenState extends State<AppScreen> {
               children: [
                 Expanded(
                   child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => _Stage1MapPanel(notifier: n),
+                    builder: (_, n, __) => _Stage1MapPanel(
+                      notifier: n,
+                      mapController: _mapController,
+                    ),
                   ),
                 ),
                 SizedBox(
                   height: constraints.maxHeight * 0.4,
                   child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => ActivityPanel(notifier: n),
+                    builder: (_, n, __) => ActivityPanel(
+                      notifier: n,
+                      mapController: _mapController,
+                    ),
                   ),
                 ),
               ],
@@ -469,10 +489,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
     // Highlight the tapped activity on the map (toggle if already selected).
     widget.notifier.selectActivity(activity['id']);
     final raw = activity['start_latlng'];
-    if (raw is List && raw.length >= 2) {
-      final lat = (raw[0] as num).toDouble();
-      final lon = (raw[1] as num).toDouble();
-      widget.mapController?.move(LatLng(lat, lon), 13.0);
+    if (raw is! List || raw.length < 2) return;
+    final target = LatLng((raw[0] as num).toDouble(), (raw[1] as num).toDouble());
+    final mc = widget.mapController;
+    if (mc == null) return;
+    if (!mc.camera.visibleBounds.contains(target)) {
+      mc.move(target, mc.camera.zoom.clamp(10.0, 15.0));
     }
   }
 
@@ -688,8 +710,9 @@ Future<void> _showSegmentDialog(
 
 class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
+  final MapController mapController;
 
-  const _Stage1MapPanel({required this.notifier});
+  const _Stage1MapPanel({required this.notifier, required this.mapController});
 
   @override
   State<_Stage1MapPanel> createState() => _Stage1MapPanelState();
@@ -697,7 +720,6 @@ class _Stage1MapPanel extends StatefulWidget {
 
 class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final NetworkTileProvider _tileProvider;
-  late final MapController _mapController;
   bool _fittedBounds = false;
 
   // Polyline cache — only rebuilt when geo or selection changes.
@@ -711,12 +733,10 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   void initState() {
     super.initState();
     _tileProvider = NetworkTileProvider();
-    _mapController = MapController();
   }
 
   @override
   void dispose() {
-    _mapController.dispose();
     super.dispose();
   }
 
@@ -733,7 +753,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
         if (p.longitude < minLon) minLon = p.longitude;
         if (p.longitude > maxLon) maxLon = p.longitude;
       }
-      _mapController.fitCamera(
+      widget.mapController.fitCamera(
         CameraFit.bounds(
           bounds: LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
           padding: const EdgeInsets.all(32),
@@ -797,7 +817,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     return Stack(
       children: [
         FlutterMap(
-          mapController: _mapController,
+          mapController: widget.mapController,
           options: const MapOptions(
             initialCenter: LatLng(48.0, 10.0),
             initialZoom: 4,
