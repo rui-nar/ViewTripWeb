@@ -145,18 +145,14 @@ class _AppScreenState extends State<AppScreen> {
                   width: 280,
                   child: ActivityPanel(notifier: notifier),
                 ),
-                Expanded(
-                  child: _DebugInfoPanel(notifier: notifier),
-                ),
+                const Expanded(child: _Stage1MapPanel()),
               ],
             );
           } else {
             // ── Narrow layout: stacked ───────────────────────────────────
             return Column(
               children: [
-                Expanded(
-                  child: _DebugInfoPanel(notifier: notifier),
-                ),
+                const Expanded(child: _Stage1MapPanel()),
                 SizedBox(
                   height: constraints.maxHeight * 0.4,
                   child: ActivityPanel(notifier: notifier),
@@ -666,6 +662,43 @@ Future<void> _showSegmentDialog(
       insertAfterIndex: insertAfterIndex,
     ),
   );
+}
+
+// ── _Stage1MapPanel — bare TileLayer, no controller, no polylines ─────────────
+
+class _Stage1MapPanel extends StatefulWidget {
+  const _Stage1MapPanel();
+
+  @override
+  State<_Stage1MapPanel> createState() => _Stage1MapPanelState();
+}
+
+class _Stage1MapPanelState extends State<_Stage1MapPanel> {
+  late final NetworkTileProvider _tileProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    _tileProvider = NetworkTileProvider();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FlutterMap(
+      options: const MapOptions(
+        initialCenter: LatLng(48.0, 10.0),
+        initialZoom: 4,
+      ),
+      children: [
+        TileLayer(
+          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.viewtrip.client',
+          tileProvider: _tileProvider,
+          maxNativeZoom: 19,
+        ),
+      ],
+    );
+  }
 }
 
 // ── _DebugInfoPanel ───────────────────────────────────────────────────────────
