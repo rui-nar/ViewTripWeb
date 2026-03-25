@@ -725,6 +725,16 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           tileProvider: _tileProvider,
           maxNativeZoom: 19,
         ),
+        PolylineLayer(
+          polylines: [
+            Polyline(
+              points: const [LatLng(48.8566, 2.3522), LatLng(52.5200, 13.4050)],
+              color: const Color(0xFFF97316),
+              strokeWidth: 2.5,
+            ),
+          ],
+          simplificationTolerance: 0.5,
+        ),
       ],
     );
   }
