@@ -174,10 +174,17 @@ class _AppScreenState extends State<AppScreen> {
                           ),
                         ),
                       ),
-                      Selector<ProjectNotifier, List<Map<String, dynamic>>>(
-                        selector: (_, n) => n.activities,
-                        builder: (_, activities, __) =>
-                            ElevationChart(activities: activities),
+                      Selector<ProjectNotifier,
+                          (List<Map<String, dynamic>>, Object?)>(
+                        selector: (_, n) =>
+                            (n.activities, n.selectedActivityId as Object?),
+                        shouldRebuild: (a, b) =>
+                            !identical(a.$1, b.$1) ||
+                            a.$2?.toString() != b.$2?.toString(),
+                        builder: (_, tuple, __) => ElevationChart(
+                          activities: tuple.$1,
+                          selectedActivityId: tuple.$2,
+                        ),
                       ),
                     ],
                   ),
@@ -208,10 +215,17 @@ class _AppScreenState extends State<AppScreen> {
                           ),
                         ),
                       ),
-                      Selector<ProjectNotifier, List<Map<String, dynamic>>>(
-                        selector: (_, n) => n.activities,
-                        builder: (_, activities, __) =>
-                            ElevationChart(activities: activities),
+                      Selector<ProjectNotifier,
+                          (List<Map<String, dynamic>>, Object?)>(
+                        selector: (_, n) =>
+                            (n.activities, n.selectedActivityId as Object?),
+                        shouldRebuild: (a, b) =>
+                            !identical(a.$1, b.$1) ||
+                            a.$2?.toString() != b.$2?.toString(),
+                        builder: (_, tuple, __) => ElevationChart(
+                          activities: tuple.$1,
+                          selectedActivityId: tuple.$2,
+                        ),
                       ),
                     ],
                   ),
@@ -877,8 +891,13 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
 
 class ElevationChart extends StatefulWidget {
   final List<Map<String, dynamic>> activities;
+  final dynamic selectedActivityId;
 
-  const ElevationChart({super.key, required this.activities});
+  const ElevationChart({
+    super.key,
+    required this.activities,
+    this.selectedActivityId,
+  });
 
   @override
   State<ElevationChart> createState() => _ElevationChartState();
@@ -892,14 +911,16 @@ class _ElevationChartState extends State<ElevationChart> {
   @override
   void initState() {
     super.initState();
-    _compute(widget.activities);
+    _compute(widget.activities, widget.selectedActivityId);
   }
 
   @override
   void didUpdateWidget(ElevationChart oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.activities, widget.activities)) {
-      _compute(widget.activities);
+    if (!identical(oldWidget.activities, widget.activities) ||
+        oldWidget.selectedActivityId?.toString() !=
+            widget.selectedActivityId?.toString()) {
+      _compute(widget.activities, widget.selectedActivityId);
     }
   }
 
@@ -910,10 +931,16 @@ class _ElevationChartState extends State<ElevationChart> {
       Text('${value.toStringAsFixed(0)} km',
           style: const TextStyle(fontSize: 9));
 
-  void _compute(List<Map<String, dynamic>> activities) {
+  void _compute(List<Map<String, dynamic>> activities, dynamic selectedId) {
+    final source = selectedId == null
+        ? activities
+        : activities
+            .where((a) => a['id']?.toString() == selectedId.toString())
+            .toList();
+
     final spots = <FlSpot>[];
     double offsetKm = 0;
-    for (final a in activities) {
+    for (final a in source) {
       final profile = a['elevation_profile'];
       if (profile is! List || profile.isEmpty) continue;
       for (final point in profile) {
@@ -944,7 +971,7 @@ class _ElevationChartState extends State<ElevationChart> {
   Widget build(BuildContext context) {
     if (_spots.isEmpty) {
       return const SizedBox(
-        height: 40,
+        height: 160,
         child: Center(child: Text('No elevation data')),
       );
     }
