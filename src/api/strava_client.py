@@ -172,3 +172,8 @@ class StravaAPI:
             f"/activities/{activity_id}/streams",
             params={"keys": "latlng,altitude,time,distance", "key_by_type": "true"},
         )
+
+    @property
+    def remaining_requests(self) -> int:
+        """Requests still available in the current 15-min rate-limit window."""
+        return RateLimiter.MAX_REQUESTS - self._rate_limiter.current_usage

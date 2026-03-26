@@ -51,8 +51,17 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
       // Reload the project so the newly-added activities appear immediately
       // in the activity list when we pop back to AppScreen.
       context.read<ProjectNotifier>().load(widget.projectName);
+      final pending = notifier.pendingEnrichment;
+      final msg = pending > 0
+          ? 'Added $added activities. '
+            '$pending ${pending == 1 ? "activity" : "activities"} '
+            'will have full track data in ~15 min (Strava rate limit).'
+          : 'Added $added activities to project.';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Added $added activities to project.')),
+        SnackBar(
+          content: Text(msg),
+          duration: Duration(seconds: pending > 0 ? 8 : 4),
+        ),
       );
       context.pop();
     } else {

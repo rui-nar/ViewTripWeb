@@ -19,24 +19,126 @@ from __future__ import annotations
 import io
 import os
 import re
+import time
 import uuid
 from typing import Annotated, Any, Dict, List, Optional
 
 import gpxpy
 import gpxpy.gpx
 import polyline as polyline_lib
+import reflex as rx
+from sqlmodel import select
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
+from app.models.user import StravaToken
+from src.api.strava_client import RateLimiter, StravaAPI
+from src.config.settings import Config
 from src.models.activity import Activity
 from src.models.great_circle import great_circle_points
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 
+_cfg = Config("config/config.json")
+
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+# ── Strava stream enrichment ───────────────────────────────────────────────────
+
+def _strava_client_for_user(user_info_id: int) -> Optional[StravaAPI]:
+    """Return a StravaAPI instance for the given user, or None if not connected."""
+    with rx.session() as sess:
+        token_row = sess.exec(
+            select(StravaToken).where(StravaToken.user_info_id == user_info_id)
+        ).first()
+        if not token_row:
+            return None
+    client = StravaAPI(_cfg)
+    client.token_data = {
+        "access_token":  token_row.access_token,
+        "refresh_token": token_row.refresh_token,
+        "expires_at":    token_row.expires_at,
+    }
+    return client
+
+
+def _enrich_activities(
+    activities: List[Activity],
+    client: StravaAPI,
+) -> List[Activity]:
+    """Fetch streams for each activity, enriching summary_polyline and elevation_profile in-place.
+
+    Returns any activities that could not be enriched due to rate limiting.
+    """
+    pending: List[Activity] = []
+    for act in activities:
+        if act.id is None:
+            continue
+        if client.remaining_requests <= 2:
+            pending.append(act)
+            continue
+        try:
+            streams  = client.get_activity_streams(act.id)
+            latlng   = streams.get("latlng",   {}).get("data") or []
+            altitude = streams.get("altitude", {}).get("data") or []
+            distance = streams.get("distance", {}).get("data") or []
+
+            if latlng:
+                act.summary_polyline = polyline_lib.encode(
+                    [(pt[0], pt[1]) for pt in latlng]
+                )
+            n = min(len(altitude), len(distance))
+            if n >= 2:
+                act.elevation_profile = (
+                    [distance[i] / 1000 for i in range(n)],
+                    [altitude[i]        for i in range(n)],
+                )
+        except Exception:
+            pass  # private activity or network error — skip silently
+    return pending
+
+
+def _enrich_pending_background(
+    pending_ids: List[int],
+    user_info_id: int,
+    project_path: str,
+) -> None:
+    """Sleep until the Strava rate-limit window resets, then enrich remaining activities."""
+    time.sleep(RateLimiter.WINDOW_SECONDS + 5)
+
+    client = _strava_client_for_user(user_info_id)
+    if client is None or not os.path.exists(project_path):
+        return
+
+    project = ProjectIO.load(project_path)
+    changed = False
+    for act in project.activities:
+        if act.id not in pending_ids:
+            continue
+        try:
+            streams  = client.get_activity_streams(act.id)
+            latlng   = streams.get("latlng",   {}).get("data") or []
+            altitude = streams.get("altitude", {}).get("data") or []
+            distance = streams.get("distance", {}).get("data") or []
+            if latlng:
+                act.summary_polyline = polyline_lib.encode(
+                    [(pt[0], pt[1]) for pt in latlng]
+                )
+            n = min(len(altitude), len(distance))
+            if n >= 2:
+                act.elevation_profile = (
+                    [distance[i] / 1000 for i in range(n)],
+                    [altitude[i]        for i in range(n)],
+                )
+            changed = True
+        except Exception:
+            pass
+    if changed:
+        ProjectIO.save(project, project_path)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
@@ -232,9 +334,17 @@ def add_activities(
     name: str,
     body: AddActivitiesRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
-    """Add specific activities (by strava dict list) to a project."""
-    user_id = current_user["sub"]
+    """Add specific activities (by strava dict list) to a project.
+
+    Fetches full-resolution GPS streams from Strava for each activity so that
+    the stored polyline is not privacy-trimmed and elevation data is available.
+    If the Strava rate limit is approached, remaining activities are queued for
+    enrichment after the 15-min window resets.
+    """
+    user_id      = current_user["sub"]
+    user_info_id = int(user_id)
     pdir = _projects_dir(user_id)
     path = os.path.join(pdir, name + ProjectIO.EXTENSION)
     if not os.path.exists(path):
@@ -247,10 +357,26 @@ def add_activities(
         except Exception:
             pass
 
+    pending: List[Activity] = []
+    client = _strava_client_for_user(user_info_id)
+    if client is not None:
+        pending = _enrich_activities(activities, client)
+
     project = ProjectIO.load(path)
     added = project.add_activities(activities)
     ProjectIO.save(project, path)
-    return {"added": added, "total": len(project.activities)}
+
+    if pending:
+        pending_ids = [a.id for a in pending if a.id is not None]
+        background_tasks.add_task(
+            _enrich_pending_background, pending_ids, user_info_id, path
+        )
+
+    return {
+        "added": added,
+        "total": len(project.activities),
+        "pending_enrichment": len(pending),
+    }
 
 
 # ── Item management (delete + reorder) ────────────────────────────────────────

@@ -21,6 +21,10 @@ class StravaImportNotifier extends ChangeNotifier {
   /// Whether the last result was served from the server-side cache.
   bool lastResultCached = false;
 
+  /// Activities added in the last import that could not be stream-enriched
+  /// due to Strava rate limiting. Full tracks will be fetched ~15 min later.
+  int pendingEnrichment = 0;
+
   /// Total matching activities across all pages.
   int totalCount = 0;
 
@@ -237,6 +241,7 @@ class StravaImportNotifier extends ChangeNotifier {
         '/api/projects/${Uri.encodeComponent(projectName)}/activities',
         {'activities': toAdd},
       ) as Map<String, dynamic>;
+      pendingEnrichment = (result['pending_enrichment'] as int?) ?? 0;
       return (result['added'] as int?) ?? 0;
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
