@@ -174,9 +174,10 @@ class _AppScreenState extends State<AppScreen> {
                           ),
                         ),
                       ),
-                      Consumer<ProjectNotifier>(
-                        builder: (_, n, __) =>
-                            ElevationChart(activities: n.activities),
+                      Selector<ProjectNotifier, List<Map<String, dynamic>>>(
+                        selector: (_, n) => n.activities,
+                        builder: (_, activities, __) =>
+                            ElevationChart(activities: activities),
                       ),
                     ],
                   ),
@@ -197,12 +198,22 @@ class _AppScreenState extends State<AppScreen> {
                 ),
                 SizedBox(
                   height: constraints.maxHeight * 0.4,
-                  child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => ActivityPanel(
-                      notifier: n,
-                      mapController: _mapController,
-                      showElevationChart: true,
-                    ),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Consumer<ProjectNotifier>(
+                          builder: (_, n, __) => ActivityPanel(
+                            notifier: n,
+                            mapController: _mapController,
+                          ),
+                        ),
+                      ),
+                      Selector<ProjectNotifier, List<Map<String, dynamic>>>(
+                        selector: (_, n) => n.activities,
+                        builder: (_, activities, __) =>
+                            ElevationChart(activities: activities),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -407,14 +418,11 @@ class ActivityPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController? mapController;
   final ScrollController? scrollController;
-  final bool showElevationChart;
-
   const ActivityPanel({
     super.key,
     required this.notifier,
     this.mapController,
     this.scrollController,
-    this.showElevationChart = false,
   });
 
   @override
@@ -513,7 +521,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
     final theme = Theme.of(context);
-    final activities = notifier.activities;
     final items = notifier.items;
 
     final activityById = _activityById;
@@ -690,12 +697,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
             ),
           ),
 
-        // ── Elevation chart (narrow layout only) ─────────────────────────────
-        if (widget.showElevationChart)
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: ElevationChart(activities: activities),
-          ),
       ],
     );
   }
