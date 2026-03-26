@@ -182,14 +182,16 @@ class _AppScreenState extends State<AppScreen> {
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
                             a.$2?.toString() != b.$2?.toString(),
-                        builder: (ctx, tuple, __) => ElevationChart(
-                          activities: tuple.$1,
-                          selectedActivityId: tuple.$2,
-                          onCursorChanged: (pos) => ctx
-                              .read<ProjectNotifier>()
-                              .elevationCursorNotifier
-                              .value = pos,
-                        ),
+                        builder: (ctx, tuple, __) {
+                          final n = ctx.read<ProjectNotifier>();
+                          return ElevationChart(
+                            activities: tuple.$1,
+                            selectedActivityId: tuple.$2,
+                            onCursorChanged: (pos) =>
+                                n.elevationCursorNotifier.value = pos,
+                            mapCursorNotifier: n.mapCursorDistNotifier,
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -227,14 +229,16 @@ class _AppScreenState extends State<AppScreen> {
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
                             a.$2?.toString() != b.$2?.toString(),
-                        builder: (ctx, tuple, __) => ElevationChart(
-                          activities: tuple.$1,
-                          selectedActivityId: tuple.$2,
-                          onCursorChanged: (pos) => ctx
-                              .read<ProjectNotifier>()
-                              .elevationCursorNotifier
-                              .value = pos,
-                        ),
+                        builder: (ctx, tuple, __) {
+                          final n = ctx.read<ProjectNotifier>();
+                          return ElevationChart(
+                            activities: tuple.$1,
+                            selectedActivityId: tuple.$2,
+                            onCursorChanged: (pos) =>
+                                n.elevationCursorNotifier.value = pos,
+                            mapCursorNotifier: n.mapCursorDistNotifier,
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -797,6 +801,21 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     });
   }
 
+  void _onMapTap(LatLng latlng) {
+    final track = widget.notifier.fullTrack;
+    if (track.isEmpty) return;
+    int nearest = 0;
+    double minDist = double.infinity;
+    for (int i = 0; i < track.length; i++) {
+      final dLat = track[i].$2.latitude  - latlng.latitude;
+      final dLon = track[i].$2.longitude - latlng.longitude;
+      final d = dLat * dLat + dLon * dLon;
+      if (d < minDist) { minDist = d; nearest = i; }
+    }
+    widget.notifier.elevationCursorNotifier.value = track[nearest].$2;
+    widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
+  }
+
   List<Polyline> _buildPolylines(Map<String, dynamic> geo, dynamic selectedId) {
     final features = geo['features'];
     if (features is! List) return [];
@@ -853,12 +872,13 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       children: [
         FlutterMap(
           mapController: widget.mapController,
-          options: const MapOptions(
-            initialCenter: LatLng(48.0, 10.0),
+          options: MapOptions(
+            initialCenter: const LatLng(48.0, 10.0),
             initialZoom: 4,
-            interactionOptions: InteractionOptions(
+            interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
             ),
+            onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
             TileLayer(
@@ -928,11 +948,15 @@ class ElevationChart extends StatefulWidget {
   /// user lifts / exits. Drives the elevation cursor marker on the map.
   final void Function(LatLng?)? onCursorChanged;
 
+  /// Driven by map taps — shows a vertical line at this distance (km).
+  final ValueNotifier<double?>? mapCursorNotifier;
+
   const ElevationChart({
     super.key,
     required this.activities,
     this.selectedActivityId,
     this.onCursorChanged,
+    this.mapCursorNotifier,
   });
 
   @override
@@ -952,17 +976,30 @@ class _ElevationChartState extends State<ElevationChart> {
   void initState() {
     super.initState();
     _compute(widget.activities, widget.selectedActivityId);
+    widget.mapCursorNotifier?.addListener(_onMapCursor);
   }
 
   @override
   void didUpdateWidget(ElevationChart oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.mapCursorNotifier != widget.mapCursorNotifier) {
+      oldWidget.mapCursorNotifier?.removeListener(_onMapCursor);
+      widget.mapCursorNotifier?.addListener(_onMapCursor);
+    }
     if (!identical(oldWidget.activities, widget.activities) ||
         oldWidget.selectedActivityId?.toString() !=
             widget.selectedActivityId?.toString()) {
       _compute(widget.activities, widget.selectedActivityId);
     }
   }
+
+  @override
+  void dispose() {
+    widget.mapCursorNotifier?.removeListener(_onMapCursor);
+    super.dispose();
+  }
+
+  void _onMapCursor() => setState(() {});
 
   static Widget _elevLeftTitle(double value, TitleMeta meta) =>
       Text('${value.toInt()} m', style: const TextStyle(fontSize: 9));
@@ -1072,6 +1109,18 @@ class _ElevationChartState extends State<ElevationChart> {
             rightTitles: const AxisTitles(
                 sideTitles: SideTitles(showTitles: false)),
           ),
+          extraLinesData: () {
+            final d = widget.mapCursorNotifier?.value;
+            if (d == null) return null;
+            return ExtraLinesData(verticalLines: [
+              VerticalLine(
+                x: d,
+                color: const Color(0xFFF97316),
+                strokeWidth: 1.5,
+                dashArray: [4, 4],
+              ),
+            ]);
+          }(),
           lineTouchData: LineTouchData(
             touchCallback: _onTouch,
             handleBuiltInTouches: true,

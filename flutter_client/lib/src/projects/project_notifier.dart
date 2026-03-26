@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../api/client.dart';
+import '../map/polyline_decoder.dart';
 import 'project_service.dart';
 
 class ProjectNotifier extends ChangeNotifier {
@@ -64,6 +65,7 @@ class ProjectNotifier extends ChangeNotifier {
           : [];
       geo = results[1];
       _updateStats();
+      _buildFullTrack();
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
@@ -100,6 +102,42 @@ class ProjectNotifier extends ChangeNotifier {
   /// Uses a ValueNotifier so only the marker layer rebuilds on cursor moves.
   final ValueNotifier<LatLng?> elevationCursorNotifier = ValueNotifier(null);
 
+  /// Elevation chart cursor driven by a map tap.
+  /// Holds the cumulative distance (km) of the nearest track point.
+  final ValueNotifier<double?> mapCursorDistNotifier = ValueNotifier(null);
+
+  /// Full distance-indexed track for all activities — used by the map panel
+  /// to map a tapped LatLng back to a distance on the elevation chart.
+  List<(double, LatLng)> _fullTrack = const [];
+  List<(double, LatLng)> get fullTrack => _fullTrack;
+
+  void _buildFullTrack() {
+    final track = <(double, LatLng)>[];
+    double offsetKm = 0;
+    for (final a in activities) {
+      final profile = a['elevation_profile'];
+      if (profile is! List || profile.isEmpty) continue;
+      final encoded = (a['map'] as Map?)?['summary_polyline'] as String?;
+      List<LatLng>? decoded;
+      if (encoded != null && encoded.isNotEmpty) {
+        decoded = decodePolyline(encoded);
+      }
+      for (int i = 0; i < profile.length; i++) {
+        final pt = profile[i];
+        if (pt is! List || pt.length < 2) continue;
+        final distKm = (pt[0] as num).toDouble() + offsetKm;
+        if (decoded != null && i < decoded.length) {
+          track.add((distKm, decoded[i]));
+        }
+      }
+      final last = profile.last;
+      if (last is List && last.isNotEmpty) {
+        offsetKm += (last[0] as num).toDouble();
+      }
+    }
+    _fullTrack = track;
+  }
+
   void clear() {
     projectName = null;
     activities = [];
@@ -107,6 +145,8 @@ class ProjectNotifier extends ChangeNotifier {
     geo = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
+    mapCursorDistNotifier.value = null;
+    _fullTrack = const [];
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;
@@ -118,6 +158,8 @@ class ProjectNotifier extends ChangeNotifier {
   @override
   void dispose() {
     previewArcNotifier.dispose();
+    elevationCursorNotifier.dispose();
+    mapCursorDistNotifier.dispose();
     super.dispose();
   }
 
