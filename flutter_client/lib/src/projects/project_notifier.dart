@@ -23,8 +23,10 @@ class ProjectNotifier extends ChangeNotifier {
   dynamic selectedActivityId;
 
   void selectActivity(dynamic id) {
-    // Toggle off if already selected.
-    selectedActivityId = selectedActivityId == id ? null : id;
+    // Toggle off if already selected (compare as strings to handle int/double
+    // type differences from JSON parsing on web).
+    selectedActivityId =
+        selectedActivityId?.toString() == id?.toString() ? null : id;
     notifyListeners();
   }
 
@@ -94,12 +96,17 @@ class ProjectNotifier extends ChangeNotifier {
     previewArcNotifier.value = arc; // no notifyListeners() — only arc layer rebuilds
   }
 
+  /// Map cursor driven by the elevation chart touch position.
+  /// Uses a ValueNotifier so only the marker layer rebuilds on cursor moves.
+  final ValueNotifier<LatLng?> elevationCursorNotifier = ValueNotifier(null);
+
   void clear() {
     projectName = null;
     activities = [];
     items = [];
     geo = null;
     previewArcNotifier.value = null;
+    elevationCursorNotifier.value = null;
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;

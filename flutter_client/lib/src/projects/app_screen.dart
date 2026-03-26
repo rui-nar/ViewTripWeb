@@ -14,6 +14,7 @@ import 'package:provider/provider.dart';
 
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
+import '../map/polyline_decoder.dart';
 import 'project_notifier.dart';
 import 'segment_dialog.dart';
 
@@ -181,9 +182,13 @@ class _AppScreenState extends State<AppScreen> {
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
                             a.$2?.toString() != b.$2?.toString(),
-                        builder: (_, tuple, __) => ElevationChart(
+                        builder: (ctx, tuple, __) => ElevationChart(
                           activities: tuple.$1,
                           selectedActivityId: tuple.$2,
+                          onCursorChanged: (pos) => ctx
+                              .read<ProjectNotifier>()
+                              .elevationCursorNotifier
+                              .value = pos,
                         ),
                       ),
                     ],
@@ -222,9 +227,13 @@ class _AppScreenState extends State<AppScreen> {
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
                             a.$2?.toString() != b.$2?.toString(),
-                        builder: (_, tuple, __) => ElevationChart(
+                        builder: (ctx, tuple, __) => ElevationChart(
                           activities: tuple.$1,
                           selectedActivityId: tuple.$2,
+                          onCursorChanged: (pos) => ctx
+                              .read<ProjectNotifier>()
+                              .elevationCursorNotifier
+                              .value = pos,
                         ),
                       ),
                     ],
@@ -878,6 +887,28 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
                 );
               },
             ),
+            ValueListenableBuilder<LatLng?>(
+              valueListenable: notifier.elevationCursorNotifier,
+              builder: (_, cursor, __) {
+                if (cursor == null) return const SizedBox.shrink();
+                return MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: cursor,
+                      width: 16,
+                      height: 16,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF97316),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
           ],
         ),
         if (notifier.isLoading)
@@ -893,10 +924,15 @@ class ElevationChart extends StatefulWidget {
   final List<Map<String, dynamic>> activities;
   final dynamic selectedActivityId;
 
+  /// Called with the map position under the chart cursor, or null when the
+  /// user lifts / exits. Drives the elevation cursor marker on the map.
+  final void Function(LatLng?)? onCursorChanged;
+
   const ElevationChart({
     super.key,
     required this.activities,
     this.selectedActivityId,
+    this.onCursorChanged,
   });
 
   @override
@@ -907,6 +943,10 @@ class _ElevationChartState extends State<ElevationChart> {
   List<FlSpot> _spots = const [];
   double _minY = 0;
   double _maxY = 0;
+
+  /// Distance-indexed track: (cumulativeDistKm, LatLng) pairs, parallel to
+  /// the elevation profile. Built from each activity's summary_polyline.
+  List<(double, LatLng)> _track = const [];
 
   @override
   void initState() {
@@ -939,23 +979,36 @@ class _ElevationChartState extends State<ElevationChart> {
             .toList();
 
     final spots = <FlSpot>[];
+    final track = <(double, LatLng)>[];
     double offsetKm = 0;
     for (final a in source) {
       final profile = a['elevation_profile'];
       if (profile is! List || profile.isEmpty) continue;
-      for (final point in profile) {
-        if (point is! List || point.length < 2) continue;
-        spots.add(FlSpot(
-          (point[0] as num).toDouble() + offsetKm,
-          (point[1] as num).toDouble(),
-        ));
+
+      // Decode this activity's polyline so we can map distance → lat/lon.
+      List<LatLng>? decoded;
+      final encoded = (a['map'] as Map?)?['summary_polyline'] as String?;
+      if (encoded != null && encoded.isNotEmpty) {
+        decoded = decodePolyline(encoded);
       }
+
+      for (int i = 0; i < profile.length; i++) {
+        final point = profile[i];
+        if (point is! List || point.length < 2) continue;
+        final distKm = (point[0] as num).toDouble() + offsetKm;
+        spots.add(FlSpot(distKm, (point[1] as num).toDouble()));
+        if (decoded != null && i < decoded.length) {
+          track.add((distKm, decoded[i]));
+        }
+      }
+
       final last = profile.last;
       if (last is List && last.isNotEmpty) {
         offsetKm += (last[0] as num).toDouble();
       }
     }
     _spots = spots;
+    _track = track;
     if (spots.isNotEmpty) {
       double minY = spots.first.y, maxY = spots.first.y;
       for (final s in spots) {
@@ -965,6 +1018,19 @@ class _ElevationChartState extends State<ElevationChart> {
       _minY = minY;
       _maxY = maxY;
     }
+  }
+
+  void _onTouch(FlTouchEvent event, LineTouchResponse? response) {
+    if (event is FlPointerExitEvent ||
+        event is FlPanEndEvent ||
+        event is FlLongPressEnd) {
+      widget.onCursorChanged?.call(null);
+      return;
+    }
+    final spots = response?.lineBarSpots;
+    if (spots == null || spots.isEmpty) return;
+    final pos = latLonAtDistance(_track, spots.first.x);
+    if (pos != null) widget.onCursorChanged?.call(pos);
   }
 
   @override
@@ -1005,6 +1071,10 @@ class _ElevationChartState extends State<ElevationChart> {
                 sideTitles: SideTitles(showTitles: false)),
             rightTitles: const AxisTitles(
                 sideTitles: SideTitles(showTitles: false)),
+          ),
+          lineTouchData: LineTouchData(
+            touchCallback: _onTouch,
+            handleBuiltInTouches: true,
           ),
           lineBarsData: [
             LineChartBarData(
