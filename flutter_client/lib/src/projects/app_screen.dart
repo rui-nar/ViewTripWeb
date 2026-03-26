@@ -1058,9 +1058,11 @@ class _ElevationChartState extends State<ElevationChart> {
   }
 
   void _onTouch(FlTouchEvent event, LineTouchResponse? response) {
-    if (event is FlPointerExitEvent ||
-        event is FlPanEndEvent ||
-        event is FlLongPressEnd) {
+    // Clear the map cursor only when the pointer fully leaves the chart
+    // (desktop mouse exit). On mobile, pan-end must NOT clear — a short tap
+    // is delivered as FlPanStart→FlPanEnd, so clearing on FlPanEndEvent would
+    // erase the marker before the user even sees it.
+    if (event is FlPointerExitEvent) {
       widget.onCursorChanged?.call(null);
       return;
     }
