@@ -24,6 +24,7 @@ from sqlmodel import select
 import reflex as rx
 
 from api.deps import get_current_user
+from app.models.project_db import DBProject, DBProjectItem, DBStravaCache
 from app.models.user import StravaToken, UserInfo
 from src.api.strava_client import StravaAPI
 from src.auth.oauth import OAuth2Session
@@ -31,6 +32,9 @@ from src.config.settings import Config
 from src.filters.filter_engine import FilterCriteria, FilterEngine
 from src.models.activity import Activity
 from src.project.project_io import ProjectIO
+from src.project.project_repo import ProjectRepo
+
+_project_repo = ProjectRepo()
 
 router = APIRouter(tags=["strava"])
 
@@ -45,63 +49,46 @@ _CALLBACK_URI = os.environ.get(
 # Origin of the Flutter web client — where to redirect after OAuth
 _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5500")
 
-_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-
-
-def _projects_dir(user_id: str) -> str:
-    path = os.path.join(_DATA_DIR, "users", user_id, "projects")
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def _user_dir(user_id: str) -> str:
-    path = os.path.join(_DATA_DIR, "users", user_id)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
 # ── Activity cache ─────────────────────────────────────────────────────────────
 
 # How long a cached activity list is considered fresh (seconds).
 _CACHE_TTL = int(os.environ.get("STRAVA_CACHE_TTL", 3600))
 
-_CACHE_FILENAME = "strava_cache.json"
 
-
-def _cache_path(user_id: str) -> str:
-    return os.path.join(_user_dir(user_id), _CACHE_FILENAME)
-
-
-def _load_cache(user_id: str) -> Dict[str, Any] | None:
+def _load_cache(user_info_id: int) -> Dict[str, Any] | None:
     """Return the cached payload if it exists and is within TTL, else None."""
-    path = _cache_path(user_id)
-    if not os.path.exists(path):
+    with rx.session() as sess:
+        row = sess.get(DBStravaCache, user_info_id)
+    if row is None:
+        return None
+    age = time.time() - row.fetched_at
+    if age > _CACHE_TTL:
         return None
     try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        age = time.time() - float(data.get("fetched_at", 0))
-        if age > _CACHE_TTL:
-            return None
-        return data
+        return {"fetched_at": row.fetched_at, "activities": json.loads(row.activities_json)}
     except Exception:
         return None
 
 
-def _save_cache(user_id: str, raw_activities: List[Dict[str, Any]]) -> None:
-    """Persist the raw Strava activity list to the user's cache file."""
-    path = _cache_path(user_id)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"fetched_at": time.time(), "activities": raw_activities}, fh)
+def _save_cache(user_info_id: int, raw_activities: List[Dict[str, Any]]) -> None:
+    """Persist the raw Strava activity list to the DB cache."""
+    with rx.session() as sess:
+        row = sess.get(DBStravaCache, user_info_id)
+        if row is None:
+            row = DBStravaCache(user_info_id=user_info_id)
+            sess.add(row)
+        row.fetched_at = time.time()
+        row.activities_json = json.dumps(raw_activities)
+        sess.commit()
 
 
-def _invalidate_cache(user_id: str) -> None:
-    """Delete the cached activity list so the next request re-fetches from Strava."""
-    path = _cache_path(user_id)
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
+def _invalidate_cache(user_info_id: int) -> None:
+    """Remove the cached activity row so the next request re-fetches from Strava."""
+    with rx.session() as sess:
+        row = sess.get(DBStravaCache, user_info_id)
+        if row is not None:
+            sess.delete(row)
+            sess.commit()
 
 
 def _fetch_all_strava(client: StravaAPI) -> List[Dict[str, Any]]:
@@ -309,7 +296,7 @@ def strava_activities(
         # Try to serve from cache
         raw_list: Optional[List[Dict[str, Any]]] = None
         if not refresh:
-            cache = _load_cache(user_id)
+            cache = _load_cache(user_info_id)
             if cache is not None:
                 raw_list = cache["activities"]
                 cached = True
@@ -318,7 +305,7 @@ def strava_activities(
         if raw_list is None:
             client = _strava_client_for_token(token_row)
             raw_list = _fetch_all_strava(client)
-            _save_cache(user_id, raw_list)
+            _save_cache(user_info_id, raw_list)
             _save_refreshed_token(sess, token_row, client)
 
     # Parse raw dicts → Activity objects
@@ -357,11 +344,21 @@ def strava_activities(
     # Determine which activity IDs are already in the project
     in_project_ids: set = set()
     if project:
-        pdir = _projects_dir(user_id)
-        proj_path = os.path.join(pdir, project + ProjectIO.EXTENSION)
-        if os.path.exists(proj_path):
-            proj = ProjectIO.load(proj_path)
-            in_project_ids = {a.id for a in proj.activities if a.id is not None}
+        with rx.session() as sess:
+            proj_row = sess.exec(
+                select(DBProject).where(
+                    DBProject.user_info_id == user_info_id,
+                    DBProject.name == project,
+                )
+            ).first()
+            if proj_row:
+                item_rows = sess.exec(
+                    select(DBProjectItem).where(
+                        DBProjectItem.project_id == proj_row.id,
+                        DBProjectItem.item_type == "activity",
+                    )
+                ).all()
+                in_project_ids = {r.activity_id for r in item_rows if r.activity_id is not None}
 
     total = len(activities)
 
@@ -391,15 +388,14 @@ def strava_activities(
 @router.get("/api/strava/cache/status")
 def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]):
     """Return metadata about the current user's activity cache."""
-    user_id = current_user["sub"]
-    path = _cache_path(user_id)
-    if not os.path.exists(path):
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        row = sess.get(DBStravaCache, user_info_id)
+    if row is None or not row.activities_json:
         return {"cached": False, "count": 0, "age_seconds": None}
     try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        age = time.time() - float(data.get("fetched_at", 0))
-        count = len(data.get("activities", []))
+        age = time.time() - row.fetched_at
+        count = len(json.loads(row.activities_json))
         return {"cached": True, "count": count, "age_seconds": round(age)}
     except Exception:
         return {"cached": False, "count": 0, "age_seconds": None}
@@ -433,7 +429,7 @@ def strava_sync(
 
         # Fetch all activities from Strava and update cache
         all_raw = _fetch_all_strava(client)
-        _save_cache(user_id, all_raw)
+        _save_cache(user_info_id, all_raw)
 
         activities = []
         for raw in all_raw:
@@ -443,14 +439,11 @@ def strava_sync(
                 pass  # skip malformed entries
 
         # Load project and merge
-        pdir = _projects_dir(user_id)
-        path = os.path.join(pdir, name + ProjectIO.EXTENSION)
-        if not os.path.exists(path):
+        project = _project_repo.get_project(sess, user_info_id, name)
+        if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-
-        project = ProjectIO.load(path)
         added = project.add_activities(activities)
-        ProjectIO.save(project, path)
+        _project_repo.save_project(sess, user_info_id, project)
 
         # Persist refreshed token if StravaAPI auto-renewed it
         _save_refreshed_token(sess, token_row, client)

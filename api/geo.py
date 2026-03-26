@@ -9,21 +9,24 @@ import os
 from typing import Annotated, Any, Dict, List
 
 import polyline as polyline_lib
+import reflex as rx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.deps import get_current_user
 from src.models.great_circle import great_circle_points
 from src.project.project_io import ProjectIO
+from src.project.project_repo import ProjectRepo
 
 router = APIRouter(prefix="/api/geo", tags=["geo"])
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+_repo = ProjectRepo()
 
 
-def _projects_dir(user_id: str) -> str:
+def _legacy_path(user_id: str, name: str) -> str:
     path = os.path.join(_DATA_DIR, "users", user_id, "projects")
     os.makedirs(path, exist_ok=True)
-    return path
+    return os.path.join(path, name + ProjectIO.EXTENSION)
 
 
 def _linestring(coords: List[List[float]], properties: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,13 +52,15 @@ def project_geo(
     Each connecting segment has properties ``{"type": "segment", ...}``.
     GeoJSON coordinates are [longitude, latitude] as per the spec.
     """
-    user_id = current_user["sub"]
-    pdir = _projects_dir(user_id)
-    path = os.path.join(pdir, name + ProjectIO.EXTENSION)
-    if not os.path.exists(path):
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+    if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    project = ProjectIO.load(path)
     features: List[Dict[str, Any]] = []
 
     for item in project.items:

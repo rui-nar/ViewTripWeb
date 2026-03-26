@@ -1,0 +1,505 @@
+"""Database repository for projects, activities, and the Strava cache.
+
+Replaces ``ProjectIO`` for the FastAPI endpoints.  ``ProjectIO`` is kept
+intact for the Reflex desktop-UI path (``app/state.py``).
+
+Public interface mirrors what the endpoints need:
+
+    repo = ProjectRepo()
+    with rx.session() as sess:
+        project = repo.get_project(sess, user_info_id, name)   # lazy-migrates if needed
+        repo.save_project(sess, user_info_id, project)
+
+All methods that write data call ``sess.commit()`` before returning.
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+from typing import List, Optional
+
+import reflex as rx
+from sqlmodel import Session, select
+
+# Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
+# before any FK resolution happens at query time.
+from app.models.user import UserInfo, StravaToken  # noqa: F401
+from app.models.project_db import DBActivity, DBProject, DBProjectItem
+from src.models.activity import Activity
+from src.models.project import (
+    ConnectingSegment,
+    Project,
+    ProjectFilterState,
+    ProjectItem,
+    SegmentEndpoint,
+)
+from src.project.project_io import ProjectIO
+
+
+class ProjectRepo:
+    """All DB operations for projects and activities."""
+
+    # ------------------------------------------------------------------
+    # Project CRUD
+    # ------------------------------------------------------------------
+
+    def list_projects(self, sess: Session, user_info_id: int) -> list[dict]:
+        """Return [{"name": …, "filename": …}] for all projects owned by user."""
+        rows = sess.exec(
+            select(DBProject)
+            .where(DBProject.user_info_id == user_info_id)
+            .order_by(DBProject.name)
+        ).all()
+        return [{"name": r.name, "filename": r.name + ProjectIO.EXTENSION} for r in rows]
+
+    def project_exists(self, sess: Session, user_info_id: int, name: str) -> bool:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        return row is not None
+
+    def get_project(
+        self,
+        sess: Session,
+        user_info_id: int,
+        name: str,
+        legacy_path: Optional[str] = None,
+    ) -> Optional[Project]:
+        """Load a project from DB.
+
+        If no DB row exists and *legacy_path* points to a ``.gettracks`` file,
+        the file is ingested into the DB first (lazy migration).
+        Returns ``None`` if neither DB row nor legacy file exists.
+        """
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+
+        if row is None:
+            if legacy_path and os.path.isfile(legacy_path):
+                self.ingest_gettracks(sess, user_info_id, legacy_path)
+                # Re-fetch after ingest
+                row = sess.exec(
+                    select(DBProject).where(
+                        DBProject.user_info_id == user_info_id,
+                        DBProject.name == name,
+                    )
+                ).first()
+            if row is None:
+                return None
+
+        return self._row_to_project(sess, row)
+
+    def create_project(self, sess: Session, user_info_id: int, name: str) -> Project:
+        """Create an empty project in the DB and return it."""
+        row = DBProject(user_info_id=user_info_id, name=name)
+        sess.add(row)
+        sess.commit()
+        return Project(name=name)
+
+    def save_project(self, sess: Session, user_info_id: int, project: Project) -> None:
+        """Persist all changes to an in-memory Project back to the DB.
+
+        This is a full replace of the project's item list and activity upserts.
+        """
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == project.name,
+            )
+        ).first()
+        if row is None:
+            row = DBProject(user_info_id=user_info_id, name=project.name)
+            sess.add(row)
+            sess.flush()
+
+        row.version = project.version
+        row.filter_state_json = json.dumps({
+            "start_date": project.filter_state.start_date,
+            "end_date": project.filter_state.end_date,
+            "activity_types": project.filter_state.activity_types,
+        })
+        row.updated_at = time.time()
+
+        # Upsert all activities in the project's activity pool
+        for act in project.activities:
+            self._upsert_activity(sess, user_info_id, act)
+
+        # Replace the full item list
+        sess.flush()  # ensure row.id is available
+        self._replace_items(sess, row.id, project.items)
+
+        sess.commit()
+
+    def delete_project(self, sess: Session, user_info_id: int, name: str) -> bool:
+        """Delete a project and its items. Activities are NOT deleted (shared).
+
+        Returns True if a project was found and deleted, False if not found.
+        """
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            return False
+
+        sess.exec(
+            select(DBProjectItem).where(DBProjectItem.project_id == row.id)
+        )
+        items = sess.exec(
+            select(DBProjectItem).where(DBProjectItem.project_id == row.id)
+        ).all()
+        for item in items:
+            sess.delete(item)
+
+        sess.delete(row)
+        sess.commit()
+        return True
+
+    # ------------------------------------------------------------------
+    # Activity enrichment (background task writes)
+    # ------------------------------------------------------------------
+
+    def update_activity_enrichment(
+        self,
+        sess: Session,
+        activity_id: int,
+        summary_polyline: Optional[str],
+        elevation_profile_json: Optional[str],
+    ) -> None:
+        """Update only the enrichment columns of an activity row."""
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return
+        if summary_polyline is not None:
+            row.summary_polyline = summary_polyline
+        if elevation_profile_json is not None:
+            row.elevation_profile_json = elevation_profile_json
+        sess.commit()
+
+    # ------------------------------------------------------------------
+    # Serialisation helpers
+    # ------------------------------------------------------------------
+
+    def to_dict(self, project: Project) -> dict:
+        """Return the project as a REST-API-ready dict (same contract as ProjectIO.to_dict)."""
+        return ProjectIO.to_dict(project)
+
+    # ------------------------------------------------------------------
+    # Legacy migration
+    # ------------------------------------------------------------------
+
+    def ingest_gettracks(
+        self, sess: Session, user_info_id: int, path: str
+    ) -> None:
+        """Parse a ``.gettracks`` file and write it into the DB.
+
+        The DB project name is derived from the **filename** (minus extension)
+        so it stays consistent with the URL slug the API has always used.
+
+        Idempotent: if the project already exists in the DB, the call is a
+        no-op.  Activity rows are upserted so enriched data is never overwritten.
+
+        After a successful ingest the file is renamed to ``*.gettracks.migrated``
+        so repeated calls are O(1) rather than re-reading the file each time.
+        """
+        # Use the filename-derived name as the DB key (matches the legacy URL slug)
+        basename = os.path.basename(path)
+        db_name = basename[: -len(ProjectIO.EXTENSION)] if basename.endswith(ProjectIO.EXTENSION) else basename
+
+        project = ProjectIO.load(path)
+
+        # Check for existing project before inserting
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == db_name,
+            )
+        ).first()
+        if row is not None:
+            # Already migrated — just rename the file and return
+            self._mark_migrated(path)
+            return
+
+        # 1. Upsert activities (do NOT overwrite enriched data if row exists)
+        for act in project.activities:
+            self._upsert_activity(sess, user_info_id, act)
+
+        # 2. Create project row (name = filename slug, version from JSON)
+        row = DBProject(
+            user_info_id=user_info_id,
+            name=db_name,
+            version=project.version,
+            filter_state_json=json.dumps({
+                "start_date": project.filter_state.start_date,
+                "end_date": project.filter_state.end_date,
+                "activity_types": project.filter_state.activity_types,
+            }),
+        )
+        sess.add(row)
+        sess.flush()  # populate row.id
+
+        # 3. Create project_item rows
+        for pos, item in enumerate(project.items):
+            db_item = DBProjectItem(
+                project_id=row.id,
+                position=pos,
+                item_type=item.item_type,
+                activity_id=item.activity_id if item.item_type == "activity" else None,
+                segment_json=(
+                    json.dumps(ProjectIO._serialise_item(item)["segment"])
+                    if item.item_type == "segment" else None
+                ),
+            )
+            sess.add(db_item)
+
+        sess.commit()
+        self._mark_migrated(path)
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _row_to_project(self, sess: Session, row: DBProject) -> Project:
+        """Reconstruct an in-memory Project from DB rows."""
+        fs_raw = json.loads(row.filter_state_json or "{}")
+        filter_state = ProjectFilterState(
+            start_date=fs_raw.get("start_date"),
+            end_date=fs_raw.get("end_date"),
+            activity_types=fs_raw.get("activity_types"),
+        )
+
+        item_rows = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == row.id)
+            .order_by(DBProjectItem.position)
+        ).all()
+
+        # Collect activity IDs needed for this project
+        activity_ids = [
+            r.activity_id for r in item_rows
+            if r.item_type == "activity" and r.activity_id is not None
+        ]
+        act_rows = (
+            sess.exec(
+                select(DBActivity).where(DBActivity.id.in_(activity_ids))
+            ).all()
+            if activity_ids else []
+        )
+        act_by_id = {r.id: self._row_to_activity(r) for r in act_rows}
+
+        items: List[ProjectItem] = []
+        activities: List[Activity] = []
+        seen_ids: set[int] = set()
+
+        for ir in item_rows:
+            if ir.item_type == "activity" and ir.activity_id is not None:
+                items.append(ProjectItem(item_type="activity", activity_id=ir.activity_id))
+                if ir.activity_id not in seen_ids:
+                    act = act_by_id.get(ir.activity_id)
+                    if act:
+                        activities.append(act)
+                        seen_ids.add(ir.activity_id)
+            else:
+                seg = self._json_to_segment(ir.segment_json or "{}")
+                items.append(ProjectItem(item_type="segment", segment=seg))
+
+        project = Project(
+            name=row.name,
+            version=row.version,
+            items=items,
+            filter_state=filter_state,
+            activities=activities,
+        )
+        project.rebuild_map()
+        return project
+
+    def _replace_items(
+        self, sess: Session, project_id: int, items: List[ProjectItem]
+    ) -> None:
+        """Delete all existing project_item rows and insert fresh ones."""
+        old_items = sess.exec(
+            select(DBProjectItem).where(DBProjectItem.project_id == project_id)
+        ).all()
+        for item in old_items:
+            sess.delete(item)
+        sess.flush()
+
+        for pos, item in enumerate(items):
+            db_item = DBProjectItem(
+                project_id=project_id,
+                position=pos,
+                item_type=item.item_type,
+                activity_id=item.activity_id if item.item_type == "activity" else None,
+                segment_json=(
+                    json.dumps(ProjectIO._serialise_item(item)["segment"])
+                    if item.item_type == "segment" else None
+                ),
+            )
+            sess.add(db_item)
+
+    def _upsert_activity(
+        self, sess: Session, user_info_id: int, act: Activity
+    ) -> None:
+        """Insert the activity row if it doesn't exist; skip if it does.
+
+        Enriched data (summary_polyline, elevation_profile) is only written
+        for new rows — existing rows may already have richer data from a
+        previous enrichment pass.
+        """
+        if act.id is None:
+            return
+        existing = sess.get(DBActivity, act.id)
+        if existing is not None:
+            # Only update mutable user-visible fields; preserve enrichment columns
+            existing.name = act.name
+            existing.kudos_count = act.kudos_count
+            existing.achievement_count = act.achievement_count
+            return
+
+        def _iso(dt) -> str:
+            if dt is None:
+                return ""
+            return dt.isoformat().replace("+00:00", "Z")
+
+        row = DBActivity(
+            id=act.id,
+            user_info_id=user_info_id,
+            name=act.name,
+            type=act.type,
+            distance=act.distance,
+            moving_time=act.moving_time,
+            elapsed_time=act.elapsed_time,
+            total_elevation_gain=act.total_elevation_gain,
+            start_date=_iso(act.start_date),
+            start_date_local=_iso(act.start_date_local),
+            timezone=act.timezone,
+            achievement_count=act.achievement_count,
+            kudos_count=act.kudos_count,
+            comment_count=act.comment_count,
+            athlete_count=act.athlete_count,
+            photo_count=act.photo_count,
+            pr_count=act.pr_count,
+            total_photo_count=act.total_photo_count,
+            trainer=act.trainer,
+            commute=act.commute,
+            manual=act.manual,
+            private=act.private,
+            flagged=act.flagged,
+            has_heartrate=act.has_heartrate,
+            has_kudoed=act.has_kudoed,
+            heartrate_opt_out=act.heartrate_opt_out,
+            display_hide_heartrate_option=act.display_hide_heartrate_option,
+            average_speed=act.average_speed,
+            max_speed=act.max_speed,
+            gear_id=act.gear_id,
+            average_heartrate=act.average_heartrate,
+            max_heartrate=act.max_heartrate,
+            elev_high=act.elev_high,
+            elev_low=act.elev_low,
+            start_latlng_json=json.dumps(act.start_latlng) if act.start_latlng else None,
+            end_latlng_json=json.dumps(act.end_latlng) if act.end_latlng else None,
+            summary_polyline=act.summary_polyline,
+            elevation_profile_json=(
+                json.dumps({
+                    "distances_km": act.elevation_profile[0],
+                    "elevations_m": act.elevation_profile[1],
+                })
+                if act.elevation_profile else None
+            ),
+        )
+        sess.add(row)
+
+    @staticmethod
+    def _row_to_activity(row: DBActivity) -> Activity:
+        """Reconstruct the domain Activity dataclass from a DB row."""
+        from datetime import datetime
+
+        def _dt(s: str) -> datetime:
+            if not s:
+                return datetime.now()
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+        return Activity(
+            id=row.id,
+            name=row.name,
+            type=row.type,
+            distance=row.distance,
+            moving_time=row.moving_time,
+            elapsed_time=row.elapsed_time,
+            total_elevation_gain=row.total_elevation_gain,
+            start_date=_dt(row.start_date),
+            start_date_local=_dt(row.start_date_local),
+            timezone=row.timezone,
+            achievement_count=row.achievement_count,
+            kudos_count=row.kudos_count,
+            comment_count=row.comment_count,
+            athlete_count=row.athlete_count,
+            photo_count=row.photo_count,
+            trainer=row.trainer,
+            commute=row.commute,
+            manual=row.manual,
+            private=row.private,
+            flagged=row.flagged,
+            average_speed=row.average_speed,
+            max_speed=row.max_speed,
+            has_heartrate=row.has_heartrate,
+            pr_count=row.pr_count,
+            total_photo_count=row.total_photo_count,
+            has_kudoed=row.has_kudoed,
+            gear_id=row.gear_id,
+            average_heartrate=row.average_heartrate,
+            max_heartrate=row.max_heartrate,
+            heartrate_opt_out=row.heartrate_opt_out,
+            display_hide_heartrate_option=row.display_hide_heartrate_option,
+            elev_high=row.elev_high,
+            elev_low=row.elev_low,
+            start_latlng=json.loads(row.start_latlng_json) if row.start_latlng_json else None,
+            end_latlng=json.loads(row.end_latlng_json) if row.end_latlng_json else None,
+            summary_polyline=row.summary_polyline,
+            elevation_profile=(
+                (
+                    ep["distances_km"],
+                    ep["elevations_m"],
+                )
+                if (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _json_to_segment(segment_json: str) -> ConnectingSegment:
+        """Deserialise a segment JSON blob back to a ConnectingSegment."""
+        sd = json.loads(segment_json) if segment_json else {}
+        return ConnectingSegment(
+            id=sd.get("id", ""),
+            segment_type=sd.get("segment_type", "flight"),
+            label=sd.get("label", ""),
+            start=SegmentEndpoint(
+                lat=sd.get("start", {}).get("lat", 0.0),
+                lon=sd.get("start", {}).get("lon", 0.0),
+                source=sd.get("start", {}).get("source", "auto"),
+            ),
+            end=SegmentEndpoint(
+                lat=sd.get("end", {}).get("lat", 0.0),
+                lon=sd.get("end", {}).get("lon", 0.0),
+                source=sd.get("end", {}).get("source", "auto"),
+            ),
+        )
+
+    @staticmethod
+    def _mark_migrated(path: str) -> None:
+        """Rename a .gettracks file to .gettracks.migrated to prevent re-ingestion."""
+        try:
+            os.rename(path, path + ".migrated")
+        except OSError:
+            pass  # not critical — ingest is idempotent anyway
