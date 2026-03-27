@@ -186,6 +186,73 @@ class ProjectRepo:
             row.elevation_profile_json = elevation_profile_json
         sess.commit()
 
+    def force_update_activity(
+        self, sess: Session, user_info_id: int, act: Activity
+    ) -> None:
+        """Overwrite ALL columns of an existing activity row (used for re-fetch).
+
+        If no row exists, inserts a new one.  Unlike ``_upsert_activity``,
+        this always overwrites enrichment columns (polyline, elevation).
+        """
+        if act.id is None:
+            return
+
+        def _iso(dt) -> str:
+            if dt is None:
+                return ""
+            return dt.isoformat().replace("+00:00", "Z")
+
+        ep_json: Optional[str] = None
+        if act.elevation_profile:
+            ep_json = json.dumps({
+                "distances_km": act.elevation_profile[0],
+                "elevations_m": act.elevation_profile[1],
+            })
+
+        existing = sess.get(DBActivity, act.id)
+        if existing is None:
+            self._upsert_activity(sess, user_info_id, act)
+            return
+
+        existing.user_info_id = user_info_id
+        existing.name = act.name
+        existing.type = act.type
+        existing.distance = act.distance
+        existing.moving_time = act.moving_time
+        existing.elapsed_time = act.elapsed_time
+        existing.total_elevation_gain = act.total_elevation_gain
+        existing.start_date = _iso(act.start_date)
+        existing.start_date_local = _iso(act.start_date_local)
+        existing.timezone = act.timezone
+        existing.achievement_count = act.achievement_count
+        existing.kudos_count = act.kudos_count
+        existing.comment_count = act.comment_count
+        existing.athlete_count = act.athlete_count
+        existing.photo_count = act.photo_count
+        existing.pr_count = act.pr_count
+        existing.total_photo_count = act.total_photo_count
+        existing.trainer = act.trainer
+        existing.commute = act.commute
+        existing.manual = act.manual
+        existing.private = act.private
+        existing.flagged = act.flagged
+        existing.has_heartrate = act.has_heartrate
+        existing.has_kudoed = act.has_kudoed
+        existing.heartrate_opt_out = act.heartrate_opt_out
+        existing.display_hide_heartrate_option = act.display_hide_heartrate_option
+        existing.average_speed = act.average_speed
+        existing.max_speed = act.max_speed
+        existing.gear_id = act.gear_id
+        existing.average_heartrate = act.average_heartrate
+        existing.max_heartrate = act.max_heartrate
+        existing.elev_high = act.elev_high
+        existing.elev_low = act.elev_low
+        existing.start_latlng_json = json.dumps(act.start_latlng) if act.start_latlng else None
+        existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
+        existing.summary_polyline = act.summary_polyline
+        existing.elevation_profile_json = ep_json
+        sess.commit()
+
     # ------------------------------------------------------------------
     # Serialisation helpers
     # ------------------------------------------------------------------

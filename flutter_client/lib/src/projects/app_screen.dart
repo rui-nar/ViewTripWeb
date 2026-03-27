@@ -659,10 +659,24 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
                             style: theme.textTheme.bodySmall,
                           ),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 18),
-                            tooltip: 'Remove from project',
-                            onPressed: () => notifier.removeItem(i),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.refresh, size: 18),
+                                tooltip: 'Re-fetch from Strava',
+                                onPressed: activityId == null
+                                    ? null
+                                    : () => notifier.refreshActivity(
+                                          activityId as int,
+                                        ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 18),
+                                tooltip: 'Remove from project',
+                                onPressed: () => notifier.removeItem(i),
+                              ),
+                            ],
                           ),
                           onTap: () => _flyToActivity(a),
                         ),

@@ -165,6 +165,10 @@ class StravaAPI:
         """Fetch list of activities."""
         return self.request("GET", "/athlete/activities", params=params)
 
+    def get_activity(self, activity_id: int) -> Dict[str, Any]:
+        """Fetch full metadata for a single activity."""
+        return self.request("GET", f"/activities/{activity_id}")
+
     def get_activity_streams(self, activity_id: int) -> Dict[str, Any]:
         """Fetch GPS streams (latlng, altitude, time, distance) for a single activity."""
         return self.request(

@@ -165,6 +165,29 @@ class ProjectNotifier extends ChangeNotifier {
 
   // ── Item management ────────────────────────────────────────────────────────
 
+  Future<void> refreshActivity(int activityId) async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      final result = await api.post(
+        '/api/projects/${Uri.encodeComponent(name)}/activities/$activityId/refresh',
+        {},
+      ) as Map<String, dynamic>;
+      final rawActivities = result['activities'];
+      activities = rawActivities is List
+          ? rawActivities.cast<Map<String, dynamic>>()
+          : [];
+      final rawItems = result['items'];
+      items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
+      _updateStats();
+      _buildFullTrack();
+      notifyListeners();
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
   Future<void> removeItem(int index) async {
     final name = projectName;
     if (name == null) return;

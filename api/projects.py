@@ -374,6 +374,78 @@ def add_activities(
     }
 
 
+# ── Single-activity refresh ────────────────────────────────────────────────────
+
+@router.post("/{name}/activities/{activity_id}/refresh")
+def refresh_activity(
+    name: str,
+    activity_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Re-fetch a single activity from Strava and update the stored data.
+
+    Fetches fresh metadata (name, distance, kudos, etc.) plus full GPS streams
+    (polyline + elevation).  Useful when the user has edited the activity on
+    Strava and wants the local copy to reflect those changes.
+
+    Returns the updated activity dict (same shape as the activities list in
+    GET /api/projects/{name}).
+    """
+    user_info_id = int(current_user["sub"])
+
+    client = _strava_client_for_user(user_info_id)
+    if client is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Strava not connected",
+        )
+
+    # 1. Fetch fresh activity metadata from Strava
+    try:
+        raw = client.get_activity(activity_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Strava fetch failed: {exc}",
+        )
+
+    act = Activity.from_strava_api(raw)
+
+    # 2. Enrich with full GPS streams (single call — check rate limit first)
+    if client.remaining_requests > 2:
+        try:
+            streams  = client.get_activity_streams(activity_id)
+            latlng   = streams.get("latlng",   {}).get("data") or []
+            altitude = streams.get("altitude", {}).get("data") or []
+            distance = streams.get("distance", {}).get("data") or []
+            if latlng:
+                act.summary_polyline = polyline_lib.encode(
+                    [(pt[0], pt[1]) for pt in latlng]
+                )
+            n = min(len(altitude), len(distance))
+            if n >= 2:
+                act.elevation_profile = (
+                    [distance[i] / 1000 for i in range(n)],
+                    [altitude[i]        for i in range(n)],
+                )
+        except Exception:
+            pass  # streams failed — still save the refreshed metadata
+
+    # 3. Overwrite the DB row (all columns, including enrichment)
+    with rx.session() as sess:
+        _repo.force_update_activity(sess, user_info_id, act)
+        # Return the updated project so the client can refresh its state
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    return _repo.to_dict(project)
+
+
 # ── Item management (delete + reorder) ────────────────────────────────────────
 
 @router.delete("/{name}/items/{index}", status_code=status.HTTP_204_NO_CONTENT)
