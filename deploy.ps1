@@ -45,6 +45,7 @@ $NAS_BASE       = "/volume2/mydev/ViewTrip"
 $HOST_PORT      = 7777
 $CONTAINER_PORT = 8000
 $FRONTEND_ORIGIN = "https://viewtrip.narciso.synology.me"
+$GOOGLE_CLIENT_ID = "544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com"
 # ──────────────────────────────────────────────────────────────────────────────
 
 function Step([string]$n, [string]$total, [string]$msg) {
@@ -109,6 +110,7 @@ VERSION="$Version"
 HOST_PORT="$HOST_PORT"
 CONTAINER_PORT="$CONTAINER_PORT"
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN"
+GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID"
 
 # ── Locate docker (not in PATH for non-interactive SSH on Synology) ────────
 DOCKER=`$(command -v docker 2>/dev/null \
@@ -168,6 +170,7 @@ echo "  Starting container..."
   -e JWT_SECRET="`$JWT_SECRET" \
   -e FRONTEND_ORIGIN="`$FRONTEND_ORIGIN" \
   -e STRAVA_REDIRECT_URI="`$FRONTEND_ORIGIN/api/strava/callback" \
+  -e GOOGLE_CLIENT_ID="`$GOOGLE_CLIENT_ID" \
   "`${IMAGE}:latest" >/dev/null
 
 # ── Health check ───────────────────────────────────────────────────────────

@@ -25,12 +25,18 @@ from models.user import LocalUser
 
 from models.user import UserInfo
 from api.deps import create_access_token, get_current_user
+import os
+
 from src.config.settings import Config
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_cfg = Config("config/config.json")
-_google_client_id = _cfg.get("google.client_id") or ""
+# Env var takes priority; fall back to config file for local dev.
+_google_client_id = (
+    os.environ.get("GOOGLE_CLIENT_ID")
+    or Config("config/config.json").get("google.client_id")
+    or ""
+)
 
 
 # ── Request / response schemas ────────────────────────────────────────────────
