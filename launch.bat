@@ -35,7 +35,7 @@ for %%D in (
 
 REM ── Start Flutter web client ──────────────────────────────────────────────
 echo Starting Flutter web client on port 5500...
-start "ViewTrip Flutter" cmd /k "cd flutter_client && %FLUTTER_CMD% run -d chrome --web-port 5500"
+start "ViewTrip Flutter" cmd /k "cd flutter_client && %FLUTTER_CMD% run -d chrome --web-port 5500 --dart-define=API_BASE_URL=http://localhost:8000"
 
 echo.
 echo  API:     http://localhost:8000

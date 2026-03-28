@@ -1,6 +1,9 @@
 """Combines all REST API sub-routers into a single FastAPI app."""
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from api.auth import router as auth_router
 from api.geo import router as geo_router
@@ -27,3 +30,15 @@ app.include_router(geo_router)
 app.include_router(projects_router)
 app.include_router(share_router)
 app.include_router(strava_router)
+
+# ── Flutter web SPA — must be registered last so /api/... routes take priority ─
+_web_dir = os.path.join(os.path.dirname(__file__), "..", "web_client")
+
+if os.path.isdir(_web_dir):
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """Serve the Flutter web build; fall back to index.html for SPA routing."""
+        candidate = os.path.join(_web_dir, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_web_dir, "index.html"))

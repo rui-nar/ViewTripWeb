@@ -72,20 +72,30 @@ Write-Host "  → $IMAGE" -ForegroundColor Green
 Write-Host "  → ${NAS_HOST}:${HOST_PORT}" -ForegroundColor Green
 Write-Host "═══════════════════════════════════════════" -ForegroundColor Green
 
-# ── 1. Build ──────────────────────────────────────────────────────────────────
-Step 1 3 "Building Docker image..."
-docker build -t "${IMAGE}:${Version}" -t "${IMAGE}:latest" .
-if ($LASTEXITCODE -ne 0) { Die "docker build failed." }
+# ── 1. Build Flutter web ──────────────────────────────────────────────────────
+Step 1 4 "Building Flutter web..."
+Push-Location flutter_client
+flutter build web --release
+if ($LASTEXITCODE -ne 0) { Pop-Location; Die "Flutter build failed." }
+Pop-Location
+if (Test-Path web_client) { Remove-Item -Recurse -Force web_client }
+Copy-Item -Recurse flutter_client/build/web web_client
+Write-Host "  Flutter web build ready in web_client/"
 
-# ── 2. Push to GHCR ───────────────────────────────────────────────────────────
-Step 2 3 "Pushing to GHCR..."
+# ── 2. Build Docker image ──────────────────────────────────────────────────────
+Step 2 4 "Building Docker image..."
+docker build -t "${IMAGE}:${Version}" -t "${IMAGE}:latest" .
+if ($LASTEXITCODE -ne 0) { Die "Docker build failed." }
+
+# ── 3. Push to GHCR ───────────────────────────────────────────────────────────
+Step 3 4 "Pushing to GHCR..."
 docker push "${IMAGE}:${Version}"
 if ($LASTEXITCODE -ne 0) { Die "docker push ${Version} failed." }
 docker push "${IMAGE}:latest"
 if ($LASTEXITCODE -ne 0) { Die "docker push latest failed." }
 
-# ── 3. Deploy on NAS ──────────────────────────────────────────────────────────
-Step 3 3 "Deploying on NAS ($NAS_HOST)..."
+# ── 4. Deploy on NAS ──────────────────────────────────────────────────────────
+Step 4 4 "Deploying on NAS ($NAS_HOST)..."
 
 # Build the remote bash script as a here-string.
 # PowerShell expands $NAS_BASE/$IMAGE/$Version etc. (our local vars).

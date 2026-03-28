@@ -7,11 +7,15 @@ library;
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+// Empty string → relative URLs (same origin, production).
+// Override at build time: --dart-define=API_BASE_URL=http://localhost:8000
+const _kApiBaseUrl = String.fromEnvironment('API_BASE_URL');
+
 class ApiClient {
   final String baseUrl;
   String? _token;
 
-  ApiClient({this.baseUrl = 'http://localhost:8000'});
+  ApiClient({this.baseUrl = _kApiBaseUrl});
 
   void setToken(String token) => _token = token;
   void clearToken() => _token = null;
