@@ -11,4 +11,7 @@ COPY web_client/ /app/web_client/
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api.router:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run migrations then start the server
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+CMD ["/entrypoint.sh"]
