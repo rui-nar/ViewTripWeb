@@ -100,13 +100,24 @@ HOST_PORT="$HOST_PORT"
 CONTAINER_PORT="$CONTAINER_PORT"
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN"
 
+# ── Locate docker (not in PATH for non-interactive SSH on Synology) ────────
+DOCKER=`$(command -v docker 2>/dev/null \
+  || ls /var/packages/ContainerManager/target/usr/bin/docker \
+         /var/packages/Docker/target/usr/bin/docker \
+         /usr/local/bin/docker 2>/dev/null | head -1 \
+  || true)
+if [ -z "`$DOCKER" ]; then
+    echo "ERROR: docker not found on NAS. Is Container Manager installed?" >&2
+    exit 1
+fi
+
 # ── Directories ────────────────────────────────────────────────────────────
 mkdir -p "`$BASE/db" "`$BASE/config" "`$BASE/data" "`$BASE/secrets"
 
 # ── GHCR login (reads stored PAT if present) ───────────────────────────────
 if [ -f "`$BASE/secrets/ghcr_token" ]; then
     echo "  Logging in to GHCR..."
-    cat "`$BASE/secrets/ghcr_token" | docker login ghcr.io -u rui-nar --password-stdin
+    cat "`$BASE/secrets/ghcr_token" | `$DOCKER login ghcr.io -u rui-nar --password-stdin
 fi
 
 # ── Generate JWT secret on first deploy ────────────────────────────────────
@@ -124,19 +135,19 @@ JWT_SECRET=`$(cat "`$BASE/secrets/jwt_secret")
 
 # ── Pull new image ─────────────────────────────────────────────────────────
 echo "  Pulling `${IMAGE}:`${VERSION} ..."
-docker pull "`${IMAGE}:`${VERSION}"
-docker tag  "`${IMAGE}:`${VERSION}" "`${IMAGE}:latest"
+`$DOCKER pull "`${IMAGE}:`${VERSION}"
+`$DOCKER tag  "`${IMAGE}:`${VERSION}" "`${IMAGE}:latest"
 
 # ── Stop and remove existing container ────────────────────────────────────
-if docker ps -a --format '{{.Names}}' | grep -q '^viewtripweb`$'; then
+if `$DOCKER ps -a --format '{{.Names}}' | grep -q '^viewtripweb`$'; then
     echo "  Stopping existing container..."
-    docker stop viewtripweb >/dev/null
-    docker rm   viewtripweb >/dev/null
+    `$DOCKER stop viewtripweb >/dev/null
+    `$DOCKER rm   viewtripweb >/dev/null
 fi
 
 # ── Start new container ────────────────────────────────────────────────────
 echo "  Starting container..."
-docker run -d \
+`$DOCKER run -d \
   --name viewtripweb \
   --restart unless-stopped \
   -p "`${HOST_PORT}:`${CONTAINER_PORT}" \
@@ -152,12 +163,12 @@ docker run -d \
 # ── Health check ───────────────────────────────────────────────────────────
 sleep 2
 echo ""
-docker ps --filter name=viewtripweb --format "  container : {{.Names}}"
-docker ps --filter name=viewtripweb --format "  status    : {{.Status}}"
-docker ps --filter name=viewtripweb --format "  ports     : {{.Ports}}"
+`$DOCKER ps --filter name=viewtripweb --format "  container : {{.Names}}"
+`$DOCKER ps --filter name=viewtripweb --format "  status    : {{.Status}}"
+`$DOCKER ps --filter name=viewtripweb --format "  ports     : {{.Ports}}"
 
 # ── Remove dangling images to free disk space ──────────────────────────────
-docker image prune -f >/dev/null 2>&1 || true
+`$DOCKER image prune -f >/dev/null 2>&1 || true
 
 echo ""
 echo "  Done."
