@@ -139,7 +139,8 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
     return Dialog(
       insetPadding: const EdgeInsets.all(16),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 700, maxHeight: 540),
+        constraints: const BoxConstraints(
+            minWidth: 320, maxWidth: 700, maxHeight: 540),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [

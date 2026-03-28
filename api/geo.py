@@ -9,7 +9,7 @@ import os
 from typing import Annotated, Any, Dict, List
 
 import polyline as polyline_lib
-import reflex as rx
+from models.db import get_session
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.deps import get_current_user
@@ -53,7 +53,7 @@ def project_geo(
     GeoJSON coordinates are [longitude, latitude] as per the spec.
     """
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),

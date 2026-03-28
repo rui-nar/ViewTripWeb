@@ -21,11 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
 from sqlmodel import select
 
-import reflex as rx
+from models.db import get_session
 
 from api.deps import get_current_user
-from app.models.project_db import DBProject, DBProjectItem, DBStravaCache
-from app.models.user import StravaToken, UserInfo
+from models.project_db import DBProject, DBProjectItem, DBStravaCache
+from models.user import StravaToken, UserInfo
 from src.api.strava_client import StravaAPI
 from src.auth.oauth import OAuth2Session
 from src.config.settings import Config
@@ -57,7 +57,7 @@ _CACHE_TTL = int(os.environ.get("STRAVA_CACHE_TTL", 3600))
 
 def _load_cache(user_info_id: int) -> Dict[str, Any] | None:
     """Return the cached payload if it exists and is within TTL, else None."""
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.get(DBStravaCache, user_info_id)
     if row is None:
         return None
@@ -72,7 +72,7 @@ def _load_cache(user_info_id: int) -> Dict[str, Any] | None:
 
 def _save_cache(user_info_id: int, raw_activities: List[Dict[str, Any]]) -> None:
     """Persist the raw Strava activity list to the DB cache."""
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.get(DBStravaCache, user_info_id)
         if row is None:
             row = DBStravaCache(user_info_id=user_info_id)
@@ -84,7 +84,7 @@ def _save_cache(user_info_id: int, raw_activities: List[Dict[str, Any]]) -> None
 
 def _invalidate_cache(user_info_id: int) -> None:
     """Remove the cached activity row so the next request re-fetches from Strava."""
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.get(DBStravaCache, user_info_id)
         if row is not None:
             sess.delete(row)
@@ -144,12 +144,12 @@ def strava_connect(current_user: Annotated[dict, Depends(get_current_user)]):
             detail="Strava not configured (missing client_id/secret in config.json)",
         )
     from api.deps import create_access_token
-    from app.models.user import UserInfo
+    from models.user import UserInfo
     from sqlmodel import select
 
     # Pass the JWT as state so the callback can identify the user without a session cookie
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         user_info = sess.exec(
             select(UserInfo).where(UserInfo.id == user_info_id)
         ).first()
@@ -204,7 +204,7 @@ def strava_callback(
             f"{_FRONTEND_ORIGIN}/?strava=error&reason={str(exc)[:80]}"
         )
 
-    with rx.session() as sess:
+    with get_session() as sess:
         existing = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -230,7 +230,7 @@ def strava_callback(
 def strava_status(current_user: Annotated[dict, Depends(get_current_user)]):
     """Return whether the current user has connected their Strava account."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -241,7 +241,7 @@ def strava_status(current_user: Annotated[dict, Depends(get_current_user)]):
 def strava_disconnect(current_user: Annotated[dict, Depends(get_current_user)]):
     """Remove the stored Strava token for the current user."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -283,7 +283,7 @@ def strava_activities(
     user_id = current_user["sub"]
 
     cached = False
-    with rx.session() as sess:
+    with get_session() as sess:
         token_row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -344,7 +344,7 @@ def strava_activities(
     # Determine which activity IDs are already in the project
     in_project_ids: set = set()
     if project:
-        with rx.session() as sess:
+        with get_session() as sess:
             proj_row = sess.exec(
                 select(DBProject).where(
                     DBProject.user_info_id == user_info_id,
@@ -389,7 +389,7 @@ def strava_activities(
 def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]):
     """Return metadata about the current user's activity cache."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.get(DBStravaCache, user_info_id)
     if row is None or not row.activities_json:
         return {"cached": False, "count": 0, "age_seconds": None}
@@ -415,7 +415,7 @@ def strava_sync(
     user_info_id = int(current_user["sub"])
     user_id = current_user["sub"]
 
-    with rx.session() as sess:
+    with get_session() as sess:
         token_row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()

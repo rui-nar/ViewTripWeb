@@ -1,12 +1,11 @@
 """Database repository for projects, activities, and the Strava cache.
 
-Replaces ``ProjectIO`` for the FastAPI endpoints.  ``ProjectIO`` is kept
-intact for the Reflex desktop-UI path (``app/state.py``).
+Replaces ``ProjectIO`` for the FastAPI endpoints.
 
 Public interface mirrors what the endpoints need:
 
     repo = ProjectRepo()
-    with rx.session() as sess:
+    with get_session() as sess:
         project = repo.get_project(sess, user_info_id, name)   # lazy-migrates if needed
         repo.save_project(sess, user_info_id, project)
 
@@ -19,13 +18,13 @@ import os
 import time
 from typing import List, Optional
 
-import reflex as rx
+from models.db import get_session
 from sqlmodel import Session, select
 
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
-from app.models.user import UserInfo, StravaToken  # noqa: F401
-from app.models.project_db import DBActivity, DBProject, DBProjectItem
+from models.user import UserInfo, StravaToken  # noqa: F401
+from models.project_db import DBActivity, DBProject, DBProjectItem
 from src.models.activity import Activity
 from src.models.project import (
     ConnectingSegment,

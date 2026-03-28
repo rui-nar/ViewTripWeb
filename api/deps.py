@@ -17,9 +17,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import select
 
-import reflex as rx
-from reflex_local_auth.user import LocalUser
-from app.models.user import UserInfo
+from models.user import UserInfo
 
 # Secret key — set JWT_SECRET in your environment or config.
 # For local dev a fallback is used; in production always set the env var.

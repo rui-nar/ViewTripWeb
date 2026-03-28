@@ -17,10 +17,8 @@ if config.config_file_name is not None:
 # Import all SQLModel table models so they register with the shared metadata
 # before autogenerate inspects it.
 import sqlmodel  # noqa: F401
-from reflex_local_auth import LocalUser  # noqa: F401
-from reflex_local_auth.local_auth import LocalAuthSession  # noqa: F401
-from app.models.user import StravaToken, UserInfo  # noqa: F401
-from app.models.project_db import (  # noqa: F401
+from models.user import LocalUser, StravaToken, UserInfo  # noqa: F401
+from models.project_db import (  # noqa: F401
     DBActivity,
     DBProject,
     DBProjectItem,

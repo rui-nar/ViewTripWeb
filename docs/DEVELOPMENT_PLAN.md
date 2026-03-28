@@ -4,7 +4,7 @@
 
 ViewTripWeb is a self-hostable web application to assemble multi-sport GPS journey files from Strava activities, with connecting transport segments, elevation profiles, and GPX export.
 
-**Stack**: Flutter Web (frontend) · Reflex/FastAPI (backend) · SQLite · Strava API
+**Stack**: Flutter Web / Android / iOS (frontend) · FastAPI (backend) · SQLite · Strava API
 
 ---
 
@@ -26,8 +26,8 @@ ViewTripWeb is a self-hostable web application to assemble multi-sport GPS journ
 - Strava status card on projects screen
 
 ### v0.7.0 — Strava Import Screen + Activity/Segment CRUD
-- **Bug fix**: blank map tracks for activities without `summary_polyline` (straight-line fallback)
-- **Elevation chart**: moved to right side below map (wide layout)
+- Bug fix: blank map tracks for activities without `summary_polyline` (straight-line fallback)
+- Elevation chart moved to right side below map (wide layout)
 - `GET /api/strava/activities` with date/type filters + `in_project` flag
 - `POST /api/projects/{name}/activities` — add selected activities
 - `DELETE /api/projects/{name}/items/{index}` — remove item
@@ -36,7 +36,28 @@ ViewTripWeb is a self-hostable web application to assemble multi-sport GPS journ
 - Flutter: `StravaImportScreen` with date range, type chips, multi-select
 - Flutter: `SegmentDialog` (Flight/Train/Bus/Boat, auto-populates from adjacent activities)
 - Flutter: `ReorderableListView` for activity panel
-- Flutter: delete buttons per item; "Add connecting segment" button
+- Share links: generate public read-only project URLs
+- Force re-fetch individual Strava activity
+
+### v0.8.0 — Reflex Removal + Performance + Bug Fixes
+- **Backend rewrite**: removed Reflex entirely; pure FastAPI + uvicorn
+  - Own `LocalUser` model (bcrypt, no reflex_local_auth dependency)
+  - Own `get_session()` context manager (SQLModel Session, no rx.session())
+  - JWT-only auth (no cookie sessions / LocalAuthSession)
+  - All Reflex/reflex_local_auth imports removed from api/, alembic/, models/
+  - Updated requirements: removed reflex, reflex-local-auth, reflex-google-auth, passlib; added sqlmodel, alembic, bcrypt, google-auth explicitly
+  - Simplified Dockerfile: no Node.js, no Reflex frontend build — just uvicorn
+  - Updated docker-compose.yml: one port (8000), persistent SQLite volume
+- **Elevation chart cursor**: orange dot on map now correctly tracks hover/click on elevation chart
+  - Root cause: Dart polyline decoder incompatible with Python `polyline` lib encoding
+  - Fix: use GeoJSON coordinates (already decoded server-side) instead of re-decoding polyline in Dart
+- **Elevation chart performance**: LTTB downsampling (300 points) gives ~56× speedup
+  - Pre-built per-activity tracks in `ProjectNotifier` (one pass, no repeated allocation)
+  - Min/max computed before downsampling; track lookup uses direct index pairing
+- **Segment dialog auto-populate**: "Add connecting segment after" button on each activity tile
+  - Start = `end_latlng` of that activity (was already working)
+  - End = `start_latlng` of the following activity (now correctly wired via per-item `insertAfterIndex`)
+- **Layout fix**: `LocationPickerDialog` `ElevatedButton` infinite-width crash on Flutter web
 
 ---
 
@@ -54,7 +75,7 @@ Backend (`api/projects.py`):
 
 Flutter:
 - Export button in AppBar
-- Download response as `{project_name}.gpx` via `dart:html` anchor trick (web)
+- Download response as `{project_name}.gpx` via `dart:html` anchor trick (web) / file save (mobile)
 
 ### Upcoming
 
@@ -66,16 +87,10 @@ Flutter:
 - Infinite scroll or "Load more" on Strava import screen (currently 100/page max)
 
 #### Map Interaction
-- Click on map to pick coordinates for segment start/end (instead of typing lat/lon)
 - Hover/tap a track to highlight the corresponding item in the list
 
-#### Segment Arc Preview
-- Show the great-circle arc on the map while editing a segment in the dialog
-
 #### Settings Screen
-- Manage Strava connection
-- Set default date range for import
-- Theme selection
+- Extend settings with default date range for import, theme selection
 
 #### Deployment Improvements
 - Postgres support (switch SQLModel DB URL)
@@ -89,5 +104,5 @@ Flutter:
 - **Ask before moving to the next phase** — confirm scope before starting new work
 - **Commit at logical checkpoints** — one commit per feature/fix, clear messages
 - **Backend first** — implement and verify API endpoints before wiring Flutter
-- **No orphan code** — remove or update any file that references the old desktop app
+- **No orphan code** — remove any file that references old dependencies
 - **Keep docs in sync** — update this plan, architecture.md, and features.md when shipping

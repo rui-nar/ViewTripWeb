@@ -27,7 +27,7 @@ from typing import Annotated, Any, Dict, List, Optional
 import gpxpy
 import gpxpy.gpx
 import polyline as polyline_lib
-import reflex as rx
+from models.db import get_session
 from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
@@ -35,8 +35,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
-from app.models.project_db import DBProject
-from app.models.user import StravaToken
+from models.project_db import DBProject
+from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
 from src.models.activity import Activity
@@ -67,7 +67,7 @@ def _legacy_path(user_id: str, name: str) -> str:
 
 def _strava_client_for_user(user_info_id: int) -> Optional[StravaAPI]:
     """Return a StravaAPI instance for the given user, or None if not connected."""
-    with rx.session() as sess:
+    with get_session() as sess:
         token_row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -150,7 +150,7 @@ def _enrich_pending_background(
                 })
 
             if polyline_str or ep_json:
-                with rx.session() as sess:
+                with get_session() as sess:
                     _repo.update_activity_enrichment(
                         sess, activity_id, polyline_str, ep_json
                     )
@@ -163,7 +163,7 @@ def _enrich_pending_background(
 @router.get("/")
 def list_projects(current_user: Annotated[dict, Depends(get_current_user)]):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         return _repo.list_projects(sess, user_info_id)
 
 
@@ -178,7 +178,7 @@ def create_project(
 ):
     user_info_id = int(current_user["sub"])
     name = body.name.strip() or "My Trip"
-    with rx.session() as sess:
+    with get_session() as sess:
         if _repo.project_exists(sess, user_info_id, name):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -194,7 +194,7 @@ def get_project(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -210,7 +210,7 @@ def delete_project(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         found = _repo.delete_project(sess, user_info_id, name)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -236,7 +236,7 @@ async def import_project(
         fh.write(contents)
 
     name = fname[: -len(ProjectIO.EXTENSION)]
-    with rx.session() as sess:
+    with get_session() as sess:
         _repo.ingest_gettracks(sess, user_info_id, tmp_path)
 
     return {"name": name, "filename": fname}
@@ -255,7 +255,7 @@ def export_project_gpx(
 ):
     """Build and stream the project as a GPX file."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -352,7 +352,7 @@ def add_activities(
     if client is not None:
         pending = _enrich_activities(activities, client)
 
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -433,7 +433,7 @@ def refresh_activity(
             pass  # streams failed — still save the refreshed metadata
 
     # 3. Overwrite the DB row (all columns, including enrichment)
-    with rx.session() as sess:
+    with get_session() as sess:
         _repo.force_update_activity(sess, user_info_id, act)
         # Return the updated project so the client can refresh its state
         project = _repo.get_project(
@@ -456,7 +456,7 @@ def delete_item(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -481,7 +481,7 @@ def reorder_items(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -521,7 +521,7 @@ def create_segment(
     )
     item = ProjectItem(item_type="segment", segment=seg)
 
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -544,7 +544,7 @@ def update_segment(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -569,7 +569,7 @@ def delete_segment(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
@@ -595,7 +595,7 @@ def create_share_link(
 ):
     """Generate (or return existing) share token for public read-only access."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(
                 DBProject.user_info_id == user_info_id,
@@ -618,7 +618,7 @@ def revoke_share_link(
 ):
     """Revoke the share token — the project becomes private again."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(
                 DBProject.user_info_id == user_info_id,

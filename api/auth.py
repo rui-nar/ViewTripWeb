@@ -20,10 +20,10 @@ from google.oauth2.id_token import verify_oauth2_token
 from pydantic import BaseModel
 from sqlmodel import select
 
-import reflex as rx
-from reflex_local_auth.user import LocalUser
+from models.db import get_session
+from models.user import LocalUser
 
-from app.models.user import UserInfo
+from models.user import UserInfo
 from api.deps import create_access_token, get_current_user
 from src.config.settings import Config
 
@@ -86,7 +86,7 @@ def _token_response(user_info: UserInfo) -> TokenResponse:
 @router.post("/token", response_model=TokenResponse)
 def login(body: TokenRequest):
     """Email + password login — returns a JWT."""
-    with rx.session() as sess:
+    with get_session() as sess:
         user = sess.exec(
             select(LocalUser).where(LocalUser.username == body.username)
         ).first()
@@ -113,7 +113,7 @@ def login(body: TokenRequest):
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(body: RegisterRequest):
     """Create a new local account — returns a JWT."""
-    with rx.session() as sess:
+    with get_session() as sess:
         existing = sess.exec(
             select(LocalUser).where(LocalUser.username == body.username)
         ).first()
@@ -165,7 +165,7 @@ def google_login(body: GoogleTokenRequest):
     name = id_info.get("name", "") or email.split("@")[0]
     picture = id_info.get("picture", "")
 
-    with rx.session() as sess:
+    with get_session() as sess:
         user_info = sess.exec(
             select(UserInfo).where(UserInfo.google_sub == google_sub)
         ).first()
@@ -207,7 +207,7 @@ def update_me(
 ):
     """Update display name and return a refreshed JWT."""
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         user_info = sess.get(UserInfo, user_info_id)
         if user_info is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -230,7 +230,7 @@ def change_password(
             detail="Password change is only available for email accounts",
         )
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         user_info = sess.get(UserInfo, user_info_id)
         if user_info is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -251,12 +251,11 @@ def change_password(
 @router.delete("/me")
 def delete_account(current_user: Annotated[dict, Depends(get_current_user)]):
     """Delete the current user's account and all associated data."""
-    from app.models.project_db import DBActivity, DBProject, DBProjectItem, DBStravaCache
-    from app.models.user import StravaToken
-    from reflex_local_auth.local_auth import LocalAuthSession
+    from models.project_db import DBActivity, DBProject, DBProjectItem, DBStravaCache
+    from models.user import StravaToken
 
     user_info_id = int(current_user["sub"])
-    with rx.session() as sess:
+    with get_session() as sess:
         user_info = sess.get(UserInfo, user_info_id)
         if user_info is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -291,15 +290,6 @@ def delete_account(current_user: Annotated[dict, Depends(get_current_user)]):
         ).first()
         if token:
             sess.delete(token)
-
-        # Delete LocalAuthSession rows (Reflex session tokens)
-        if user_info.local_auth_id:
-            for s in sess.exec(
-                select(LocalAuthSession).where(
-                    LocalAuthSession.user_id == user_info.local_auth_id
-                )
-            ).all():
-                sess.delete(s)
 
         # Delete UserInfo then LocalUser
         local_auth_id = user_info.local_auth_id

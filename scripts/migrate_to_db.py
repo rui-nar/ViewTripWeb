@@ -17,15 +17,12 @@ import sys
 # Ensure repo root is on sys.path so imports resolve correctly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import reflex as rx  # noqa: E402  (must come after sys.path tweak)
-
 # Import all SQLModel table models so SQLAlchemy's FK resolution works
-from reflex_local_auth import LocalUser  # noqa: F401, E402
-from reflex_local_auth.local_auth import LocalAuthSession  # noqa: F401, E402
-from app.models.user import StravaToken, UserInfo  # noqa: F401, E402
-from app.models.project_db import (  # noqa: F401, E402
+from models.user import LocalUser, StravaToken, UserInfo  # noqa: F401, E402
+from models.project_db import (  # noqa: F401, E402
     DBActivity, DBProject, DBProjectItem, DBStravaCache,
 )
+from models.db import get_session  # noqa: E402
 from src.project.project_repo import ProjectRepo  # noqa: E402
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -66,7 +63,7 @@ def main() -> None:
     for user_info_id, path in files:
         name = os.path.basename(path)[: -len(_EXTENSION)]
         try:
-            with rx.session() as sess:
+            with get_session() as sess:
                 repo.ingest_gettracks(sess, user_info_id, path)
             print(f"  OK  user {user_info_id} / {name}")
             ok += 1

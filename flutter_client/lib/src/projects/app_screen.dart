@@ -786,6 +786,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
+                                icon: const Icon(Icons.add_road, size: 18),
+                                tooltip: 'Add connecting segment after',
+                                onPressed: () => _showSegmentDialog(
+                                  context,
+                                  notifier,
+                                  insertAfterIndex: i,
+                                ),
+                              ),
+                              IconButton(
                                 icon: const Icon(Icons.refresh, size: 18),
                                 tooltip: 'Re-fetch from Strava',
                                 onPressed: activityId == null

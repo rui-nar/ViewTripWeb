@@ -2,9 +2,9 @@
 
 > Build multi-sport GPS journey files from your Strava activities — with connecting transport segments, elevation profiles, and one-click GPX export.
 
-A self-hostable web application. Authenticate with Google, connect Strava, and assemble your trips from activities with flight/train/bus/boat connecting segments.
+A self-hostable web application. Authenticate with Google or email/password, connect Strava, and assemble your trips from activities with flight/train/bus/boat connecting segments.
 
-**Current release: v0.7.0** · Self-hosted via Docker · Flutter web frontend + Python/Reflex backend
+**Current release: v0.8.0** · Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend
 
 ---
 
@@ -12,10 +12,10 @@ A self-hostable web application. Authenticate with Google, connect Strava, and a
 
 | Layer | Technology |
 |---|---|
-| Frontend | Flutter Web |
-| Backend | Reflex (FastAPI) · Python 3.11 |
+| Frontend | Flutter Web / Android / iOS |
+| Backend | FastAPI · Python 3.11 |
 | Database | SQLite via SQLModel / Alembic |
-| Auth | Google OAuth (Reflex) + JWT |
+| Auth | Google OAuth + local email/password · JWT (PyJWT) |
 | Strava | OAuth 2.0 · per-user token storage in DB |
 | Maps | flutter_map (OpenStreetMap) |
 
@@ -27,13 +27,13 @@ A self-hostable web application. Authenticate with Google, connect Strava, and a
 # 1. Create your config
 mkdir -p config
 cp config/config.example.json config/config.json
-# Edit config.json — add your Strava client_id and client_secret
+# Edit config.json — add your Strava + Google credentials
 
 # 2. Run
 docker compose up -d
 ```
 
-The Flutter app is served at `http://localhost:5500` and the backend API at `http://localhost:8000`.
+The API is available at `http://localhost:8000`. Point the Flutter app at that origin.
 
 ---
 
@@ -47,8 +47,8 @@ python -m venv .venv
 # source .venv/bin/activate     # Linux/macOS
 
 pip install -r requirements-web.txt
-reflex db migrate
-reflex run
+alembic upgrade head
+uvicorn api.router:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Backend API available at `http://localhost:8000/api/...`.
@@ -61,6 +61,8 @@ flutter pub get
 flutter run -d chrome --web-port 5500
 ```
 
+Or use `launch.bat` (Windows) which starts both together.
+
 ---
 
 ## Configuration
@@ -72,16 +74,33 @@ flutter run -d chrome --web-port 5500
     "client_id": "YOUR_CLIENT_ID",
     "client_secret": "YOUR_CLIENT_SECRET",
     "redirect_uri": "http://localhost:8000/api/strava/callback"
+  },
+  "google": {
+    "client_id": "YOUR_GOOGLE_CLIENT_ID"
   }
 }
 ```
 
-Register a Strava application at <https://www.strava.com/settings/api>.
-Set the **Authorization Callback Domain** to your server's hostname.
+- Register a Strava application at <https://www.strava.com/settings/api>. Set the **Authorization Callback Domain** to your server's hostname.
+- Register a Google OAuth app at <https://console.developers.google.com>. Add your origin to the allowed origins.
 
 ---
 
 ## API Reference
+
+### Auth
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/auth/token` | Email + password login → JWT |
+| POST | `/api/auth/register` | Create local account → JWT |
+| POST | `/api/auth/google` | Google id_token → JWT |
+| GET | `/api/auth/me` | Current user profile |
+| PUT | `/api/auth/me` | Update display name |
+| POST | `/api/auth/change-password` | Change password (local accounts) |
+| DELETE | `/api/auth/me` | Delete account + all data |
+
+### Projects
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -96,6 +115,11 @@ Set the **Authorization Callback Domain** to your server's hostname.
 | POST | `/api/projects/{name}/segments` | Create connecting segment |
 | PUT | `/api/projects/{name}/segments/{id}` | Update segment |
 | DELETE | `/api/projects/{name}/segments/{id}` | Delete segment |
+
+### Geo / Strava
+
+| Method | Endpoint | Description |
+|---|---|---|
 | GET | `/api/geo/project?name=` | GeoJSON FeatureCollection for map |
 | GET | `/api/strava/connect` | Get Strava OAuth URL |
 | GET | `/api/strava/callback` | OAuth redirect handler |

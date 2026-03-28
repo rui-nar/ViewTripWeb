@@ -2,8 +2,8 @@
 
 ## Current Status
 
-**Release**: v0.7.0
-**Stack**: Flutter Web (frontend) + Reflex/FastAPI (backend) + SQLite
+**Release**: v0.8.0
+**Stack**: Flutter Web / Android / iOS (frontend) + FastAPI (backend) + SQLite
 
 ---
 
@@ -11,13 +11,13 @@
 
 | Layer | Technology |
 |---|---|
-| Frontend | Flutter Web — Dart, flutter_map, provider, go_router |
-| Backend | Python 3.11, Reflex (FastAPI wrapper), SQLModel |
-| Database | SQLite (managed by Reflex/Alembic) |
-| Auth | Google OAuth via Reflex + JWT (PyJWT) for API calls |
+| Frontend | Flutter — Dart, flutter_map, provider, go_router |
+| Backend | Python 3.11, FastAPI, SQLModel |
+| Database | SQLite (managed by Alembic) |
+| Auth | Google OAuth + local email/password · JWT (PyJWT, HS256) |
 | Strava | OAuth 2.0, per-user token in `StravaToken` DB table |
 | Maps | flutter_map + OpenStreetMap tiles |
-| Charts | fl_chart (elevation profile) |
+| Charts | fl_chart (elevation profile, LTTB downsampled) |
 
 ---
 
@@ -25,28 +25,32 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Browser                                                │
+│  Browser / Mobile                                       │
 │                                                         │
 │  ┌─────────────────────────┐                            │
-│  │   Flutter Web App       │                            │
-│  │   (compiled Dart/JS)    │                            │
+│  │   Flutter App           │                            │
+│  │   (Web / Android / iOS) │                            │
 │  │                         │                            │
 │  │  Screens:               │   HTTP + JWT Bearer        │
 │  │  - Login / Register     │ ──────────────────────►    │
 │  │  - Projects list        │                        ┌───┴──────────────────┐
-│  │  - App screen           │ ◄──────────────────── │  Reflex + FastAPI     │
+│  │  - App screen           │ ◄──────────────────── │  FastAPI              │
 │  │  - Strava import        │   JSON responses       │  Python 3.11         │
 │  └─────────────────────────┘                        │                      │
 │                                                      │  Routers:            │
+│                                                      │  /api/auth/          │
 │                                                      │  /api/projects/      │
 │                                                      │  /api/geo/           │
 │                                                      │  /api/strava/        │
-│                                                      │  /api/auth/          │
+│                                                      │  /api/share/         │
 │                                                      │                      │
 │                                                      │  ┌────────────────┐  │
 │                                                      │  │   SQLite DB     │  │
+│                                                      │  │  LocalUser      │  │
 │                                                      │  │  UserInfo       │  │
 │                                                      │  │  StravaToken    │  │
+│                                                      │  │  DBProject      │  │
+│                                                      │  │  DBActivity     │  │
 │                                                      │  └────────────────┘  │
 │                                                      │                      │
 │                                                      │  data/users/*/       │
@@ -61,11 +65,15 @@
 
 ### 1. Authentication (`api/auth.py`, `api/deps.py`)
 
-- Google OAuth handled by Reflex's `reflex-google-auth`
-- On successful Google login, `UserInfo` row is created/fetched
-- `create_access_token(user_info)` → signed JWT (PyJWT, HS256)
-- All API endpoints require `Authorization: Bearer <jwt>` via `get_current_user()` dependency
-- Strava OAuth: user identity passed as JWT in OAuth `state` param so stateless callback can resolve the user
+Two auth providers, both issuing a JWT on success:
+
+- **Local**: `POST /api/auth/token` — username + bcrypt password verification against `LocalUser` table
+- **Google**: `POST /api/auth/google` — verifies Google `id_token` via `google-auth` library; creates shadow `LocalUser` + `UserInfo` on first login
+
+`create_access_token(user_info)` → signed JWT (PyJWT, HS256, 7-day expiry).
+All endpoints require `Authorization: Bearer <jwt>` via the `get_current_user()` FastAPI dependency.
+
+Strava OAuth: user identity passed as JWT in OAuth `state` param — stateless callback resolves the user by verifying the token.
 
 ### 2. Projects (`api/projects.py`)
 
@@ -85,6 +93,7 @@ All project data stored as `.gettracks` JSON files per user under `data/users/{u
   - Fallback: two-point line from `start_latlng`/`end_latlng` if no polyline
 - Segments: SLERP great-circle arc via `great_circle_points()` → `[[lon, lat], ...]`
 - Returns GeoJSON FeatureCollection with `type` property (`"activity"` or `"segment"`) on each Feature
+- Includes `elevation_profile` and `start_latlng`/`end_latlng` in Feature properties for Flutter to consume
 
 ### 4. Strava (`api/strava.py`)
 
@@ -94,7 +103,7 @@ All project data stored as `.gettracks` JSON files per user under `data/users/{u
 - **Activities** (`GET /api/strava/activities`): paginated browse with `start_date`, `end_date`, `types` filters and `in_project` flag
 - **Sync** (`POST /api/projects/{name}/strava/sync`): fetches all Strava activities (200/page), merges new ones into project
 
-Token refresh: `StravaAPI.token_data` is set directly (bypasses file-based `TokenStore`); refreshed token persisted back to DB after each request.
+Token refresh: refreshed token is persisted back to DB after each request.
 
 ### 5. Core Business Logic (`src/`)
 
@@ -108,6 +117,7 @@ Token refresh: `StravaAPI.token_data` is set directly (bypasses file-based `Toke
 | `src/models/project.py` | Project, ProjectItem, ConnectingSegment, SegmentEndpoint |
 | `src/models/great_circle.py` | SLERP great-circle arc generation |
 | `src/project/project_io.py` | ProjectIO — load/save/new + `to_dict()` serialisation |
+| `src/project/project_repo.py` | ProjectRepo — DB-backed CRUD for projects + activities |
 
 ---
 
@@ -121,7 +131,7 @@ Provider pattern — each screen has a `ChangeNotifier`:
 |---|---|
 | `AuthNotifier` | Login/logout/session restore; holds current user + JWT |
 | `ProjectsNotifier` | Project list; create/delete; Strava connect status |
-| `ProjectNotifier` | Open project data (activities, items, geo); all CRUD ops |
+| `ProjectNotifier` | Open project data (activities, items, geo); all CRUD ops; elevation cursor |
 | `StravaImportNotifier` | Strava activity browser state (filters, selection, add) |
 
 ### Routing (`app_router.dart`)
@@ -141,8 +151,8 @@ Provider pattern — each screen has a `ChangeNotifier`:
 │  (280 px)       │  + Polyline layer                    │
 │                 ├──────────────────────────────────────┤
 │  - Stats header │  ElevationChart (160 px, fl_chart)   │
-│  - Reorderable  │                                      │
-│    items list   │                                      │
+│  - Reorderable  │  LTTB-downsampled, elevation cursor  │
+│    items list   │  synced to map orange dot marker     │
 │  - Add segment  │                                      │
 └─────────────────┴──────────────────────────────────────┘
 ```
@@ -158,16 +168,32 @@ Provider pattern — each screen has a `ChangeNotifier`:
 └──────────────────────────────────────────────────────┘
 ```
 
+### Elevation Chart Performance
+
+The elevation chart uses **LTTB (Largest-Triangle-Three-Buckets)** downsampling to reduce data from up to ~17 000 points to 300 rendered points, giving a ~56× rendering speedup while preserving visual shape. Hover/click on the chart moves an orange dot marker on the map to the corresponding GPS coordinate.
+
 ---
 
 ## Database Schema
 
+Managed by SQLModel + Alembic migrations:
+
 ```sql
--- Managed by Reflex / SQLModel
+CREATE TABLE localuser (
+    id            INTEGER PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash BLOB,
+    enabled       BOOLEAN
+);
+
 CREATE TABLE userinfo (
-    id          INTEGER PRIMARY KEY,
-    email       TEXT UNIQUE NOT NULL,
-    ...         -- Google profile fields
+    id            INTEGER PRIMARY KEY,
+    local_auth_id INTEGER REFERENCES localuser(id),
+    google_sub    TEXT,
+    display_name  TEXT,
+    email         TEXT,
+    avatar_url    TEXT,
+    auth_provider TEXT    -- "local" | "google"
 );
 
 CREATE TABLE stravatoken (
@@ -179,7 +205,7 @@ CREATE TABLE stravatoken (
 );
 ```
 
-Migrations managed via Alembic (`reflex db makemigrations` / `reflex db migrate`).
+Run migrations with `alembic upgrade head`.
 
 ---
 
@@ -194,7 +220,9 @@ Flutter: context.go('/app?project=foo')
             └─ GET /api/geo/project?name=foo  →  GeoJSON FeatureCollection
        └─> MapPanel renders polylines
        └─> ActivityPanel renders reorderable items list
-       └─> ElevationChart concatenates elevation_profile from all activities
+       └─> ElevationChart: full elevation_profile built from GeoJSON
+            → LTTB downsampled to 300 points for fl_chart
+            → per-activity tracks indexed for cursor → map dot sync
 ```
 
 ### Import from Strava
@@ -227,10 +255,11 @@ Flutter: GET /api/strava/connect → {url: "https://www.strava.com/oauth/authori
 
 ## Security
 
-- JWT signed with `SECRET_KEY` (env var or config); HS256
+- JWT signed with `JWT_SECRET` env var (fallback dev value — always set in production); HS256, 7-day expiry
 - Strava OAuth state param carries JWT — callback verifies signature before trusting user identity
 - All project endpoints scoped to authenticated user's directory (`data/users/{sub}/`)
 - `config/config.json` gitignored; secrets never in source or logs
+- Passwords hashed with bcrypt (cost factor from `bcrypt.gensalt()`)
 - HTTPS enforced by Strava on OAuth redirect
 
 ---

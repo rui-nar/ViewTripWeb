@@ -8,22 +8,22 @@ from api.projects import router as projects_router
 from api.share import router as share_router
 from api.strava import router as strava_router
 
-api = FastAPI(
+app = FastAPI(
     title="ViewTrip API",
     description="REST API consumed by Flutter and other native clients.",
     version="1.0.0",
 )
 
 # Allow Flutter dev clients (and web) to call the API
-api.add_middleware(
+app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-api.include_router(auth_router)
-api.include_router(geo_router)
-api.include_router(projects_router)
-api.include_router(share_router)
-api.include_router(strava_router)
+app.include_router(auth_router)
+app.include_router(geo_router)
+app.include_router(projects_router)
+app.include_router(share_router)
+app.include_router(strava_router)

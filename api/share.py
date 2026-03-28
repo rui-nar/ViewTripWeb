@@ -9,11 +9,11 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import polyline as polyline_lib
-import reflex as rx
+from models.db import get_session
 from fastapi import APIRouter, HTTPException, status
 from sqlmodel import select
 
-from app.models.project_db import DBProject
+from models.project_db import DBProject
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
 
@@ -24,7 +24,7 @@ _repo = ProjectRepo()
 
 def _get_project_by_token(token: str):
     """Look up a project by share_token; raise 404 if not found."""
-    with rx.session() as sess:
+    with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(DBProject.share_token == token)
         ).first()
