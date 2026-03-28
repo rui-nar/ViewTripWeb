@@ -1,37 +1,17 @@
 @echo off
-REM GetTracks Launcher
-REM This script launches the GetTracks application
+echo Freeing ports 3000 and 8000...
 
-echo Starting GetTracks...
-
-REM Check if virtual environment exists
-if not exist ".venv\Scripts\python.exe" (
-    echo Error: Virtual environment not found at .venv
-    echo Please run: python -m venv .venv
-    echo Then: .venv\Scripts\python.exe -m pip install -r requirements.txt
-    echo Or simply run: python -m venv .venv ^&^& .venv\Scripts\python.exe -m pip install -r requirements.txt
-    pause
-    exit /b 1
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":3000 " ^| findstr "LISTENING"') do (
+    echo   Killing PID %%p on port 3000
+    taskkill /PID %%p /F >nul 2>&1
+)
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
+    echo   Killing PID %%p on port 8000
+    taskkill /PID %%p /F >nul 2>&1
 )
 
-REM Check if main.py exists
-if not exist "main.py" (
-    echo Error: main.py not found
-    pause
-    exit /b 1
-)
+timeout /t 1 /nobreak >nul
 
-REM Launch the application
-echo.
-echo Launching GetTracks GUI...
-.venv\Scripts\python.exe main.py
-
-REM Check for errors
-if %errorlevel% neq 0 (
-    echo.
-    echo Application exited with error code %errorlevel%
-    echo This may be normal if running in a headless environment.
-)
-
-echo GetTracks session ended.
+call .venv\Scripts\activate
+reflex run
 pause

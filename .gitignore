@@ -1,3 +1,7 @@
+.states
+*.db
+.web
+assets/external/
 # Virtual environment
 .venv/
 venv/
@@ -26,6 +30,9 @@ logs/
 .env
 .env.*
 
+# Config with secrets — use config/config.example.json as template
+config/config.json
+
 # IDE / editor
 .vscode/
 .idea/
@@ -35,3 +42,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Reflex
+.web/
+.reflex/
+
+# App data (local dev)
+data/
+uploaded_files/

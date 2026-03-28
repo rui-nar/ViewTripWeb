@@ -1,0 +1,25 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, web]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-web.txt
+
+      - name: Run tests
+        run: pytest tests/ --ignore=tests/test_gui.py --ignore=tests/test_gui_launch.py --ignore=tests/test_map_widget.py --ignore=tests/test_export_options_widget.py --ignore=tests/test_filter_widget.py --ignore=tests/test_stats_bar.py --ignore=tests/test_toast.py -v --tb=short
