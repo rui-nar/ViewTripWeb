@@ -1,6 +1,8 @@
 /// Google-encoded polyline decoder and distance-indexed track builder.
 library;
 
+import 'dart:math' as math;
+
 import 'package:latlong2/latlong.dart';
 
 /// Decode a Google-encoded polyline string to a list of [LatLng] points.
@@ -28,11 +30,52 @@ List<LatLng> decodePolyline(String encoded) {
   return result;
 }
 
+/// Build a distance-indexed track from decoded [points] using haversine geometry.
+///
+/// Used as a fallback when the stored polyline is shorter than the elevation
+/// profile (e.g. desktop-migrated activities that still carry the compressed
+/// Strava summary polyline). Distances are scaled so the last point matches
+/// [elevTotalKm], keeping the track aligned with the elevation chart's x-axis.
+///
+/// [offsetKm] is added to every distance (used to chain multiple activities).
+List<(double, LatLng)> buildTrackFromPolyline(
+  List<LatLng> points, {
+  double elevTotalKm = 0,
+  double offsetKm = 0,
+}) {
+  if (points.isEmpty) return const [];
+  final track = <(double, LatLng)>[];
+  double cumDist = 0;
+  track.add((0, points.first));
+  for (int i = 1; i < points.length; i++) {
+    cumDist += _haversineKm(points[i - 1], points[i]);
+    track.add((cumDist, points[i]));
+  }
+  final scale =
+      (cumDist > 0 && elevTotalKm > 0) ? elevTotalKm / cumDist : 1.0;
+  return [
+    for (final pt in track) (offsetKm + pt.$1 * scale, pt.$2),
+  ];
+}
+
+double _haversineKm(LatLng a, LatLng b) {
+  const r = 6371.0;
+  final dLat = (b.latitude - a.latitude) * (math.pi / 180);
+  final dLon = (b.longitude - a.longitude) * (math.pi / 180);
+  final sinDLat = math.sin(dLat / 2);
+  final sinDLon = math.sin(dLon / 2);
+  final h = (sinDLat * sinDLat +
+          math.cos(a.latitude * math.pi / 180) *
+              math.cos(b.latitude * math.pi / 180) *
+              sinDLon * sinDLon)
+      .clamp(0.0, 1.0);
+  return 2 * r * math.asin(math.sqrt(h));
+}
+
 /// Interpolate a [LatLng] from a distance-indexed track at [distKm].
 ///
 /// [track] is a list of `(cumulativeDistanceKm, LatLng)` records sorted by
-/// distance, as built by [ElevationChart._compute] from the activity's
-/// elevation profile and decoded polyline.
+/// distance, as built by [ElevationChart._compute].
 LatLng? latLonAtDistance(List<(double, LatLng)> track, double distKm) {
   if (track.isEmpty) return null;
   if (distKm <= track.first.$1) return track.first.$2;

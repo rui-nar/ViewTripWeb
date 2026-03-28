@@ -12,6 +12,8 @@ import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import 'package:flutter/services.dart';
+
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../map/polyline_decoder.dart';
@@ -107,6 +109,69 @@ class _AppScreenState extends State<AppScreen> {
     }
   }
 
+  Future<void> _showShareDialog() async {
+    final name = widget.projectName;
+    // Capture before any await so the messenger is available inside the dialog.
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final result = await api.post(
+        '/api/projects/${Uri.encodeComponent(name)}/share',
+        {},
+      ) as Map<String, dynamic>;
+      final token = result['share_token'] as String? ?? '';
+      if (!mounted) return;
+
+      final shareUrl = '${Uri.base.origin}/share/$token';
+
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Share project'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text('Anyone with this link can view the project read-only:'),
+              const SizedBox(height: 12),
+              SelectableText(shareUrl),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: shareUrl));
+                messenger.showSnackBar(
+                  const SnackBar(content: Text('Link copied to clipboard')),
+                );
+              },
+              child: const Text('Copy link'),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(ctx).pop();
+                await api.delete(
+                    '/api/projects/${Uri.encodeComponent(name)}/share');
+                messenger.showSnackBar(
+                  const SnackBar(content: Text('Share link revoked')),
+                );
+              },
+              child: const Text('Revoke'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('Share failed: ${e.body}')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Only rebuild AppScreen (AppBar + LayoutBuilder) when the title changes.
@@ -140,6 +205,16 @@ class _AppScreenState extends State<AppScreen> {
             icon: const Icon(Icons.sync),
             tooltip: 'Sync from Strava',
             onPressed: _syncStrava,
+          ),
+          IconButton(
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Share project',
+            onPressed: _showShareDialog,
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: () => context.push('/settings'),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -190,6 +265,9 @@ class _AppScreenState extends State<AppScreen> {
                             onCursorChanged: (pos) =>
                                 n.elevationCursorNotifier.value = pos,
                             mapCursorNotifier: n.mapCursorDistNotifier,
+                            track: tuple.$2 == null
+                                ? n.fullTrack
+                                : n.perActivityTracks[tuple.$2.toString()] ?? n.fullTrack,
                           );
                         },
                       ),
@@ -237,6 +315,9 @@ class _AppScreenState extends State<AppScreen> {
                             onCursorChanged: (pos) =>
                                 n.elevationCursorNotifier.value = pos,
                             mapCursorNotifier: n.mapCursorDistNotifier,
+                            track: tuple.$2 == null
+                                ? n.fullTrack
+                                : n.perActivityTracks[tuple.$2.toString()] ?? n.fullTrack,
                           );
                         },
                       ),
@@ -368,6 +449,21 @@ class _MapPanelState extends State<MapPanel> {
     }
   }
 
+  void _onMapTap(LatLng latlng) {
+    final track = widget.notifier.fullTrack;
+    if (track.isEmpty) return;
+    int nearest = 0;
+    double minDist = double.infinity;
+    for (int i = 0; i < track.length; i++) {
+      final dLat = track[i].$2.latitude  - latlng.latitude;
+      final dLon = track[i].$2.longitude - latlng.longitude;
+      final d = dLat * dLat + dLon * dLon;
+      if (d < minDist) { minDist = d; nearest = i; }
+    }
+    widget.notifier.elevationCursorNotifier.value = track[nearest].$2;
+    widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
@@ -395,9 +491,13 @@ class _MapPanelState extends State<MapPanel> {
       children: [
         FlutterMap(
           mapController: widget.mapController,
-          options: const MapOptions(
-            initialCenter: LatLng(0, 0),
+          options: MapOptions(
+            initialCenter: const LatLng(0, 0),
             initialZoom: 2,
+            interactionOptions: const InteractionOptions(
+              flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
+            ),
+            onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
             TileLayer(
@@ -425,6 +525,29 @@ class _MapPanelState extends State<MapPanel> {
                       points: arc,
                       color: const Color(0xCC6366F1),
                       strokeWidth: 2.5,
+                    ),
+                  ],
+                );
+              },
+            ),
+            // Elevation cursor — driven by chart hover/tap and by map taps.
+            ValueListenableBuilder<LatLng?>(
+              valueListenable: notifier.elevationCursorNotifier,
+              builder: (_, cursor, __) {
+                if (cursor == null) return const SizedBox.shrink();
+                return MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: cursor,
+                      width: 16,
+                      height: 16,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF97316),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
                     ),
                   ],
                 );
@@ -965,9 +1088,16 @@ class ElevationChart extends StatefulWidget {
   /// Driven by map taps — shows a vertical line at this distance (km).
   final ValueNotifier<double?>? mapCursorNotifier;
 
+  /// Pre-built distance-indexed track (cumulative km → LatLng).
+  /// Built by ProjectNotifier from GeoJSON so Flutter never needs to decode
+  /// the polyline.  Pass fullTrack when no activity is selected, or the
+  /// per-activity track (0-based distances) when one is selected.
+  final List<(double, LatLng)> track;
+
   const ElevationChart({
     super.key,
     required this.activities,
+    required this.track,
     this.selectedActivityId,
     this.onCursorChanged,
     this.mapCursorNotifier,
@@ -982,9 +1112,6 @@ class _ElevationChartState extends State<ElevationChart> {
   double _minY = 0;
   double _maxY = 0;
 
-  /// Distance-indexed track: (cumulativeDistKm, LatLng) pairs, parallel to
-  /// the elevation profile. Built from each activity's summary_polyline.
-  List<(double, LatLng)> _track = const [];
 
   @override
   void initState() {
@@ -1030,37 +1157,26 @@ class _ElevationChartState extends State<ElevationChart> {
             .toList();
 
     final spots = <FlSpot>[];
-    final track = <(double, LatLng)>[];
     double offsetKm = 0;
     for (final a in source) {
       final profile = a['elevation_profile'];
       if (profile is! List || profile.isEmpty) continue;
-
-      // Decode this activity's polyline so we can map distance → lat/lon.
-      List<LatLng>? decoded;
-      final encoded = (a['map'] as Map?)?['summary_polyline'] as String?;
-      if (encoded != null && encoded.isNotEmpty) {
-        decoded = decodePolyline(encoded);
-      }
-
+      final lastPt = profile.last;
+      final elevTotalKm = (lastPt is List && lastPt.isNotEmpty)
+          ? (lastPt[0] as num).toDouble()
+          : 0.0;
       for (int i = 0; i < profile.length; i++) {
         final point = profile[i];
         if (point is! List || point.length < 2) continue;
-        final distKm = (point[0] as num).toDouble() + offsetKm;
-        spots.add(FlSpot(distKm, (point[1] as num).toDouble()));
-        if (decoded != null && i < decoded.length) {
-          track.add((distKm, decoded[i]));
-        }
+        spots.add(FlSpot(
+            (point[0] as num).toDouble() + offsetKm,
+            (point[1] as num).toDouble()));
       }
-
-      final last = profile.last;
-      if (last is List && last.isNotEmpty) {
-        offsetKm += (last[0] as num).toDouble();
-      }
+      if (elevTotalKm > 0) offsetKm += elevTotalKm;
     }
-    _spots = spots;
-    _track = track;
     if (spots.isNotEmpty) {
+      // Compute min/max over full data before downsampling — LTTB may not
+      // select the global peak or valley, but the y-axis must contain them.
       double minY = spots.first.y, maxY = spots.first.y;
       for (final s in spots) {
         if (s.y < minY) minY = s.y;
@@ -1069,20 +1185,55 @@ class _ElevationChartState extends State<ElevationChart> {
       _minY = minY;
       _maxY = maxY;
     }
+    _spots = spots.length > _kMaxChartPoints ? _lttb(spots, _kMaxChartPoints) : spots;
+  }
+
+  /// Maximum number of FlSpot points rendered by fl_chart.
+  /// LTTB downsampling preserves visual shape; cursor uses the full-resolution
+  /// [widget.track] so accuracy is unaffected.
+  static const _kMaxChartPoints = 300;
+
+  /// Largest-Triangle-Three-Buckets downsampling.  O(n) — selects [threshold]
+  /// points from [data] that best preserve the visual shape of the series.
+  static List<FlSpot> _lttb(List<FlSpot> data, int threshold) {
+    final n = data.length;
+    assert(n > threshold);
+    final out = <FlSpot>[data.first];
+    int a = 0;
+    final every = (n - 2) / (threshold - 2);
+    for (int i = 0; i < threshold - 2; i++) {
+      // Centroid of the next bucket — used as the "future" anchor.
+      final nS = ((i + 1) * every + 1).floor();
+      final nE = ((i + 2) * every + 1).floor().clamp(0, n);
+      double avgX = 0, avgY = 0;
+      for (int j = nS; j < nE; j++) { avgX += data[j].x; avgY += data[j].y; }
+      final cnt = nE - nS;
+      avgX /= cnt; avgY /= cnt;
+      // Current bucket — pick the point that forms the largest triangle
+      // with the previously selected point (a) and the next-bucket centroid.
+      final cS = (i * every + 1).floor();
+      final cE = ((i + 1) * every + 1).floor().clamp(0, n);
+      final ax = data[a].x, ay = data[a].y;
+      double maxArea = -1; int best = cS;
+      for (int j = cS; j < cE; j++) {
+        final area = ((ax - avgX) * (data[j].y - ay)
+                    - (ax - data[j].x) * (avgY - ay)).abs();
+        if (area > maxArea) { maxArea = area; best = j; }
+      }
+      out.add(data[best]);
+      a = best;
+    }
+    out.add(data.last);
+    return out;
   }
 
   void _onTouch(FlTouchEvent event, LineTouchResponse? response) {
-    // Clear the map cursor only when the pointer fully leaves the chart
-    // (desktop mouse exit). On mobile, pan-end must NOT clear — a short tap
-    // is delivered as FlPanStart→FlPanEnd, so clearing on FlPanEndEvent would
-    // erase the marker before the user even sees it.
-    if (event is FlPointerExitEvent) {
-      widget.onCursorChanged?.call(null);
-      return;
-    }
+    // Do NOT clear on FlPointerExitEvent — the cursor should persist at the
+    // last hovered/clicked position so the user can inspect it after moving
+    // the mouse off the chart.
     final spots = response?.lineBarSpots;
     if (spots == null || spots.isEmpty) return;
-    final pos = latLonAtDistance(_track, spots.first.x);
+    final pos = latLonAtDistance(widget.track, spots.first.x);
     if (pos != null) widget.onCursorChanged?.call(pos);
   }
 

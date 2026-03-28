@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
+from app.models.project_db import DBProject
 from app.models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
@@ -583,3 +584,49 @@ def delete_segment(
         if len(project.items) == original_len:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, user_info_id, project)
+
+
+# ── Project sharing ────────────────────────────────────────────────────────────
+
+@router.post("/{name}/share")
+def create_share_link(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Generate (or return existing) share token for public read-only access."""
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if not row.share_token:
+            row.share_token = str(uuid.uuid4())
+            sess.add(row)
+            sess.commit()
+    return {"share_token": row.share_token}
+
+
+@router.delete("/{name}/share", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_share_link(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Revoke the share token — the project becomes private again."""
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row.share_token = None
+        sess.add(row)
+        sess.commit()

@@ -28,6 +28,8 @@ class DBProject(sqlmodel.SQLModel, table=True):
     filter_state_json: str = sqlmodel.Field(default="{}")
     created_at: float = sqlmodel.Field(default_factory=time.time)
     updated_at: float = sqlmodel.Field(default_factory=time.time)
+    # UUID token granting read-only public access to this project; None = not shared
+    share_token: Optional[str] = sqlmodel.Field(default=None, index=True)
 
 
 class DBActivity(sqlmodel.SQLModel, table=True):

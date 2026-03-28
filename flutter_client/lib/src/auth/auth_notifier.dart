@@ -139,6 +139,12 @@ class AuthNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Update the in-memory user from a token-response `user` map.
+  void updateUser(Map<String, dynamic> userMap) {
+    _user = User.fromMap(userMap);
+    notifyListeners();
+  }
+
   void clearError() {
     _error = null;
     notifyListeners();

@@ -62,6 +62,9 @@ class AuthService {
     await _storage.delete(key: _tokenKey);
   }
 
+  /// Persist a token returned by a mid-session API call (e.g. profile update).
+  Future<void> persistToken(String token) async => _persist(token);
+
   void _persist(String token) {
     api.setToken(token);
     _storage.write(key: _tokenKey, value: token);

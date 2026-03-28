@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
@@ -21,6 +22,7 @@ const _kGoogleServerClientId =
     '544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com';
 
 void main() async {
+  if (kIsWeb) usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
   // Initialize GoogleSignIn exactly once before the widget tree starts.
   await GoogleSignIn.instance.initialize(

@@ -97,6 +97,13 @@ class ProjectRepo:
 
         return self._row_to_project(sess, row)
 
+    def get_project_by_id(self, sess: Session, project_id: int) -> Optional[Project]:
+        """Load a project directly by its primary key (used for shared-link access)."""
+        row = sess.get(DBProject, project_id)
+        if row is None:
+            return None
+        return self._row_to_project(sess, row)
+
     def create_project(self, sess: Session, user_info_id: int, name: str) -> Project:
         """Create an empty project in the DB and return it."""
         row = DBProject(user_info_id=user_info_id, name=name)

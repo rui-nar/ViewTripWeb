@@ -1,6 +1,7 @@
 /// Named routes + auth guard for the ViewTripWeb Flutter client.
 library;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -13,27 +14,46 @@ import '../projects/app_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
 import '../settings/settings_screen.dart';
+import '../shared/shared_project_screen.dart';
+
+/// On web, derive the starting location from the actual browser URL so that
+/// deep links (e.g. /share/TOKEN) are honoured even before auth resolves.
+/// Falls back to /login on non-web platforms.
+String _initialLocation() {
+  if (!kIsWeb) return '/login';
+  final path = Uri.base.path;
+  return (path.isEmpty || path == '/') ? '/login' : path;
+}
 
 GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
 
   return GoRouter(
-    initialLocation: '/login',
+    initialLocation: _initialLocation(),
     // Re-evaluate redirect whenever auth state changes (login / logout / init).
     refreshListenable: authNotifier,
 
     redirect: (BuildContext ctx, GoRouterState state) {
       final auth = ctx.read<AuthNotifier>();
-      final isLoading = auth.isLoading;
-      final isLoggedIn = auth.user != null;
-      final loc = state.matchedLocation;
-      final onPublic = loc == '/login' || loc == '/register';
 
       // Wait for restoreSession to complete before making routing decisions.
-      if (isLoading) return null;
+      if (auth.isLoading) return null;
 
-      if (!isLoggedIn && !onPublic) return '/login';
-      if (isLoggedIn && onPublic) return '/projects';
+      final isLoggedIn = auth.user != null;
+      // Use the real browser URL path, not matchedLocation, so that timing
+      // issues during auth init don't cause stale-route redirects.
+      final loc = state.uri.path;
+
+      // Shared-project links are accessible without login.
+      if (loc.startsWith('/share/')) return null;
+
+      // Redirect unauthenticated users away from protected routes.
+      final isAuthPage = loc == '/login' || loc == '/register';
+      if (!isLoggedIn && !isAuthPage) return '/login';
+
+      // Redirect authenticated users away from auth pages.
+      if (isLoggedIn && isAuthPage) return '/projects';
+
       return null;
     },
 
@@ -72,6 +92,13 @@ GoRouter buildRouter(BuildContext context) {
       GoRoute(
         path: '/settings',
         builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: '/share/:token',
+        builder: (context, state) {
+          final token = state.pathParameters['token']!;
+          return SharedProjectScreen(token: token);
+        },
       ),
     ],
   );

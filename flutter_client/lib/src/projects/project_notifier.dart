@@ -55,6 +55,7 @@ class ProjectNotifier extends ChangeNotifier {
       ]);
 
       final details = results[0];
+      projectName = details['name'] as String? ?? name;
       final rawActivities = details['activities'];
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()
@@ -111,31 +112,73 @@ class ProjectNotifier extends ChangeNotifier {
   List<(double, LatLng)> _fullTrack = const [];
   List<(double, LatLng)> get fullTrack => _fullTrack;
 
+  /// Per-activity distance-indexed tracks (0-based distances) — used by
+  /// ElevationChart to map chart x-position to a map position.
+  /// Keys are activity_id as String.
+  Map<String, List<(double, LatLng)>> get perActivityTracks => _perActivityTracks;
+  Map<String, List<(double, LatLng)>> _perActivityTracks = const {};
+
   void _buildFullTrack() {
-    final track = <(double, LatLng)>[];
+    // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
+    // GeoJSON coordinates are [lon, lat] per spec.
+    final geoCoords = <String, List>{};
+    final features = geo?['features'];
+    if (features is List) {
+      for (final f in features) {
+        if (f is! Map) continue;
+        final props = f['properties'] as Map? ?? {};
+        if (props['type'] == 'segment') continue;
+        final actId = props['activity_id']?.toString();
+        if (actId == null) continue;
+        final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+        if (coords is List && coords.isNotEmpty) geoCoords[actId] = coords;
+      }
+    }
+
+    final combined = <(double, LatLng)>[];
+    final perAct = <String, List<(double, LatLng)>>{};
     double offsetKm = 0;
     for (final a in activities) {
       final profile = a['elevation_profile'];
       if (profile is! List || profile.isEmpty) continue;
-      final encoded = (a['map'] as Map?)?['summary_polyline'] as String?;
-      List<LatLng>? decoded;
-      if (encoded != null && encoded.isNotEmpty) {
-        decoded = decodePolyline(encoded);
-      }
-      for (int i = 0; i < profile.length; i++) {
-        final pt = profile[i];
-        if (pt is! List || pt.length < 2) continue;
-        final distKm = (pt[0] as num).toDouble() + offsetKm;
-        if (decoded != null && i < decoded.length) {
-          track.add((distKm, decoded[i]));
+      final actId = a['id']?.toString();
+      final coords = actId != null ? geoCoords[actId] : null;
+      final last = profile.last;
+      final elevTotalKm = (last is List && last.isNotEmpty)
+          ? (last[0] as num).toDouble()
+          : 0.0;
+      final actTrack = <(double, LatLng)>[];
+      if (coords != null && coords.isNotEmpty) {
+        if (coords.length >= profile.length) {
+          // Fast path: create LatLng only for the points we actually use.
+          for (int i = 0; i < profile.length; i++) {
+            final pt = profile[i];
+            final c = coords[i];
+            if (pt is! List || pt.length < 2 || c is! List || c.length < 2) continue;
+            actTrack.add((
+              (pt[0] as num).toDouble(),
+              LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+            ));
+          }
+        } else {
+          // Haversine fallback: coords fewer than profile samples.
+          final pts = <LatLng>[];
+          for (final c in coords) {
+            if (c is List && c.length >= 2) {
+              pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+            }
+          }
+          actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
         }
       }
-      final last = profile.last;
-      if (last is List && last.isNotEmpty) {
-        offsetKm += (last[0] as num).toDouble();
+      if (actId != null) perAct[actId] = actTrack;
+      for (final pt in actTrack) {
+        combined.add((pt.$1 + offsetKm, pt.$2));
       }
+      if (elevTotalKm > 0) offsetKm += elevTotalKm;
     }
-    _fullTrack = track;
+    _fullTrack = combined;
+    _perActivityTracks = perAct;
   }
 
   void clear() {
@@ -147,6 +190,7 @@ class ProjectNotifier extends ChangeNotifier {
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
     _fullTrack = const [];
+    _perActivityTracks = const {};
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;

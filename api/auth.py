@@ -1,10 +1,13 @@
 """REST auth endpoints consumed by Flutter (and any non-Reflex client).
 
 Routes:
-    POST /api/auth/token          — email + password → JWT
-    POST /api/auth/register       — create account → JWT
-    POST /api/auth/google         — Google id_token → JWT
-    GET  /api/auth/me             — current user profile
+    POST   /api/auth/token           — email + password → JWT
+    POST   /api/auth/register        — create account → JWT
+    POST   /api/auth/google          — Google id_token → JWT
+    GET    /api/auth/me              — current user profile
+    PUT    /api/auth/me              — update display name → refreshed JWT
+    POST   /api/auth/change-password — change password (local accounts only)
+    DELETE /api/auth/me              — delete account + all associated data
 """
 from __future__ import annotations
 
@@ -43,6 +46,13 @@ class RegisterRequest(BaseModel):
 
 class GoogleTokenRequest(BaseModel):
     id_token: str  # JWT credential from Google (One Tap or GIS)
+
+class UpdateProfileRequest(BaseModel):
+    display_name: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -188,3 +198,118 @@ def google_login(body: GoogleTokenRequest):
 def me(current_user: Annotated[dict, Depends(get_current_user)]):
     """Return the current user's profile from the JWT payload."""
     return current_user
+
+
+@router.put("/me", response_model=TokenResponse)
+def update_me(
+    body: UpdateProfileRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Update display name and return a refreshed JWT."""
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        user_info.display_name = body.display_name.strip()
+        sess.add(user_info)
+        sess.commit()
+        sess.refresh(user_info)
+        return _token_response(user_info)
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Change password — local (email) accounts only."""
+    if current_user.get("auth_provider") != "local":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change is only available for email accounts",
+        )
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        local_user = sess.get(LocalUser, user_info.local_auth_id)
+        if local_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Local user not found")
+        if not local_user.verify(body.current_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password is incorrect",
+            )
+        local_user.password_hash = LocalUser.hash_password(body.new_password)
+        sess.add(local_user)
+        sess.commit()
+    return {"ok": True}
+
+
+@router.delete("/me")
+def delete_account(current_user: Annotated[dict, Depends(get_current_user)]):
+    """Delete the current user's account and all associated data."""
+    from app.models.project_db import DBActivity, DBProject, DBProjectItem, DBStravaCache
+    from app.models.user import StravaToken
+    from reflex_local_auth.local_auth import LocalAuthSession
+
+    user_info_id = int(current_user["sub"])
+    with rx.session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        # Delete project items and projects
+        project_rows = sess.exec(
+            select(DBProject).where(DBProject.user_info_id == user_info_id)
+        ).all()
+        for proj in project_rows:
+            items = sess.exec(
+                select(DBProjectItem).where(DBProjectItem.project_id == proj.id)
+            ).all()
+            for item in items:
+                sess.delete(item)
+        for proj in project_rows:
+            sess.delete(proj)
+
+        # Delete activities
+        for act in sess.exec(
+            select(DBActivity).where(DBActivity.user_info_id == user_info_id)
+        ).all():
+            sess.delete(act)
+
+        # Delete Strava cache
+        cache = sess.get(DBStravaCache, user_info_id)
+        if cache:
+            sess.delete(cache)
+
+        # Delete Strava token
+        token = sess.exec(
+            select(StravaToken).where(StravaToken.user_info_id == user_info_id)
+        ).first()
+        if token:
+            sess.delete(token)
+
+        # Delete LocalAuthSession rows (Reflex session tokens)
+        if user_info.local_auth_id:
+            for s in sess.exec(
+                select(LocalAuthSession).where(
+                    LocalAuthSession.user_id == user_info.local_auth_id
+                )
+            ).all():
+                sess.delete(s)
+
+        # Delete UserInfo then LocalUser
+        local_auth_id = user_info.local_auth_id
+        sess.delete(user_info)
+        sess.flush()
+
+        if local_auth_id:
+            local_user = sess.get(LocalUser, local_auth_id)
+            if local_user:
+                sess.delete(local_user)
+
+        sess.commit()
+    return {"ok": True}

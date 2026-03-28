@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.auth import router as auth_router
 from api.geo import router as geo_router
 from api.projects import router as projects_router
+from api.share import router as share_router
 from api.strava import router as strava_router
 
 api = FastAPI(
@@ -24,4 +25,5 @@ api.add_middleware(
 api.include_router(auth_router)
 api.include_router(geo_router)
 api.include_router(projects_router)
+api.include_router(share_router)
 api.include_router(strava_router)
