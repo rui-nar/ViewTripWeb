@@ -87,8 +87,9 @@ if ($LASTEXITCODE -ne 0) { Die "docker push latest failed." }
 # ── 3. Deploy on NAS ──────────────────────────────────────────────────────────
 Step 3 3 "Deploying on NAS ($NAS_HOST)..."
 
-# Build the remote bash script as a here-string so PowerShell expands
-# our local variables, while \$ escapes stay literal on the remote side.
+# Build the remote bash script as a here-string.
+# PowerShell expands $NAS_BASE/$IMAGE/$Version etc. (our local vars).
+# Bash variables are escaped with backtick-$ so PowerShell leaves them literal.
 $remoteScript = @"
 set -euo pipefail
 
@@ -100,34 +101,34 @@ CONTAINER_PORT="$CONTAINER_PORT"
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN"
 
 # ── Directories ────────────────────────────────────────────────────────────
-mkdir -p "\$BASE/db" "\$BASE/config" "\$BASE/data" "\$BASE/secrets"
+mkdir -p "`$BASE/db" "`$BASE/config" "`$BASE/data" "`$BASE/secrets"
 
 # ── GHCR login (reads stored PAT if present) ───────────────────────────────
-if [ -f "\$BASE/secrets/ghcr_token" ]; then
+if [ -f "`$BASE/secrets/ghcr_token" ]; then
     echo "  Logging in to GHCR..."
-    cat "\$BASE/secrets/ghcr_token" | docker login ghcr.io -u rui-nar --password-stdin
+    cat "`$BASE/secrets/ghcr_token" | docker login ghcr.io -u rui-nar --password-stdin
 fi
 
 # ── Generate JWT secret on first deploy ────────────────────────────────────
-if [ ! -f "\$BASE/secrets/jwt_secret" ]; then
+if [ ! -f "`$BASE/secrets/jwt_secret" ]; then
     echo "  Generating JWT secret..."
     if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex 32 > "\$BASE/secrets/jwt_secret"
+        openssl rand -hex 32 > "`$BASE/secrets/jwt_secret"
     else
-        tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64 > "\$BASE/secrets/jwt_secret"
+        tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64 > "`$BASE/secrets/jwt_secret"
     fi
-    chmod 600 "\$BASE/secrets/jwt_secret"
-    echo "  JWT secret saved to \$BASE/secrets/jwt_secret"
+    chmod 600 "`$BASE/secrets/jwt_secret"
+    echo "  JWT secret saved to `$BASE/secrets/jwt_secret"
 fi
-JWT_SECRET=\$(cat "\$BASE/secrets/jwt_secret")
+JWT_SECRET=`$(cat "`$BASE/secrets/jwt_secret")
 
 # ── Pull new image ─────────────────────────────────────────────────────────
-echo "  Pulling \$IMAGE:\$VERSION ..."
-docker pull "\$IMAGE:\$VERSION"
-docker tag "\$IMAGE:\$VERSION" "\$IMAGE:latest"
+echo "  Pulling `${IMAGE}:`${VERSION} ..."
+docker pull "`${IMAGE}:`${VERSION}"
+docker tag  "`${IMAGE}:`${VERSION}" "`${IMAGE}:latest"
 
 # ── Stop and remove existing container ────────────────────────────────────
-if docker ps -a --format '{{.Names}}' | grep -q '^viewtripweb$'; then
+if docker ps -a --format '{{.Names}}' | grep -q '^viewtripweb`$'; then
     echo "  Stopping existing container..."
     docker stop viewtripweb >/dev/null
     docker rm   viewtripweb >/dev/null
@@ -138,15 +139,15 @@ echo "  Starting container..."
 docker run -d \
   --name viewtripweb \
   --restart unless-stopped \
-  -p "\$HOST_PORT:\$CONTAINER_PORT" \
-  -v "\$BASE/db:/app/db" \
-  -v "\$BASE/config:/app/config" \
-  -v "\$BASE/data:/app/data" \
+  -p "`${HOST_PORT}:`${CONTAINER_PORT}" \
+  -v "`$BASE/db:/app/db" \
+  -v "`$BASE/config:/app/config" \
+  -v "`$BASE/data:/app/data" \
   -e DATABASE_URL="sqlite:////app/db/viewtripweb.db" \
-  -e JWT_SECRET="\$JWT_SECRET" \
-  -e FRONTEND_ORIGIN="\$FRONTEND_ORIGIN" \
-  -e STRAVA_REDIRECT_URI="\$FRONTEND_ORIGIN/api/strava/callback" \
-  "\$IMAGE:latest" >/dev/null
+  -e JWT_SECRET="`$JWT_SECRET" \
+  -e FRONTEND_ORIGIN="`$FRONTEND_ORIGIN" \
+  -e STRAVA_REDIRECT_URI="`$FRONTEND_ORIGIN/api/strava/callback" \
+  "`${IMAGE}:latest" >/dev/null
 
 # ── Health check ───────────────────────────────────────────────────────────
 sleep 2
