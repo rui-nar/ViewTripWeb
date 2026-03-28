@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Reflex frontend (no longer used)
+.web/
+
+# Flutter client (built separately, not part of the API image)
+flutter_client/
+
+# Dev / local files
+.git/
+.claude/
+*.db
+data/
+docs/
+tests/
+scripts/
+
+# Secrets
+config/config.json
