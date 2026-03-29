@@ -208,6 +208,37 @@ def get_project(
     return _repo.to_dict(project)
 
 
+class RenameProjectRequest(BaseModel):
+    new_name: str
+
+
+@router.put("/{name}")
+def rename_project(
+    name: str,
+    body: RenameProjectRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    new_name = body.new_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Name cannot be empty")
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if new_name != name and _repo.project_exists(sess, user_info_id, new_name):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
+        row.name = new_name
+        sess.add(row)
+        sess.commit()
+    return {"name": new_name}
+
+
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
     name: str,
@@ -612,7 +643,8 @@ def create_share_link(
             row.share_token = str(uuid.uuid4())
             sess.add(row)
             sess.commit()
-    return {"share_token": row.share_token}
+        token = row.share_token
+    return {"share_token": token}
 
 
 @router.delete("/{name}/share", status_code=status.HTTP_204_NO_CONTENT)

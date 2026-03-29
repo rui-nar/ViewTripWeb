@@ -23,11 +23,22 @@ class ProjectNotifier extends ChangeNotifier {
   /// The activity currently highlighted on the map. Null = no selection.
   dynamic selectedActivityId;
 
+  /// The connecting segment currently highlighted on the map. Null = no selection.
+  dynamic selectedSegmentId;
+
   void selectActivity(dynamic id) {
     // Toggle off if already selected (compare as strings to handle int/double
     // type differences from JSON parsing on web).
     selectedActivityId =
         selectedActivityId?.toString() == id?.toString() ? null : id;
+    selectedSegmentId = null;
+    notifyListeners();
+  }
+
+  void selectSegment(dynamic id) {
+    selectedSegmentId =
+        selectedSegmentId?.toString() == id?.toString() ? null : id;
+    selectedActivityId = null;
     notifyListeners();
   }
 
@@ -46,6 +57,7 @@ class ProjectNotifier extends ChangeNotifier {
     items = [];
     geo = null;
     selectedActivityId = null;
+    selectedSegmentId = null;
     notifyListeners();
 
     try {
@@ -197,6 +209,24 @@ class ProjectNotifier extends ChangeNotifier {
     isLoading = false;
     error = null;
     notifyListeners();
+  }
+
+  Future<String?> renameProject(String newName) async {
+    final name = projectName;
+    if (name == null) return null;
+    try {
+      final result = await api.put(
+        '/api/projects/${Uri.encodeComponent(name)}',
+        {'new_name': newName},
+      ) as Map<String, dynamic>;
+      projectName = result['name'] as String;
+      notifyListeners();
+      return projectName;
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+      return null;
+    }
   }
 
   @override

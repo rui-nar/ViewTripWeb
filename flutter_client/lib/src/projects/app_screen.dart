@@ -33,6 +33,8 @@ class AppScreen extends StatefulWidget {
 
 class _AppScreenState extends State<AppScreen> {
   final MapController _mapController = MapController();
+  bool _panelOpen = false;
+  void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
 
   @override
   void initState() {
@@ -80,32 +82,48 @@ class _AppScreenState extends State<AppScreen> {
     }
   }
 
-  Future<void> _syncStrava() async {
-    final name = widget.projectName;
-    try {
-      final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(name)}/strava/sync',
-        {},
-      ) as Map<String, dynamic>;
-      if (!mounted) return;
-      final added = result['added'] as int? ?? 0;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(added > 0
-              ? 'Synced — added $added ${added == 1 ? 'activity' : 'activities'}'
-              : 'Already up to date'),
+
+  Future<void> _showRenameDialog(BuildContext context) async {
+    final notifier = context.read<ProjectNotifier>();
+    final ctrl = TextEditingController(text: notifier.projectName ?? '');
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename project'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Project name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => Navigator.of(ctx).pop(),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    final newName = ctrl.text.trim();
+    ctrl.dispose();
+    if (newName.isEmpty || newName == notifier.projectName) return;
+    final result = await notifier.renameProject(newName);
+    if (!context.mounted) return;
+    if (result != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Renamed to "$result"')),
       );
-      if (added > 0) {
-        // Reload the project to show the new activities
-        context.read<ProjectNotifier>().load(name);
-      }
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      final msg = e.statusCode == 400
-          ? 'Connect Strava first (go to Projects)'
-          : 'Sync failed: ${e.body}';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(notifier.error ?? 'Rename failed')),
+      );
     }
   }
 
@@ -188,7 +206,23 @@ class _AppScreenState extends State<AppScreen> {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => context.go('/projects'),
         ),
-        title: Text(title.isEmpty ? 'ViewTripWeb' : title),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                title.isEmpty ? 'ViewTripWeb' : title,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 18),
+              tooltip: 'Rename project',
+              visualDensity: VisualDensity.compact,
+              onPressed: () => _showRenameDialog(context),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.download),
@@ -200,11 +234,6 @@ class _AppScreenState extends State<AppScreen> {
             tooltip: 'Import activities from Strava',
             onPressed: () => context.push(
                 '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.sync),
-            tooltip: 'Sync from Strava',
-            onPressed: _syncStrava,
           ),
           IconButton(
             icon: const Icon(Icons.share_outlined),
@@ -226,6 +255,12 @@ class _AppScreenState extends State<AppScreen> {
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
+          // Auto-close the panel when switching to wide layout.
+          if (constraints.maxWidth >= 720 && _panelOpen) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && _panelOpen) setState(() => _panelOpen = false);
+            });
+          }
           if (constraints.maxWidth >= 720) {
             // ── Wide layout: side-by-side ────────────────────────────────
             return Row(
@@ -277,52 +312,81 @@ class _AppScreenState extends State<AppScreen> {
               ],
             );
           } else {
-            // ── Narrow layout: stacked ───────────────────────────────────
-            return Column(
+            // ── Narrow layout: full-screen map + slide-in activity panel ──
+            final mapHeight = constraints.maxHeight - 160;
+            return Stack(
               children: [
-                Expanded(
-                  child: Consumer<ProjectNotifier>(
-                    builder: (_, n, __) => _Stage1MapPanel(
-                      notifier: n,
-                      mapController: _mapController,
+                // Base: full-height map + pinned elevation chart
+                Column(
+                  children: [
+                    Expanded(
+                      child: Consumer<ProjectNotifier>(
+                        builder: (_, n, __) => _Stage1MapPanel(
+                          notifier: n,
+                          mapController: _mapController,
+                        ),
+                      ),
+                    ),
+                    Selector<ProjectNotifier,
+                        (List<Map<String, dynamic>>, Object?)>(
+                      selector: (_, n) =>
+                          (n.activities, n.selectedActivityId as Object?),
+                      shouldRebuild: (a, b) =>
+                          !identical(a.$1, b.$1) ||
+                          a.$2?.toString() != b.$2?.toString(),
+                      builder: (ctx, tuple, __) {
+                        final n = ctx.read<ProjectNotifier>();
+                        return ElevationChart(
+                          activities: tuple.$1,
+                          selectedActivityId: tuple.$2,
+                          onCursorChanged: (pos) =>
+                              n.elevationCursorNotifier.value = pos,
+                          mapCursorNotifier: n.mapCursorDistNotifier,
+                          track: tuple.$2 == null
+                              ? n.fullTrack
+                              : n.perActivityTracks[tuple.$2.toString()] ??
+                                  n.fullTrack,
+                        );
+                      },
+                    ),
+                  ],
+                ),
+
+                // Overlay: activity panel slides in from the left
+                AnimatedSlide(
+                  offset: _panelOpen ? Offset.zero : const Offset(-1.0, 0),
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOut,
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: Consumer<ProjectNotifier>(
+                      builder: (_, n, __) => _MobileActivityPanelOverlay(
+                        notifier: n,
+                        mapController: _mapController,
+                        height: mapHeight,
+                      ),
                     ),
                   ),
                 ),
-                SizedBox(
-                  height: constraints.maxHeight * 0.4,
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: Consumer<ProjectNotifier>(
-                          builder: (_, n, __) => ActivityPanel(
-                            notifier: n,
-                            mapController: _mapController,
-                          ),
-                        ),
+
+                // Toggle FAB: sits just above the elevation chart
+                Positioned(
+                  left: 12,
+                  bottom: 172,
+                  child: Builder(builder: (ctx) {
+                    final theme = Theme.of(ctx);
+                    return FloatingActionButton.small(
+                      heroTag: 'activityPanelToggle',
+                      backgroundColor: theme.colorScheme.surface,
+                      foregroundColor: theme.colorScheme.onSurface,
+                      onPressed: _togglePanel,
+                      child: AnimatedRotation(
+                        turns: _panelOpen ? 0.5 : 0.0,
+                        duration: const Duration(milliseconds: 280),
+                        child: const Icon(Icons.chevron_right),
                       ),
-                      Selector<ProjectNotifier,
-                          (List<Map<String, dynamic>>, Object?)>(
-                        selector: (_, n) =>
-                            (n.activities, n.selectedActivityId as Object?),
-                        shouldRebuild: (a, b) =>
-                            !identical(a.$1, b.$1) ||
-                            a.$2?.toString() != b.$2?.toString(),
-                        builder: (ctx, tuple, __) {
-                          final n = ctx.read<ProjectNotifier>();
-                          return ElevationChart(
-                            activities: tuple.$1,
-                            selectedActivityId: tuple.$2,
-                            onCursorChanged: (pos) =>
-                                n.elevationCursorNotifier.value = pos,
-                            mapCursorNotifier: n.mapCursorDistNotifier,
-                            track: tuple.$2 == null
-                                ? n.fullTrack
-                                : n.perActivityTracks[tuple.$2.toString()] ?? n.fullTrack,
-                          );
-                        },
-                      ),
-                    ],
-                  ),
+                    );
+                  }),
                 ),
               ],
             );
@@ -354,6 +418,7 @@ class _MapPanelState extends State<MapPanel> {
   // Polyline + bounds cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
+  dynamic _lastSelectedSegId = _sentinel;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   late final NetworkTileProvider _tileProvider;
@@ -366,11 +431,16 @@ class _MapPanelState extends State<MapPanel> {
     _tileProvider = NetworkTileProvider();
   }
 
-  List<Polyline> _buildPolylines(Map<String, dynamic> geo, dynamic selectedId) {
+  List<Polyline> _buildPolylines(
+    Map<String, dynamic> geo,
+    dynamic selectedActivityId,
+    dynamic selectedSegmentId,
+  ) {
     final features = geo['features'];
     if (features is! List) return [];
 
     final polylines = <Polyline>[];
+    final hasSelection = selectedActivityId != null || selectedSegmentId != null;
     for (final feature in features) {
       if (feature is! Map) continue;
       final props = feature['properties'] as Map? ?? {};
@@ -389,22 +459,37 @@ class _MapPanelState extends State<MapPanel> {
       if (points.isEmpty) continue;
 
       final isSegment = props['type'] == 'segment';
-      final activityId = props['activity_id'];
-      final isSelected = selectedId != null &&
-          activityId?.toString() == selectedId.toString();
-      final hasSelection = selectedId != null;
+      final isSelAct = selectedActivityId != null &&
+          props['activity_id']?.toString() == selectedActivityId.toString();
+      final isSelSeg = selectedSegmentId != null &&
+          props['segment_id']?.toString() == selectedSegmentId.toString();
 
-      polylines.add(Polyline(
-        points: points,
-        color: isSegment
-            ? const Color(0xFF888888)
-            : isSelected
-                ? const Color(0xFFEF4444)              // red — selected
-                : hasSelection
-                    ? const Color(0x60F97316)          // dimmed — others
-                    : const Color(0xFFF97316),         // full orange — no selection
-        strokeWidth: isSegment ? 2.0 : isSelected ? 5.0 : 2.5,
-      ));
+      final Color color;
+      final double strokeWidth;
+      if (isSegment) {
+        if (isSelSeg) {
+          color = const Color(0xFF44AAFF);   // bright blue — selected segment
+          strokeWidth = 4.0;
+        } else if (hasSelection) {
+          color = const Color(0x60888888);   // dimmed grey
+          strokeWidth = 2.0;
+        } else {
+          color = const Color(0xFF888888);   // normal grey
+          strokeWidth = 2.0;
+        }
+      } else {
+        if (isSelAct) {
+          color = const Color(0xFFEF4444);   // red — selected activity
+          strokeWidth = 5.0;
+        } else if (hasSelection) {
+          color = const Color(0x60F97316);   // dimmed orange
+          strokeWidth = 2.5;
+        } else {
+          color = const Color(0xFFF97316);   // full orange
+          strokeWidth = 2.5;
+        }
+      }
+      polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
     }
     return polylines;
   }
@@ -470,11 +555,14 @@ class _MapPanelState extends State<MapPanel> {
 
     // Recompute polylines only when geo or selection changes.
     final geo = notifier.geo;
-    final selectedId = notifier.selectedActivityId;
-    if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
+    final selActId = notifier.selectedActivityId;
+    final selSegId = notifier.selectedSegmentId;
+    if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
+        selSegId.toString() != (_lastSelectedSegId ?? '').toString()) {
       _lastGeo = geo;
-      _lastSelectedId = selectedId;
-      _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
+      _lastSelectedId = selActId;
+      _lastSelectedSegId = selSegId;
+      _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
       _cachedAllPoints = _allPoints(_cachedPolylines);
     }
     final polylines = _cachedPolylines;
@@ -587,7 +675,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
   TextStyle? _segmentTitleStyle;
-  TextStyle? _projectTitleStyle;
+
 
   void _refreshActivityById(List<Map<String, dynamic>> activities) {
     if (identical(activities, _lastActivities)) return;
@@ -613,8 +701,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final theme = Theme.of(context);
     _segmentTitleStyle =
         theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
-    _projectTitleStyle =
-        theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold);
+
   }
 
   static IconData _iconForActivityType(String? type) {
@@ -667,6 +754,21 @@ class _ActivityPanelState extends State<ActivityPanel> {
     }
   }
 
+  void _flyToSegment(Map<String, dynamic> seg) {
+    widget.notifier.selectSegment(seg['id']);
+    final start = seg['start'] as Map?;
+    final end   = seg['end']   as Map?;
+    if (start == null || end == null) return;
+    final lat = ((start['lat'] as num? ?? 0) + (end['lat'] as num? ?? 0)) / 2;
+    final lon = ((start['lon'] as num? ?? 0) + (end['lon'] as num? ?? 0)) / 2;
+    final target = LatLng(lat, lon);
+    final mc = widget.mapController;
+    if (mc == null) return;
+    if (!mc.camera.visibleBounds.contains(target)) {
+      mc.move(target, mc.camera.zoom.clamp(4.0, 10.0));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
@@ -696,11 +798,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                notifier.projectName ?? '',
-                style: _projectTitleStyle,
-              ),
-              const SizedBox(height: 6),
               Wrap(
                 spacing: 8,
                 runSpacing: 4,
@@ -744,13 +841,20 @@ class _ActivityPanelState extends State<ActivityPanel> {
                     if (isActivity) {
                       final a = activityById[item['activity_id']];
                       if (a == null) {
-                        return ListTile(
+                        return Dismissible(
                           key: ValueKey('act_${item['activity_id']}'),
-                          leading: const Icon(Icons.help_outline),
-                          title: const Text('Unknown activity'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 18),
-                            onPressed: () => notifier.removeItem(i),
+                          direction: DismissDirection.endToStart,
+                          onDismissed: (_) => notifier.removeItem(i),
+                          background: Container(
+                            color: theme.colorScheme.error,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: Icon(Icons.delete_outline,
+                                color: theme.colorScheme.onError),
+                          ),
+                          child: const ListTile(
+                            leading: Icon(Icons.help_outline),
+                            title: Text('Unknown activity'),
                           ),
                         );
                       }
@@ -759,58 +863,50 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       final distM = (a['distance'] as num? ?? 0).toDouble();
                       final movingSec = a['moving_time'];
                       final activityId = item['activity_id'];
-                      return Selector<ProjectNotifier, bool>(
+                      return Dismissible(
                         key: ValueKey('act_$activityId'),
-                        selector: (_, n) =>
-                            activityId?.toString() ==
-                            n.selectedActivityId?.toString(),
-                        builder: (_, isSelected, __) => ListTile(
-                          tileColor: isSelected
-                              ? theme.colorScheme.primaryContainer
-                                  .withValues(alpha: 0.45)
-                              : null,
-                          leading: Icon(
-                            _iconForActivityType(type),
-                            color: isSelected
-                                ? theme.colorScheme.primary
-                                : theme.colorScheme.primary
-                                    .withValues(alpha: 0.7),
-                          ),
-                          title:
-                              Text(name, style: theme.textTheme.bodyMedium),
-                          subtitle: Text(
-                            '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
-                            style: theme.textTheme.bodySmall,
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.add_road, size: 18),
-                                tooltip: 'Add connecting segment after',
-                                onPressed: () => _showSegmentDialog(
-                                  context,
-                                  notifier,
-                                  insertAfterIndex: i,
-                                ),
+                        direction: DismissDirection.endToStart,
+                        onDismissed: (_) => notifier.removeItem(i),
+                        background: Container(
+                          color: theme.colorScheme.error,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20),
+                          child: Icon(Icons.delete_outline,
+                              color: theme.colorScheme.onError),
+                        ),
+                        child: Selector<ProjectNotifier, bool>(
+                          selector: (_, n) =>
+                              activityId?.toString() ==
+                              n.selectedActivityId?.toString(),
+                          builder: (_, isSelected, __) => ListTile(
+                            tileColor: isSelected
+                                ? theme.colorScheme.primaryContainer
+                                    .withValues(alpha: 0.45)
+                                : null,
+                            leading: Icon(
+                              _iconForActivityType(type),
+                              color: isSelected
+                                  ? theme.colorScheme.primary
+                                  : theme.colorScheme.primary
+                                      .withValues(alpha: 0.7),
+                            ),
+                            title: Text(
+                                name, style: theme.textTheme.bodyMedium),
+                            subtitle: Text(
+                              '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.add_road, size: 18),
+                              tooltip: 'Add connecting segment after',
+                              onPressed: () => _showSegmentDialog(
+                                context,
+                                notifier,
+                                insertAfterIndex: i,
                               ),
-                              IconButton(
-                                icon: const Icon(Icons.refresh, size: 18),
-                                tooltip: 'Re-fetch from Strava',
-                                onPressed: activityId == null
-                                    ? null
-                                    : () => notifier.refreshActivity(
-                                          activityId as int,
-                                        ),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete_outline, size: 18),
-                                tooltip: 'Remove from project',
-                                onPressed: () => notifier.removeItem(i),
-                              ),
-                            ],
+                            ),
+                            onTap: () => _flyToActivity(a),
                           ),
-                          onTap: () => _flyToActivity(a),
                         ),
                       );
                     } else {
@@ -819,35 +915,62 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       final segId = seg['id'] as String? ?? '';
                       final segType = seg['segment_type'] as String?;
                       final label = seg['label'] as String? ?? segType ?? 'Segment';
-                      return ListTile(
+                      return Dismissible(
                         key: ValueKey('seg_$segId'),
-                        leading: Icon(
-                          _iconForSegmentType(segType),
-                          color: theme.colorScheme.secondary,
+                        direction: DismissDirection.endToStart,
+                        onDismissed: (_) => notifier.deleteSegment(segId),
+                        background: Container(
+                          color: theme.colorScheme.error,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20),
+                          child: Icon(Icons.delete_outline,
+                              color: theme.colorScheme.onError),
                         ),
-                        title: Text(label, style: _segmentTitleStyle),
-                        subtitle: Text(segType ?? '',
-                            style: theme.textTheme.bodySmall),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit_outlined, size: 18),
-                              tooltip: 'Edit segment',
-                              onPressed: () => _showSegmentDialog(
-                                context,
-                                notifier,
-                                editSegment: seg,
-                                insertAfterIndex: null,
-                              ),
+                        child: Selector<ProjectNotifier, bool>(
+                          selector: (_, n) =>
+                              n.selectedSegmentId?.toString() == segId,
+                          builder: (_, isSelected, __) => ListTile(
+                            tileColor: isSelected
+                                ? theme.colorScheme.secondaryContainer
+                                    .withValues(alpha: 0.45)
+                                : null,
+                            leading: Icon(
+                              _iconForSegmentType(segType),
+                              color: isSelected
+                                  ? theme.colorScheme.secondary
+                                  : theme.colorScheme.secondary
+                                      .withValues(alpha: 0.7),
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline, size: 18),
-                              tooltip: 'Delete segment',
-                              onPressed: () =>
-                                  notifier.deleteSegment(segId),
+                            title: Text(label, style: _segmentTitleStyle),
+                            subtitle: Text(segType ?? '',
+                                style: theme.textTheme.bodySmall),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.edit_outlined,
+                                      size: 18),
+                                  tooltip: 'Edit segment',
+                                  onPressed: () => _showSegmentDialog(
+                                    context,
+                                    notifier,
+                                    editSegment: seg,
+                                    insertAfterIndex: null,
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.add_road, size: 18),
+                                  tooltip: 'Add connecting segment after',
+                                  onPressed: () => _showSegmentDialog(
+                                    context,
+                                    notifier,
+                                    insertAfterIndex: i,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
+                            onTap: () => _flyToSegment(seg),
+                          ),
                         ),
                       );
                     }
@@ -910,6 +1033,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   // Polyline cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
+  dynamic _lastSelectedSegId = _sentinel;
   List<Polyline> _cachedPolylines = [];
 
   static const _sentinel = Object();
@@ -962,11 +1086,15 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
   }
 
-  List<Polyline> _buildPolylines(Map<String, dynamic> geo, dynamic selectedId) {
+  List<Polyline> _buildPolylines(
+    Map<String, dynamic> geo,
+    dynamic selectedActivityId,
+    dynamic selectedSegmentId,
+  ) {
     final features = geo['features'];
     if (features is! List) return [];
     final polylines = <Polyline>[];
-    final hasSelection = selectedId != null;
+    final hasSelection = selectedActivityId != null || selectedSegmentId != null;
     for (final feature in features) {
       if (feature is! Map) continue;
       final props = feature['properties'] as Map? ?? {};
@@ -981,19 +1109,37 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       }
       if (points.isEmpty) continue;
       final isSegment = props['type'] == 'segment';
-      final isSelected = hasSelection &&
-          props['activity_id']?.toString() == selectedId.toString();
-      polylines.add(Polyline(
-        points: points,
-        color: isSegment
-            ? const Color(0xFF888888)
-            : isSelected
-                ? const Color(0xFFEF4444)
-                : hasSelection
-                    ? const Color(0x60F97316)
-                    : const Color(0xFFF97316),
-        strokeWidth: isSegment ? 2.0 : isSelected ? 5.0 : 2.5,
-      ));
+      final isSelAct = selectedActivityId != null &&
+          props['activity_id']?.toString() == selectedActivityId.toString();
+      final isSelSeg = selectedSegmentId != null &&
+          props['segment_id']?.toString() == selectedSegmentId.toString();
+
+      final Color color;
+      final double strokeWidth;
+      if (isSegment) {
+        if (isSelSeg) {
+          color = const Color(0xFF44AAFF);
+          strokeWidth = 4.0;
+        } else if (hasSelection) {
+          color = const Color(0x60888888);
+          strokeWidth = 2.0;
+        } else {
+          color = const Color(0xFF888888);
+          strokeWidth = 2.0;
+        }
+      } else {
+        if (isSelAct) {
+          color = const Color(0xFFEF4444);
+          strokeWidth = 5.0;
+        } else if (hasSelection) {
+          color = const Color(0x60F97316);
+          strokeWidth = 2.5;
+        } else {
+          color = const Color(0xFFF97316);
+          strokeWidth = 2.5;
+        }
+      }
+      polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
     }
     return polylines;
   }
@@ -1002,12 +1148,15 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
     final geo = notifier.geo;
-    final selectedId = notifier.selectedActivityId;
-    if (!identical(geo, _lastGeo) || selectedId != _lastSelectedId) {
-      if (!identical(geo, _lastGeo)) _fittedBounds = false; // refit on new geo
+    final selActId = notifier.selectedActivityId;
+    final selSegId = notifier.selectedSegmentId;
+    if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
+        selSegId.toString() != (_lastSelectedSegId ?? '').toString()) {
+      if (!identical(geo, _lastGeo)) _fittedBounds = false;
       _lastGeo = geo;
-      _lastSelectedId = selectedId;
-      _cachedPolylines = geo != null ? _buildPolylines(geo, selectedId) : [];
+      _lastSelectedId = selActId;
+      _lastSelectedSegId = selSegId;
+      _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
     }
 
     if (!notifier.isLoading) {
@@ -1314,6 +1463,40 @@ class _ElevationChartState extends State<ElevationChart> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── _StatChip ─────────────────────────────────────────────────────────────────
+
+// ── _MobileActivityPanelOverlay ───────────────────────────────────────────────
+// Slide-in activity panel for narrow (mobile) layout. Rendered as a Material
+// surface with elevation so it casts a shadow over the map behind it.
+
+class _MobileActivityPanelOverlay extends StatelessWidget {
+  final ProjectNotifier notifier;
+  final MapController mapController;
+  final double height;
+
+  const _MobileActivityPanelOverlay({
+    required this.notifier,
+    required this.mapController,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      elevation: 4,
+      color: Theme.of(context).colorScheme.surface,
+      child: SizedBox(
+        width: 280,
+        height: height,
+        child: ActivityPanel(
+          notifier: notifier,
+          mapController: mapController,
         ),
       ),
     );

@@ -292,10 +292,27 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                     }
                     final a = notifier.activities[i];
                     final id = a['id'] as int;
+                    final inProject = a['in_project'] == true;
                     return _ActivityTile(
                       key: ValueKey(id),
                       activity: a,
                       onToggle: () => notifier.toggleSelect(id),
+                      onRefetch: inProject
+                          ? () async {
+                              final pn = context.read<ProjectNotifier>();
+                              await pn.refreshActivity(id);
+                              if (!context.mounted) return;
+                              final err = pn.error;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(err != null
+                                      ? 'Re-fetch failed: $err'
+                                      : 'Activity updated.'),
+                                  duration: Duration(seconds: err != null ? 6 : 3),
+                                ),
+                              );
+                            }
+                          : null,
                     );
                   },
                 );
@@ -342,18 +359,37 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
 // Uses Selector<bool> scoped to selectedIds.contains(id) so only THIS tile
 // rebuilds when its selection state changes, not the whole list.
 
-class _ActivityTile extends StatelessWidget {
+class _ActivityTile extends StatefulWidget {
   final Map<String, dynamic> activity;
   final VoidCallback onToggle;
+  final Future<void> Function()? onRefetch;
 
   const _ActivityTile({
     super.key,
     required this.activity,
     required this.onToggle,
+    this.onRefetch,
   });
 
   @override
+  State<_ActivityTile> createState() => _ActivityTileState();
+}
+
+class _ActivityTileState extends State<_ActivityTile> {
+  bool _refetching = false;
+
+  Future<void> _handleRefetch() async {
+    setState(() => _refetching = true);
+    try {
+      await widget.onRefetch!();
+    } finally {
+      if (mounted) setState(() => _refetching = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final activity = widget.activity;
     final id = activity['id'] as int;
     final inProject = activity['in_project'] == true;
     final type = activity['type'] as String? ?? '';
@@ -371,7 +407,7 @@ class _ActivityTile extends StatelessWidget {
         return ListTile(
           leading: Checkbox(
             value: selected,
-            onChanged: (_) => onToggle(),
+            onChanged: (_) => widget.onToggle(),
           ),
           title: Text(
             name,
@@ -383,13 +419,34 @@ class _ActivityTile extends StatelessWidget {
           ),
           subtitle: Text('$type  $dist  $dateStr'),
           trailing: inProject
-              ? Tooltip(
-                  message: 'Already in project',
-                  child: Icon(Icons.check,
-                      size: 16, color: theme.colorScheme.primary),
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (widget.onRefetch != null)
+                      _refetching
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: Padding(
+                                padding: EdgeInsets.all(4),
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : IconButton(
+                              icon: const Icon(Icons.refresh, size: 18),
+                              tooltip: 'Re-fetch from Strava',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: _handleRefetch,
+                            ),
+                    Tooltip(
+                      message: 'Already in project',
+                      child: Icon(Icons.check,
+                          size: 16, color: theme.colorScheme.primary),
+                    ),
+                  ],
                 )
               : null,
-          onTap: onToggle,
+          onTap: widget.onToggle,
         );
       },
     );

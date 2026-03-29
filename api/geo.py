@@ -104,6 +104,7 @@ def project_geo(
                 continue
             features.append(_linestring(coords, {
                 "type": "segment",
+                "segment_id": seg.id,
                 "segment_type": seg.segment_type,
                 "label": seg.label,
             }))
