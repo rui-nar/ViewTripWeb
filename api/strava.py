@@ -186,17 +186,17 @@ def strava_callback(
     the state param and we decode it here.
     """
     if error or not code:
-        return RedirectResponse(f"{_FRONTEND_ORIGIN}/settings?strava=error")
+        return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error")
 
     # state carries the JWT so we know which user is connecting
     if not state:
-        return RedirectResponse(f"{_FRONTEND_ORIGIN}/settings?strava=error&reason=no_state")
+        return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error&reason=no_state")
 
     from api.deps import decode_token
     try:
         payload = decode_token(state)
     except HTTPException:
-        return RedirectResponse(f"{_FRONTEND_ORIGIN}/settings?strava=error&reason=invalid_state")
+        return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error&reason=invalid_state")
 
     user_info_id = int(payload["sub"])
 
@@ -206,7 +206,7 @@ def strava_callback(
         token_data = oauth.exchange_code(code)
     except Exception as exc:
         return RedirectResponse(
-            f"{_FRONTEND_ORIGIN}/?strava=error&reason={str(exc)[:80]}"
+            f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error&reason={str(exc)[:80]}"
         )
 
     with get_session() as sess:
@@ -228,7 +228,7 @@ def strava_callback(
             sess.add(row)
         sess.commit()
 
-    return RedirectResponse(f"{_FRONTEND_ORIGIN}/settings?strava=connected")
+    return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=connected")
 
 
 @router.get("/api/strava/status")

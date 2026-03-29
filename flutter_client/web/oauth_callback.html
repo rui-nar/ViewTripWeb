@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Connecting…</title></head>
+<body>
+<p>Connecting, please wait…</p>
+<script>
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var status = params.get('strava');
+    var reason = params.get('reason') || '';
+    if (window.opener && window.opener.origin === window.origin) {
+      // Send as a plain string "strava_oauth:connected" or "strava_oauth:error:reason"
+      var msg = 'strava_oauth:' + (status || 'error');
+      if (reason) msg += ':' + reason;
+      window.opener.postMessage(msg, window.origin);
+    }
+    window.close();
+  })();
+</script>
+</body>
+</html>

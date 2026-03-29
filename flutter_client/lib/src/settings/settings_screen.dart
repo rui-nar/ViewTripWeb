@@ -1,8 +1,11 @@
+import 'dart:js_interop';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:web/web.dart' as web;
 
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
@@ -20,6 +23,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ── Strava state ──────────────────────────────────────────────────────────
   bool _stravaConnected = false;
   bool _stravaLoading = false;
+  JSFunction? _stravaMessageHandler;
 
   // ── Account state ─────────────────────────────────────────────────────────
   final _displayNameCtrl = TextEditingController();
@@ -41,29 +45,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStravaStatus();
       _loadProfile();
-      if (kIsWeb) {
-        final uri = Uri.base;
-        final stravaParam = uri.queryParameters['strava'];
-        if (stravaParam == 'connected') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Strava connected!')),
-          );
-        } else if (stravaParam == 'error') {
-          final reason = uri.queryParameters['reason'] ?? '';
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(reason.isNotEmpty
-                  ? 'Strava connection failed: $reason'
-                  : 'Strava connection failed.'),
-            ),
-          );
-        }
-      }
     });
   }
 
   @override
   void dispose() {
+    if (_stravaMessageHandler != null) {
+      web.window.removeEventListener('message', _stravaMessageHandler!);
+      _stravaMessageHandler = null;
+    }
     _displayNameCtrl.dispose();
     _currentPwCtrl.dispose();
     _newPwCtrl.dispose();
@@ -212,11 +202,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final data =
           await api.get('/api/strava/connect') as Map<String, dynamic>;
-      final url = Uri.parse(data['url'] as String);
-      await launchUrl(
-        url,
-        mode: kIsWeb ? LaunchMode.platformDefault : LaunchMode.externalApplication,
-      );
+      final urlStr = data['url'] as String;
+
+      if (kIsWeb) {
+        // Remove any stale listener from a previous attempt.
+        if (_stravaMessageHandler != null) {
+          web.window.removeEventListener('message', _stravaMessageHandler!);
+          _stravaMessageHandler = null;
+        }
+
+        // Open OAuth in a popup. The popup redirects to oauth_callback.html
+        // which postMessages the result back here, then closes itself.
+        final popup = web.window.open(
+          urlStr,
+          'strava_oauth',
+          'width=600,height=700,left=200,top=100',
+        );
+
+        // Listen for the postMessage from oauth_callback.html.
+        // Message format: "strava_oauth:connected" or "strava_oauth:error[:reason]"
+        // Must store as JSFunction field so the same reference can be removed.
+        _stravaMessageHandler = (web.Event event) {
+          final msg = event as web.MessageEvent;
+          if (msg.origin != web.window.origin) return;
+          final raw = msg.data?.toString() ?? '';
+          if (!raw.startsWith('strava_oauth:')) return;
+
+          web.window.removeEventListener('message', _stravaMessageHandler!);
+          _stravaMessageHandler = null;
+          popup?.close();
+
+          final parts = raw.split(':');
+          final status = parts.length > 1 ? parts[1] : 'error';
+          final reason = parts.length > 2 ? parts.sublist(2).join(':') : '';
+
+          if (!mounted) return;
+          if (status == 'connected') {
+            _loadStravaStatus();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Strava connected!')),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(reason.isNotEmpty
+                    ? 'Strava connection failed: $reason'
+                    : 'Strava connection failed.'),
+              ),
+            );
+          }
+        }.toJS;
+
+        web.window.addEventListener('message', _stravaMessageHandler!);
+      } else {
+        await launchUrl(Uri.parse(urlStr),
+            mode: LaunchMode.externalApplication);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

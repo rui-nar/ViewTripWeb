@@ -2,7 +2,7 @@ name: viewtrip_client
 description: ViewTripWeb Flutter client — web, Android, iOS.
 publish_to: 'none'
 
-version: 0.8.2+1
+version: 0.8.3+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -36,6 +36,7 @@ dependencies:
   # Open URLs in browser (Strava OAuth connect)
   url_launcher: ^6.3.0
   url_launcher_web: ^2.3.3
+  web: ^1.1.0
 
   # Persist user preferences (theme mode)
   shared_preferences: ^2.3.2
