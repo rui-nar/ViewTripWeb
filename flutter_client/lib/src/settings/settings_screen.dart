@@ -213,7 +213,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final data =
           await api.get('/api/strava/connect') as Map<String, dynamic>;
       final url = Uri.parse(data['url'] as String);
-      await launchUrl(url, mode: LaunchMode.externalApplication);
+      await launchUrl(
+        url,
+        mode: kIsWeb ? LaunchMode.platformDefault : LaunchMode.externalApplication,
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
