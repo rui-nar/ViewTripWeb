@@ -316,6 +316,22 @@ class ProjectNotifier extends ChangeNotifier {
   }) async {
     final name = projectName;
     if (name == null) return;
+    // Immediate local update so the list responds without a blank flash.
+    final placeholder = {
+      'item_type': 'segment',
+      'segment': {
+        'id': '__optimistic__',
+        'segment_type': segmentType,
+        'label': label,
+        'start': {'lat': startLat, 'lon': startLon},
+        'end':   {'lat': endLat,   'lon': endLon},
+      },
+    };
+    final insertAt = insertAfterIndex != null
+        ? (insertAfterIndex + 1).clamp(0, items.length)
+        : items.length;
+    items.insert(insertAt, placeholder);
+    notifyListeners();
     try {
       await api.post(
         '/api/projects/${Uri.encodeComponent(name)}/segments',
@@ -329,7 +345,7 @@ class ProjectNotifier extends ChangeNotifier {
           if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
         },
       );
-      await load(name);
+      await _silentReload(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -347,6 +363,20 @@ class ProjectNotifier extends ChangeNotifier {
   }) async {
     final name = projectName;
     if (name == null) return;
+    // Immediate local update so the list responds without a blank flash.
+    for (final item in items) {
+      if (item['item_type'] == 'segment' &&
+          item['segment']?['id']?.toString() == segId) {
+        final seg = Map<String, dynamic>.from(item['segment'] as Map);
+        seg['segment_type'] = segmentType;
+        seg['label'] = label;
+        seg['start'] = {'lat': startLat, 'lon': startLon};
+        seg['end']   = {'lat': endLat,   'lon': endLon};
+        item['segment'] = seg;
+        break;
+      }
+    }
+    notifyListeners();
     try {
       await api.put(
         '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}',
@@ -359,7 +389,7 @@ class ProjectNotifier extends ChangeNotifier {
           'end_lon': endLon,
         },
       );
-      await load(name);
+      await _silentReload(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
