@@ -4,7 +4,7 @@
 
 A self-hostable web application. Authenticate with Google or email/password, connect Strava, and assemble your trips from activities with flight/train/bus/boat connecting segments.
 
-**Current release: v0.8.0** · Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend
+**Current release: v0.8.2** · Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend
 
 ---
 

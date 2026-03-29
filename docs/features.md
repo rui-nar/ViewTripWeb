@@ -2,7 +2,7 @@
 
 ## Project Status
 
-**Current Release**: v0.8.0
+**Current Release**: v0.8.2
 **Stack**: Flutter Web / Android / iOS + FastAPI backend
 
 ---

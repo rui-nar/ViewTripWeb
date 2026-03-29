@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Release**: v0.8.0
+**Release**: v0.8.2
 **Stack**: Flutter Web / Android / iOS (frontend) + FastAPI (backend) + SQLite
 
 ---
