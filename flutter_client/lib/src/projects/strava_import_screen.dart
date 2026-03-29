@@ -229,6 +229,41 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                 if (notifier.isLoading) {
                   return const Center(child: CircularProgressIndicator());
                 }
+                if (notifier.stravaNotConnected) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.link_off,
+                              size: 48,
+                              color: theme.colorScheme.onSurface
+                                  .withValues(alpha: 0.4)),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Strava not connected',
+                            style: theme.textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Connect your Strava account in Settings\nbefore importing activities.',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.6)),
+                          ),
+                          const SizedBox(height: 24),
+                          FilledButton.icon(
+                            icon: const Icon(Icons.settings_outlined),
+                            label: const Text('Go to Settings'),
+                            onPressed: () => context.go('/settings'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
                 if (notifier.error != null) {
                   return Center(
                     child: Padding(

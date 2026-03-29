@@ -13,6 +13,7 @@ class StravaImportNotifier extends ChangeNotifier {
   bool isLoading = false;
   bool isLoadingMore = false;
   String? error;
+  bool stravaNotConnected = false;
 
   /// Count of selected activities not yet in the project.
   /// Pre-computed so the bottom bar never iterates the full list on each tap.
@@ -44,6 +45,7 @@ class StravaImportNotifier extends ChangeNotifier {
     _lastProjectName = projectName;
     isLoading = true;
     error = null;
+    stravaNotConnected = false;
     notifyListeners();
 
     try {
@@ -68,6 +70,13 @@ class StravaImportNotifier extends ChangeNotifier {
 
       _rebuildTypes(activities);
       _recomputeNewCount();
+    } on ApiException catch (e) {
+      if (e.statusCode == 400 &&
+          e.body.toLowerCase().contains('strava not connected')) {
+        stravaNotConnected = true;
+      } else {
+        error = e.toString().replaceFirst('Exception: ', '');
+      }
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
     } finally {
