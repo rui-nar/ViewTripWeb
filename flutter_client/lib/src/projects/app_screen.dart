@@ -741,6 +741,32 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return '${m}m';
   }
 
+  void _dismissWithUndo({
+    required BuildContext context,
+    required ProjectNotifier notifier,
+    required String label,
+    required Future<void> Function() onConfirm,
+  }) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    final controller = messenger.showSnackBar(SnackBar(
+      content: Text(label),
+      duration: const Duration(seconds: 5),
+      action: SnackBarAction(
+        label: 'Undo',
+        onPressed: () {
+          final name = notifier.projectName;
+          if (name != null) notifier.load(name);
+        },
+      ),
+    ));
+    controller.closed.then((reason) {
+      if (reason != SnackBarClosedReason.action) {
+        onConfirm();
+      }
+    });
+  }
+
   void _flyToActivity(Map<String, dynamic> activity) {
     // Highlight the tapped activity on the map (toggle if already selected).
     widget.notifier.selectActivity(activity['id']);
@@ -844,7 +870,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         return Dismissible(
                           key: ValueKey('act_${item['activity_id']}'),
                           direction: DismissDirection.endToStart,
-                          onDismissed: (_) => notifier.removeItem(i),
+                          onDismissed: (_) => _dismissWithUndo(
+                            context: context,
+                            notifier: notifier,
+                            label: 'Activity removed',
+                            onConfirm: () => notifier.removeItem(i),
+                          ),
                           background: Container(
                             color: theme.colorScheme.error,
                             alignment: Alignment.centerRight,
@@ -866,7 +897,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       return Dismissible(
                         key: ValueKey('act_$activityId'),
                         direction: DismissDirection.endToStart,
-                        onDismissed: (_) => notifier.removeItem(i),
+                        onDismissed: (_) => _dismissWithUndo(
+                          context: context,
+                          notifier: notifier,
+                          label: 'Removed "$name"',
+                          onConfirm: () => notifier.removeItem(i),
+                        ),
                         background: Container(
                           color: theme.colorScheme.error,
                           alignment: Alignment.centerRight,
@@ -918,7 +954,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       return Dismissible(
                         key: ValueKey('seg_$segId'),
                         direction: DismissDirection.endToStart,
-                        onDismissed: (_) => notifier.deleteSegment(segId),
+                        onDismissed: (_) => _dismissWithUndo(
+                          context: context,
+                          notifier: notifier,
+                          label: 'Removed "$label"',
+                          onConfirm: () => notifier.deleteSegment(segId),
+                        ),
                         background: Container(
                           color: theme.colorScheme.error,
                           alignment: Alignment.centerRight,
