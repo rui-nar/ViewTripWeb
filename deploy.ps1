@@ -46,6 +46,8 @@ $HOST_PORT      = 7777
 $CONTAINER_PORT = 8000
 $FRONTEND_ORIGIN = "https://viewtrip.narciso.synology.me"
 $GOOGLE_CLIENT_ID = "544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com"
+$STRAVA_CLIENT_ID     = "YOUR_STRAVA_CLIENT_ID"      # from strava.com/settings/api
+$STRAVA_CLIENT_SECRET = "YOUR_STRAVA_CLIENT_SECRET"  # from strava.com/settings/api
 # ──────────────────────────────────────────────────────────────────────────────
 
 function Step([string]$n, [string]$total, [string]$msg) {
@@ -111,6 +113,8 @@ HOST_PORT="$HOST_PORT"
 CONTAINER_PORT="$CONTAINER_PORT"
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN"
 GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID"
+STRAVA_CLIENT_ID="$STRAVA_CLIENT_ID"
+STRAVA_CLIENT_SECRET="$STRAVA_CLIENT_SECRET"
 
 # ── Locate docker (not in PATH for non-interactive SSH on Synology) ────────
 DOCKER=`$(command -v docker 2>/dev/null \
@@ -171,6 +175,8 @@ echo "  Starting container..."
   -e FRONTEND_ORIGIN="`$FRONTEND_ORIGIN" \
   -e STRAVA_REDIRECT_URI="`$FRONTEND_ORIGIN/api/strava/callback" \
   -e GOOGLE_CLIENT_ID="`$GOOGLE_CLIENT_ID" \
+  -e STRAVA_CLIENT_ID="`$STRAVA_CLIENT_ID" \
+  -e STRAVA_CLIENT_SECRET="`$STRAVA_CLIENT_SECRET" \
   "`${IMAGE}:latest" >/dev/null
 
 # ── Health check ───────────────────────────────────────────────────────────

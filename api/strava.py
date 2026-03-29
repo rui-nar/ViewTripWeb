@@ -39,6 +39,11 @@ _project_repo = ProjectRepo()
 router = APIRouter(tags=["strava"])
 
 _cfg = Config("config/config.json")
+# Env vars override config file (used in Docker; config file used for local dev)
+if os.environ.get("STRAVA_CLIENT_ID"):
+    _cfg.set("strava.client_id", os.environ["STRAVA_CLIENT_ID"])
+if os.environ.get("STRAVA_CLIENT_SECRET"):
+    _cfg.set("strava.client_secret", os.environ["STRAVA_CLIENT_SECRET"])
 
 # Redirect URI for Strava OAuth — override via env var in production
 _CALLBACK_URI = os.environ.get(
