@@ -46,6 +46,10 @@ from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo
 
 _cfg = Config("config/config.json")
+if os.environ.get("STRAVA_CLIENT_ID"):
+    _cfg.set("strava.client_id", os.environ["STRAVA_CLIENT_ID"])
+if os.environ.get("STRAVA_CLIENT_SECRET"):
+    _cfg.set("strava.client_secret", os.environ["STRAVA_CLIENT_SECRET"])
 _repo = ProjectRepo()
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
