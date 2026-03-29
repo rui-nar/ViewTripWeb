@@ -265,10 +265,19 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> removeItem(int index) async {
     final name = projectName;
     if (name == null) return;
+    // Immediate local update so the list responds without a blank flash.
+    if (index >= 0 && index < items.length) {
+      final removed = items.removeAt(index);
+      if (removed['item_type'] == 'activity') {
+        final actId = removed['activity_id']?.toString();
+        activities.removeWhere((a) => a['id']?.toString() == actId);
+      }
+    }
+    notifyListeners();
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/items/$index');
-      await load(name);
+      await _silentReload(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -278,12 +287,16 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> reorderItems(int fromIndex, int toIndex) async {
     final name = projectName;
     if (name == null) return;
+    // Immediate local update so the list responds without a blank flash.
+    final moved = items.removeAt(fromIndex);
+    items.insert(toIndex, moved);
+    notifyListeners();
     try {
       await api.put(
         '/api/projects/${Uri.encodeComponent(name)}/items/reorder',
         {'from_index': fromIndex, 'to_index': toIndex},
       );
-      await load(name);
+      await _silentReload(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -356,12 +369,46 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> deleteSegment(String segId) async {
     final name = projectName;
     if (name == null) return;
+    // Immediate local update so the list responds without a blank flash.
+    items.removeWhere((item) =>
+        item['item_type'] == 'segment' &&
+        item['segment']?['id']?.toString() == segId);
+    notifyListeners();
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');
-      await load(name);
+      await _silentReload(name);
     } on Exception catch (e) {
       error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  /// Reloads project data from the API without clearing existing state first.
+  /// Used after optimistic local mutations so the map/elevation update in the
+  /// background without causing a blank-screen flash.
+  Future<void> _silentReload(String name) async {
+    try {
+      final results = await Future.wait([
+        _service.getDetails(name),
+        _service.getGeo(name),
+      ]);
+      final details = results[0];
+      projectName = details['name'] as String? ?? name;
+      final rawActivities = details['activities'];
+      activities = rawActivities is List
+          ? rawActivities.cast<Map<String, dynamic>>()
+          : [];
+      final rawItems = details['items'];
+      items = rawItems is List
+          ? rawItems.cast<Map<String, dynamic>>()
+          : [];
+      geo = results[1];
+      _updateStats();
+      _buildFullTrack();
+    } on Exception catch (e) {
+      error = _msg(e);
+    } finally {
       notifyListeners();
     }
   }

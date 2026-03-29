@@ -421,6 +421,7 @@ class _MapPanelState extends State<MapPanel> {
   dynamic _lastSelectedSegId = _sentinel;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
+  List<Marker> _cachedSegmentMarkers = [];
   late final NetworkTileProvider _tileProvider;
 
   static const _sentinel = Object(); // distinct from null
@@ -494,6 +495,62 @@ class _MapPanelState extends State<MapPanel> {
     return polylines;
   }
 
+  static IconData _iconForSegmentType(String? type) {
+    switch (type?.toLowerCase()) {
+      case 'flight': return Icons.flight;
+      case 'train':  return Icons.train;
+      case 'bus':    return Icons.directions_bus;
+      case 'boat':   return Icons.directions_boat;
+      default:       return Icons.route;
+    }
+  }
+
+  List<Marker> _buildSegmentMarkers(
+    Map<String, dynamic> geo,
+    dynamic selectedSegmentId,
+    bool hasSelection,
+  ) {
+    final features = geo['features'];
+    if (features is! List) return [];
+    final markers = <Marker>[];
+    for (final feature in features) {
+      if (feature is! Map) continue;
+      final props = feature['properties'] as Map? ?? {};
+      if (props['type'] != 'segment') continue;
+      final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is! List || coords.isEmpty) continue;
+
+      final mid = coords[coords.length ~/ 2];
+      if (mid is! List || mid.length < 2) continue;
+      final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+
+      final segId = props['segment_id']?.toString();
+      final isSelected = selectedSegmentId != null &&
+          segId == selectedSegmentId.toString();
+
+      final bgColor = isSelected
+          ? const Color(0xFF44AAFF)
+          : hasSelection
+              ? const Color(0x60888888)
+              : const Color(0xFF888888);
+
+      markers.add(Marker(
+        point: point,
+        width: 22,
+        height: 22,
+        child: Container(
+          decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+          child: Icon(
+            _iconForSegmentType(props['segment_type'] as String?),
+            color: Colors.white,
+            size: 13,
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
   List<LatLng> _allPoints(List<Polyline> polylines) {
     return polylines.expand((p) => p.points).toList();
   }
@@ -564,6 +621,10 @@ class _MapPanelState extends State<MapPanel> {
       _lastSelectedSegId = selSegId;
       _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
       _cachedAllPoints = _allPoints(_cachedPolylines);
+      final hasSelection = selActId != null || selSegId != null;
+      _cachedSegmentMarkers = geo != null
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection)
+          : [];
     }
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
@@ -601,6 +662,8 @@ class _MapPanelState extends State<MapPanel> {
                 // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
                 simplificationTolerance: 0.5,
               ),
+            if (_cachedSegmentMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedSegmentMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<LatLng>?>(
@@ -1071,13 +1134,70 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final NetworkTileProvider _tileProvider;
   bool _fittedBounds = false;
 
-  // Polyline cache — only rebuilt when geo or selection changes.
+  // Polyline + marker cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
   List<Polyline> _cachedPolylines = [];
+  List<Marker> _cachedSegmentMarkers = [];
 
   static const _sentinel = Object();
+
+  static IconData _iconForSegmentType(String? type) {
+    switch (type?.toLowerCase()) {
+      case 'flight': return Icons.flight;
+      case 'train':  return Icons.train;
+      case 'bus':    return Icons.directions_bus;
+      case 'boat':   return Icons.directions_boat;
+      default:       return Icons.route;
+    }
+  }
+
+  List<Marker> _buildSegmentMarkers(
+    Map<String, dynamic> geo,
+    dynamic selectedSegmentId,
+    bool hasSelection,
+  ) {
+    final features = geo['features'];
+    if (features is! List) return [];
+    final markers = <Marker>[];
+    for (final feature in features) {
+      if (feature is! Map) continue;
+      final props = feature['properties'] as Map? ?? {};
+      if (props['type'] != 'segment') continue;
+      final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is! List || coords.isEmpty) continue;
+
+      final mid = coords[coords.length ~/ 2];
+      if (mid is! List || mid.length < 2) continue;
+      final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+
+      final segId = props['segment_id']?.toString();
+      final isSelected = selectedSegmentId != null &&
+          segId == selectedSegmentId.toString();
+
+      final bgColor = isSelected
+          ? const Color(0xFF44AAFF)
+          : hasSelection
+              ? const Color(0x60888888)
+              : const Color(0xFF888888);
+
+      markers.add(Marker(
+        point: point,
+        width: 22,
+        height: 22,
+        child: Container(
+          decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+          child: Icon(
+            _iconForSegmentType(props['segment_type'] as String?),
+            color: Colors.white,
+            size: 13,
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
 
   @override
   void initState() {
@@ -1198,6 +1318,10 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
       _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
+      final hasSelection = selActId != null || selSegId != null;
+      _cachedSegmentMarkers = geo != null
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection)
+          : [];
     }
 
     if (!notifier.isLoading) {
@@ -1228,6 +1352,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
                 polylines: _cachedPolylines,
                 simplificationTolerance: 0.5,
               ),
+            if (_cachedSegmentMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedSegmentMarkers),
             ValueListenableBuilder<List<LatLng>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
