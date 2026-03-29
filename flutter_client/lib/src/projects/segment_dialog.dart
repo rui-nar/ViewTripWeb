@@ -111,6 +111,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
           _startLatCtrl.text = (endLl[0] as num).toStringAsFixed(6);
           _startLonCtrl.text = (endLl[1] as num).toStringAsFixed(6);
         }
+      } else if (prev['item_type'] == 'segment') {
+        final end = prev['segment']?['end'] as Map?;
+        if (end != null) {
+          _startLatCtrl.text = (end['lat'] as num).toStringAsFixed(6);
+          _startLonCtrl.text = (end['lon'] as num).toStringAsFixed(6);
+        }
       }
     }
 
@@ -124,6 +130,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
         if (startLl is List && startLl.length >= 2) {
           _endLatCtrl.text = (startLl[0] as num).toStringAsFixed(6);
           _endLonCtrl.text = (startLl[1] as num).toStringAsFixed(6);
+        }
+      } else if (next['item_type'] == 'segment') {
+        final start = next['segment']?['start'] as Map?;
+        if (start != null) {
+          _endLatCtrl.text = (start['lat'] as num).toStringAsFixed(6);
+          _endLonCtrl.text = (start['lon'] as num).toStringAsFixed(6);
         }
       }
     }
