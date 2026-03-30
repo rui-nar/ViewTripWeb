@@ -195,6 +195,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final otherLonCtrl = isStart ? _endLonCtrl   : _startLonCtrl;
     final result = await showDialog<LatLonResult>(
       context: context,
+      useRootNavigator: true,
       builder: (_) => LocationPickerDialog(
         title: title,
         initialLat: double.tryParse(latCtrl.text.trim()),

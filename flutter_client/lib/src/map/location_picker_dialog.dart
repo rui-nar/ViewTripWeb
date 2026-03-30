@@ -241,6 +241,8 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                        minimumSize: const Size(96, 44)),
                     icon: const Icon(Icons.check, size: 16),
                     label: const Text('Confirm'),
                     onPressed: _picked == null
