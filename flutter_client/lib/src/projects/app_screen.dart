@@ -286,23 +286,35 @@ class _AppScreenState extends State<AppScreen> {
                         ),
                       ),
                       Selector<ProjectNotifier,
-                          (List<Map<String, dynamic>>, Object?)>(
-                        selector: (_, n) =>
-                            (n.activities, n.selectedActivityId as Object?),
+                          (List<Map<String, dynamic>>, Object?, String?)>(
+                        selector: (_, n) => (
+                          n.activities,
+                          n.selectedActivityId as Object?,
+                          n.selectedDay,
+                        ),
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
-                            a.$2?.toString() != b.$2?.toString(),
+                            a.$2?.toString() != b.$2?.toString() ||
+                            a.$3 != b.$3,
                         builder: (ctx, tuple, __) {
                           final n = ctx.read<ProjectNotifier>();
+                          final allActivities = tuple.$1;
+                          final selActId = tuple.$2;
+                          final selDay = tuple.$3;
+                          final activities = selDay != null
+                              ? allActivities.where((a) =>
+                                  (a['start_date_local'] as String? ?? '')
+                                      .split('T').first == selDay).toList()
+                              : allActivities;
                           return ElevationChart(
-                            activities: tuple.$1,
-                            selectedActivityId: tuple.$2,
+                            activities: activities,
+                            selectedActivityId: selActId,
                             onCursorChanged: (pos) =>
                                 n.elevationCursorNotifier.value = pos,
                             mapCursorNotifier: n.mapCursorDistNotifier,
-                            track: tuple.$2 == null
-                                ? n.fullTrack
-                                : n.perActivityTracks[tuple.$2.toString()] ?? n.fullTrack,
+                            track: selActId != null
+                                ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
+                                : n.fullTrack,
                           );
                         },
                       ),
@@ -328,24 +340,35 @@ class _AppScreenState extends State<AppScreen> {
                       ),
                     ),
                     Selector<ProjectNotifier,
-                        (List<Map<String, dynamic>>, Object?)>(
-                      selector: (_, n) =>
-                          (n.activities, n.selectedActivityId as Object?),
+                        (List<Map<String, dynamic>>, Object?, String?)>(
+                      selector: (_, n) => (
+                        n.activities,
+                        n.selectedActivityId as Object?,
+                        n.selectedDay,
+                      ),
                       shouldRebuild: (a, b) =>
                           !identical(a.$1, b.$1) ||
-                          a.$2?.toString() != b.$2?.toString(),
+                          a.$2?.toString() != b.$2?.toString() ||
+                          a.$3 != b.$3,
                       builder: (ctx, tuple, __) {
                         final n = ctx.read<ProjectNotifier>();
+                        final allActivities = tuple.$1;
+                        final selActId = tuple.$2;
+                        final selDay = tuple.$3;
+                        final activities = selDay != null
+                            ? allActivities.where((a) =>
+                                (a['start_date_local'] as String? ?? '')
+                                    .split('T').first == selDay).toList()
+                            : allActivities;
                         return ElevationChart(
-                          activities: tuple.$1,
-                          selectedActivityId: tuple.$2,
+                          activities: activities,
+                          selectedActivityId: selActId,
                           onCursorChanged: (pos) =>
                               n.elevationCursorNotifier.value = pos,
                           mapCursorNotifier: n.mapCursorDistNotifier,
-                          track: tuple.$2 == null
-                              ? n.fullTrack
-                              : n.perActivityTracks[tuple.$2.toString()] ??
-                                  n.fullTrack,
+                          track: selActId != null
+                              ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
+                              : n.fullTrack,
                         );
                       },
                     ),
@@ -730,15 +753,43 @@ class ActivityPanel extends StatefulWidget {
   State<ActivityPanel> createState() => _ActivityPanelState();
 }
 
+// ── Day-grouping display list helpers ─────────────────────────────────────────
+
+class _DayHeader {
+  final int dayNumber;
+  final DateTime date;
+  final String dateKey; // "YYYY-MM-DD"
+  const _DayHeader(this.dayNumber, this.date, this.dateKey);
+}
+
+class _PanelItem {
+  final int originalIndex;
+  final Map<String, dynamic> item;
+  final String? dateKey;
+  const _PanelItem(this.originalIndex, this.item, this.dateKey);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _ActivityPanelState extends State<ActivityPanel> {
   // activityById cache — rebuilt only when the activities list reference changes.
   List<Map<String, dynamic>>? _lastActivities;
   Map<dynamic, Map<String, dynamic>> _activityById = {};
 
+  // Day grouping state
+  Set<int> _collapsedDays = {};
+  String? _selectedDay; // "YYYY-MM-DD"
+
+  // Display list cache — rebuilt when items or activities change.
+  List<Map<String, dynamic>>? _lastItems;
+  List<Object> _displayList = [];
+
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
   TextStyle? _segmentTitleStyle;
 
+  static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  static String _fmtGroupDate(DateTime d) => '${_months[d.month - 1]} ${d.day}';
 
   void _refreshActivityById(List<Map<String, dynamic>> activities) {
     if (identical(activities, _lastActivities)) return;
@@ -746,16 +797,80 @@ class _ActivityPanelState extends State<ActivityPanel> {
     _activityById = {for (final a in activities) a['id']: a};
   }
 
+  void _rebuildDisplayList(List<Map<String, dynamic>> items) {
+    if (identical(items, _lastItems)) return;
+    _lastItems = items;
+    _displayList = _buildDisplayList(items, _activityById);
+  }
+
+  List<Object> _buildDisplayList(
+    List<Map<String, dynamic>> items,
+    Map<dynamic, Map<String, dynamic>> activityById,
+  ) {
+    if (items.isEmpty) return [];
+
+    // Assign each item a date ("YYYY-MM-DD"), propagating forward.
+    final itemDates = <String?>[];
+    String? lastDate;
+    for (final item in items) {
+      String? d;
+      if (item['item_type'] == 'activity') {
+        final a = activityById[item['activity_id']];
+        final ds = a?['start_date_local'] as String?;
+        d = ds?.split('T').first;
+        if (d != null) lastDate = d;
+      } else {
+        d = item['segment']?['date'] as String? ?? lastDate;
+      }
+      itemDates.add(d);
+    }
+
+    // Find trip start = earliest date.
+    final dates = itemDates.whereType<String>().toSet().toList()..sort();
+    if (dates.isEmpty) {
+      return [for (int i = 0; i < items.length; i++) _PanelItem(i, items[i], null)];
+    }
+    final tripStart = DateTime.parse(dates.first);
+    final tripStartDate = DateTime(tripStart.year, tripStart.month, tripStart.day);
+
+    // Build flat display list with day headers.
+    final result = <Object>[];
+    String? lastGroupDate;
+    for (int i = 0; i < items.length; i++) {
+      final dk = itemDates[i];
+      if (dk != null && dk != lastGroupDate) {
+        final d = DateTime.parse(dk);
+        final groupDate = DateTime(d.year, d.month, d.day);
+        final dayNum = groupDate.difference(tripStartDate).inDays + 1;
+        result.add(_DayHeader(dayNum, d, dk));
+        lastGroupDate = dk;
+      }
+      // Skip collapsed items.
+      final dayNum = lastGroupDate != null
+          ? () {
+              final d = DateTime.parse(lastGroupDate!);
+              final gd = DateTime(d.year, d.month, d.day);
+              return gd.difference(tripStartDate).inDays + 1;
+            }()
+          : null;
+      if (dayNum != null && _collapsedDays.contains(dayNum)) continue;
+      result.add(_PanelItem(i, items[i], dk));
+    }
+    return result;
+  }
+
   @override
   void initState() {
     super.initState();
     _refreshActivityById(widget.notifier.activities);
+    _rebuildDisplayList(widget.notifier.items);
   }
 
   @override
   void didUpdateWidget(ActivityPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     _refreshActivityById(widget.notifier.activities);
+    _rebuildDisplayList(widget.notifier.items);
   }
 
   @override
@@ -764,7 +879,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final theme = Theme.of(context);
     _segmentTitleStyle =
         theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
-
   }
 
   static IconData _iconForActivityType(String? type) {
@@ -902,7 +1016,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
           ),
         ),
 
-        // ── Items list (activities + segments, reorderable) ───────────────────
+        // ── Items list (activities + segments, reorderable, day-grouped) ────────
         Expanded(
           child: items.isEmpty && !notifier.isLoading
               ? Center(
@@ -914,29 +1028,132 @@ class _ActivityPanelState extends State<ActivityPanel> {
                     textAlign: TextAlign.center,
                   ),
                 )
-              : ReorderableListView.builder(
-                  scrollController: widget.scrollController,
-                  onReorder: (oldIndex, newIndex) {
-                    // ReorderableListView passes newIndex after removal,
-                    // but our backend uses the original "before" semantics.
-                    final to = newIndex > oldIndex ? newIndex - 1 : newIndex;
-                    notifier.reorderItems(oldIndex, to);
-                  },
-                  itemCount: items.length,
-                  itemBuilder: (context, i) {
-                    final item = items[i];
-                    final isActivity = item['item_type'] == 'activity';
+              : Builder(builder: (context) {
+                  // Rebuild display list if items changed.
+                  _rebuildDisplayList(items);
+                  final displayList = _displayList;
+                  return ReorderableListView.builder(
+                    scrollController: widget.scrollController,
+                    buildDefaultDragHandles: false,
+                    onReorder: (fromV, toV) {
+                      final fromEntry = fromV < displayList.length
+                          ? displayList[fromV] : null;
+                      if (fromEntry is! _PanelItem) return;
+                      final fromOrig = fromEntry.originalIndex;
+                      final adjToV = toV > fromV ? toV - 1 : toV;
+                      int origCount = 0;
+                      int? toOrig;
+                      for (int k = 0; k < displayList.length; k++) {
+                        if (k == adjToV) { toOrig = origCount; break; }
+                        if (displayList[k] is _PanelItem) origCount++;
+                      }
+                      toOrig ??= notifier.items.length - 1;
+                      notifier.reorderItems(fromOrig, toOrig);
+                    },
+                    itemCount: displayList.length,
+                    itemBuilder: (context, vi) {
+                      final entry = displayList[vi];
 
-                    if (isActivity) {
-                      final a = activityById[item['activity_id']];
-                      if (a == null) {
+                      // ── Day header ──────────────────────────────────────────
+                      if (entry is _DayHeader) {
+                        final h = entry;
+                        final isSelected = _selectedDay == h.dateKey;
+                        final isCollapsed = _collapsedDays.contains(h.dayNumber);
+                        return InkWell(
+                          key: ValueKey('header_${h.dayNumber}'),
+                          onTap: () {
+                            final newDay = isSelected ? null : h.dateKey;
+                            setState(() => _selectedDay = newDay);
+                            notifier.selectDay(newDay);
+                          },
+                          child: Container(
+                            color: isSelected
+                                ? theme.colorScheme.primaryContainer
+                                    .withValues(alpha: 0.4)
+                                : null,
+                            padding: const EdgeInsets.fromLTRB(4, 4, 8, 2),
+                            child: Row(children: [
+                              IconButton(
+                                icon: Icon(
+                                  isCollapsed
+                                      ? Icons.chevron_right
+                                      : Icons.expand_more,
+                                  size: 20,
+                                ),
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => setState(() {
+                                  if (isCollapsed) {
+                                    _collapsedDays.remove(h.dayNumber);
+                                  } else {
+                                    _collapsedDays.add(h.dayNumber);
+                                  }
+                                  // Force rebuild of display list.
+                                  _lastItems = null;
+                                }),
+                              ),
+                              Text(
+                                'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
+                                style: theme.textTheme.labelMedium?.copyWith(
+                                  color: isSelected
+                                      ? theme.colorScheme.primary
+                                      : theme.colorScheme.onSurfaceVariant,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ]),
+                          ),
+                        );
+                      }
+
+                      // ── Activity or segment item ─────────────────────────────
+                      final panelItem = entry as _PanelItem;
+                      final i = panelItem.originalIndex;
+                      final item = panelItem.item;
+                      final isActivity = item['item_type'] == 'activity';
+                      final dragHandle = ReorderableDragStartListener(
+                        index: vi,
+                        child: const Icon(Icons.drag_handle,
+                            size: 18, color: Colors.grey),
+                      );
+
+                      if (isActivity) {
+                        final a = activityById[item['activity_id']];
+                        if (a == null) {
+                          return Dismissible(
+                            key: ValueKey('act_${item['activity_id']}'),
+                            direction: DismissDirection.endToStart,
+                            onDismissed: (_) => _dismissWithUndo(
+                              context: context,
+                              notifier: notifier,
+                              label: 'Activity removed',
+                              onConfirm: () => notifier.removeItem(i),
+                            ),
+                            background: Container(
+                              color: theme.colorScheme.error,
+                              alignment: Alignment.centerRight,
+                              padding: const EdgeInsets.only(right: 20),
+                              child: Icon(Icons.delete_outline,
+                                  color: theme.colorScheme.onError),
+                            ),
+                            child: ListTile(
+                              leading: dragHandle,
+                              title: const Text('Unknown activity'),
+                              trailing: const Icon(Icons.help_outline),
+                            ),
+                          );
+                        }
+                        final type = a['type'] as String?;
+                        final name = a['name'] as String? ?? 'Activity';
+                        final distM = (a['distance'] as num? ?? 0).toDouble();
+                        final movingSec = a['moving_time'];
+                        final activityId = item['activity_id'];
                         return Dismissible(
-                          key: ValueKey('act_${item['activity_id']}'),
+                          key: ValueKey('act_$activityId'),
                           direction: DismissDirection.endToStart,
                           onDismissed: (_) => _dismissWithUndo(
                             context: context,
                             notifier: notifier,
-                            label: 'Activity removed',
+                            label: 'Removed "$name"',
                             onConfirm: () => notifier.removeItem(i),
                           ),
                           background: Container(
@@ -946,140 +1163,131 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             child: Icon(Icons.delete_outline,
                                 color: theme.colorScheme.onError),
                           ),
-                          child: const ListTile(
-                            leading: Icon(Icons.help_outline),
-                            title: Text('Unknown activity'),
+                          child: Selector<ProjectNotifier, bool>(
+                            selector: (_, n) =>
+                                activityId?.toString() ==
+                                n.selectedActivityId?.toString(),
+                            builder: (_, isSelected, __) => ListTile(
+                              tileColor: isSelected
+                                  ? theme.colorScheme.primaryContainer
+                                      .withValues(alpha: 0.45)
+                                  : null,
+                              leading: dragHandle,
+                              title: Row(children: [
+                                Icon(
+                                  _iconForActivityType(type),
+                                  size: 16,
+                                  color: isSelected
+                                      ? theme.colorScheme.primary
+                                      : theme.colorScheme.primary
+                                          .withValues(alpha: 0.7),
+                                ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(name,
+                                      style: theme.textTheme.bodyMedium),
+                                ),
+                              ]),
+                              subtitle: Text(
+                                '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
+                                style: theme.textTheme.bodySmall,
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.add_road, size: 18),
+                                tooltip: 'Add connecting segment after',
+                                onPressed: () => _showSegmentDialog(
+                                  context,
+                                  notifier,
+                                  insertAfterIndex: i,
+                                ),
+                              ),
+                              onTap: () => _flyToActivity(a),
+                            ),
+                          ),
+                        );
+                      } else {
+                        // Segment item
+                        final seg =
+                            item['segment'] as Map<String, dynamic>? ?? {};
+                        final segId = seg['id'] as String? ?? '';
+                        final segType = seg['segment_type'] as String?;
+                        final label =
+                            seg['label'] as String? ?? segType ?? 'Segment';
+                        return Dismissible(
+                          key: ValueKey('seg_$segId'),
+                          direction: DismissDirection.endToStart,
+                          onDismissed: (_) => _dismissWithUndo(
+                            context: context,
+                            notifier: notifier,
+                            label: 'Removed "$label"',
+                            onConfirm: () => notifier.deleteSegment(segId),
+                          ),
+                          background: Container(
+                            color: theme.colorScheme.error,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: Icon(Icons.delete_outline,
+                                color: theme.colorScheme.onError),
+                          ),
+                          child: Selector<ProjectNotifier, bool>(
+                            selector: (_, n) =>
+                                n.selectedSegmentId?.toString() == segId,
+                            builder: (_, isSelected, __) => ListTile(
+                              tileColor: isSelected
+                                  ? theme.colorScheme.secondaryContainer
+                                      .withValues(alpha: 0.45)
+                                  : null,
+                              leading: dragHandle,
+                              title: Row(children: [
+                                Icon(
+                                  _iconForSegmentType(segType),
+                                  size: 16,
+                                  color: isSelected
+                                      ? theme.colorScheme.secondary
+                                      : theme.colorScheme.secondary
+                                          .withValues(alpha: 0.7),
+                                ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(label,
+                                      style: _segmentTitleStyle),
+                                ),
+                              ]),
+                              subtitle: Text(segType ?? '',
+                                  style: theme.textTheme.bodySmall),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_outlined,
+                                        size: 18),
+                                    tooltip: 'Edit segment',
+                                    onPressed: () => _showSegmentDialog(
+                                      context,
+                                      notifier,
+                                      editSegment: seg,
+                                      insertAfterIndex: null,
+                                    ),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.add_road, size: 18),
+                                    tooltip: 'Add connecting segment after',
+                                    onPressed: () => _showSegmentDialog(
+                                      context,
+                                      notifier,
+                                      insertAfterIndex: i,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              onTap: () => _flyToSegment(seg),
+                            ),
                           ),
                         );
                       }
-                      final type = a['type'] as String?;
-                      final name = a['name'] as String? ?? 'Activity';
-                      final distM = (a['distance'] as num? ?? 0).toDouble();
-                      final movingSec = a['moving_time'];
-                      final activityId = item['activity_id'];
-                      return Dismissible(
-                        key: ValueKey('act_$activityId'),
-                        direction: DismissDirection.endToStart,
-                        onDismissed: (_) => _dismissWithUndo(
-                          context: context,
-                          notifier: notifier,
-                          label: 'Removed "$name"',
-                          onConfirm: () => notifier.removeItem(i),
-                        ),
-                        background: Container(
-                          color: theme.colorScheme.error,
-                          alignment: Alignment.centerRight,
-                          padding: const EdgeInsets.only(right: 20),
-                          child: Icon(Icons.delete_outline,
-                              color: theme.colorScheme.onError),
-                        ),
-                        child: Selector<ProjectNotifier, bool>(
-                          selector: (_, n) =>
-                              activityId?.toString() ==
-                              n.selectedActivityId?.toString(),
-                          builder: (_, isSelected, __) => ListTile(
-                            tileColor: isSelected
-                                ? theme.colorScheme.primaryContainer
-                                    .withValues(alpha: 0.45)
-                                : null,
-                            leading: Icon(
-                              _iconForActivityType(type),
-                              color: isSelected
-                                  ? theme.colorScheme.primary
-                                  : theme.colorScheme.primary
-                                      .withValues(alpha: 0.7),
-                            ),
-                            title: Text(
-                                name, style: theme.textTheme.bodyMedium),
-                            subtitle: Text(
-                              '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
-                              style: theme.textTheme.bodySmall,
-                            ),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.add_road, size: 18),
-                              tooltip: 'Add connecting segment after',
-                              onPressed: () => _showSegmentDialog(
-                                context,
-                                notifier,
-                                insertAfterIndex: i,
-                              ),
-                            ),
-                            onTap: () => _flyToActivity(a),
-                          ),
-                        ),
-                      );
-                    } else {
-                      // Segment item
-                      final seg = item['segment'] as Map<String, dynamic>? ?? {};
-                      final segId = seg['id'] as String? ?? '';
-                      final segType = seg['segment_type'] as String?;
-                      final label = seg['label'] as String? ?? segType ?? 'Segment';
-                      return Dismissible(
-                        key: ValueKey('seg_$segId'),
-                        direction: DismissDirection.endToStart,
-                        onDismissed: (_) => _dismissWithUndo(
-                          context: context,
-                          notifier: notifier,
-                          label: 'Removed "$label"',
-                          onConfirm: () => notifier.deleteSegment(segId),
-                        ),
-                        background: Container(
-                          color: theme.colorScheme.error,
-                          alignment: Alignment.centerRight,
-                          padding: const EdgeInsets.only(right: 20),
-                          child: Icon(Icons.delete_outline,
-                              color: theme.colorScheme.onError),
-                        ),
-                        child: Selector<ProjectNotifier, bool>(
-                          selector: (_, n) =>
-                              n.selectedSegmentId?.toString() == segId,
-                          builder: (_, isSelected, __) => ListTile(
-                            tileColor: isSelected
-                                ? theme.colorScheme.secondaryContainer
-                                    .withValues(alpha: 0.45)
-                                : null,
-                            leading: Icon(
-                              _iconForSegmentType(segType),
-                              color: isSelected
-                                  ? theme.colorScheme.secondary
-                                  : theme.colorScheme.secondary
-                                      .withValues(alpha: 0.7),
-                            ),
-                            title: Text(label, style: _segmentTitleStyle),
-                            subtitle: Text(segType ?? '',
-                                style: theme.textTheme.bodySmall),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.edit_outlined,
-                                      size: 18),
-                                  tooltip: 'Edit segment',
-                                  onPressed: () => _showSegmentDialog(
-                                    context,
-                                    notifier,
-                                    editSegment: seg,
-                                    insertAfterIndex: null,
-                                  ),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.add_road, size: 18),
-                                  tooltip: 'Add connecting segment after',
-                                  onPressed: () => _showSegmentDialog(
-                                    context,
-                                    notifier,
-                                    insertAfterIndex: i,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            onTap: () => _flyToSegment(seg),
-                          ),
-                        ),
-                      );
-                    }
-                  },
-                ),
+                    },
+                  );
+                }),
         ),
 
         // ── "Add segment" button between items ────────────────────────────────
@@ -1138,6 +1346,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
+  String? _lastSelectedDay = '';   // '' = sentinel (distinct from null)
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedSegmentMarkers = [];
 
@@ -1247,15 +1456,59 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
   }
 
+  /// Compute the set of activity_ids and segment_ids that belong to [dateKey].
+  static ({Set<String> actIds, Set<String> segIds}) _dayItemIds(
+    List<Map<String, dynamic>> items,
+    Map<dynamic, Map<String, dynamic>> activityById,
+    String dateKey,
+  ) {
+    final actIds = <String>{};
+    final segIds = <String>{};
+    String? lastDate;
+    for (final item in items) {
+      if (item['item_type'] == 'activity') {
+        final a = activityById[item['activity_id']];
+        final ds = (a?['start_date_local'] as String?)?.split('T').first;
+        if (ds != null) lastDate = ds;
+        if ((ds ?? lastDate) == dateKey) {
+          final id = item['activity_id']?.toString();
+          if (id != null) actIds.add(id);
+        }
+      } else {
+        final ds = item['segment']?['date'] as String? ?? lastDate;
+        if (ds == dateKey) {
+          final id = item['segment']?['id']?.toString();
+          if (id != null) segIds.add(id);
+        }
+      }
+    }
+    return (actIds: actIds, segIds: segIds);
+  }
+
   List<Polyline> _buildPolylines(
     Map<String, dynamic> geo,
     dynamic selectedActivityId,
     dynamic selectedSegmentId,
+    String? selectedDay,
+    Map<dynamic, Map<String, dynamic>> activityById,
+    List<Map<String, dynamic>> items,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
+
+    // For day selection, compute which ids are in that day.
+    Set<String>? dayActIds;
+    Set<String>? daySegIds;
+    if (selectedDay != null) {
+      final r = _dayItemIds(items, activityById, selectedDay);
+      dayActIds = r.actIds;
+      daySegIds = r.segIds;
+    }
+
     final polylines = <Polyline>[];
-    final hasSelection = selectedActivityId != null || selectedSegmentId != null;
+    final hasSelection = selectedActivityId != null ||
+        selectedSegmentId != null ||
+        selectedDay != null;
     for (final feature in features) {
       if (feature is! Map) continue;
       final props = feature['properties'] as Map? ?? {};
@@ -1270,15 +1523,27 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       }
       if (points.isEmpty) continue;
       final isSegment = props['type'] == 'segment';
-      final isSelAct = selectedActivityId != null &&
-          props['activity_id']?.toString() == selectedActivityId.toString();
-      final isSelSeg = selectedSegmentId != null &&
-          props['segment_id']?.toString() == selectedSegmentId.toString();
+      final featureId = isSegment
+          ? props['segment_id']?.toString()
+          : props['activity_id']?.toString();
+
+      final bool isHighlighted;
+      if (selectedDay != null) {
+        isHighlighted = isSegment
+            ? (daySegIds?.contains(featureId) ?? false)
+            : (dayActIds?.contains(featureId) ?? false);
+      } else if (isSegment) {
+        isHighlighted = selectedSegmentId != null &&
+            featureId == selectedSegmentId.toString();
+      } else {
+        isHighlighted = selectedActivityId != null &&
+            featureId == selectedActivityId.toString();
+      }
 
       final Color color;
       final double strokeWidth;
       if (isSegment) {
-        if (isSelSeg) {
+        if (isHighlighted) {
           color = const Color(0xFF44AAFF);
           strokeWidth = 4.0;
         } else if (hasSelection) {
@@ -1289,7 +1554,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           strokeWidth = 2.0;
         }
       } else {
-        if (isSelAct) {
+        if (isHighlighted) {
           color = const Color(0xFFEF4444);
           strokeWidth = 5.0;
         } else if (hasSelection) {
@@ -1311,14 +1576,23 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
+    final selDay = notifier.selectedDay;
     if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
-        selSegId.toString() != (_lastSelectedSegId ?? '').toString()) {
+        selSegId.toString() != (_lastSelectedSegId ?? '').toString() ||
+        selDay != _lastSelectedDay) {
       if (!identical(geo, _lastGeo)) _fittedBounds = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
-      _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
-      final hasSelection = selActId != null || selSegId != null;
+      _lastSelectedDay = selDay;
+      // Build activityById for day-selection polyline colouring.
+      final actById = <dynamic, Map<String, dynamic>>{
+        for (final a in notifier.activities) a['id']: a
+      };
+      _cachedPolylines = geo != null
+          ? _buildPolylines(geo, selActId, selSegId, selDay, actById, notifier.items)
+          : [];
+      final hasSelection = selActId != null || selSegId != null || selDay != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];

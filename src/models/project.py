@@ -26,6 +26,7 @@ class ConnectingSegment:
     start: SegmentEndpoint = field(default_factory=lambda: SegmentEndpoint(0.0, 0.0))
     end: SegmentEndpoint = field(default_factory=lambda: SegmentEndpoint(0.0, 0.0))
     label: str = ""   # e.g. "Basel → Paris (TGV)"
+    date: Optional[str] = None  # ISO date "YYYY-MM-DD"
     # Great-circle points are regenerated at load time — never stored in the file.
 
 
