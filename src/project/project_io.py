@@ -125,6 +125,7 @@ class ProjectIO:
                 "id": seg.id,
                 "segment_type": seg.segment_type,
                 "label": seg.label,
+                "date": seg.date,
                 "start": {
                     "lat": seg.start.lat,
                     "lon": seg.start.lon,
@@ -148,6 +149,7 @@ class ProjectIO:
             id=sd.get("id", ""),
             segment_type=sd.get("segment_type", "flight"),
             label=sd.get("label", ""),
+            date=sd.get("date"),
             start=SegmentEndpoint(
                 lat=sd.get("start", {}).get("lat", 0.0),
                 lon=sd.get("start", {}).get("lon", 0.0),

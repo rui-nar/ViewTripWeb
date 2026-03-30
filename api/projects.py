@@ -538,6 +538,7 @@ class SegmentBody(BaseModel):
     end_lat: float = 0.0
     end_lon: float = 0.0
     insert_after_index: Optional[int] = None  # POST only
+    date: Optional[str] = None  # ISO date "YYYY-MM-DD"
 
 
 @router.post("/{name}/segments", status_code=status.HTTP_201_CREATED)
@@ -551,6 +552,7 @@ def create_segment(
         id=str(uuid.uuid4()),
         segment_type=body.segment_type,
         label=body.label,
+        date=body.date,
         start=SegmentEndpoint(lat=body.start_lat, lon=body.start_lon),
         end=SegmentEndpoint(lat=body.end_lat, lon=body.end_lon),
     )
@@ -590,6 +592,7 @@ def update_segment(
             if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
                 item.segment.segment_type = body.segment_type
                 item.segment.label = body.label
+                item.segment.date = body.date
                 item.segment.start = SegmentEndpoint(lat=body.start_lat, lon=body.start_lon)
                 item.segment.end = SegmentEndpoint(lat=body.end_lat, lon=body.end_lon)
                 _repo.save_project(sess, user_info_id, project)

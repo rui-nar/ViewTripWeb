@@ -30,8 +30,14 @@ class _SegmentDialogState extends State<SegmentDialog> {
   late TextEditingController _startLonCtrl;
   late TextEditingController _endLatCtrl;
   late TextEditingController _endLonCtrl;
+  DateTime? _date;
   bool _saving = false;
   Timer? _previewDebounce;
+
+  static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
+  static String _toIso(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   void initState() {
@@ -48,6 +54,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
     _endLonCtrl = TextEditingController(
         text: _fmt(seg?['end']?['lon']));
 
+    // Date: edit mode reads from segment, create mode auto-infers
+    final dateStr = seg?['date'] as String?;
+    if (dateStr != null) {
+      _date = DateTime.tryParse(dateStr);
+    }
+
     // Auto-populate from adjacent activities if creating new segment
     if (seg == null) _autoPopulate();
 
@@ -57,7 +69,8 @@ class _SegmentDialogState extends State<SegmentDialog> {
     _startLonCtrl.addListener(_schedulePreviewUpdate);
     _endLatCtrl.addListener(_schedulePreviewUpdate);
     _endLonCtrl.addListener(_schedulePreviewUpdate);
-    _updatePreview(); // immediate on open (fields may be pre-filled)
+    // Defer so the ValueNotifier change doesn't fire during the first build.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updatePreview());
   }
 
   void _schedulePreviewUpdate() {
@@ -139,12 +152,30 @@ class _SegmentDialogState extends State<SegmentDialog> {
         }
       }
     }
+
+    // Infer date: walk backwards from insertAfter to find nearest dated item
+    for (int i = insertAfter; i >= 0; i--) {
+      final it = items[i];
+      if (it['item_type'] == 'activity') {
+        final a = actById(it['activity_id']);
+        final ds = a?['start_date_local'] as String?;
+        if (ds != null) { _date = DateTime.tryParse(ds); break; }
+      } else if (it['item_type'] == 'segment') {
+        final ds = it['segment']?['date'] as String?;
+        if (ds != null) { _date = DateTime.tryParse(ds); break; }
+      }
+    }
   }
 
   @override
   void dispose() {
     _previewDebounce?.cancel();
-    widget.notifier.setPreviewArc(null);
+    // Defer so we don't fire the ValueNotifier while the framework tree is
+    // locked during unmount (finalizeTree / lockState).
+    final notifier = widget.notifier;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifier.setPreviewArc(null);
+    });
     _labelCtrl.dispose();
     _startLatCtrl.dispose();
     _startLonCtrl.dispose();
@@ -191,6 +222,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final startLon = double.parse(_startLonCtrl.text.trim());
     final endLat = double.parse(_endLatCtrl.text.trim());
     final endLon = double.parse(_endLonCtrl.text.trim());
+    final dateStr = _date != null ? _toIso(_date!) : null;
 
     if (widget.editSegment != null) {
       await widget.notifier.updateSegment(
@@ -201,6 +233,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         startLon: startLon,
         endLat: endLat,
         endLon: endLon,
+        date: dateStr,
       );
     } else {
       await widget.notifier.addSegment(
@@ -211,6 +244,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         endLat: endLat,
         endLon: endLon,
         insertAfterIndex: widget.insertAfterIndex,
+        date: dateStr,
       );
     }
 
@@ -225,6 +259,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final isEdit = widget.editSegment != null;
     return AlertDialog(
       title: Text(isEdit ? 'Edit Segment' : 'Add Segment'),
@@ -262,7 +297,47 @@ class _SegmentDialogState extends State<SegmentDialog> {
                   hintText: 'e.g. Basel → Paris',
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              // Date
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _date ?? DateTime.now(),
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime(2100),
+                  );
+                  if (picked != null) setState(() => _date = picked);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.calendar_today, size: 18,
+                          color: theme.colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _date == null ? 'No date set' : _fmtDate(_date!),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: _date == null
+                                ? theme.colorScheme.onSurfaceVariant
+                                : null,
+                          ),
+                        ),
+                      ),
+                      if (_date != null)
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () => setState(() => _date = null),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
               // Start
               Row(
                 children: [

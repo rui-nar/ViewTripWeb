@@ -26,12 +26,16 @@ class ProjectNotifier extends ChangeNotifier {
   /// The connecting segment currently highlighted on the map. Null = no selection.
   dynamic selectedSegmentId;
 
+  /// The day currently selected in the activity panel ("YYYY-MM-DD" or null).
+  String? selectedDay;
+
   void selectActivity(dynamic id) {
     // Toggle off if already selected (compare as strings to handle int/double
     // type differences from JSON parsing on web).
     selectedActivityId =
         selectedActivityId?.toString() == id?.toString() ? null : id;
     selectedSegmentId = null;
+    selectedDay = null;
     notifyListeners();
   }
 
@@ -39,6 +43,14 @@ class ProjectNotifier extends ChangeNotifier {
     selectedSegmentId =
         selectedSegmentId?.toString() == id?.toString() ? null : id;
     selectedActivityId = null;
+    selectedDay = null;
+    notifyListeners();
+  }
+
+  void selectDay(String? dateKey) {
+    selectedDay = dateKey;
+    selectedActivityId = null;
+    selectedSegmentId = null;
     notifyListeners();
   }
 
@@ -58,6 +70,7 @@ class ProjectNotifier extends ChangeNotifier {
     geo = null;
     selectedActivityId = null;
     selectedSegmentId = null;
+    selectedDay = null;
     notifyListeners();
 
     try {
@@ -198,6 +211,9 @@ class ProjectNotifier extends ChangeNotifier {
     activities = [];
     items = [];
     geo = null;
+    selectedActivityId = null;
+    selectedSegmentId = null;
+    selectedDay = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
@@ -313,6 +329,7 @@ class ProjectNotifier extends ChangeNotifier {
     required double endLat,
     required double endLon,
     int? insertAfterIndex,
+    String? date,
   }) async {
     final name = projectName;
     if (name == null) return;
@@ -323,6 +340,7 @@ class ProjectNotifier extends ChangeNotifier {
         'id': '__optimistic__',
         'segment_type': segmentType,
         'label': label,
+        'date': date,
         'start': {'lat': startLat, 'lon': startLon},
         'end':   {'lat': endLat,   'lon': endLon},
       },
@@ -343,6 +361,7 @@ class ProjectNotifier extends ChangeNotifier {
           'end_lat': endLat,
           'end_lon': endLon,
           if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
+          if (date != null) 'date': date,
         },
       );
       await _silentReload(name);
@@ -360,6 +379,7 @@ class ProjectNotifier extends ChangeNotifier {
     required double startLon,
     required double endLat,
     required double endLon,
+    String? date,
   }) async {
     final name = projectName;
     if (name == null) return;
@@ -370,6 +390,7 @@ class ProjectNotifier extends ChangeNotifier {
         final seg = Map<String, dynamic>.from(item['segment'] as Map);
         seg['segment_type'] = segmentType;
         seg['label'] = label;
+        seg['date'] = date;
         seg['start'] = {'lat': startLat, 'lon': startLon};
         seg['end']   = {'lat': endLat,   'lon': endLon};
         item['segment'] = seg;
@@ -387,6 +408,7 @@ class ProjectNotifier extends ChangeNotifier {
           'start_lon': startLon,
           'end_lat': endLat,
           'end_lon': endLon,
+          if (date != null) 'date': date,
         },
       );
       await _silentReload(name);
