@@ -32,6 +32,8 @@ class DBProject(sqlmodel.SQLModel, table=True):
     share_token: Optional[str] = sqlmodel.Field(default=None, index=True)
     # User-defined trip start date override ("YYYY-MM-DD"); None = infer from activities
     trip_start: Optional[str] = sqlmodel.Field(default=None)
+    # Pre-computed project stats JSON; recomputed after any mutation
+    stats_json: Optional[str] = sqlmodel.Field(default=None)
 
 
 class DBActivity(sqlmodel.SQLModel, table=True):

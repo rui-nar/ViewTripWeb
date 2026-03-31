@@ -162,6 +162,12 @@ def _enrich_pending_background(
             pass
 
 
+def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
+    """Background task: open a fresh session and recompute project stats."""
+    with get_session() as sess:
+        _repo.compute_and_cache_stats(sess, user_info_id, project_name)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/")
@@ -206,6 +212,35 @@ def get_project(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return _repo.to_dict(project)
+
+
+@router.get("/{name}/stats")
+def get_project_stats(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return pre-computed project statistics (computed on-the-fly if not cached yet)."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        if row.stats_json is None:
+            # First-time access: compute synchronously, then return
+            _repo.compute_and_cache_stats(sess, user_info_id, name)
+            row = sess.exec(
+                select(DBProject).where(
+                    DBProject.user_info_id == user_info_id,
+                    DBProject.name == name,
+                )
+            ).first()
+        stats = json.loads(row.stats_json or "{}")
+    return stats
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -414,6 +449,8 @@ def add_activities(
             _enrich_pending_background, pending_ids, user_info_id, name
         )
 
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+
     return {
         "added": added,
         "total": len(project.activities),
@@ -500,6 +537,7 @@ def delete_item(
     name: str,
     index: int,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -513,6 +551,7 @@ def delete_item(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Index out of range")
         project.remove_item(index)
         _repo.save_project(sess, user_info_id, project)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
 
 
 class ReorderRequest(BaseModel):
@@ -525,6 +564,7 @@ def reorder_items(
     name: str,
     body: ReorderRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -536,6 +576,7 @@ def reorder_items(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         project.move_item(body.from_index, body.to_index)
         _repo.save_project(sess, user_info_id, project)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     return [ProjectIO._serialise_item(i) for i in project.items]
 
 
@@ -557,6 +598,7 @@ def create_segment(
     name: str,
     body: SegmentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     user_info_id = int(current_user["sub"])
     seg = ConnectingSegment(
@@ -581,6 +623,7 @@ def create_segment(
             insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
         project.items.insert(insert_at, item)
         _repo.save_project(sess, user_info_id, project)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     return {"id": seg.id}
 
 
@@ -590,6 +633,7 @@ def update_segment(
     seg_id: str,
     body: SegmentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -607,6 +651,7 @@ def update_segment(
                 item.segment.start = SegmentEndpoint(lat=body.start_lat, lon=body.start_lon)
                 item.segment.end = SegmentEndpoint(lat=body.end_lat, lon=body.end_lon)
                 _repo.save_project(sess, user_info_id, project)
+                background_tasks.add_task(_refresh_stats_background, user_info_id, name)
                 return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
@@ -616,6 +661,7 @@ def delete_segment(
     name: str,
     seg_id: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -633,6 +679,7 @@ def delete_segment(
         if len(project.items) == original_len:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, user_info_id, project)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
 
 
 # ── Project sharing ────────────────────────────────────────────────────────────

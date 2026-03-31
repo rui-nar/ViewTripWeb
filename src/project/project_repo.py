@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import List, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 from models.db import get_session
 from sqlmodel import Session, select
@@ -258,6 +259,28 @@ class ProjectRepo:
         existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
         existing.summary_polyline = act.summary_polyline
         existing.elevation_profile_json = ep_json
+        sess.commit()
+
+    # ------------------------------------------------------------------
+    # Stats computation + caching
+    # ------------------------------------------------------------------
+
+    def compute_and_cache_stats(
+        self, sess: Session, user_info_id: int, name: str
+    ) -> None:
+        """Compute project statistics and persist them to DBProject.stats_json."""
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            return
+        project = self._row_to_project(sess, row)
+        row.stats_json = json.dumps(_compute_stats(project))
+        row.updated_at = time.time()
+        sess.add(row)
         sess.commit()
 
     # ------------------------------------------------------------------
@@ -578,3 +601,92 @@ class ProjectRepo:
             os.rename(path, path + ".migrated")
         except OSError:
             pass  # not critical — ingest is idempotent anyway
+
+
+# ---------------------------------------------------------------------------
+# Module-level stats helper (outside the class so it can be tested standalone)
+# ---------------------------------------------------------------------------
+
+def _compute_stats(project: Project) -> Dict[str, Any]:
+    """Compute all project statistics from an in-memory Project.
+
+    Returns a dict that is stored as ``DBProject.stats_json``.
+    """
+    from src.models.great_circle import haversine_km
+
+    # ── Aggregate totals over all activities ────────────────────────────────
+    total_dist_m = 0.0
+    total_moving_s = 0
+    total_elev_m = 0.0
+
+    activity_counts: Dict[str, int] = defaultdict(int)     # type → count
+    ride_day_dist: Dict[str, float] = defaultdict(float)   # date → metres
+    ride_day_elev: Dict[str, float] = defaultdict(float)   # date → metres
+    ride_total_elev_m = 0.0
+
+    for a in project.activities:
+        total_dist_m   += a.distance or 0.0
+        total_moving_s += a.moving_time or 0
+        total_elev_m   += a.total_elevation_gain or 0.0
+
+        atype = (a.type or "other").lower()
+        activity_counts[atype] += 1
+
+        if atype == "ride":
+            ride_total_elev_m += a.total_elevation_gain or 0.0
+            date_key: Optional[str] = None
+            if a.start_date_local is not None:
+                # start_date_local may be a datetime or an ISO string
+                try:
+                    date_key = a.start_date_local.date().isoformat()  # datetime
+                except AttributeError:
+                    date_key = str(a.start_date_local)[:10]           # string fallback
+            if date_key:
+                ride_day_dist[date_key] += a.distance or 0.0
+                ride_day_elev[date_key] += a.total_elevation_gain or 0.0
+
+    ride_days = len(ride_day_dist)
+    ride_dist_m = sum(ride_day_dist.values())
+    ride_avg_dist_per_day_m = ride_dist_m / ride_days if ride_days else 0.0
+
+    if ride_day_dist:
+        best_dist_day = max(ride_day_dist, key=lambda k: ride_day_dist[k])
+        best_dist_m   = ride_day_dist[best_dist_day]
+        best_elev_day = max(ride_day_elev, key=lambda k: ride_day_elev[k])
+        best_elev_m   = ride_day_elev[best_elev_day]
+    else:
+        best_dist_day = best_elev_day = None
+        best_dist_m   = best_elev_m   = 0.0
+
+    # ── Distance + counts by segment type ───────────────────────────────────
+    seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}
+    seg_counts: Dict[str, int] = defaultdict(int)
+    for item in project.items:
+        if item.item_type == "segment" and item.segment is not None:
+            seg = item.segment
+            km = haversine_km(seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
+            if seg.segment_type in seg_dist:
+                seg_dist[seg.segment_type] += km * 1000.0
+            seg_counts[seg.segment_type] += 1
+
+    return {
+        "total_distance_m":      total_dist_m,
+        "total_moving_s":        total_moving_s,
+        "total_elevation_m":     total_elev_m,
+        "activity_counts":       dict(activity_counts),
+        "segment_counts":        dict(seg_counts),
+        "ride_days":             ride_days,
+        "ride_avg_dist_per_day_m": ride_avg_dist_per_day_m,
+        "ride_total_elev_m":     ride_total_elev_m,
+        "best_ride_dist_m":      best_dist_m,
+        "best_ride_dist_day":    best_dist_day,
+        "best_ride_elev_m":      best_elev_m,
+        "best_ride_elev_day":    best_elev_day,
+        "distance_by_mode": {
+            "ride":   ride_dist_m,
+            "train":  seg_dist["train"],
+            "flight": seg_dist["flight"],
+            "boat":   seg_dist["boat"],
+            "bus":    seg_dist["bus"],
+        },
+    }
