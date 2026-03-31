@@ -873,7 +873,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
     }
     final tripStartStr = tripStartOverride ?? allDates.first;
     final ts = DateTime.parse(tripStartStr);
-    final tripStartDate = DateTime(ts.year, ts.month, ts.day);
+    // Use UTC dates for the day-number difference so DST transitions don't
+    // shorten a "day" to 23 hours and cause an off-by-one.
+    final tripStartDate = DateTime.utc(ts.year, ts.month, ts.day);
 
     // Sort unique date keys ascending, then build display list in that order.
     final sortedDates = allDates.toList(); // already sorted ascending
@@ -893,7 +895,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final result = <Object>[];
     for (final dk in sortedDates) {
       final d = DateTime.parse(dk);
-      final groupDate = DateTime(d.year, d.month, d.day);
+      final groupDate = DateTime.utc(d.year, d.month, d.day);
       final dayNum = groupDate.difference(tripStartDate).inDays + 1;
       result.add(_DayHeader(dayNum, d, dk));
       if (!_collapsedDays.contains(dayNum)) {
