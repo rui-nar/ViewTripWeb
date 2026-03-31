@@ -242,6 +242,12 @@ class _AppScreenState extends State<AppScreen> {
             onPressed: _showShareDialog,
           ),
           IconButton(
+            icon: const Icon(Icons.bar_chart_outlined),
+            tooltip: 'Statistics',
+            onPressed: () => context.push(
+                '/stats?project=${Uri.encodeComponent(widget.projectName)}'),
+          ),
+          IconButton(
             icon: const Icon(Icons.tune),
             tooltip: 'Project settings',
             onPressed: () => showDialog<void>(
