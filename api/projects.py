@@ -208,20 +208,18 @@ def get_project(
     return _repo.to_dict(project)
 
 
-class RenameProjectRequest(BaseModel):
-    new_name: str
+class ProjectUpdateRequest(BaseModel):
+    new_name: Optional[str] = None
+    trip_start: Optional[str] = None  # "YYYY-MM-DD" or None to clear
 
 
 @router.put("/{name}")
-def rename_project(
+def update_project(
     name: str,
-    body: RenameProjectRequest,
+    body: ProjectUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     user_info_id = int(current_user["sub"])
-    new_name = body.new_name.strip()
-    if not new_name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Name cannot be empty")
     with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(
@@ -231,12 +229,25 @@ def rename_project(
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        if new_name != name and _repo.project_exists(sess, user_info_id, new_name):
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
-        row.name = new_name
+
+        # Rename if requested
+        if body.new_name is not None:
+            new_name = body.new_name.strip()
+            if not new_name:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Name cannot be empty")
+            if new_name != name and _repo.project_exists(sess, user_info_id, new_name):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
+            row.name = new_name
+
+        # Update trip_start if key is present in body (None = clear)
+        if 'trip_start' in body.model_fields_set:
+            row.trip_start = body.trip_start or None
+
         sess.add(row)
         sess.commit()
-    return {"name": new_name}
+        result_name = row.name
+        result_trip_start = row.trip_start
+    return {"name": result_name, "trip_start": result_trip_start}
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)

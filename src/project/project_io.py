@@ -35,6 +35,7 @@ class ProjectIO:
         data: Dict[str, Any] = {
             "version": project.version,
             "name": project.name,
+            "trip_start": project.trip_start,
             "filter_state": {
                 "start_date": project.filter_state.start_date,
                 "end_date": project.filter_state.end_date,
@@ -69,6 +70,7 @@ class ProjectIO:
         return {
             "version": project.version,
             "name": project.name,
+            "trip_start": project.trip_start,
             "filter_state": {
                 "start_date": project.filter_state.start_date,
                 "end_date": project.filter_state.end_date,
@@ -103,6 +105,7 @@ class ProjectIO:
         project = Project(
             name=data.get("name", "Untitled"),
             version=data.get("version", 1),
+            trip_start=data.get("trip_start"),
             items=items,
             filter_state=filter_state,
             activities=activities,

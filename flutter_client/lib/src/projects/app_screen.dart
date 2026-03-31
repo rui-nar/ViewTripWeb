@@ -18,6 +18,7 @@ import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../map/polyline_decoder.dart';
 import 'project_notifier.dart';
+import 'project_settings_dialog.dart';
 import 'segment_dialog.dart';
 
 // ── AppScreen ─────────────────────────────────────────────────────────────────
@@ -239,6 +240,17 @@ class _AppScreenState extends State<AppScreen> {
             icon: const Icon(Icons.share_outlined),
             tooltip: 'Share project',
             onPressed: _showShareDialog,
+          ),
+          IconButton(
+            icon: const Icon(Icons.tune),
+            tooltip: 'Project settings',
+            onPressed: () => showDialog<void>(
+              context: context,
+              useRootNavigator: true,
+              builder: (_) => ProjectSettingsDialog(
+                notifier: context.read<ProjectNotifier>(),
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -797,15 +809,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
     _activityById = {for (final a in activities) a['id']: a};
   }
 
-  void _rebuildDisplayList(List<Map<String, dynamic>> items) {
-    if (identical(items, _lastItems)) return;
+  void _rebuildDisplayList(
+    List<Map<String, dynamic>> items,
+    String? tripStartOverride,
+  ) {
+    if (identical(items, _lastItems) && tripStartOverride == _lastTripStart) return;
     _lastItems = items;
-    _displayList = _buildDisplayList(items, _activityById);
+    _lastTripStart = tripStartOverride;
+    _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
   }
+
+  String? _lastTripStart;
 
   List<Object> _buildDisplayList(
     List<Map<String, dynamic>> items,
     Map<dynamic, Map<String, dynamic>> activityById,
+    String? tripStartOverride,
   ) {
     if (items.isEmpty) return [];
 
@@ -825,36 +844,45 @@ class _ActivityPanelState extends State<ActivityPanel> {
       itemDates.add(d);
     }
 
-    // Find trip start = earliest date.
-    final dates = itemDates.whereType<String>().toSet().toList()..sort();
-    if (dates.isEmpty) {
+    // Determine trip start: use override if set, else earliest date in items.
+    final allDates = itemDates.whereType<String>().toSet().toList()..sort();
+    if (allDates.isEmpty) {
       return [for (int i = 0; i < items.length; i++) _PanelItem(i, items[i], null)];
     }
-    final tripStart = DateTime.parse(dates.first);
-    final tripStartDate = DateTime(tripStart.year, tripStart.month, tripStart.day);
+    final tripStartStr = tripStartOverride ?? allDates.first;
+    final ts = DateTime.parse(tripStartStr);
+    final tripStartDate = DateTime(ts.year, ts.month, ts.day);
 
-    // Build flat display list with day headers.
-    final result = <Object>[];
-    String? lastGroupDate;
+    // Sort unique date keys ascending, then build display list in that order.
+    final sortedDates = allDates.toList(); // already sorted ascending
+
+    // Build a map from dateKey → list of (originalIndex, item) pairs.
+    final byDate = <String, List<(int, Map<String, dynamic>)>>{};
+    final undated = <(int, Map<String, dynamic>)>[];
     for (int i = 0; i < items.length; i++) {
       final dk = itemDates[i];
-      if (dk != null && dk != lastGroupDate) {
-        final d = DateTime.parse(dk);
-        final groupDate = DateTime(d.year, d.month, d.day);
-        final dayNum = groupDate.difference(tripStartDate).inDays + 1;
-        result.add(_DayHeader(dayNum, d, dk));
-        lastGroupDate = dk;
+      if (dk == null) {
+        undated.add((i, items[i]));
+      } else {
+        byDate.putIfAbsent(dk, () => []).add((i, items[i]));
       }
-      // Skip collapsed items.
-      final dayNum = lastGroupDate != null
-          ? () {
-              final d = DateTime.parse(lastGroupDate!);
-              final gd = DateTime(d.year, d.month, d.day);
-              return gd.difference(tripStartDate).inDays + 1;
-            }()
-          : null;
-      if (dayNum != null && _collapsedDays.contains(dayNum)) continue;
-      result.add(_PanelItem(i, items[i], dk));
+    }
+
+    final result = <Object>[];
+    for (final dk in sortedDates) {
+      final d = DateTime.parse(dk);
+      final groupDate = DateTime(d.year, d.month, d.day);
+      final dayNum = groupDate.difference(tripStartDate).inDays + 1;
+      result.add(_DayHeader(dayNum, d, dk));
+      if (!_collapsedDays.contains(dayNum)) {
+        for (final (int idx, Map<String, dynamic> item) in byDate[dk] ?? []) {
+          result.add(_PanelItem(idx, item, dk));
+        }
+      }
+    }
+    // Undated items always appear at the end, uncollapsible.
+    for (final (int idx, Map<String, dynamic> item) in undated) {
+      result.add(_PanelItem(idx, item, null));
     }
     return result;
   }
@@ -863,14 +891,14 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void initState() {
     super.initState();
     _refreshActivityById(widget.notifier.activities);
-    _rebuildDisplayList(widget.notifier.items);
+    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart);
   }
 
   @override
   void didUpdateWidget(ActivityPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     _refreshActivityById(widget.notifier.activities);
-    _rebuildDisplayList(widget.notifier.items);
+    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart);
   }
 
   @override
@@ -1030,7 +1058,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 )
               : Builder(builder: (context) {
                   // Rebuild display list if items changed.
-                  _rebuildDisplayList(items);
+                  _rebuildDisplayList(items, notifier.tripStart);
                   final displayList = _displayList;
                   return ReorderableListView.builder(
                     scrollController: widget.scrollController,

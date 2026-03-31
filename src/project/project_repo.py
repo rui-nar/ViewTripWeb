@@ -127,6 +127,7 @@ class ProjectRepo:
             sess.flush()
 
         row.version = project.version
+        row.trip_start = project.trip_start
         row.filter_state_json = json.dumps({
             "start_date": project.filter_state.start_date,
             "end_date": project.filter_state.end_date,
@@ -389,6 +390,7 @@ class ProjectRepo:
         project = Project(
             name=row.name,
             version=row.version,
+            trip_start=getattr(row, 'trip_start', None),
             items=items,
             filter_state=filter_state,
             activities=activities,

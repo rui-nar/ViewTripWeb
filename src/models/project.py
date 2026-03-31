@@ -53,6 +53,7 @@ class Project:
     version: int = 1
     items: List[ProjectItem] = field(default_factory=list)
     filter_state: ProjectFilterState = field(default_factory=ProjectFilterState)
+    trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised

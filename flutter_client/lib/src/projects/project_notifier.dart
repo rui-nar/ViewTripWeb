@@ -29,6 +29,9 @@ class ProjectNotifier extends ChangeNotifier {
   /// The day currently selected in the activity panel ("YYYY-MM-DD" or null).
   String? selectedDay;
 
+  /// User-defined trip start date override ("YYYY-MM-DD"); null = infer from activities.
+  String? tripStart;
+
   void selectActivity(dynamic id) {
     // Toggle off if already selected (compare as strings to handle int/double
     // type differences from JSON parsing on web).
@@ -81,6 +84,7 @@ class ProjectNotifier extends ChangeNotifier {
 
       final details = results[0];
       projectName = details['name'] as String? ?? name;
+      tripStart = details['trip_start'] as String?;
       final rawActivities = details['activities'];
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()
@@ -214,6 +218,7 @@ class ProjectNotifier extends ChangeNotifier {
     selectedActivityId = null;
     selectedSegmentId = null;
     selectedDay = null;
+    tripStart = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
@@ -242,6 +247,23 @@ class ProjectNotifier extends ChangeNotifier {
       error = _msg(e);
       notifyListeners();
       return null;
+    }
+  }
+
+  Future<void> setTripStart(String? dateStr) async {
+    final name = projectName;
+    if (name == null) return;
+    tripStart = dateStr;
+    notifyListeners();
+    try {
+      await api.put(
+        '/api/projects/${Uri.encodeComponent(name)}',
+        {'trip_start': dateStr},
+      );
+      await _silentReload(name);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
     }
   }
 
@@ -447,6 +469,7 @@ class ProjectNotifier extends ChangeNotifier {
       ]);
       final details = results[0];
       projectName = details['name'] as String? ?? name;
+      tripStart = details['trip_start'] as String?;
       final rawActivities = details['activities'];
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()

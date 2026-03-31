@@ -30,6 +30,8 @@ class DBProject(sqlmodel.SQLModel, table=True):
     updated_at: float = sqlmodel.Field(default_factory=time.time)
     # UUID token granting read-only public access to this project; None = not shared
     share_token: Optional[str] = sqlmodel.Field(default=None, index=True)
+    # User-defined trip start date override ("YYYY-MM-DD"); None = infer from activities
+    trip_start: Optional[str] = sqlmodel.Field(default=None)
 
 
 class DBActivity(sqlmodel.SQLModel, table=True):
