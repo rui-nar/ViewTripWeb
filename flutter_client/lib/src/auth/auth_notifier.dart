@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../api/client.dart';
 import 'auth_service.dart';
 
 // ── User model ─────────────────────────────────────────────────────────────────
@@ -61,11 +62,19 @@ class AuthNotifier extends ChangeNotifier {
       final restored = await _service.restoreSession();
       if (restored) {
         // Token restored — attempt to fetch the real profile from the server.
-        // Fall back to the sentinel user if the network is unavailable so the
-        // session is still considered valid offline.
+        // A 401 means the token is expired/invalid: clear it and force re-login.
+        // Any other error (no network, timeout) keeps the sentinel user so the
+        // session remains valid offline.
         try {
           final data = await _service.getMe();
           _user = User.fromMap(data);
+        } on ApiException catch (e) {
+          if (e.statusCode == 401) {
+            await _service.logout();
+            _user = null;
+          } else {
+            _user = User.restored;
+          }
         } catch (_) {
           _user = User.restored;
         }

@@ -36,6 +36,7 @@ class _AppScreenState extends State<AppScreen> {
   final MapController _mapController = MapController();
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
+  bool _isExporting = false;
 
   @override
   void initState() {
@@ -57,6 +58,7 @@ class _AppScreenState extends State<AppScreen> {
   }
 
   Future<void> _exportGpx() async {
+    setState(() => _isExporting = true);
     final name = widget.projectName;
     try {
       final res = await api.getRaw(
@@ -75,11 +77,19 @@ class _AppScreenState extends State<AppScreen> {
         ..setAttribute('download', filename)
         ..click();
       html.Url.revokeObjectUrl(url);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$filename downloaded')),
+        );
+      }
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Export failed: ${e.body}')),
       );
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
     }
   }
 
@@ -226,9 +236,15 @@ class _AppScreenState extends State<AppScreen> {
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.download),
+            icon: _isExporting
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.download),
             tooltip: 'Export as GPX',
-            onPressed: _exportGpx,
+            onPressed: _isExporting ? null : _exportGpx,
           ),
           IconButton(
             icon: const Icon(Icons.playlist_add),
