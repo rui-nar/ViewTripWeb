@@ -25,8 +25,9 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBMemory, DBProject, DBProjectItem
 from src.models.activity import Activity
+from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
     Project,
@@ -160,14 +161,18 @@ class ProjectRepo:
         if row is None:
             return False
 
-        sess.exec(
-            select(DBProjectItem).where(DBProjectItem.project_id == row.id)
-        )
         items = sess.exec(
             select(DBProjectItem).where(DBProjectItem.project_id == row.id)
         ).all()
         for item in items:
             sess.delete(item)
+
+        # Delete memories (photos on disk are left — no user_id available here)
+        memories = sess.exec(
+            select(DBMemory).where(DBMemory.project_id == row.id)
+        ).all()
+        for mem in memories:
+            sess.delete(mem)
 
         sess.delete(row)
         sess.commit()
@@ -347,6 +352,25 @@ class ProjectRepo:
 
         # 3. Create project_item rows
         for pos, item in enumerate(project.items):
+            memory_id: Optional[int] = None
+            if item.item_type == "memory" and item.memory is not None:
+                # Persist the memory row so we get its DB id
+                mem = item.memory
+                mem_row = DBMemory(
+                    project_id=row.id,
+                    name=mem.name,
+                    date=mem.date,
+                    time=mem.time,
+                    description=mem.description,
+                    photos_json=json.dumps(mem.photos),
+                    geo_mode=mem.geo_mode,
+                    lat=mem.lat,
+                    lon=mem.lon,
+                )
+                sess.add(mem_row)
+                sess.flush()
+                memory_id = mem_row.id
+
             db_item = DBProjectItem(
                 project_id=row.id,
                 position=pos,
@@ -356,6 +380,7 @@ class ProjectRepo:
                     json.dumps(ProjectIO._serialise_item(item)["segment"])
                     if item.item_type == "segment" else None
                 ),
+                memory_id=memory_id,
             )
             sess.add(db_item)
 
@@ -394,8 +419,15 @@ class ProjectRepo:
         )
         act_by_id = {r.id: self._row_to_activity(r) for r in act_rows}
 
+        # Load memory rows for this project
+        memory_rows = sess.exec(
+            select(DBMemory).where(DBMemory.project_id == row.id)
+        ).all()
+        memory_by_id = {mr.id: self._row_to_memory(mr) for mr in memory_rows}
+
         items: List[ProjectItem] = []
         activities: List[Activity] = []
+        memories: List[Memory] = []
         seen_ids: set[int] = set()
 
         for ir in item_rows:
@@ -406,6 +438,11 @@ class ProjectRepo:
                     if act:
                         activities.append(act)
                         seen_ids.add(ir.activity_id)
+            elif ir.item_type == "memory" and ir.memory_id is not None:
+                mem = memory_by_id.get(ir.memory_id)
+                if mem:
+                    items.append(ProjectItem(item_type="memory", memory=mem))
+                    memories.append(mem)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
@@ -417,6 +454,7 @@ class ProjectRepo:
             items=items,
             filter_state=filter_state,
             activities=activities,
+            memories=memories,
         )
         project.rebuild_map()
         return project
@@ -441,6 +479,11 @@ class ProjectRepo:
                 segment_json=(
                     json.dumps(ProjectIO._serialise_item(item)["segment"])
                     if item.item_type == "segment" else None
+                ),
+                memory_id=(
+                    item.memory.id
+                    if item.item_type == "memory" and item.memory is not None
+                    else None
                 ),
             )
             sess.add(db_item)
@@ -516,6 +559,21 @@ class ProjectRepo:
             ),
         )
         sess.add(row)
+
+    @staticmethod
+    def _row_to_memory(row: DBMemory) -> Memory:
+        return Memory(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            date=row.date,
+            time=row.time,
+            description=row.description,
+            photos=json.loads(row.photos_json or "[]"),
+            geo_mode=row.geo_mode,
+            lat=row.lat,
+            lon=row.lon,
+        )
 
     @staticmethod
     def _row_to_activity(row: DBActivity) -> Activity:

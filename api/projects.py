@@ -7,6 +7,8 @@ Routes:
     DELETE /api/projects/{name}                 — delete a project
     POST   /api/projects/import                 — upload a .gettracks file
     GET    /api/projects/{name}/export          — download project as GPX file
+    GET    /api/projects/{name}/export-gettracks — download project as .gettracks JSON
+    GET    /api/projects/{name}/export-zip      — download ZIP (gettracks + photos)
     POST   /api/projects/{name}/activities      — add activities to project
     DELETE /api/projects/{name}/items/{index}   — remove item at index
     PUT    /api/projects/{name}/items/reorder   — move item from/to index
@@ -22,6 +24,9 @@ import os
 import re
 import time
 import uuid
+import zipfile
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 import gpxpy
@@ -391,6 +396,19 @@ def export_project_gpx(
                 seg.points.append(gpxpy.gpx.GPXTrackPoint(lat, lon))
             track.segments.append(seg)
 
+        elif item.item_type == "memory" and item.memory:
+            mem = item.memory
+            if mem.lat is not None and mem.lon is not None:
+                wpt = gpxpy.gpx.GPXWaypoint(mem.lat, mem.lon)
+                wpt.name = mem.name or "Memory"
+                wpt.description = mem.description
+                if mem.date and mem.time:
+                    try:
+                        wpt.time = datetime.fromisoformat(f"{mem.date}T{mem.time}:00")
+                    except ValueError:
+                        pass
+                gpx.waypoints.append(wpt)
+
     gpx_xml = gpx.to_xml()
     safe = _SAFE_NAME.sub("_", project.name)
 
@@ -398,6 +416,110 @@ def export_project_gpx(
         io.BytesIO(gpx_xml.encode("utf-8")),
         media_type="application/gpx+xml",
         headers={"Content-Disposition": f'attachment; filename="{safe}.gpx"'},
+    )
+
+
+# ── .gettracks export ─────────────────────────────────────────────────────────
+
+@router.get("/{name}/export-gettracks")
+def export_project_gettracks(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Download the project as a .gettracks JSON file (no embedded photos)."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    data: Dict[str, Any] = {
+        "version": project.version,
+        "name": project.name,
+        "trip_start": project.trip_start,
+        "filter_state": {
+            "start_date": project.filter_state.start_date,
+            "end_date": project.filter_state.end_date,
+            "activity_types": project.filter_state.activity_types,
+        },
+        "items": [ProjectIO._serialise_item(i) for i in project.items],
+        "activities": [a.to_strava_dict() for a in project.activities],
+    }
+    json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    safe = _SAFE_NAME.sub("_", project.name)
+    return StreamingResponse(
+        io.BytesIO(json_bytes),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.gettracks"'},
+    )
+
+
+# ── ZIP export (gettracks + photos) ───────────────────────────────────────────
+
+@router.get("/{name}/export-zip")
+def export_project_zip(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Download a ZIP containing the .gettracks file and all memory photos."""
+    user_info_id = int(current_user["sub"])
+    user_id = current_user["sub"]
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(user_id, name),
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Serialise items, adding relative photo_refs for memories.
+    items_serialised = []
+    for item in project.items:
+        d = ProjectIO._serialise_item(item)
+        if item.item_type == "memory" and item.memory and item.memory.id and item.memory.photos:
+            d["memory"]["photo_refs"] = [
+                f"photos/{item.memory.id}/{uuid}.jpg"
+                for uuid in item.memory.photos
+            ]
+        items_serialised.append(d)
+
+    data: Dict[str, Any] = {
+        "version": project.version,
+        "name": project.name,
+        "trip_start": project.trip_start,
+        "filter_state": {
+            "start_date": project.filter_state.start_date,
+            "end_date": project.filter_state.end_date,
+            "activity_types": project.filter_state.activity_types,
+        },
+        "items": items_serialised,
+        "activities": [a.to_strava_dict() for a in project.activities],
+    }
+    gettracks_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+    zip_buffer = io.BytesIO()
+    safe = _SAFE_NAME.sub("_", project.name)
+    memories_base = Path(_DATA_DIR) / "users" / user_id / "memories"
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{safe}.gettracks", gettracks_bytes)
+        for item in project.items:
+            if item.item_type != "memory" or item.memory is None or item.memory.id is None:
+                continue
+            mem = item.memory
+            mem_dir = memories_base / str(mem.id)
+            for photo_uuid in mem.photos:
+                full_path = mem_dir / f"{photo_uuid}.jpg"
+                if full_path.exists():
+                    zf.write(full_path, f"photos/{mem.id}/{photo_uuid}.jpg")
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.zip"'},
     )
 
 

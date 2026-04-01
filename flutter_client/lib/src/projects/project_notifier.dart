@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import '../api/client.dart';
@@ -15,7 +16,7 @@ class ProjectNotifier extends ChangeNotifier {
 
   String? projectName;
   List<Map<String, dynamic>> activities = [];
-  List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments)
+  List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
   Map<String, dynamic>? geo;
   bool isLoading = false;
   String? error;
@@ -26,19 +27,25 @@ class ProjectNotifier extends ChangeNotifier {
   /// The connecting segment currently highlighted on the map. Null = no selection.
   dynamic selectedSegmentId;
 
+  /// The memory currently highlighted on the map/panel. Null = no selection.
+  dynamic selectedMemoryId;
+
   /// The day currently selected in the activity panel ("YYYY-MM-DD" or null).
   String? selectedDay;
+
+  /// Days selected in multi-select mode. Empty = no multi-day filter.
+  Set<String> selectedDays = {};
 
   /// User-defined trip start date override ("YYYY-MM-DD"); null = infer from activities.
   String? tripStart;
 
   void selectActivity(dynamic id) {
-    // Toggle off if already selected (compare as strings to handle int/double
-    // type differences from JSON parsing on web).
     selectedActivityId =
         selectedActivityId?.toString() == id?.toString() ? null : id;
     selectedSegmentId = null;
+    selectedMemoryId = null;
     selectedDay = null;
+    selectedDays = {};
     notifyListeners();
   }
 
@@ -46,7 +53,19 @@ class ProjectNotifier extends ChangeNotifier {
     selectedSegmentId =
         selectedSegmentId?.toString() == id?.toString() ? null : id;
     selectedActivityId = null;
+    selectedMemoryId = null;
     selectedDay = null;
+    selectedDays = {};
+    notifyListeners();
+  }
+
+  void selectMemory(dynamic id) {
+    selectedMemoryId =
+        selectedMemoryId?.toString() == id?.toString() ? null : id;
+    selectedActivityId = null;
+    selectedSegmentId = null;
+    selectedDay = null;
+    selectedDays = {};
     notifyListeners();
   }
 
@@ -54,6 +73,17 @@ class ProjectNotifier extends ChangeNotifier {
     selectedDay = dateKey;
     selectedActivityId = null;
     selectedSegmentId = null;
+    selectedMemoryId = null;
+    selectedDays = {};
+    notifyListeners();
+  }
+
+  void selectDays(Set<String> days) {
+    selectedDays = Set.from(days);
+    selectedActivityId = null;
+    selectedSegmentId = null;
+    selectedMemoryId = null;
+    selectedDay = null;
     notifyListeners();
   }
 
@@ -73,7 +103,9 @@ class ProjectNotifier extends ChangeNotifier {
     geo = null;
     selectedActivityId = null;
     selectedSegmentId = null;
+    selectedMemoryId = null;
     selectedDay = null;
+    selectedDays = {};
     notifyListeners();
 
     try {
@@ -217,7 +249,9 @@ class ProjectNotifier extends ChangeNotifier {
     geo = null;
     selectedActivityId = null;
     selectedSegmentId = null;
+    selectedMemoryId = null;
     selectedDay = null;
+    selectedDays = {};
     tripStart = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
@@ -355,7 +389,6 @@ class ProjectNotifier extends ChangeNotifier {
   }) async {
     final name = projectName;
     if (name == null) return;
-    // Immediate local update so the list responds without a blank flash.
     final placeholder = {
       'item_type': 'segment',
       'segment': {
@@ -405,7 +438,6 @@ class ProjectNotifier extends ChangeNotifier {
   }) async {
     final name = projectName;
     if (name == null) return;
-    // Immediate local update so the list responds without a blank flash.
     for (final item in items) {
       if (item['item_type'] == 'segment' &&
           item['segment']?['id']?.toString() == segId) {
@@ -443,7 +475,6 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> deleteSegment(String segId) async {
     final name = projectName;
     if (name == null) return;
-    // Immediate local update so the list responds without a blank flash.
     items.removeWhere((item) =>
         item['item_type'] == 'segment' &&
         item['segment']?['id']?.toString() == segId);
@@ -458,9 +489,167 @@ class ProjectNotifier extends ChangeNotifier {
     }
   }
 
+  // ── Memory CRUD ────────────────────────────────────────────────────────────
+
+  Future<void> createMemory({
+    required String date,
+    required String geoMode,
+    String? name,
+    String? time,
+    String? description,
+    double? lat,
+    double? lon,
+    int? insertAfterIndex,
+  }) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    // Optimistic placeholder
+    final placeholder = {
+      'item_type': 'memory',
+      'memory': {
+        'id': '__optimistic__',
+        'name': name,
+        'date': date,
+        'time': time,
+        'description': description,
+        'photos': <String>[],
+        'geo_mode': geoMode,
+        'lat': lat,
+        'lon': lon,
+      },
+    };
+    final insertAt = insertAfterIndex != null
+        ? (insertAfterIndex + 1).clamp(0, items.length)
+        : items.length;
+    items.insert(insertAt, placeholder);
+    notifyListeners();
+    try {
+      await api.post('/api/memories/', {
+        'project_name': projectName,
+        'date': date,
+        'geo_mode': geoMode,
+        if (name != null) 'name': name,
+        if (time != null) 'time': time,
+        if (description != null) 'description': description,
+        if (lat != null) 'lat': lat,
+        if (lon != null) 'lon': lon,
+        if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
+      });
+      await _silentReload(projectName);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> updateMemory(
+    String memoryId, {
+    required String date,
+    required String geoMode,
+    String? name,
+    String? time,
+    String? description,
+    double? lat,
+    double? lon,
+  }) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    // Optimistic update
+    for (final item in items) {
+      if (item['item_type'] == 'memory' &&
+          item['memory']?['id']?.toString() == memoryId) {
+        final mem = Map<String, dynamic>.from(item['memory'] as Map);
+        mem['name'] = name;
+        mem['date'] = date;
+        mem['time'] = time;
+        mem['description'] = description;
+        mem['geo_mode'] = geoMode;
+        mem['lat'] = lat;
+        mem['lon'] = lon;
+        item['memory'] = mem;
+        break;
+      }
+    }
+    notifyListeners();
+    try {
+      await api.put('/api/memories/$memoryId', {
+        'date': date,
+        'geo_mode': geoMode,
+        if (name != null) 'name': name,
+        if (time != null) 'time': time,
+        if (description != null) 'description': description,
+        if (lat != null) 'lat': lat,
+        if (lon != null) 'lon': lon,
+      });
+      await _silentReload(projectName);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> deleteMemory(String memoryId) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    items.removeWhere((item) =>
+        item['item_type'] == 'memory' &&
+        item['memory']?['id']?.toString() == memoryId);
+    notifyListeners();
+    try {
+      await api.delete('/api/memories/$memoryId');
+      await _silentReload(projectName);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  /// Upload a photo for a memory. Returns the UUID string on success.
+  Future<String?> uploadMemoryPhoto(
+    String memoryId,
+    Uint8List bytes,
+    String filename,
+  ) async {
+    final token = api.tokenForUpload;
+    if (token == null) return null;
+    final baseUrl = api.baseUrl;
+    final uri = Uri.parse('$baseUrl/api/memories/$memoryId/photos');
+    final request = http.MultipartRequest('POST', uri)
+      ..headers['Authorization'] = 'Bearer $token'
+      ..files.add(http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+      ));
+    try {
+      final streamed = await request.send();
+      final res = await http.Response.fromStream(streamed);
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        // Parse uuid from response JSON
+        final body = res.body;
+        final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(body);
+        return match?.group(1);
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> deleteMemoryPhoto(String memoryId, String photoUuid) async {
+    final projectName = this.projectName;
+    try {
+      await api.delete('/api/memories/$memoryId/photos/$photoUuid');
+      if (projectName != null) await _silentReload(projectName);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  // ── Internal helpers ───────────────────────────────────────────────────────
+
   /// Reloads project data from the API without clearing existing state first.
-  /// Used after optimistic local mutations so the map/elevation update in the
-  /// background without causing a blank-screen flash.
   Future<void> _silentReload(String name) async {
     try {
       final results = await Future.wait([

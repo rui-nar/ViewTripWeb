@@ -18,6 +18,8 @@ import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../map/polyline_decoder.dart';
 import 'project_notifier.dart';
+import 'memory_detail_modal.dart';
+import 'memory_dialog.dart';
 import 'project_settings_dialog.dart';
 import 'segment_dialog.dart';
 
@@ -57,21 +59,18 @@ class _AppScreenState extends State<AppScreen> {
     if (mounted) context.go('/login');
   }
 
-  Future<void> _exportGpx() async {
+  Future<void> _downloadFile(String apiPath, String fallbackFilename) async {
     setState(() => _isExporting = true);
-    final name = widget.projectName;
     try {
-      final res = await api.getRaw(
-        '/api/projects/${Uri.encodeComponent(name)}/export',
-      );
-      // Determine filename from Content-Disposition or fall back to project name
-      String filename = '$name.gpx';
+      final res = await api.getRaw(apiPath);
+      String filename = fallbackFilename;
       final cd = res.headers['content-disposition'] ?? '';
       final match = RegExp(r'filename="([^"]+)"').firstMatch(cd);
       if (match != null) filename = match.group(1)!;
 
-      // Trigger browser download via a temporary anchor element
-      final blob = html.Blob([res.bodyBytes], 'application/gpx+xml');
+      final mimeType =
+          res.headers['content-type'] ?? 'application/octet-stream';
+      final blob = html.Blob([res.bodyBytes], mimeType);
       final url = html.Url.createObjectUrlFromBlob(blob);
       html.AnchorElement(href: url)
         ..setAttribute('download', filename)
@@ -79,17 +78,86 @@ class _AppScreenState extends State<AppScreen> {
       html.Url.revokeObjectUrl(url);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$filename downloaded')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$filename downloaded')));
       }
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Export failed: ${e.body}')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Export failed: ${e.body}')));
     } finally {
       if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _exportOptions() async {
+    final name = widget.projectName;
+    final enc = Uri.encodeComponent(name);
+
+    // Check whether any memory items have photos attached.
+    final notifier = context.read<ProjectNotifier>();
+    final hasMemoryPhotos = notifier.items.any(
+      (i) =>
+          i['item_type'] == 'memory' &&
+          ((i['memory']?['photos'] as List?)?.isNotEmpty ?? false),
+    );
+
+    if (!hasMemoryPhotos) {
+      // Simple case: no memory photos — just export GPX.
+      await _downloadFile('/api/projects/$enc/export', '$name.gpx');
+      return;
+    }
+
+    // Project has memory photos — offer a choice.
+    if (!mounted) return;
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Export project'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop('gpx'),
+            child: const ListTile(
+              leading: Icon(Icons.map_outlined),
+              title: Text('GPX file'),
+              subtitle: Text('Memories as waypoints, no photos'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop('gettracks'),
+            child: const ListTile(
+              leading: Icon(Icons.article_outlined),
+              title: Text('.gettracks file'),
+              subtitle: Text('Full project data, no photo files'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop('zip'),
+            child: const ListTile(
+              leading: Icon(Icons.archive_outlined),
+              title: Text('ZIP archive'),
+              subtitle: Text('.gettracks + all memory photos'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const ListTile(
+              leading: Icon(Icons.close),
+              title: Text('Cancel'),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == null || !mounted) return;
+    if (choice == 'gpx') {
+      await _downloadFile('/api/projects/$enc/export', '$name.gpx');
+    } else if (choice == 'gettracks') {
+      await _downloadFile(
+          '/api/projects/$enc/export-gettracks', '$name.gettracks');
+    } else if (choice == 'zip') {
+      await _downloadFile('/api/projects/$enc/export-zip', '$name.zip');
     }
   }
 
@@ -243,8 +311,8 @@ class _AppScreenState extends State<AppScreen> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.download),
-            tooltip: 'Export as GPX',
-            onPressed: _isExporting ? null : _exportGpx,
+            tooltip: 'Export project',
+            onPressed: _isExporting ? null : _exportOptions,
           ),
           IconButton(
             icon: const Icon(Icons.playlist_add),
@@ -320,26 +388,33 @@ class _AppScreenState extends State<AppScreen> {
                         ),
                       ),
                       Selector<ProjectNotifier,
-                          (List<Map<String, dynamic>>, Object?, String?)>(
+                          (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
                         selector: (_, n) => (
                           n.activities,
                           n.selectedActivityId as Object?,
                           n.selectedDay,
+                          n.selectedDays,
                         ),
                         shouldRebuild: (a, b) =>
                             !identical(a.$1, b.$1) ||
                             a.$2?.toString() != b.$2?.toString() ||
-                            a.$3 != b.$3,
+                            a.$3 != b.$3 ||
+                            !_Stage1MapPanelState._setEquals(a.$4, b.$4),
                         builder: (ctx, tuple, __) {
                           final n = ctx.read<ProjectNotifier>();
                           final allActivities = tuple.$1;
                           final selActId = tuple.$2;
                           final selDay = tuple.$3;
-                          final activities = selDay != null
-                              ? allActivities.where((a) =>
-                                  (a['start_date_local'] as String? ?? '')
-                                      .split('T').first == selDay).toList()
-                              : allActivities;
+                          final selDays = tuple.$4;
+                          final effectiveDays = selDays.isNotEmpty
+                              ? selDays
+                              : (selDay != null ? {selDay} : <String>{});
+                          final activities = effectiveDays.isEmpty
+                              ? allActivities
+                              : allActivities.where((a) =>
+                                  effectiveDays.contains(
+                                    (a['start_date_local'] as String? ?? '')
+                                        .split('T').first)).toList();
                           return ElevationChart(
                             activities: activities,
                             selectedActivityId: selActId,
@@ -814,9 +889,17 @@ class _ActivityPanelState extends State<ActivityPanel> {
   Set<int> _collapsedDays = {};
   String? _selectedDay; // "YYYY-MM-DD"
 
+  // Multi-select state
+  bool _multiSelect = false;
+  Set<String> _selectedDays = {};
+
+  // Memories-only filter toggle
+  bool _memoriesOnly = false;
+
   // Display list cache — rebuilt when items or activities change.
   List<Map<String, dynamic>>? _lastItems;
   List<Object> _displayList = [];
+  bool _initialCollapseApplied = false;
 
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
@@ -839,6 +922,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
     _lastItems = items;
     _lastTripStart = tripStartOverride;
     _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
+    // Collapse all days on first load only; never reset after that.
+    if (!_initialCollapseApplied) {
+      _initialCollapseApplied = true;
+      _collapsedDays = {
+        for (final o in _displayList) if (o is _DayHeader) o.dayNumber
+      };
+    }
+  }
+
+  void _toggleMultiSelect() {
+    setState(() {
+      _multiSelect = !_multiSelect;
+      if (!_multiSelect) {
+        _selectedDays.clear();
+        widget.notifier.selectDays({});
+      }
+    });
   }
 
   String? _lastTripStart;
@@ -860,6 +960,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         final ds = a?['start_date_local'] as String?;
         d = ds?.split('T').first;
         if (d != null) lastDate = d;
+      } else if (item['item_type'] == 'memory') {
+        d = item['memory']?['date'] as String? ?? lastDate;
       } else {
         d = item['segment']?['date'] as String? ?? lastDate;
       }
@@ -970,6 +1072,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return '${m}m';
   }
 
+  static String _fmtMemDate(String date, String? time) {
+    final d = DateTime.tryParse(date);
+    if (d == null) return date;
+    final part = '${_months[d.month - 1]} ${d.day}';
+    return time == null ? part : '$part · $time';
+  }
+
   void _dismissWithUndo({
     required BuildContext context,
     required ProjectNotifier notifier,
@@ -1024,6 +1133,72 @@ class _ActivityPanelState extends State<ActivityPanel> {
     }
   }
 
+  void _flyToMemory(Map<String, dynamic> mem) {
+    widget.notifier.selectMemory(mem['id']);
+    final lat = (mem['lat'] as num?)?.toDouble();
+    final lon = (mem['lon'] as num?)?.toDouble();
+    if (lat != null && lon != null) {
+      final target = LatLng(lat, lon);
+      final mc = widget.mapController;
+      if (mc != null && !mc.camera.visibleBounds.contains(target)) {
+        mc.move(target, mc.camera.zoom.clamp(8.0, 15.0));
+      }
+    }
+    showMemoryDetail(context, widget.notifier, mem);
+  }
+
+  int? _lastOriginalIndexForDay(String dateKey) {
+    int? last;
+    for (final e in _displayList) {
+      if (e is _PanelItem && e.dateKey == dateKey) last = e.originalIndex;
+    }
+    return last;
+  }
+
+  List<Object> _applyMemoriesFilter(List<Object> list) {
+    // Build an uncollapsed version of the display list so collapsed days
+    // don't hide their memory items from the filter.
+    final uncollapsed = <Object>[];
+    for (final entry in list) {
+      if (entry is _DayHeader) {
+        uncollapsed.add(entry);
+        final dk = entry.dateKey;
+        // Always include all items for this day regardless of collapse state.
+        for (int i = 0; i < _lastItems!.length; i++) {
+          final item = _lastItems![i];
+          // Determine item date the same way _buildDisplayList does.
+          String? d;
+          if (item['item_type'] == 'activity') {
+            final a = _activityById[item['activity_id']];
+            d = (a?['start_date_local'] as String?)?.split('T').first;
+          } else if (item['item_type'] == 'memory') {
+            d = item['memory']?['date'] as String?;
+          } else {
+            d = item['segment']?['date'] as String?;
+          }
+          if (d == dk) uncollapsed.add(_PanelItem(i, item, dk));
+        }
+      }
+    }
+
+    final result = <Object>[];
+    _DayHeader? pendingHeader;
+    for (final entry in uncollapsed) {
+      if (entry is _DayHeader) {
+        pendingHeader = entry;
+      } else if (entry is _PanelItem) {
+        if (entry.item['item_type'] == 'memory') {
+          if (pendingHeader != null) {
+            result.add(pendingHeader);
+            pendingHeader = null;
+          }
+          result.add(entry);
+        }
+      }
+    }
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
@@ -1034,35 +1209,60 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
     // Styles are pre-computed in didChangeDependencies() — no copyWith in build().
 
-    // Aggregate stats are pre-computed in ProjectNotifier._updateStats().
-    final totalDistM    = notifier.totalDistanceM;
-    final totalMovingSec = notifier.totalMovingSeconds;
-    final totalElevGain = notifier.totalElevationGainM;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // ── Header ────────────────────────────────────────────────────────────
         Container(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          padding: const EdgeInsets.fromLTRB(4, 2, 4, 2),
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(color: theme.dividerColor),
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  _StatChip(
-                      label: '${(totalDistM / 1000).toStringAsFixed(1)} km'),
-                  _StatChip(label: _formatDuration(totalMovingSec)),
-                  _StatChip(
-                      label: '${totalElevGain.toStringAsFixed(0)} m elev'),
-                ],
+              IconButton(
+                icon: const Icon(Icons.unfold_less, size: 20),
+                tooltip: 'Collapse all',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => setState(() {
+                  _collapsedDays = {
+                    for (final o in _displayList) if (o is _DayHeader) o.dayNumber
+                  };
+                  _lastItems = null;
+                }),
+              ),
+              IconButton(
+                icon: const Icon(Icons.unfold_more, size: 20),
+                tooltip: 'Expand all',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => setState(() {
+                  _collapsedDays = {};
+                  _lastItems = null;
+                }),
+              ),
+              IconButton(
+                icon: Icon(
+                  _multiSelect
+                      ? Icons.check_box_outlined
+                      : Icons.check_box_outline_blank,
+                  size: 20,
+                ),
+                tooltip: _multiSelect ? 'Exit multi-select' : 'Multi-select days',
+                visualDensity: VisualDensity.compact,
+                onPressed: _toggleMultiSelect,
+              ),
+              const Spacer(),
+              IconButton(
+                icon: Icon(
+                  Icons.photo_library_outlined,
+                  size: 20,
+                  color: _memoriesOnly ? theme.colorScheme.primary : null,
+                ),
+                tooltip: _memoriesOnly ? 'Show all' : 'Memories only',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => setState(() => _memoriesOnly = !_memoriesOnly),
               ),
             ],
           ),
@@ -1083,7 +1283,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
               : Builder(builder: (context) {
                   // Rebuild display list if items changed.
                   _rebuildDisplayList(items, notifier.tripStart);
-                  final displayList = _displayList;
+                  final displayList = _memoriesOnly
+                      ? _applyMemoriesFilter(_displayList)
+                      : _displayList;
                   return ReorderableListView.builder(
                     scrollController: widget.scrollController,
                     buildDefaultDragHandles: false,
@@ -1109,47 +1311,93 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       // ── Day header ──────────────────────────────────────────
                       if (entry is _DayHeader) {
                         final h = entry;
-                        final isSelected = _selectedDay == h.dateKey;
                         final isCollapsed = _collapsedDays.contains(h.dayNumber);
+                        final isMultiChecked = _selectedDays.contains(h.dateKey);
+                        final isSingleSelected = !_multiSelect && _selectedDay == h.dateKey;
+                        final isHighlighted = _multiSelect ? isMultiChecked : isSingleSelected;
                         return InkWell(
                           key: ValueKey('header_${h.dayNumber}'),
                           onTap: () {
-                            final newDay = isSelected ? null : h.dateKey;
-                            setState(() => _selectedDay = newDay);
-                            notifier.selectDay(newDay);
+                            if (_multiSelect) {
+                              setState(() {
+                                if (isMultiChecked) {
+                                  _selectedDays.remove(h.dateKey);
+                                } else {
+                                  _selectedDays.add(h.dateKey);
+                                }
+                              });
+                              notifier.selectDays(Set.from(_selectedDays));
+                            } else {
+                              final newDay = isSingleSelected ? null : h.dateKey;
+                              setState(() => _selectedDay = newDay);
+                              notifier.selectDay(newDay);
+                            }
                           },
                           child: Container(
-                            color: isSelected
+                            color: isHighlighted
                                 ? theme.colorScheme.primaryContainer
                                     .withValues(alpha: 0.4)
                                 : null,
-                            padding: const EdgeInsets.fromLTRB(4, 4, 8, 2),
+                            padding: const EdgeInsets.fromLTRB(4, 2, 8, 0),
                             child: Row(children: [
-                              IconButton(
-                                icon: Icon(
-                                  isCollapsed
-                                      ? Icons.chevron_right
-                                      : Icons.expand_more,
-                                  size: 20,
+                              if (_multiSelect)
+                                Checkbox(
+                                  value: isMultiChecked,
+                                  visualDensity: VisualDensity.compact,
+                                  onChanged: (_) {
+                                    setState(() {
+                                      if (isMultiChecked) {
+                                        _selectedDays.remove(h.dateKey);
+                                      } else {
+                                        _selectedDays.add(h.dateKey);
+                                      }
+                                    });
+                                    notifier.selectDays(Set.from(_selectedDays));
+                                  },
+                                )
+                              else
+                                IconButton(
+                                  icon: Icon(
+                                    isCollapsed
+                                        ? Icons.chevron_right
+                                        : Icons.expand_more,
+                                    size: 20,
+                                  ),
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () => setState(() {
+                                    if (isCollapsed) {
+                                      _collapsedDays.remove(h.dayNumber);
+                                    } else {
+                                      _collapsedDays.add(h.dayNumber);
+                                    }
+                                    _lastItems = null;
+                                  }),
                                 ),
-                                visualDensity: VisualDensity.compact,
-                                onPressed: () => setState(() {
-                                  if (isCollapsed) {
-                                    _collapsedDays.remove(h.dayNumber);
-                                  } else {
-                                    _collapsedDays.add(h.dayNumber);
-                                  }
-                                  // Force rebuild of display list.
-                                  _lastItems = null;
-                                }),
-                              ),
                               Text(
                                 'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
                                 style: theme.textTheme.labelMedium?.copyWith(
-                                  color: isSelected
+                                  color: isHighlighted
                                       ? theme.colorScheme.primary
                                       : theme.colorScheme.onSurfaceVariant,
                                   fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const Spacer(),
+                              IconButton(
+                                icon: const Icon(
+                                    Icons.add_photo_alternate_outlined,
+                                    size: 16),
+                                tooltip: 'Add memory',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => showDialog(
+                                  context: context,
+                                  useRootNavigator: true,
+                                  builder: (_) => MemoryDialog(
+                                    notifier: notifier,
+                                    initialDate: h.dateKey,
+                                    insertAfterIndex:
+                                        _lastOriginalIndexForDay(h.dateKey),
+                                  ),
                                 ),
                               ),
                             ]),
@@ -1257,6 +1505,61 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             ),
                           ),
                         );
+                      } else if (item['item_type'] == 'memory') {
+                        // Memory item
+                        final mem =
+                            item['memory'] as Map<String, dynamic>? ?? {};
+                        final memId = mem['id']?.toString() ?? '';
+                        final memName = mem['name'] as String?;
+                        final memDate = mem['date'] as String?;
+                        final memTime = mem['time'] as String?;
+                        final memDesc = mem['description'] as String?;
+                        final label = memName ??
+                            (memDate != null
+                                ? _fmtMemDate(memDate, memTime)
+                                : 'Memory');
+                        return Selector<ProjectNotifier, bool>(
+                          key: ValueKey('mem_$memId'),
+                          selector: (_, n) =>
+                              n.selectedMemoryId?.toString() == memId,
+                          builder: (_, isSelected, __) => ListTile(
+                            dense: true,
+                            tileColor: isSelected
+                                ? theme.colorScheme.tertiaryContainer
+                                    .withValues(alpha: 0.45)
+                                : null,
+                            leading: dragHandle,
+                            title: Row(children: [
+                              Icon(Icons.photo_camera_outlined,
+                                  size: 16,
+                                  color: isSelected
+                                      ? theme.colorScheme.primary
+                                      : theme.colorScheme.primary
+                                          .withValues(alpha: 0.7)),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                  child: Text(label,
+                                      style: theme.textTheme.bodyMedium)),
+                            ]),
+                            subtitle: memDesc != null && memDesc.isNotEmpty
+                                ? Text(memDesc,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall)
+                                : null,
+                            trailing: IconButton(
+                              icon: const Icon(Icons.edit_outlined, size: 18),
+                              tooltip: 'Edit memory',
+                              onPressed: () => showDialog(
+                                context: context,
+                                useRootNavigator: true,
+                                builder: (_) => MemoryDialog(
+                                    notifier: notifier, editMemory: mem),
+                              ),
+                            ),
+                            onTap: () => _flyToMemory(mem),
+                          ),
+                        );
                       } else {
                         // Segment item
                         final seg =
@@ -1342,20 +1645,37 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 }),
         ),
 
-        // ── "Add segment" button between items ────────────────────────────────
-        if (items.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: OutlinedButton.icon(
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('Add connecting segment'),
-              onPressed: () => _showSegmentDialog(
-                context,
-                notifier,
-                insertAfterIndex: items.length - 1,
+        // ── Footer buttons ────────────────────────────────────────────────────
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Add segment'),
+                  onPressed: () => _showSegmentDialog(
+                    context,
+                    notifier,
+                    insertAfterIndex: items.isNotEmpty ? items.length - 1 : null,
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+                  label: const Text('Add memory'),
+                  onPressed: () => showDialog(
+                    context: context,
+                    useRootNavigator: true,
+                    builder: (_) => MemoryDialog(notifier: notifier),
+                  ),
+                ),
+              ),
+            ],
           ),
+        ),
 
       ],
     );
@@ -1399,10 +1719,17 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
   String? _lastSelectedDay = '';   // '' = sentinel (distinct from null)
+  Set<String> _lastSelectedDays = const {};
+  dynamic _lastSelectedMemId = _sentinel;
+  List<Map<String, dynamic>>? _lastItems;
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedSegmentMarkers = [];
+  List<Marker> _cachedMemoryMarkers = [];
 
   static const _sentinel = Object();
+
+  static bool _setEquals(Set<String> a, Set<String> b) =>
+      a.length == b.length && a.containsAll(b);
 
   static IconData _iconForSegmentType(String? type) {
     switch (type?.toLowerCase()) {
@@ -1453,6 +1780,77 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
             _iconForSegmentType(props['segment_type'] as String?),
             color: Colors.white,
             size: 13,
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
+  List<Marker> _buildMemoryMarkers(
+    List<Map<String, dynamic>> items,
+    dynamic selectedMemoryId,
+    bool hasSelection,
+    BuildContext context,
+  ) {
+    final markers = <Marker>[];
+    final authHeaders = api.tokenForUpload != null
+        ? {'Authorization': 'Bearer ${api.tokenForUpload}'}
+        : <String, String>{};
+    for (final item in items) {
+      if (item['item_type'] != 'memory') continue;
+      final mem = item['memory'] as Map<String, dynamic>?;
+      if (mem == null) continue;
+      final lat = (mem['lat'] as num?)?.toDouble();
+      final lon = (mem['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final memId = mem['id']?.toString() ?? '';
+      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
+      final isSelected = selectedMemoryId?.toString() == memId;
+      final size = isSelected ? 34.0 : 28.0;
+      final bgColor = isSelected
+          ? const Color(0xFFEA580C)
+          : hasSelection
+              ? const Color(0xA0F97316)
+              : const Color(0xFFF97316);
+
+      Widget inner;
+      if (photos.isNotEmpty) {
+        final thumbUrl =
+            '${api.baseUrl}/api/memories/$memId/photos/${photos.first}/thumb';
+        inner = ClipOval(
+          child: Image.network(
+            thumbUrl,
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            headers: authHeaders,
+            errorBuilder: (_, __, ___) => Icon(Icons.photo_camera,
+                size: size * 0.45, color: Colors.white),
+          ),
+        );
+      } else {
+        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
+      }
+
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: size,
+        height: size,
+        child: GestureDetector(
+          onTap: () {
+            widget.notifier.selectMemory(mem['id']);
+            showMemoryDetail(context, widget.notifier, mem);
+          },
+          child: Container(
+            decoration: BoxDecoration(
+              color: bgColor,
+              shape: BoxShape.circle,
+              border: isSelected
+                  ? Border.all(color: Colors.white, width: 2)
+                  : null,
+            ),
+            child: Center(child: inner),
           ),
         ),
       ));
@@ -1541,26 +1939,30 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     Map<String, dynamic> geo,
     dynamic selectedActivityId,
     dynamic selectedSegmentId,
-    String? selectedDay,
+    Set<String> effectiveDays,
     Map<dynamic, Map<String, dynamic>> activityById,
     List<Map<String, dynamic>> items,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
 
-    // For day selection, compute which ids are in that day.
+    // For day selection, union ids across all selected days.
     Set<String>? dayActIds;
     Set<String>? daySegIds;
-    if (selectedDay != null) {
-      final r = _dayItemIds(items, activityById, selectedDay);
-      dayActIds = r.actIds;
-      daySegIds = r.segIds;
+    if (effectiveDays.isNotEmpty) {
+      dayActIds = {};
+      daySegIds = {};
+      for (final dk in effectiveDays) {
+        final r = _dayItemIds(items, activityById, dk);
+        dayActIds.addAll(r.actIds);
+        daySegIds.addAll(r.segIds);
+      }
     }
 
     final polylines = <Polyline>[];
     final hasSelection = selectedActivityId != null ||
         selectedSegmentId != null ||
-        selectedDay != null;
+        effectiveDays.isNotEmpty;
     for (final feature in features) {
       if (feature is! Map) continue;
       final props = feature['properties'] as Map? ?? {};
@@ -1580,7 +1982,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           : props['activity_id']?.toString();
 
       final bool isHighlighted;
-      if (selectedDay != null) {
+      if (effectiveDays.isNotEmpty) {
         isHighlighted = isSegment
             ? (daySegIds?.contains(featureId) ?? false)
             : (dayActIds?.contains(featureId) ?? false);
@@ -1629,25 +2031,41 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
     final selDay = notifier.selectedDay;
+    final selDays = notifier.selectedDays;
+    final selMemId = notifier.selectedMemoryId;
+    final items = notifier.items;
     if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
         selSegId.toString() != (_lastSelectedSegId ?? '').toString() ||
-        selDay != _lastSelectedDay) {
+        selDay != _lastSelectedDay ||
+        !_setEquals(selDays, _lastSelectedDays) ||
+        selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString() ||
+        !identical(items, _lastItems)) {
       if (!identical(geo, _lastGeo)) _fittedBounds = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
       _lastSelectedDay = selDay;
+      _lastSelectedDays = Set.from(selDays);
+      _lastSelectedMemId = selMemId;
+      _lastItems = items;
+      // Multi-select takes priority over single-day selection.
+      final effectiveDays = selDays.isNotEmpty
+          ? selDays
+          : (selDay != null ? {selDay} : <String>{});
       // Build activityById for day-selection polyline colouring.
       final actById = <dynamic, Map<String, dynamic>>{
         for (final a in notifier.activities) a['id']: a
       };
       _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, selDay, actById, notifier.items)
+          ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById, items)
           : [];
-      final hasSelection = selActId != null || selSegId != null || selDay != null;
+      final hasSelection = selActId != null || selSegId != null ||
+          effectiveDays.isNotEmpty || selMemId != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];
+      _cachedMemoryMarkers =
+          _buildMemoryMarkers(items, selMemId, hasSelection, context);
     }
 
     if (!notifier.isLoading) {
@@ -1680,6 +2098,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
               ),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
+            if (_cachedMemoryMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedMemoryMarkers),
             ValueListenableBuilder<List<LatLng>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
@@ -1996,26 +2416,3 @@ class _MobileActivityPanelOverlay extends StatelessWidget {
   }
 }
 
-// ── _StatChip ─────────────────────────────────────────────────────────────────
-
-class _StatChip extends StatelessWidget {
-  final String label;
-
-  const _StatChip({required this.label});
-
-  static const _borderRadius = BorderRadius.all(Radius.circular(12));
-  static const _padding = EdgeInsets.symmetric(horizontal: 8, vertical: 3);
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: _padding,
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: _borderRadius,
-      ),
-      child: Text(label, style: theme.textTheme.labelSmall),
-    );
-  }
-}
