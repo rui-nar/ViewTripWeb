@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional
 
 from src.models.activity import Activity
+from src.models.memory import Memory
 
 SegmentType = Literal["train", "flight", "boat", "bus"]
 
@@ -33,9 +34,10 @@ class ConnectingSegment:
 @dataclass
 class ProjectItem:
     """One entry in the project's ordered item list."""
-    item_type: Literal["activity", "segment"]
+    item_type: Literal["activity", "segment", "memory"]
     activity_id: Optional[int] = None
     segment: Optional[ConnectingSegment] = None
+    memory: Optional[Memory] = None
 
 
 @dataclass
@@ -56,6 +58,7 @@ class Project:
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
+    memories: List[Memory] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised
     _activity_map: Dict[int, Activity] = field(
         default_factory=dict, repr=False, compare=False

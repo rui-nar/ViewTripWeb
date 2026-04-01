@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict
 
 from src.models.activity import Activity
+from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
     Project,
@@ -122,6 +123,19 @@ class ProjectIO:
         d: Dict[str, Any] = {"item_type": item.item_type}
         if item.item_type == "activity":
             d["activity_id"] = item.activity_id
+        elif item.item_type == "memory" and item.memory is not None:
+            mem = item.memory
+            d["memory"] = {
+                "id": mem.id,
+                "name": mem.name,
+                "date": mem.date,
+                "time": mem.time,
+                "description": mem.description,
+                "photos": mem.photos,
+                "geo_mode": mem.geo_mode,
+                "lat": mem.lat,
+                "lon": mem.lon,
+            }
         else:
             seg = item.segment
             d["segment"] = {
@@ -146,6 +160,20 @@ class ProjectIO:
     def _deserialise_item(d: Dict[str, Any]) -> ProjectItem:
         if d.get("item_type") == "activity":
             return ProjectItem(item_type="activity", activity_id=d.get("activity_id"))
+        if d.get("item_type") == "memory":
+            md = d.get("memory", {})
+            mem = Memory(
+                id=md.get("id"),
+                name=md.get("name"),
+                date=md.get("date", ""),
+                time=md.get("time"),
+                description=md.get("description"),
+                photos=md.get("photos", []),
+                geo_mode=md.get("geo_mode", "start_of_day"),
+                lat=md.get("lat"),
+                lon=md.get("lon"),
+            )
+            return ProjectItem(item_type="memory", memory=mem)
         # segment
         sd = d.get("segment", {})
         seg = ConnectingSegment(
