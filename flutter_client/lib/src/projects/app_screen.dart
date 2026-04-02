@@ -484,7 +484,7 @@ class _AppScreenState extends State<AppScreen> {
                         Positioned(
                           bottom: 0, left: 0, right: 0,
                           child: Builder(builder: (ctx) => Container(
-                            color: Theme.of(ctx).colorScheme.surface.withOpacity(0.82),
+                            color: Theme.of(ctx).colorScheme.surface.withOpacity(0.5),
                             child: Selector<ProjectNotifier,
                                 (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
                               selector: (_, n) => (
@@ -550,7 +550,7 @@ class _AppScreenState extends State<AppScreen> {
                 Positioned(
                   bottom: 0, left: 0, right: 0,
                   child: Builder(builder: (ctx) => Container(
-                    color: Theme.of(ctx).colorScheme.surface.withOpacity(0.82),
+                    color: Theme.of(ctx).colorScheme.surface.withOpacity(0.42),
                     child: Selector<ProjectNotifier,
                         (List<Map<String, dynamic>>, Object?, String?)>(
                       selector: (_, n) => (
@@ -2521,6 +2521,14 @@ class _ElevationChartState extends State<ElevationChart> {
           borderData: FlBorderData(show: false),
           titlesData: FlTitlesData(
             leftTitles: AxisTitles(
+              axisNameWidget: RotatedBox(
+                quarterTurns: 3,
+                child: Text(
+                  'Elevation (m)',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ),
+              axisNameSize: 14,
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 40,
