@@ -194,6 +194,8 @@ class _AppScreenState extends State<AppScreen> {
 
   Future<void> _doCapture(
       _ImageExportOptions opts, RenderRepaintBoundary boundary) async {
+    // Wait for any in-flight 512px tiles to finish loading before capture.
+    await Future.delayed(const Duration(milliseconds: 1200));
     try {
       ui.Image image = await boundary.toImage(pixelRatio: opts.scale);
 
@@ -878,9 +880,11 @@ class _MapPanelState extends State<MapPanel> {
           children: [
             TileLayer(
               urlTemplate:
-                  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  'https://tiles.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
+              tileSize: 512,
+              zoomOffset: -1,
               maxNativeZoom: 19,
             ),
             if (polylines.isNotEmpty)
@@ -2620,7 +2624,7 @@ class _ImageExportDialog extends StatefulWidget {
 }
 
 class _ImageExportDialogState extends State<_ImageExportDialog> {
-  double _scale = 3.0;
+  double _scale = 2.0;
   bool _includeChart = true;
   bool _includeTitle = false;
   bool _exporting = false;
