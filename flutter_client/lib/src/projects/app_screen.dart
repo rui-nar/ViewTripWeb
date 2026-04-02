@@ -39,6 +39,7 @@ class _AppScreenState extends State<AppScreen> {
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _isExporting = false;
+  bool _autoZoom = false;
 
   @override
   void initState() {
@@ -304,6 +305,14 @@ class _AppScreenState extends State<AppScreen> {
         ),
         actions: [
           IconButton(
+            icon: Icon(
+              Icons.fit_screen,
+              color: _autoZoom ? Theme.of(context).colorScheme.primary : null,
+            ),
+            tooltip: _autoZoom ? 'Auto-zoom on (tap to disable)' : 'Auto-zoom to selection',
+            onPressed: () => setState(() => _autoZoom = !_autoZoom),
+          ),
+          IconButton(
             icon: _isExporting
                 ? const SizedBox(
                     width: 20,
@@ -384,6 +393,7 @@ class _AppScreenState extends State<AppScreen> {
                           builder: (_, n, __) => _Stage1MapPanel(
                             notifier: n,
                             mapController: _mapController,
+                            autoZoom: _autoZoom,
                           ),
                         ),
                       ),
@@ -1703,8 +1713,13 @@ Future<void> _showSegmentDialog(
 class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
+  final bool autoZoom;
 
-  const _Stage1MapPanel({required this.notifier, required this.mapController});
+  const _Stage1MapPanel({
+    required this.notifier,
+    required this.mapController,
+    this.autoZoom = false,
+  });
 
   @override
   State<_Stage1MapPanel> createState() => _Stage1MapPanelState();
@@ -1935,6 +1950,45 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     return (actIds: actIds, segIds: segIds);
   }
 
+  List<LatLng> _extractSelectedPoints(
+    Map<String, dynamic> geo,
+    dynamic selActId,
+    dynamic selSegId,
+    Set<String>? dayActIds,
+    Set<String>? daySegIds,
+  ) {
+    final points = <LatLng>[];
+    final features = geo['features'];
+    if (features is! List) return points;
+    for (final feature in features) {
+      if (feature is! Map) continue;
+      final props = feature['properties'] as Map? ?? {};
+      final isSegment = props['type'] == 'segment';
+      final featureId = isSegment
+          ? props['segment_id']?.toString()
+          : props['activity_id']?.toString();
+      final bool match;
+      if (dayActIds != null || daySegIds != null) {
+        match = isSegment
+            ? (daySegIds?.contains(featureId) ?? false)
+            : (dayActIds?.contains(featureId) ?? false);
+      } else if (isSegment) {
+        match = selSegId != null && featureId == selSegId.toString();
+      } else {
+        match = selActId != null && featureId == selActId.toString();
+      }
+      if (!match) continue;
+      final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is! List) continue;
+      for (final c in coords) {
+        if (c is List && c.length >= 2) {
+          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+        }
+      }
+    }
+    return points;
+  }
+
   List<Polyline> _buildPolylines(
     Map<String, dynamic> geo,
     dynamic selectedActivityId,
@@ -2066,6 +2120,44 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
+
+      // Auto-zoom to selection
+      if (widget.autoZoom && geo != null &&
+          (effectiveDays.isNotEmpty || selActId != null || selSegId != null)) {
+        Set<String>? dayActIds;
+        Set<String>? daySegIds;
+        if (effectiveDays.isNotEmpty) {
+          dayActIds = {};
+          daySegIds = {};
+          for (final dk in effectiveDays) {
+            final r = _dayItemIds(items, actById, dk);
+            dayActIds.addAll(r.actIds);
+            daySegIds.addAll(r.segIds);
+          }
+        }
+        final pts = _extractSelectedPoints(
+            geo, selActId, selSegId, dayActIds, daySegIds);
+        if (pts.isNotEmpty) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            double minLat = pts.first.latitude, maxLat = pts.first.latitude;
+            double minLon = pts.first.longitude, maxLon = pts.first.longitude;
+            for (final p in pts) {
+              if (p.latitude < minLat) minLat = p.latitude;
+              if (p.latitude > maxLat) maxLat = p.latitude;
+              if (p.longitude < minLon) minLon = p.longitude;
+              if (p.longitude > maxLon) maxLon = p.longitude;
+            }
+            widget.mapController.fitCamera(
+              CameraFit.bounds(
+                bounds: LatLngBounds(
+                    LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+                padding: const EdgeInsets.all(48),
+              ),
+            );
+          });
+        }
+      }
     }
 
     if (!notifier.isLoading) {
