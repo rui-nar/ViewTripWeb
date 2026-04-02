@@ -933,7 +933,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
     _lastTripStart = tripStartOverride;
     _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
     // Collapse all days on first load only; never reset after that.
-    if (!_initialCollapseApplied) {
+    // Only apply once we have actual day headers (items may be empty on initState).
+    if (!_initialCollapseApplied && _displayList.any((o) => o is _DayHeader)) {
       _initialCollapseApplied = true;
       _collapsedDays = {
         for (final o in _displayList) if (o is _DayHeader) o.dayNumber

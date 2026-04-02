@@ -116,6 +116,10 @@ def _enrich_activities(
                 act.summary_polyline = polyline_lib.encode(
                     [(pt[0], pt[1]) for pt in latlng]
                 )
+                if not act.start_latlng:
+                    act.start_latlng = [latlng[0][0], latlng[0][1]]
+                if not act.end_latlng:
+                    act.end_latlng = [latlng[-1][0], latlng[-1][1]]
             n = min(len(altitude), len(distance))
             if n >= 2:
                 act.elevation_profile = (
@@ -628,6 +632,11 @@ def refresh_activity(
                 act.summary_polyline = polyline_lib.encode(
                     [(pt[0], pt[1]) for pt in latlng]
                 )
+                # Derive start/end from stream if metadata didn't provide them
+                if not act.start_latlng:
+                    act.start_latlng = [latlng[0][0], latlng[0][1]]
+                if not act.end_latlng:
+                    act.end_latlng = [latlng[-1][0], latlng[-1][1]]
             n = min(len(altitude), len(distance))
             if n >= 2:
                 act.elevation_profile = (
