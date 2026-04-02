@@ -469,10 +469,9 @@ class _AppScreenState extends State<AppScreen> {
                 Expanded(
                   child: RepaintBoundary(
                     key: _mapChartKey,
-                    child: Column(
-                    children: [
-                      Expanded(
-                        child: RepaintBoundary(
+                    child: Stack(
+                      children: [
+                        RepaintBoundary(
                           key: _mapOnlyKey,
                           child: Consumer<ProjectNotifier>(
                             builder: (_, n, __) => _Stage1MapPanel(
@@ -482,70 +481,77 @@ class _AppScreenState extends State<AppScreen> {
                             ),
                           ),
                         ),
-                      ),
-                      Selector<ProjectNotifier,
-                          (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
-                        selector: (_, n) => (
-                          n.activities,
-                          n.selectedActivityId as Object?,
-                          n.selectedDay,
-                          n.selectedDays,
+                        Positioned(
+                          bottom: 0, left: 0, right: 0,
+                          child: Builder(builder: (ctx) => Container(
+                            color: Theme.of(ctx).colorScheme.surface.withOpacity(0.82),
+                            child: Selector<ProjectNotifier,
+                                (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
+                              selector: (_, n) => (
+                                n.activities,
+                                n.selectedActivityId as Object?,
+                                n.selectedDay,
+                                n.selectedDays,
+                              ),
+                              shouldRebuild: (a, b) =>
+                                  !identical(a.$1, b.$1) ||
+                                  a.$2?.toString() != b.$2?.toString() ||
+                                  a.$3 != b.$3 ||
+                                  !_Stage1MapPanelState._setEquals(a.$4, b.$4),
+                              builder: (ctx, tuple, __) {
+                                final n = ctx.read<ProjectNotifier>();
+                                final allActivities = tuple.$1;
+                                final selActId = tuple.$2;
+                                final selDay = tuple.$3;
+                                final selDays = tuple.$4;
+                                final effectiveDays = selDays.isNotEmpty
+                                    ? selDays
+                                    : (selDay != null ? {selDay} : <String>{});
+                                final activities = effectiveDays.isEmpty
+                                    ? allActivities
+                                    : allActivities.where((a) =>
+                                        effectiveDays.contains(
+                                          (a['start_date_local'] as String? ?? '')
+                                              .split('T').first)).toList();
+                                return ElevationChart(
+                                  activities: activities,
+                                  selectedActivityId: selActId,
+                                  onCursorChanged: (pos) =>
+                                      n.elevationCursorNotifier.value = pos,
+                                  mapCursorNotifier: n.mapCursorDistNotifier,
+                                  track: selActId != null
+                                      ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
+                                      : n.fullTrack,
+                                );
+                              },
+                            ),
+                          )),
                         ),
-                        shouldRebuild: (a, b) =>
-                            !identical(a.$1, b.$1) ||
-                            a.$2?.toString() != b.$2?.toString() ||
-                            a.$3 != b.$3 ||
-                            !_Stage1MapPanelState._setEquals(a.$4, b.$4),
-                        builder: (ctx, tuple, __) {
-                          final n = ctx.read<ProjectNotifier>();
-                          final allActivities = tuple.$1;
-                          final selActId = tuple.$2;
-                          final selDay = tuple.$3;
-                          final selDays = tuple.$4;
-                          final effectiveDays = selDays.isNotEmpty
-                              ? selDays
-                              : (selDay != null ? {selDay} : <String>{});
-                          final activities = effectiveDays.isEmpty
-                              ? allActivities
-                              : allActivities.where((a) =>
-                                  effectiveDays.contains(
-                                    (a['start_date_local'] as String? ?? '')
-                                        .split('T').first)).toList();
-                          return ElevationChart(
-                            activities: activities,
-                            selectedActivityId: selActId,
-                            onCursorChanged: (pos) =>
-                                n.elevationCursorNotifier.value = pos,
-                            mapCursorNotifier: n.mapCursorDistNotifier,
-                            track: selActId != null
-                                ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
-                                : n.fullTrack,
-                          );
-                        },
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
                   ),
                 ),
               ],
             );
           } else {
             // ── Narrow layout: full-screen map + slide-in activity panel ──
-            final mapHeight = constraints.maxHeight - 160;
+            final mapHeight = constraints.maxHeight;
             return Stack(
               children: [
-                // Base: full-height map + pinned elevation chart
-                Column(
-                  children: [
-                    Expanded(
-                      child: Consumer<ProjectNotifier>(
-                        builder: (_, n, __) => _Stage1MapPanel(
-                          notifier: n,
-                          mapController: _mapController,
-                        ),
-                      ),
-                    ),
-                    Selector<ProjectNotifier,
+                // Base: full-height map
+                Consumer<ProjectNotifier>(
+                  builder: (_, n, __) => _Stage1MapPanel(
+                    notifier: n,
+                    mapController: _mapController,
+                  ),
+                ),
+
+                // Elevation chart overlaid at bottom
+                Positioned(
+                  bottom: 0, left: 0, right: 0,
+                  child: Builder(builder: (ctx) => Container(
+                    color: Theme.of(ctx).colorScheme.surface.withOpacity(0.82),
+                    child: Selector<ProjectNotifier,
                         (List<Map<String, dynamic>>, Object?, String?)>(
                       selector: (_, n) => (
                         n.activities,
@@ -578,7 +584,7 @@ class _AppScreenState extends State<AppScreen> {
                         );
                       },
                     ),
-                  ],
+                  )),
                 ),
 
                 // Overlay: activity panel slides in from the left
@@ -805,7 +811,7 @@ class _MapPanelState extends State<MapPanel> {
             LatLng(minLat, minLon),
             LatLng(maxLat, maxLon),
           ),
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.fromLTRB(32, 32, 32, 32 + 160),
         ),
       );
     });
@@ -1994,7 +2000,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       widget.mapController.fitCamera(
         CameraFit.bounds(
           bounds: LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
-          padding: const EdgeInsets.all(32),
+          padding: const EdgeInsets.fromLTRB(32, 32, 32, 32 + 160),
         ),
       );
     });
@@ -2246,7 +2252,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
               CameraFit.bounds(
                 bounds: LatLngBounds(
                     LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
-                padding: const EdgeInsets.all(48),
+                padding: const EdgeInsets.fromLTRB(48, 48, 48, 48 + 160),
               ),
             );
           });
