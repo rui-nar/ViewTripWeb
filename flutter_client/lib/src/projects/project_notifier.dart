@@ -327,6 +327,8 @@ class ProjectNotifier extends ChangeNotifier {
       items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
       _updateStats();
       _buildFullTrack();
+      // Refresh GeoJSON so the map polylines reflect the updated track.
+      geo = await _service.getGeo(name);
       notifyListeners();
     } on Exception catch (e) {
       error = _msg(e);
