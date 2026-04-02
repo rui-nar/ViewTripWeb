@@ -1,16 +1,17 @@
 /// Authentication service — wraps /api/auth/* endpoints.
+// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 library;
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'dart:html' as html;
+
 import '../api/client.dart';
 
 class AuthService {
   static const _tokenKey = 'viewtrip_jwt';
-  final _storage = const FlutterSecureStorage();
 
   /// Restore a persisted token on app start.
   Future<bool> restoreSession() async {
-    final token = await _storage.read(key: _tokenKey);
+    final token = html.window.localStorage[_tokenKey];
     if (token != null) {
       api.setToken(token);
       return true;
@@ -59,7 +60,7 @@ class AuthService {
 
   Future<void> logout() async {
     api.clearToken();
-    await _storage.delete(key: _tokenKey);
+    html.window.localStorage.remove(_tokenKey);
   }
 
   /// Persist a token returned by a mid-session API call (e.g. profile update).
@@ -67,6 +68,6 @@ class AuthService {
 
   void _persist(String token) {
     api.setToken(token);
-    _storage.write(key: _tokenKey, value: token);
+    html.window.localStorage[_tokenKey] = token;
   }
 }
