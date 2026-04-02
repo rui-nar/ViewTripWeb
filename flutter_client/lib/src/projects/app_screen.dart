@@ -4,6 +4,7 @@ library;
 
 // dart:html is intentional — ViewTripWeb targets Flutter Web only.
 import 'dart:html' as html;
+import 'dart:ui' as ui;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../api/client.dart';
@@ -40,6 +42,8 @@ class _AppScreenState extends State<AppScreen> {
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _isExporting = false;
   bool _autoZoom = false;
+  final GlobalKey _mapOnlyKey  = GlobalKey();
+  final GlobalKey _mapChartKey = GlobalKey();
 
   @override
   void initState() {
@@ -103,13 +107,6 @@ class _AppScreenState extends State<AppScreen> {
           ((i['memory']?['photos'] as List?)?.isNotEmpty ?? false),
     );
 
-    if (!hasMemoryPhotos) {
-      // Simple case: no memory photos — just export GPX.
-      await _downloadFile('/api/projects/$enc/export', '$name.gpx');
-      return;
-    }
-
-    // Project has memory photos — offer a choice.
     if (!mounted) return;
     final choice = await showDialog<String>(
       context: context,
@@ -132,12 +129,21 @@ class _AppScreenState extends State<AppScreen> {
               subtitle: Text('Full project data, no photo files'),
             ),
           ),
+          if (hasMemoryPhotos)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop('zip'),
+              child: const ListTile(
+                leading: Icon(Icons.archive_outlined),
+                title: Text('ZIP archive'),
+                subtitle: Text('.gettracks + all memory photos'),
+              ),
+            ),
           SimpleDialogOption(
-            onPressed: () => Navigator.of(ctx).pop('zip'),
+            onPressed: () => Navigator.of(ctx).pop('image'),
             child: const ListTile(
-              leading: Icon(Icons.archive_outlined),
-              title: Text('ZIP archive'),
-              subtitle: Text('.gettracks + all memory photos'),
+              leading: Icon(Icons.photo_outlined),
+              title: Text('Export image (PNG)'),
+              subtitle: Text('Map + elevation chart as a high-quality image'),
             ),
           ),
           SimpleDialogOption(
@@ -159,6 +165,69 @@ class _AppScreenState extends State<AppScreen> {
           '/api/projects/$enc/export-gettracks', '$name.gettracks');
     } else if (choice == 'zip') {
       await _downloadFile('/api/projects/$enc/export-zip', '$name.zip');
+    } else if (choice == 'image') {
+      await _exportImage();
+    }
+  }
+
+  Future<void> _exportImage() async {
+    if (!mounted) return;
+    final opts = await showDialog<_ImageExportOptions>(
+      context: context,
+      builder: (ctx) => _ImageExportDialog(projectName: widget.projectName),
+    );
+    if (opts == null || !mounted) return;
+
+    final key = opts.includeChart ? _mapChartKey : _mapOnlyKey;
+    final boundary =
+        key.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+    if (boundary == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Image export is only available in wide layout')),
+      );
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      ui.Image image = await boundary.toImage(pixelRatio: opts.scale);
+
+      if (opts.includeTitle) {
+        final recorder = ui.PictureRecorder();
+        final canvas = Canvas(recorder);
+        canvas.drawImage(image, Offset.zero, Paint());
+        final tp = TextPainter(
+          text: TextSpan(
+            text: widget.projectName,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+              shadows: [Shadow(blurRadius: 4, color: Colors.black54)],
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: image.width.toDouble() - 32);
+        tp.paint(canvas, const Offset(16, 16));
+        final picture = recorder.endRecording();
+        image = await picture.toImage(image.width, image.height);
+      }
+
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null || !mounted) return;
+      final bytes = byteData.buffer.asUint8List();
+      final blob = html.Blob([bytes], 'image/png');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+      html.AnchorElement(href: url)
+        ..setAttribute('download', '${widget.projectName}.png')
+        ..click();
+      html.Url.revokeObjectUrl(url);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${widget.projectName}.png downloaded')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
     }
   }
 
@@ -386,14 +455,19 @@ class _AppScreenState extends State<AppScreen> {
                   ),
                 ),
                 Expanded(
-                  child: Column(
+                  child: RepaintBoundary(
+                    key: _mapChartKey,
+                    child: Column(
                     children: [
                       Expanded(
-                        child: Consumer<ProjectNotifier>(
-                          builder: (_, n, __) => _Stage1MapPanel(
-                            notifier: n,
-                            mapController: _mapController,
-                            autoZoom: _autoZoom,
+                        child: RepaintBoundary(
+                          key: _mapOnlyKey,
+                          child: Consumer<ProjectNotifier>(
+                            builder: (_, n, __) => _Stage1MapPanel(
+                              notifier: n,
+                              mapController: _mapController,
+                              autoZoom: _autoZoom,
+                            ),
                           ),
                         ),
                       ),
@@ -438,6 +512,7 @@ class _AppScreenState extends State<AppScreen> {
                         },
                       ),
                     ],
+                  ),
                   ),
                 ),
               ],
@@ -2509,6 +2584,87 @@ class _MobileActivityPanelOverlay extends StatelessWidget {
           mapController: mapController,
         ),
       ),
+    );
+  }
+}
+
+// ── Image export ──────────────────────────────────────────────────────────────
+
+class _ImageExportOptions {
+  final double scale;
+  final bool includeChart;
+  final bool includeTitle;
+  const _ImageExportOptions({
+    required this.scale,
+    required this.includeChart,
+    required this.includeTitle,
+  });
+}
+
+class _ImageExportDialog extends StatefulWidget {
+  final String projectName;
+  const _ImageExportDialog({required this.projectName});
+  @override
+  State<_ImageExportDialog> createState() => _ImageExportDialogState();
+}
+
+class _ImageExportDialogState extends State<_ImageExportDialog> {
+  double _scale = 3.0;
+  bool _includeChart = true;
+  bool _includeTitle = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Export image'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Resolution'),
+          const SizedBox(height: 8),
+          SegmentedButton<double>(
+            segments: const [
+              ButtonSegment(value: 2.0, label: Text('2×')),
+              ButtonSegment(value: 3.0, label: Text('3×')),
+              ButtonSegment(value: 4.0, label: Text('4×')),
+            ],
+            selected: {_scale},
+            onSelectionChanged: (s) => setState(() => _scale = s.first),
+          ),
+          const SizedBox(height: 16),
+          CheckboxListTile(
+            title: const Text('Include elevation chart'),
+            value: _includeChart,
+            onChanged: (v) => setState(() => _includeChart = v!),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+          ),
+          CheckboxListTile(
+            title: const Text('Include project title'),
+            value: _includeTitle,
+            onChanged: (v) => setState(() => _includeTitle = v!),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(
+            _ImageExportOptions(
+              scale: _scale,
+              includeChart: _includeChart,
+              includeTitle: _includeTitle,
+            ),
+          ),
+          child: const Text('Export PNG'),
+        ),
+      ],
     );
   }
 }
