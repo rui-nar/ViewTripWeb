@@ -939,6 +939,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
       _collapsedDays = {
         for (final o in _displayList) if (o is _DayHeader) o.dayNumber
       };
+      // Rebuild now that _collapsedDays is populated — _buildDisplayList filters
+      // children using _collapsedDays, so the first call above produced an
+      // uncollapsed list.
+      _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
     }
   }
 
