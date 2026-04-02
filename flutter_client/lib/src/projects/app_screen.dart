@@ -44,6 +44,7 @@ class _AppScreenState extends State<AppScreen> {
   bool _autoZoom = false;
   final GlobalKey _mapOnlyKey  = GlobalKey();
   final GlobalKey _mapChartKey = GlobalKey();
+  final ValueNotifier<bool> _mapRetinaNotifier = ValueNotifier(false);
 
   @override
   void initState() {
@@ -56,6 +57,7 @@ class _AppScreenState extends State<AppScreen> {
   @override
   void dispose() {
     _mapController.dispose();
+    _mapRetinaNotifier.dispose();
     super.dispose();
   }
 
@@ -172,48 +174,69 @@ class _AppScreenState extends State<AppScreen> {
 
   Future<void> _exportImage() async {
     if (!mounted) return;
-    final opts = await showDialog<_ImageExportOptions>(
-      context: context,
-      builder: (ctx) => _ImageExportDialog(projectName: widget.projectName),
-    );
-    if (opts == null || !mounted) return;
-
-    final key = opts.includeChart ? _mapChartKey : _mapOnlyKey;
-    final boundary =
-        key.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+    final boundary = _mapChartKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
     if (boundary == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Image export is only available in wide layout')),
+        const SnackBar(
+            content: Text('Image export is only available in wide layout')),
       );
       return;
     }
-    setState(() => _isExporting = true);
-    try {
-      ui.Image image = await boundary.toImage(pixelRatio: opts.scale);
 
-      if (opts.includeTitle) {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _ImageExportDialog(
+        projectName: widget.projectName,
+        onExport: (opts) => _doCapture(opts, boundary),
+      ),
+    );
+  }
+
+  Future<void> _doCapture(
+      _ImageExportOptions opts, RenderRepaintBoundary boundary) async {
+    // Enable retina tiles and wait two frames so the TileLayer requests
+    // higher-resolution tiles before we capture.
+    _mapRetinaNotifier.value = true;
+    await Future.delayed(const Duration(milliseconds: 800));
+
+    try {
+      ui.Image image = await boundary.toImage(
+          pixelRatio: opts.includeChart ? opts.scale : opts.scale);
+
+      // Always composite onto a white background to avoid transparent areas
+      // (e.g. the elevation chart) appearing black in the PNG.
+      {
         final recorder = ui.PictureRecorder();
         final canvas = Canvas(recorder);
+        canvas.drawRect(
+          Rect.fromLTWH(
+              0, 0, image.width.toDouble(), image.height.toDouble()),
+          Paint()..color = const Color(0xFFFFFFFF),
+        );
         canvas.drawImage(image, Offset.zero, Paint());
-        final tp = TextPainter(
-          text: TextSpan(
-            text: widget.projectName,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              shadows: [Shadow(blurRadius: 4, color: Colors.black54)],
+        if (opts.includeTitle) {
+          final tp = TextPainter(
+            text: TextSpan(
+              text: widget.projectName,
+              style: TextStyle(
+                color: Colors.black,
+                fontSize: 14 * opts.scale,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout(maxWidth: image.width.toDouble() - 32);
-        tp.paint(canvas, const Offset(16, 16));
+            textDirection: TextDirection.ltr,
+          )..layout(maxWidth: image.width.toDouble() - 32 * opts.scale);
+          tp.paint(canvas, Offset(16 * opts.scale, 16 * opts.scale));
+        }
         final picture = recorder.endRecording();
         image = await picture.toImage(image.width, image.height);
       }
 
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null || !mounted) return;
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
       final bytes = byteData.buffer.asUint8List();
       final blob = html.Blob([bytes], 'image/png');
       final url = html.Url.createObjectUrlFromBlob(blob);
@@ -221,13 +244,8 @@ class _AppScreenState extends State<AppScreen> {
         ..setAttribute('download', '${widget.projectName}.png')
         ..click();
       html.Url.revokeObjectUrl(url);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${widget.projectName}.png downloaded')),
-        );
-      }
     } finally {
-      if (mounted) setState(() => _isExporting = false);
+      _mapRetinaNotifier.value = false;
     }
   }
 
@@ -467,6 +485,7 @@ class _AppScreenState extends State<AppScreen> {
                               notifier: n,
                               mapController: _mapController,
                               autoZoom: _autoZoom,
+                              retinaNotifier: _mapRetinaNotifier,
                             ),
                           ),
                         ),
@@ -1794,11 +1813,13 @@ class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final bool autoZoom;
+  final ValueNotifier<bool>? retinaNotifier;
 
   const _Stage1MapPanel({
     required this.notifier,
     required this.mapController,
     this.autoZoom = false,
+    this.retinaNotifier,
   });
 
   @override
@@ -2257,11 +2278,15 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            TileLayer(
-              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-              userAgentPackageName: 'com.viewtrip.client',
-              tileProvider: _tileProvider,
-              maxNativeZoom: 19,
+            ValueListenableBuilder<bool>(
+              valueListenable: widget.retinaNotifier ?? ValueNotifier(false),
+              builder: (_, retina, __) => TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider,
+                maxNativeZoom: 19,
+                retinaMode: retina ? true : false,
+              ),
             ),
             if (_cachedPolylines.isNotEmpty)
               PolylineLayer(
@@ -2603,7 +2628,8 @@ class _ImageExportOptions {
 
 class _ImageExportDialog extends StatefulWidget {
   final String projectName;
-  const _ImageExportDialog({required this.projectName});
+  final Future<void> Function(_ImageExportOptions) onExport;
+  const _ImageExportDialog({required this.projectName, required this.onExport});
   @override
   State<_ImageExportDialog> createState() => _ImageExportDialogState();
 }
@@ -2612,6 +2638,7 @@ class _ImageExportDialogState extends State<_ImageExportDialog> {
   double _scale = 3.0;
   bool _includeChart = true;
   bool _includeTitle = false;
+  bool _exporting = false;
 
   @override
   Widget build(BuildContext context) {
@@ -2630,20 +2657,26 @@ class _ImageExportDialogState extends State<_ImageExportDialog> {
               ButtonSegment(value: 4.0, label: Text('4×')),
             ],
             selected: {_scale},
-            onSelectionChanged: (s) => setState(() => _scale = s.first),
+            onSelectionChanged: _exporting
+                ? null
+                : (s) => setState(() => _scale = s.first),
           ),
           const SizedBox(height: 16),
           CheckboxListTile(
             title: const Text('Include elevation chart'),
             value: _includeChart,
-            onChanged: (v) => setState(() => _includeChart = v!),
+            onChanged: _exporting
+                ? null
+                : (v) => setState(() => _includeChart = v!),
             contentPadding: EdgeInsets.zero,
             dense: true,
           ),
           CheckboxListTile(
             title: const Text('Include project title'),
             value: _includeTitle,
-            onChanged: (v) => setState(() => _includeTitle = v!),
+            onChanged: _exporting
+                ? null
+                : (v) => setState(() => _includeTitle = v!),
             contentPadding: EdgeInsets.zero,
             dense: true,
           ),
@@ -2651,18 +2684,33 @@ class _ImageExportDialogState extends State<_ImageExportDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _exporting ? null : () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(
-            _ImageExportOptions(
-              scale: _scale,
-              includeChart: _includeChart,
-              includeTitle: _includeTitle,
-            ),
-          ),
-          child: const Text('Export PNG'),
+          onPressed: _exporting
+              ? null
+              : () async {
+                  setState(() => _exporting = true);
+                  final nav = Navigator.of(context);
+                  try {
+                    await widget.onExport(_ImageExportOptions(
+                      scale: _scale,
+                      includeChart: _includeChart,
+                      includeTitle: _includeTitle,
+                    ));
+                  } finally {
+                    nav.pop();
+                  }
+                },
+          child: _exporting
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Text('Export PNG'),
         ),
       ],
     );
