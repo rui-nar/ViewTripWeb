@@ -44,7 +44,6 @@ class _AppScreenState extends State<AppScreen> {
   bool _autoZoom = false;
   final GlobalKey _mapOnlyKey  = GlobalKey();
   final GlobalKey _mapChartKey = GlobalKey();
-  final ValueNotifier<bool> _mapRetinaNotifier = ValueNotifier(false);
 
   @override
   void initState() {
@@ -57,7 +56,6 @@ class _AppScreenState extends State<AppScreen> {
   @override
   void dispose() {
     _mapController.dispose();
-    _mapRetinaNotifier.dispose();
     super.dispose();
   }
 
@@ -196,14 +194,8 @@ class _AppScreenState extends State<AppScreen> {
 
   Future<void> _doCapture(
       _ImageExportOptions opts, RenderRepaintBoundary boundary) async {
-    // Enable retina tiles and wait two frames so the TileLayer requests
-    // higher-resolution tiles before we capture.
-    _mapRetinaNotifier.value = true;
-    await Future.delayed(const Duration(milliseconds: 800));
-
     try {
-      ui.Image image = await boundary.toImage(
-          pixelRatio: opts.includeChart ? opts.scale : opts.scale);
+      ui.Image image = await boundary.toImage(pixelRatio: opts.scale);
 
       // Always composite onto a white background to avoid transparent areas
       // (e.g. the elevation chart) appearing black in the PNG.
@@ -245,7 +237,7 @@ class _AppScreenState extends State<AppScreen> {
         ..click();
       html.Url.revokeObjectUrl(url);
     } finally {
-      _mapRetinaNotifier.value = false;
+      // nothing to reset
     }
   }
 
@@ -485,7 +477,6 @@ class _AppScreenState extends State<AppScreen> {
                               notifier: n,
                               mapController: _mapController,
                               autoZoom: _autoZoom,
-                              retinaNotifier: _mapRetinaNotifier,
                             ),
                           ),
                         ),
@@ -1813,13 +1804,11 @@ class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final bool autoZoom;
-  final ValueNotifier<bool>? retinaNotifier;
 
   const _Stage1MapPanel({
     required this.notifier,
     required this.mapController,
     this.autoZoom = false,
-    this.retinaNotifier,
   });
 
   @override
@@ -2278,15 +2267,11 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            ValueListenableBuilder<bool>(
-              valueListenable: widget.retinaNotifier ?? ValueNotifier(false),
-              builder: (_, retina, __) => TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.viewtrip.client',
-                tileProvider: _tileProvider,
-                maxNativeZoom: 19,
-                retinaMode: retina ? true : false,
-              ),
+            TileLayer(
+              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              userAgentPackageName: 'com.viewtrip.client',
+              tileProvider: _tileProvider,
+              maxNativeZoom: 19,
             ),
             if (_cachedPolylines.isNotEmpty)
               PolylineLayer(
