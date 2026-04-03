@@ -15,7 +15,7 @@ from api.strava import router as strava_router
 app = FastAPI(
     title="ViewTrip API",
     description="REST API consumed by Flutter and other native clients.",
-    version="0.11.0",
+    version="0.12.0",
 )
 
 # Allow Flutter dev clients (and web) to call the API
