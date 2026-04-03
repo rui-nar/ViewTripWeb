@@ -2517,12 +2517,24 @@ class _ElevationChartState extends State<ElevationChart> {
         LineChartData(
           minY: _minY - yPad,
           maxY: _maxY + yPad,
-          gridData: const FlGridData(show: false),
+          gridData: FlGridData(
+            show: true,
+            drawHorizontalLine: true,
+            horizontalInterval: 100,
+            drawVerticalLine: false,
+            getDrawingHorizontalLine: (value) {
+              return FlLine(
+                color: Colors.grey.withOpacity(0.3),
+                strokeWidth: 1,
+                dashArray: [2, 2],
+              );
+            },
+          ),
           borderData: FlBorderData(show: false),
           titlesData: FlTitlesData(
             leftTitles: AxisTitles(
               axisNameWidget: RotatedBox(
-                quarterTurns: 3,
+                quarterTurns: 0,
                 child: Text(
                   'Elevation (m)',
                   style: Theme.of(context).textTheme.labelSmall,
