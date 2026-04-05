@@ -39,6 +39,16 @@ class ProjectNotifier extends ChangeNotifier {
   /// User-defined trip start date override ("YYYY-MM-DD"); null = infer from activities.
   String? tripStart;
 
+  /// Day metadata keyed by "YYYY-MM-DD".
+  Map<String, Map<String, dynamic>> dayMeta = {};
+
+  /// Project-specific list of sleeping type options.
+  List<String> sleepingOptions = [];
+
+  static const _defaultSleepingOptions = [
+    'Camping', 'Bivouac', 'Shelter', 'Pension/Guesthouse', 'Hotel', 'Apartment',
+  ];
+
   void selectActivity(dynamic id) {
     selectedActivityId =
         selectedActivityId?.toString() == id?.toString() ? null : id;
@@ -125,6 +135,14 @@ class ProjectNotifier extends ChangeNotifier {
       items = rawItems is List
           ? rawItems.cast<Map<String, dynamic>>()
           : [];
+      final rawDm = details['day_meta'];
+      dayMeta = rawDm is Map
+          ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
+          : {};
+      final rawOpts = details['sleeping_options'];
+      sleepingOptions = rawOpts is List
+          ? List<String>.from(rawOpts)
+          : List<String>.from(_defaultSleepingOptions);
       geo = results[1];
       _updateStats();
       _buildFullTrack();
@@ -253,6 +271,8 @@ class ProjectNotifier extends ChangeNotifier {
     selectedDay = null;
     selectedDays = {};
     tripStart = null;
+    dayMeta = {};
+    sleepingOptions = [];
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
@@ -652,6 +672,32 @@ class ProjectNotifier extends ChangeNotifier {
   // ── Internal helpers ───────────────────────────────────────────────────────
 
   /// Reloads project data from the API without clearing existing state first.
+  Future<void> saveDayMeta({
+    required Map<String, Map<String, dynamic>> newDayMeta,
+    List<String>? newSleepingOptions,
+  }) async {
+    final name = projectName;
+    if (name == null) return;
+    dayMeta = newDayMeta;
+    if (newSleepingOptions != null) sleepingOptions = newSleepingOptions;
+    notifyListeners();
+    try {
+      await api.put(
+        '/api/projects/${Uri.encodeComponent(name)}/day-meta',
+        {
+          'day_meta': newDayMeta,
+          if (newSleepingOptions != null) 'sleeping_options': newSleepingOptions,
+        },
+      );
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> updateSleepingOptions(List<String> opts) =>
+      saveDayMeta(newDayMeta: dayMeta, newSleepingOptions: opts);
+
   Future<void> _silentReload(String name) async {
     try {
       final results = await Future.wait([
@@ -669,6 +715,14 @@ class ProjectNotifier extends ChangeNotifier {
       items = rawItems is List
           ? rawItems.cast<Map<String, dynamic>>()
           : [];
+      final rawDm = details['day_meta'];
+      dayMeta = rawDm is Map
+          ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
+          : {};
+      final rawOpts = details['sleeping_options'];
+      sleepingOptions = rawOpts is List
+          ? List<String>.from(rawOpts)
+          : List<String>.from(_defaultSleepingOptions);
       geo = results[1];
       _updateStats();
       _buildFullTrack();

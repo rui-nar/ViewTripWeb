@@ -30,6 +30,8 @@ from src.models.activity import Activity
 from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
+    DayMeta,
+    DEFAULT_SLEEPING_OPTIONS,
     Project,
     ProjectFilterState,
     ProjectItem,
@@ -107,7 +109,11 @@ class ProjectRepo:
 
     def create_project(self, sess: Session, user_info_id: int, name: str) -> Project:
         """Create an empty project in the DB and return it."""
-        row = DBProject(user_info_id=user_info_id, name=name)
+        row = DBProject(
+            user_info_id=user_info_id,
+            name=name,
+            sleeping_options_json=json.dumps(DEFAULT_SLEEPING_OPTIONS),
+        )
         sess.add(row)
         sess.commit()
         return Project(name=name)
@@ -135,6 +141,12 @@ class ProjectRepo:
             "end_date": project.filter_state.end_date,
             "activity_types": project.filter_state.activity_types,
         })
+        row.day_meta_json = json.dumps({
+            dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                 "weather": dm.weather, "journal": dm.journal}
+            for dk, dm in project.day_meta.items()
+        })
+        row.sleeping_options_json = json.dumps(project.sleeping_options)
         row.updated_at = time.time()
 
         # Upsert all activities in the project's activity pool
@@ -346,6 +358,12 @@ class ProjectRepo:
                 "end_date": project.filter_state.end_date,
                 "activity_types": project.filter_state.activity_types,
             }),
+            day_meta_json=json.dumps({
+                dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                     "weather": dm.weather, "journal": dm.journal}
+                for dk, dm in project.day_meta.items()
+            }),
+            sleeping_options_json=json.dumps(project.sleeping_options),
         )
         sess.add(row)
         sess.flush()  # populate row.id
@@ -447,6 +465,19 @@ class ProjectRepo:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
 
+        raw_dm = json.loads(getattr(row, 'day_meta_json', None) or "{}")
+        day_meta = {
+            dk: DayMeta(
+                difficulty=v.get("difficulty"),
+                sleeping=v.get("sleeping"),
+                weather=v.get("weather"),
+                journal=v.get("journal"),
+            )
+            for dk, v in raw_dm.items()
+        }
+        raw_opts = json.loads(getattr(row, 'sleeping_options_json', None) or "[]")
+        sleeping_options = raw_opts if isinstance(raw_opts, list) and raw_opts else list(DEFAULT_SLEEPING_OPTIONS)
+
         project = Project(
             name=row.name,
             version=row.version,
@@ -455,6 +486,8 @@ class ProjectRepo:
             filter_state=filter_state,
             activities=activities,
             memories=memories,
+            day_meta=day_meta,
+            sleeping_options=sleeping_options,
         )
         project.rebuild_map()
         return project

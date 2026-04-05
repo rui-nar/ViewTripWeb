@@ -22,6 +22,7 @@ import '../map/polyline_decoder.dart';
 import 'project_notifier.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
+import 'day_meta_editor.dart';
 import 'project_settings_dialog.dart';
 import 'segment_dialog.dart';
 
@@ -999,6 +1000,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
   bool _multiSelect = false;
   Set<String> _selectedDays = {};
 
+  // Narrow-layout: day keys whose edit strip is revealed by swipe-right
+  final Set<String> _expandedDayEdits = {};
+
   // Memories-only filter toggle
   bool _memoriesOnly = false;
 
@@ -1426,9 +1430,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final isMultiChecked = _selectedDays.contains(h.dateKey);
                         final isSingleSelected = !_multiSelect && _selectedDay == h.dateKey;
                         final isHighlighted = _multiSelect ? isMultiChecked : isSingleSelected;
-                        return InkWell(
+                        final isWide = MediaQuery.of(context).size.width >= 720;
+                        final isEditExpanded = !isWide && _expandedDayEdits.contains(h.dateKey);
+
+                        Widget headerRow = InkWell(
                           key: ValueKey('header_${h.dayNumber}'),
                           onTap: () {
+                            if (!isWide) {
+                              setState(() => _expandedDayEdits.remove(h.dateKey));
+                            }
                             if (_multiSelect) {
                               setState(() {
                                 if (isMultiChecked) {
@@ -1494,6 +1504,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 ),
                               ),
                               const Spacer(),
+                              if (isWide)
+                                IconButton(
+                                  icon: const Icon(Icons.edit_outlined, size: 16),
+                                  tooltip: 'Edit day',
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () => showDayMetaDialog(context, notifier, h.dateKey),
+                                ),
                               IconButton(
                                 icon: const Icon(
                                     Icons.add_photo_alternate_outlined,
@@ -1514,6 +1531,51 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             ]),
                           ),
                         );
+
+                        if (!isWide) {
+                          headerRow = GestureDetector(
+                            onHorizontalDragEnd: (details) {
+                              if ((details.primaryVelocity ?? 0) > 0) {
+                                setState(() {
+                                  if (isEditExpanded) {
+                                    _expandedDayEdits.remove(h.dateKey);
+                                  } else {
+                                    _expandedDayEdits.add(h.dateKey);
+                                  }
+                                });
+                              }
+                            },
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                headerRow,
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  curve: Curves.easeOut,
+                                  height: isEditExpanded ? 40.0 : 0.0,
+                                  clipBehavior: Clip.hardEdge,
+                                  decoration: const BoxDecoration(),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      TextButton.icon(
+                                        icon: const Icon(Icons.edit_outlined, size: 16),
+                                        label: const Text('Edit day'),
+                                        onPressed: () {
+                                          setState(() => _expandedDayEdits.remove(h.dateKey));
+                                          showDayMetaSheet(context, notifier, h.dateKey);
+                                        },
+                                      ),
+                                      const SizedBox(width: 8),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        }
+
+                        return headerRow;
                       }
 
                       // ── Activity or segment item ─────────────────────────────

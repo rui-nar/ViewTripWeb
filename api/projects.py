@@ -294,6 +294,36 @@ def update_project(
     return {"name": result_name, "trip_start": result_trip_start}
 
 
+class DayMetaUpdateRequest(BaseModel):
+    day_meta: Dict[str, Dict[str, Optional[str]]]
+    sleeping_options: Optional[List[str]] = None
+
+
+@router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT)
+def update_day_meta(
+    name: str,
+    body: DayMetaUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Replace day metadata (and optionally sleeping options) for a project."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row.day_meta_json = json.dumps(body.day_meta)
+        if body.sleeping_options is not None:
+            row.sleeping_options_json = json.dumps(body.sleeping_options)
+        row.updated_at = time.time()
+        sess.add(row)
+        sess.commit()
+
+
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
     name: str,
@@ -413,6 +443,44 @@ def export_project_gpx(
                         pass
                 gpx.waypoints.append(wpt)
 
+    # Emit one <wpt> per day that has any day metadata
+    if project.day_meta:
+        # Build a map: date_key → first lat/lon from an activity on that day
+        day_first_latlng: dict[str, tuple[float, float]] = {}
+        for it in project.items:
+            if it.item_type == "activity" and it.activity_id is not None:
+                act = project.activity_by_id(it.activity_id)
+                if act is None:
+                    continue
+                try:
+                    date_key = act.start_date_local.date().isoformat()
+                except AttributeError:
+                    date_key = str(act.start_date_local)[:10]
+                if date_key and date_key not in day_first_latlng and act.start_latlng:
+                    day_first_latlng[date_key] = (act.start_latlng[0], act.start_latlng[1])
+
+        for date_key, dm in project.day_meta.items():
+            if not any([dm.difficulty, dm.sleeping, dm.weather, dm.journal]):
+                continue
+            lat, lon = day_first_latlng.get(date_key, (0.0, 0.0))
+            wpt = gpxpy.gpx.GPXWaypoint(lat, lon)
+            wpt.name = f"Day meta {date_key}"
+            parts = [s for s in [
+                dm.difficulty and f"Difficulty: {dm.difficulty}",
+                dm.sleeping   and f"Sleeping: {dm.sleeping}",
+                dm.weather    and f"Weather: {dm.weather}",
+                dm.journal    and f"Journal: {dm.journal}",
+            ] if s]
+            wpt.description = " | ".join(parts)
+            wpt.comment = json.dumps({
+                "date": date_key,
+                "difficulty": dm.difficulty,
+                "sleeping": dm.sleeping,
+                "weather": dm.weather,
+                "journal": dm.journal,
+            })
+            gpx.waypoints.append(wpt)
+
     gpx_xml = gpx.to_xml()
     safe = _SAFE_NAME.sub("_", project.name)
 
@@ -440,18 +508,9 @@ def export_project_gettracks(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    data: Dict[str, Any] = {
-        "version": project.version,
-        "name": project.name,
-        "trip_start": project.trip_start,
-        "filter_state": {
-            "start_date": project.filter_state.start_date,
-            "end_date": project.filter_state.end_date,
-            "activity_types": project.filter_state.activity_types,
-        },
-        "items": [ProjectIO._serialise_item(i) for i in project.items],
-        "activities": [a.to_strava_dict() for a in project.activities],
-    }
+    data: Dict[str, Any] = ProjectIO.to_dict(project)
+    # Override activities with the raw Strava format (no elevation_profile pairs) for the backup file
+    data["activities"] = [a.to_strava_dict() for a in project.activities]
     json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     safe = _SAFE_NAME.sub("_", project.name)
     return StreamingResponse(

@@ -34,6 +34,10 @@ class DBProject(sqlmodel.SQLModel, table=True):
     trip_start: Optional[str] = sqlmodel.Field(default=None)
     # Pre-computed project stats JSON; recomputed after any mutation
     stats_json: Optional[str] = sqlmodel.Field(default=None)
+    # Day metadata keyed by "YYYY-MM-DD": difficulty, sleeping, weather, journal
+    day_meta_json: Optional[str] = sqlmodel.Field(default="{}")
+    # Ordered list of sleeping option strings (project-configurable)
+    sleeping_options_json: Optional[str] = sqlmodel.Field(default="[]")
 
 
 class DBActivity(sqlmodel.SQLModel, table=True):
