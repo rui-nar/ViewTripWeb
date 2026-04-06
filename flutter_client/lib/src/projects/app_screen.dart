@@ -543,6 +543,7 @@ class _AppScreenState extends State<AppScreen> {
                   builder: (_, n, __) => _Stage1MapPanel(
                     notifier: n,
                     mapController: _mapController,
+                    autoZoom: _autoZoom,
                   ),
                 ),
 
