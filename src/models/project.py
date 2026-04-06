@@ -11,6 +11,23 @@ from src.models.memory import Memory
 
 SegmentType = Literal["train", "flight", "boat", "bus"]
 
+DEFAULT_SLEEPING_OPTIONS = [
+    "Camping", "Bivouac", "Shelter",
+    "Pension/Guesthouse", "Hotel", "Apartment",
+]
+
+DifficultyLevel = Literal["easy", "normal", "hard", "super_hard"]
+WeatherCondition = Literal["hot", "clear", "cloudy", "some_rain", "heavy_rain"]
+
+
+@dataclass
+class DayMeta:
+    """User-authored metadata for a single trip day."""
+    difficulty: Optional[DifficultyLevel] = None
+    sleeping: Optional[str] = None
+    weather: Optional[WeatherCondition] = None
+    journal: Optional[str] = None
+
 
 @dataclass
 class SegmentEndpoint:
@@ -56,6 +73,10 @@ class Project:
     items: List[ProjectItem] = field(default_factory=list)
     filter_state: ProjectFilterState = field(default_factory=ProjectFilterState)
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date
+    # Day metadata keyed by "YYYY-MM-DD"
+    day_meta: Dict[str, DayMeta] = field(default_factory=dict)
+    # Project-specific list of sleeping options
+    sleeping_options: List[str] = field(default_factory=lambda: list(DEFAULT_SLEEPING_OPTIONS))
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)

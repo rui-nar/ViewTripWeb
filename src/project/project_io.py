@@ -9,6 +9,8 @@ from src.models.activity import Activity
 from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
+    DayMeta,
+    DEFAULT_SLEEPING_OPTIONS,
     Project,
     ProjectFilterState,
     ProjectItem,
@@ -44,6 +46,14 @@ class ProjectIO:
             },
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": [a.to_strava_dict() for a in project.activities],
+            "day_meta": {
+                dk: {k: v for k, v in {
+                    "difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                    "weather": dm.weather, "journal": dm.journal,
+                }.items() if v is not None}
+                for dk, dm in project.day_meta.items()
+            },
+            "sleeping_options": project.sleeping_options,
         }
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
@@ -79,6 +89,14 @@ class ProjectIO:
             },
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": activities_out,
+            "day_meta": {
+                dk: {k: v for k, v in {
+                    "difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                    "weather": dm.weather, "journal": dm.journal,
+                }.items() if v is not None}
+                for dk, dm in project.day_meta.items()
+            },
+            "sleeping_options": project.sleeping_options,
         }
 
     @staticmethod
@@ -103,6 +121,22 @@ class ProjectIO:
 
         items = [ProjectIO._deserialise_item(i) for i in data.get("items", [])]
 
+        raw_dm = data.get("day_meta") or {}
+        day_meta = {
+            dk: DayMeta(
+                difficulty=v.get("difficulty"),
+                sleeping=v.get("sleeping"),
+                weather=v.get("weather"),
+                journal=v.get("journal"),
+            )
+            for dk, v in raw_dm.items()
+        }
+        raw_opts = data.get("sleeping_options")
+        sleeping_options = (
+            list(raw_opts) if isinstance(raw_opts, list) and raw_opts
+            else list(DEFAULT_SLEEPING_OPTIONS)
+        )
+
         project = Project(
             name=data.get("name", "Untitled"),
             version=data.get("version", 1),
@@ -110,6 +144,8 @@ class ProjectIO:
             items=items,
             filter_state=filter_state,
             activities=activities,
+            day_meta=day_meta,
+            sleeping_options=sleeping_options,
         )
         project.rebuild_map()
         return project
