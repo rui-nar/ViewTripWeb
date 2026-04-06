@@ -888,11 +888,9 @@ class _MapPanelState extends State<MapPanel> {
           children: [
             TileLayer(
               urlTemplate:
-                  'https://tiles.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
-              tileSize: 512,
-              zoomOffset: -1,
               maxNativeZoom: 19,
             ),
             if (polylines.isNotEmpty)
@@ -2342,7 +2340,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              urlTemplate:
+                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
