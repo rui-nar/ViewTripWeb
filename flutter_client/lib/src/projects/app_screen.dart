@@ -1434,7 +1434,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final isEditExpanded = !isWide && _expandedDayEdits.contains(h.dateKey);
 
                         Widget headerRow = InkWell(
-                          key: ValueKey('header_${h.dayNumber}'),
+                          key: isWide ? ValueKey('header_${h.dayNumber}') : null,
                           onTap: () {
                             if (!isWide) {
                               setState(() => _expandedDayEdits.remove(h.dateKey));
@@ -1534,6 +1534,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
                         if (!isWide) {
                           headerRow = GestureDetector(
+                            key: ValueKey('header_${h.dayNumber}'),
                             onHorizontalDragEnd: (details) {
                               if ((details.primaryVelocity ?? 0) > 0) {
                                 setState(() {
