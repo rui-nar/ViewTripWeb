@@ -550,6 +550,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Text('ViewTripWeb',
                           style: theme.textTheme.titleMedium),
                       const SizedBox(height: 4),
+                      const Text(
+                        String.fromEnvironment('APP_VERSION', defaultValue: 'dev'),
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
                       Text(
                         '© ${DateTime.now().year} Rui Narciso. All rights reserved.',
                         style: theme.textTheme.bodySmall,
