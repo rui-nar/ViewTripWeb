@@ -387,17 +387,28 @@ class _AppScreenState extends State<AppScreen> {
           ],
         ),
         actions: [
-          IconButton(
-            icon: Icon(Icons.edit_outlined,
-                color: Theme.of(context).colorScheme.primary),
-            tooltip: 'Manage mode (active)',
-            onPressed: null,
-          ),
-          IconButton(
-            icon: const Icon(Icons.visibility_outlined),
-            tooltip: 'Switch to view mode',
-            onPressed: () => context.go(
-                '/view?project=${Uri.encodeComponent(widget.projectName)}'),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                  value: false,
+                  icon: Icon(Icons.edit_outlined),
+                  tooltip: 'Manage mode',
+                ),
+                ButtonSegment(
+                  value: true,
+                  icon: Icon(Icons.visibility_outlined),
+                  tooltip: 'View mode',
+                ),
+              ],
+              selected: const {false},
+              onSelectionChanged: (s) => context.go(
+                  '/view?project=${Uri.encodeComponent(widget.projectName)}'),
+              style: const ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            ),
           ),
           IconButton(
             icon: Icon(

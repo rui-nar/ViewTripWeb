@@ -81,18 +81,29 @@ class _ViewBodyState extends State<_ViewBody> {
           overflow: TextOverflow.ellipsis,
         ),
         actions: [
-          // Mode toggle — manage (navigate) / view (active)
-          IconButton(
-            icon: const Icon(Icons.edit_outlined),
-            tooltip: 'Switch to manage mode',
-            onPressed: () => context.go(
-                '/app?project=${Uri.encodeComponent(widget.projectName)}'),
-          ),
-          IconButton(
-            icon: Icon(Icons.visibility_outlined,
-                color: Theme.of(context).colorScheme.primary),
-            tooltip: 'View mode (active)',
-            onPressed: null,
+          // Mode toggle — manage / view (active)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                  value: false,
+                  icon: Icon(Icons.edit_outlined),
+                  tooltip: 'Manage mode',
+                ),
+                ButtonSegment(
+                  value: true,
+                  icon: Icon(Icons.visibility_outlined),
+                  tooltip: 'View mode',
+                ),
+              ],
+              selected: const {true},
+              onSelectionChanged: (s) => context.go(
+                  '/app?project=${Uri.encodeComponent(widget.projectName)}'),
+              style: const ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            ),
           ),
           IconButton(
             icon: Icon(
