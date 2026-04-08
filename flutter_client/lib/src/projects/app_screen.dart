@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../map/polyline_decoder.dart';
+import 'basemaps.dart';
 import 'project_notifier.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
@@ -387,6 +388,18 @@ class _AppScreenState extends State<AppScreen> {
         ),
         actions: [
           IconButton(
+            icon: Icon(Icons.edit_outlined,
+                color: Theme.of(context).colorScheme.primary),
+            tooltip: 'Manage mode (active)',
+            onPressed: null,
+          ),
+          IconButton(
+            icon: const Icon(Icons.visibility_outlined),
+            tooltip: 'Switch to view mode',
+            onPressed: () => context.go(
+                '/view?project=${Uri.encodeComponent(widget.projectName)}'),
+          ),
+          IconButton(
             icon: Icon(
               Icons.fit_screen,
               color: _autoZoom ? Theme.of(context).colorScheme.primary : null,
@@ -479,6 +492,8 @@ class _AppScreenState extends State<AppScreen> {
                               notifier: n,
                               mapController: _mapController,
                               autoZoom: _autoZoom,
+                              basemapUrl: kManageBasemapUrl,
+                              basemapSubdomains: kManageBasemapSubdomains,
                             ),
                           ),
                         ),
@@ -545,6 +560,8 @@ class _AppScreenState extends State<AppScreen> {
                     notifier: n,
                     mapController: _mapController,
                     autoZoom: _autoZoom,
+                    basemapUrl: kManageBasemapUrl,
+                    basemapSubdomains: kManageBasemapSubdomains,
                   ),
                 ),
 
@@ -639,11 +656,15 @@ class _AppScreenState extends State<AppScreen> {
 class MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
+  final String basemapUrl;
+  final List<String> basemapSubdomains;
 
   const MapPanel({
     super.key,
     required this.notifier,
     required this.mapController,
+    required this.basemapUrl,
+    this.basemapSubdomains = const [],
   });
 
   @override
@@ -887,8 +908,8 @@ class _MapPanelState extends State<MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate:
-                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+              urlTemplate: widget.basemapUrl,
+              subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
@@ -1876,11 +1897,15 @@ class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final bool autoZoom;
+  final String basemapUrl;
+  final List<String> basemapSubdomains;
 
   const _Stage1MapPanel({
     required this.notifier,
     required this.mapController,
+    required this.basemapUrl,
     this.autoZoom = false,
+    this.basemapSubdomains = const [],
   });
 
   @override
@@ -2340,8 +2365,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate:
-                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+              urlTemplate: widget.basemapUrl,
+              subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
