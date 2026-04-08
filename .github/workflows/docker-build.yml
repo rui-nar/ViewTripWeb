@@ -15,6 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Build Flutter Web
+        working-directory: flutter_client
+        run: |
+          flutter pub get
+          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }}
+
+      - name: Stage Flutter build output for Docker
+        run: cp -r flutter_client/build/web web_client
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
