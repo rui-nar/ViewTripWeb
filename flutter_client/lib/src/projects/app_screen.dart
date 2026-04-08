@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../map/polyline_decoder.dart';
+import 'basemaps.dart';
 import 'project_notifier.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
@@ -386,6 +387,29 @@ class _AppScreenState extends State<AppScreen> {
           ],
         ),
         actions: [
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(
+                  value: false,
+                  icon: Icon(Icons.edit_outlined),
+                  tooltip: 'Manage mode',
+                ),
+                ButtonSegment(
+                  value: true,
+                  icon: Icon(Icons.visibility_outlined),
+                  tooltip: 'View mode',
+                ),
+              ],
+              selected: const {false},
+              onSelectionChanged: (s) => context.go(
+                  '/view?project=${Uri.encodeComponent(widget.projectName)}'),
+              style: const ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            ),
+          ),
           IconButton(
             icon: Icon(
               Icons.fit_screen,
@@ -479,6 +503,8 @@ class _AppScreenState extends State<AppScreen> {
                               notifier: n,
                               mapController: _mapController,
                               autoZoom: _autoZoom,
+                              basemapUrl: kManageBasemapUrl,
+                              basemapSubdomains: kManageBasemapSubdomains,
                             ),
                           ),
                         ),
@@ -545,6 +571,8 @@ class _AppScreenState extends State<AppScreen> {
                     notifier: n,
                     mapController: _mapController,
                     autoZoom: _autoZoom,
+                    basemapUrl: kManageBasemapUrl,
+                    basemapSubdomains: kManageBasemapSubdomains,
                   ),
                 ),
 
@@ -639,11 +667,15 @@ class _AppScreenState extends State<AppScreen> {
 class MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
+  final String basemapUrl;
+  final List<String> basemapSubdomains;
 
   const MapPanel({
     super.key,
     required this.notifier,
     required this.mapController,
+    required this.basemapUrl,
+    this.basemapSubdomains = const [],
   });
 
   @override
@@ -887,8 +919,8 @@ class _MapPanelState extends State<MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate:
-                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+              urlTemplate: widget.basemapUrl,
+              subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
@@ -1876,11 +1908,15 @@ class _Stage1MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final MapController mapController;
   final bool autoZoom;
+  final String basemapUrl;
+  final List<String> basemapSubdomains;
 
   const _Stage1MapPanel({
     required this.notifier,
     required this.mapController,
+    required this.basemapUrl,
     this.autoZoom = false,
+    this.basemapSubdomains = const [],
   });
 
   @override
@@ -2340,8 +2376,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
           ),
           children: [
             TileLayer(
-              urlTemplate:
-                  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+              urlTemplate: widget.basemapUrl,
+              subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 19,

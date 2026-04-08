@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../api/client.dart';
 import '../projects/app_screen.dart';
+import '../projects/basemaps.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
 
@@ -130,6 +131,7 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
                     final mapPanel = MapPanel(
                       notifier: pn,
                       mapController: _mapController,
+                      basemapUrl: kViewBasemapUrl,
                     );
                     final activityList = _ReadOnlyActivityList(notifier: pn);
                     final selectedId = notifier.selectedActivityId;

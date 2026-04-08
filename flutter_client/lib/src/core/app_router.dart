@@ -11,6 +11,7 @@ import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
+import '../projects/view_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
 import '../projects/project_stats_screen.dart';
@@ -77,6 +78,14 @@ GoRouter buildRouter(BuildContext context) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
           return AppScreen(projectName: projectName);
+        },
+      ),
+      GoRoute(
+        path: '/view',
+        builder: (context, state) {
+          final projectName =
+              state.uri.queryParameters['project'] ?? '';
+          return ViewScreen(projectName: projectName);
         },
       ),
       GoRoute(
