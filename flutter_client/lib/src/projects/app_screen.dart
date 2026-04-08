@@ -27,6 +27,11 @@ import 'day_meta_editor.dart';
 import 'project_settings_dialog.dart';
 import 'segment_dialog.dart';
 
+// ── Export constants ──────────────────────────────────────────────────────────
+const _kExportMapWidth    = 2400.0;
+const _kExportMapHeight   = 1600.0;
+const _kExportChartHeight = 200.0;
+
 // ── AppScreen ─────────────────────────────────────────────────────────────────
 
 class AppScreen extends StatefulWidget {
@@ -42,10 +47,9 @@ class _AppScreenState extends State<AppScreen> {
   final MapController _mapController = MapController();
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
-  bool _isExporting = false;
   bool _autoZoom = false;
-  final GlobalKey _mapOnlyKey  = GlobalKey();
-  final GlobalKey _mapChartKey = GlobalKey();
+  bool _isExporting = false;
+  OverlayEntry? _exportOverlay;
 
   @override
   void initState() {
@@ -174,41 +178,139 @@ class _AppScreenState extends State<AppScreen> {
 
   Future<void> _exportImage() async {
     if (!mounted) return;
-    final boundary = _mapChartKey.currentContext?.findRenderObject()
-        as RenderRepaintBoundary?;
-    if (boundary == null) {
+    if (_exportOverlay != null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Image export is only available in wide layout')),
-      );
+        const SnackBar(content: Text('Export already in progress')));
       return;
     }
-
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _ImageExportDialog(
         projectName: widget.projectName,
-        onExport: (opts) => _doCapture(opts, boundary),
+        onExport: _startOffscreenExport,
       ),
     );
   }
 
-  Future<void> _doCapture(
-      _ImageExportOptions opts, RenderRepaintBoundary boundary) async {
-    // Wait for any in-flight 512px tiles to finish loading before capture.
-    await Future.delayed(const Duration(milliseconds: 1200));
-    try {
-      ui.Image image = await boundary.toImage(pixelRatio: opts.scale);
+  Future<void> _startOffscreenExport(_ImageExportOptions opts) async {
+    final notifier = context.read<ProjectNotifier>();
+    final geo = notifier.geo;
+    if (geo == null) return;
 
-      // Always composite onto a white background to avoid transparent areas
-      // (e.g. the elevation chart) appearing black in the PNG.
+    // Build polylines and collect all points for camera fit.
+    final allPoints = <LatLng>[];
+    final polylines = <Polyline>[];
+    final features = geo['features'];
+    if (features is List) {
+      for (final feature in features) {
+        if (feature is! Map) continue;
+        final geometry = feature['geometry'] as Map? ?? {};
+        final coords = geometry['coordinates'];
+        if (coords is! List) continue;
+        final points = <LatLng>[];
+        for (final c in coords) {
+          if (c is List && c.length >= 2) {
+            points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+          }
+        }
+        if (points.isEmpty) continue;
+        allPoints.addAll(points);
+        final props = feature['properties'] as Map? ?? {};
+        final isSegment = props['type'] == 'segment';
+        polylines.add(Polyline(
+          points: points,
+          color: isSegment ? const Color(0xFF888888) : const Color(0xFFF97316),
+          strokeWidth: isSegment ? 2.0 : 2.5,
+        ));
+      }
+    }
+
+    final exportKey  = GlobalKey();
+    final exportCtrl = MapController();
+    final totalHeight = _kExportMapHeight + (opts.includeChart ? _kExportChartHeight : 0);
+
+    _exportOverlay = OverlayEntry(builder: (_) {
+      return Positioned(
+        left: -(_kExportMapWidth + 20),
+        top: 0,
+        width: _kExportMapWidth,
+        height: totalHeight,
+        child: RepaintBoundary(
+          key: exportKey,
+          child: Container(
+            color: Colors.white,
+            child: Column(
+              children: [
+                Expanded(
+                  child: FlutterMap(
+                    mapController: exportCtrl,
+                    options: MapOptions(
+                      initialCameraFit: allPoints.isNotEmpty
+                          ? CameraFit.bounds(
+                              bounds: LatLngBounds.fromPoints(allPoints),
+                              padding: const EdgeInsets.all(48))
+                          : null,
+                      interactionOptions:
+                          const InteractionOptions(flags: InteractiveFlag.none),
+                    ),
+                    children: [
+                      TileLayer(
+                        urlTemplate: kViewBasemapUrl,
+                        userAgentPackageName: 'com.viewtrip.client',
+                        tileProvider: NetworkTileProvider(),
+                        maxNativeZoom: 19,
+                      ),
+                      if (polylines.isNotEmpty)
+                        PolylineLayer(polylines: polylines,
+                            simplificationTolerance: 0),
+                    ],
+                  ),
+                ),
+                if (opts.includeChart)
+                  SizedBox(
+                    height: _kExportChartHeight,
+                    child: ElevationChart(
+                      activities: notifier.activities,
+                      selectedActivityId: null,
+                      track: notifier.fullTrack,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    });
+
+    Overlay.of(context).insert(_exportOverlay!);
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+      content: Row(children: [
+        SizedBox(width: 16, height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+        SizedBox(width: 12),
+        Text('Preparing map export…'),
+      ]),
+      duration: Duration(seconds: 60),
+    ));
+
+    await Future.delayed(const Duration(milliseconds: 2500));
+
+    try {
+      final boundary = exportKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) return;
+
+      ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+
+      // Composite onto white background + optional title overlay.
       {
         final recorder = ui.PictureRecorder();
         final canvas = Canvas(recorder);
         canvas.drawRect(
-          Rect.fromLTWH(
-              0, 0, image.width.toDouble(), image.height.toDouble()),
+          Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
           Paint()..color = const Color(0xFFFFFFFF),
         );
         canvas.drawImage(image, Offset.zero, Paint());
@@ -216,32 +318,37 @@ class _AppScreenState extends State<AppScreen> {
           final tp = TextPainter(
             text: TextSpan(
               text: widget.projectName,
-              style: TextStyle(
+              style: const TextStyle(
                 color: Colors.black,
-                fontSize: 14 * opts.scale,
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
               ),
             ),
             textDirection: TextDirection.ltr,
-          )..layout(maxWidth: image.width.toDouble() - 32 * opts.scale);
-          tp.paint(canvas, Offset(16 * opts.scale, 16 * opts.scale));
+          )..layout(maxWidth: image.width.toDouble() - 32);
+          tp.paint(canvas, const Offset(16, 16));
         }
         final picture = recorder.endRecording();
         image = await picture.toImage(image.width, image.height);
       }
 
-      final byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null) return;
       final bytes = byteData.buffer.asUint8List();
       final blob = html.Blob([bytes], 'image/png');
-      final url = html.Url.createObjectUrlFromBlob(blob);
+      final url  = html.Url.createObjectUrlFromBlob(blob);
       html.AnchorElement(href: url)
         ..setAttribute('download', '${widget.projectName}.png')
         ..click();
       html.Url.revokeObjectUrl(url);
+
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(const SnackBar(
+          content: Text('Export complete'), duration: Duration(seconds: 3)));
     } finally {
-      // nothing to reset
+      _exportOverlay?.remove();
+      _exportOverlay = null;
+      exportCtrl.dispose();
     }
   }
 
@@ -492,70 +599,64 @@ class _AppScreenState extends State<AppScreen> {
                   ),
                 ),
                 Expanded(
-                  child: RepaintBoundary(
-                    key: _mapChartKey,
-                    child: Stack(
-                      children: [
-                        RepaintBoundary(
-                          key: _mapOnlyKey,
-                          child: Consumer<ProjectNotifier>(
-                            builder: (_, n, __) => _Stage1MapPanel(
-                              notifier: n,
-                              mapController: _mapController,
-                              autoZoom: _autoZoom,
-                              basemapUrl: kManageBasemapUrl,
-                              basemapSubdomains: kManageBasemapSubdomains,
+                  child: Stack(
+                    children: [
+                      Consumer<ProjectNotifier>(
+                        builder: (_, n, __) => _Stage1MapPanel(
+                          notifier: n,
+                          mapController: _mapController,
+                          autoZoom: _autoZoom,
+                          basemapUrl: kManageBasemapUrl,
+                          basemapSubdomains: kManageBasemapSubdomains,
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 0, left: 0, right: 0,
+                        child: Builder(builder: (ctx) => Container(
+                          color: Theme.of(ctx).colorScheme.surface.withOpacity(0.5),
+                          child: Selector<ProjectNotifier,
+                              (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
+                            selector: (_, n) => (
+                              n.activities,
+                              n.selectedActivityId as Object?,
+                              n.selectedDay,
+                              n.selectedDays,
                             ),
+                            shouldRebuild: (a, b) =>
+                                !identical(a.$1, b.$1) ||
+                                a.$2?.toString() != b.$2?.toString() ||
+                                a.$3 != b.$3 ||
+                                !_Stage1MapPanelState._setEquals(a.$4, b.$4),
+                            builder: (ctx, tuple, __) {
+                              final n = ctx.read<ProjectNotifier>();
+                              final allActivities = tuple.$1;
+                              final selActId = tuple.$2;
+                              final selDay = tuple.$3;
+                              final selDays = tuple.$4;
+                              final effectiveDays = selDays.isNotEmpty
+                                  ? selDays
+                                  : (selDay != null ? {selDay} : <String>{});
+                              final activities = effectiveDays.isEmpty
+                                  ? allActivities
+                                  : allActivities.where((a) =>
+                                      effectiveDays.contains(
+                                        (a['start_date_local'] as String? ?? '')
+                                            .split('T').first)).toList();
+                              return ElevationChart(
+                                activities: activities,
+                                selectedActivityId: selActId,
+                                onCursorChanged: (pos) =>
+                                    n.elevationCursorNotifier.value = pos,
+                                mapCursorNotifier: n.mapCursorDistNotifier,
+                                track: selActId != null
+                                    ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
+                                    : n.fullTrack,
+                              );
+                            },
                           ),
-                        ),
-                        Positioned(
-                          bottom: 0, left: 0, right: 0,
-                          child: Builder(builder: (ctx) => Container(
-                            color: Theme.of(ctx).colorScheme.surface.withOpacity(0.5),
-                            child: Selector<ProjectNotifier,
-                                (List<Map<String, dynamic>>, Object?, String?, Set<String>)>(
-                              selector: (_, n) => (
-                                n.activities,
-                                n.selectedActivityId as Object?,
-                                n.selectedDay,
-                                n.selectedDays,
-                              ),
-                              shouldRebuild: (a, b) =>
-                                  !identical(a.$1, b.$1) ||
-                                  a.$2?.toString() != b.$2?.toString() ||
-                                  a.$3 != b.$3 ||
-                                  !_Stage1MapPanelState._setEquals(a.$4, b.$4),
-                              builder: (ctx, tuple, __) {
-                                final n = ctx.read<ProjectNotifier>();
-                                final allActivities = tuple.$1;
-                                final selActId = tuple.$2;
-                                final selDay = tuple.$3;
-                                final selDays = tuple.$4;
-                                final effectiveDays = selDays.isNotEmpty
-                                    ? selDays
-                                    : (selDay != null ? {selDay} : <String>{});
-                                final activities = effectiveDays.isEmpty
-                                    ? allActivities
-                                    : allActivities.where((a) =>
-                                        effectiveDays.contains(
-                                          (a['start_date_local'] as String? ?? '')
-                                              .split('T').first)).toList();
-                                return ElevationChart(
-                                  activities: activities,
-                                  selectedActivityId: selActId,
-                                  onCursorChanged: (pos) =>
-                                      n.elevationCursorNotifier.value = pos,
-                                  mapCursorNotifier: n.mapCursorDistNotifier,
-                                  track: selActId != null
-                                      ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
-                                      : n.fullTrack,
-                                );
-                              },
-                            ),
-                          )),
-                        ),
-                      ],
-                    ),
+                        )),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -2730,11 +2831,9 @@ class _MobileActivityPanelOverlay extends StatelessWidget {
 // ── Image export ──────────────────────────────────────────────────────────────
 
 class _ImageExportOptions {
-  final double scale;
   final bool includeChart;
   final bool includeTitle;
   const _ImageExportOptions({
-    required this.scale,
     required this.includeChart,
     required this.includeTitle,
   });
@@ -2742,17 +2841,15 @@ class _ImageExportOptions {
 
 class _ImageExportDialog extends StatefulWidget {
   final String projectName;
-  final Future<void> Function(_ImageExportOptions) onExport;
+  final void Function(_ImageExportOptions) onExport;
   const _ImageExportDialog({required this.projectName, required this.onExport});
   @override
   State<_ImageExportDialog> createState() => _ImageExportDialogState();
 }
 
 class _ImageExportDialogState extends State<_ImageExportDialog> {
-  double _scale = 2.0;
   bool _includeChart = true;
   bool _includeTitle = false;
-  bool _exporting = false;
 
   @override
   Widget build(BuildContext context) {
@@ -2762,35 +2859,20 @@ class _ImageExportDialogState extends State<_ImageExportDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Resolution'),
-          const SizedBox(height: 8),
-          SegmentedButton<double>(
-            segments: const [
-              ButtonSegment(value: 2.0, label: Text('2×')),
-              ButtonSegment(value: 3.0, label: Text('3×')),
-              ButtonSegment(value: 4.0, label: Text('4×')),
-            ],
-            selected: {_scale},
-            onSelectionChanged: _exporting
-                ? null
-                : (s) => setState(() => _scale = s.first),
-          ),
-          const SizedBox(height: 16),
+          Text('Canvas: 2400 × 1600 px',
+              style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 12),
           CheckboxListTile(
             title: const Text('Include elevation chart'),
             value: _includeChart,
-            onChanged: _exporting
-                ? null
-                : (v) => setState(() => _includeChart = v!),
+            onChanged: (v) => setState(() => _includeChart = v!),
             contentPadding: EdgeInsets.zero,
             dense: true,
           ),
           CheckboxListTile(
             title: const Text('Include project title'),
             value: _includeTitle,
-            onChanged: _exporting
-                ? null
-                : (v) => setState(() => _includeTitle = v!),
+            onChanged: (v) => setState(() => _includeTitle = v!),
             contentPadding: EdgeInsets.zero,
             dense: true,
           ),
@@ -2798,33 +2880,19 @@ class _ImageExportDialogState extends State<_ImageExportDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _exporting ? null : () => Navigator.of(context).pop(),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: _exporting
-              ? null
-              : () async {
-                  setState(() => _exporting = true);
-                  final nav = Navigator.of(context);
-                  try {
-                    await widget.onExport(_ImageExportOptions(
-                      scale: _scale,
-                      includeChart: _includeChart,
-                      includeTitle: _includeTitle,
-                    ));
-                  } finally {
-                    nav.pop();
-                  }
-                },
-          child: _exporting
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
-                )
-              : const Text('Export PNG'),
+          onPressed: () {
+            final opts = _ImageExportOptions(
+              includeChart: _includeChart,
+              includeTitle: _includeTitle,
+            );
+            Navigator.of(context).pop();
+            widget.onExport(opts);
+          },
+          child: const Text('Export PNG'),
         ),
       ],
     );
