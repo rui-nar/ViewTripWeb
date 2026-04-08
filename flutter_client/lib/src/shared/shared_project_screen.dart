@@ -132,6 +132,7 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
                       notifier: pn,
                       mapController: _mapController,
                       basemapUrl: kViewBasemapUrl,
+                      labelsUrl: kViewLabelsUrl,
                     );
                     final activityList = _ReadOnlyActivityList(notifier: pn);
                     final selectedId = notifier.selectedActivityId;

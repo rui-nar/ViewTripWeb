@@ -279,6 +279,12 @@ class _AppScreenState extends State<AppScreen> {
                               tileProvider: NetworkTileProvider(),
                               maxNativeZoom: 19,
                             ),
+                            TileLayer(
+                              urlTemplate: kViewLabelsUrl,
+                              userAgentPackageName: 'com.viewtrip.client',
+                              tileProvider: NetworkTileProvider(),
+                              maxNativeZoom: 19,
+                            ),
                             if (polylines.isNotEmpty)
                               PolylineLayer(
                                   polylines: polylines,
@@ -811,6 +817,7 @@ class MapPanel extends StatefulWidget {
   final MapController mapController;
   final String basemapUrl;
   final List<String> basemapSubdomains;
+  final String? labelsUrl;
 
   const MapPanel({
     super.key,
@@ -818,6 +825,7 @@ class MapPanel extends StatefulWidget {
     required this.mapController,
     required this.basemapUrl,
     this.basemapSubdomains = const [],
+    this.labelsUrl,
   });
 
   @override
@@ -1067,6 +1075,13 @@ class _MapPanelState extends State<MapPanel> {
               tileProvider: _tileProvider,
               maxNativeZoom: 19,
             ),
+            if (widget.labelsUrl != null)
+              TileLayer(
+                urlTemplate: widget.labelsUrl!,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider,
+                maxNativeZoom: 19,
+              ),
             if (polylines.isNotEmpty)
               PolylineLayer(
                 polylines: polylines,
