@@ -10,12 +10,14 @@ from typing import Annotated, Any, Dict, List
 
 import polyline as polyline_lib
 from models.db import get_session
+from models.project_db import DBProject
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlmodel import select
 
 from api.deps import get_current_user
 from src.models.great_circle import great_circle_points
 from src.project.project_io import ProjectIO
-from src.project.project_repo import ProjectRepo
+from src.project.project_repo import ProjectRepo, _compute_low_res_geo
 
 router = APIRouter(prefix="/api/geo", tags=["geo"])
 
@@ -39,6 +41,43 @@ def _linestring(coords: List[List[float]], properties: Dict[str, Any]) -> Dict[s
         },
         "properties": properties,
     }
+
+
+@router.get("/project/low-res")
+def project_geo_low_res(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return pre-computed low-res GeoJSON (straight lines per activity).
+
+    Reads ``DBProject.low_res_geo_json`` directly — no polyline decoding.
+    Falls back to computing on-the-fly for existing projects where the column
+    is still null (before their first ``save_project`` after migration).
+    """
+    import json
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+        raw = getattr(row, "low_res_geo_json", None)
+        if raw:
+            return json.loads(raw)
+
+        # Fallback: compute on-the-fly if column is null
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return json.loads(_compute_low_res_geo(project))
 
 
 @router.get("/project")

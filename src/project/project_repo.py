@@ -109,14 +109,16 @@ class ProjectRepo:
 
     def create_project(self, sess: Session, user_info_id: int, name: str) -> Project:
         """Create an empty project in the DB and return it."""
+        empty_project = Project(name=name)
         row = DBProject(
             user_info_id=user_info_id,
             name=name,
             sleeping_options_json=json.dumps(DEFAULT_SLEEPING_OPTIONS),
+            low_res_geo_json=_compute_low_res_geo(empty_project),
         )
         sess.add(row)
         sess.commit()
-        return Project(name=name)
+        return empty_project
 
     def save_project(self, sess: Session, user_info_id: int, project: Project) -> None:
         """Persist all changes to an in-memory Project back to the DB.
@@ -147,6 +149,7 @@ class ProjectRepo:
             for dk, dm in project.day_meta.items()
         })
         row.sleeping_options_json = json.dumps(project.sleeping_options)
+        row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
 
         # Upsert all activities in the project's activity pool
@@ -364,6 +367,7 @@ class ProjectRepo:
                 for dk, dm in project.day_meta.items()
             }),
             sleeping_options_json=json.dumps(project.sleeping_options),
+            low_res_geo_json=_compute_low_res_geo(project),
         )
         sess.add(row)
         sess.flush()  # populate row.id
@@ -692,6 +696,64 @@ class ProjectRepo:
             os.rename(path, path + ".migrated")
         except OSError:
             pass  # not critical — ingest is idempotent anyway
+
+
+# ---------------------------------------------------------------------------
+# Module-level low-res geo helper
+# ---------------------------------------------------------------------------
+
+def _compute_low_res_geo(project: Project) -> str:
+    """Build a low-res GeoJSON FeatureCollection for *project*.
+
+    Each activity is represented as a 2-point straight line from
+    ``start_latlng`` to ``end_latlng`` — no polyline decoding required.
+    Connecting segments use the same 50-point great-circle arcs as the
+    full-res endpoint (they're already cheap to compute).
+    """
+    from src.models.great_circle import great_circle_points
+
+    features = []
+    for item in project.items:
+        if item.item_type == "activity":
+            act = project.activity_by_id(item.activity_id)
+            if act is None or not act.start_latlng or not act.end_latlng:
+                continue
+            coords = [
+                [act.start_latlng[1], act.start_latlng[0]],
+                [act.end_latlng[1],   act.end_latlng[0]],
+            ]
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coords},
+                "properties": {
+                    "type": "activity",
+                    "activity_id": act.id,
+                    "name": act.name,
+                    "sport_type": act.type,
+                },
+            })
+        elif item.item_type == "segment" and item.segment is not None:
+            seg = item.segment
+            pts = great_circle_points(
+                seg.start.lat, seg.start.lon,
+                seg.end.lat,   seg.end.lon,
+                n_points=50,
+            )
+            coords = [[lon, lat] for lat, lon in pts]
+            if len(coords) < 2:
+                continue
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coords},
+                "properties": {
+                    "type": "segment",
+                    "segment_id": seg.id,
+                    "segment_type": seg.segment_type,
+                    "label": seg.label,
+                },
+            })
+
+    return json.dumps({"type": "FeatureCollection", "features": features})
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,14 @@ class ProjectService {
     return data as Map<String, dynamic>;
   }
 
+  /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [name].
+  /// GET /api/geo/project/low-res?name={name}
+  Future<Map<String, dynamic>> getLowResGeo(String name) async {
+    final encoded = Uri.encodeComponent(name);
+    final data = await api.get('/api/geo/project/low-res?name=$encoded');
+    return data as Map<String, dynamic>;
+  }
+
   /// Fetches pre-computed project statistics for [name].
   /// GET /api/projects/{name}/stats
   Future<Map<String, dynamic>> getStats(String name) async {

@@ -102,7 +102,14 @@ class ProjectNotifier extends ChangeNotifier {
   int totalMovingSeconds = 0;
   double totalElevationGainM = 0;
 
-  /// Loads project details and GeoJSON concurrently.
+  /// Loads project details and GeoJSON in two phases.
+  ///
+  /// Phase 1 (fast): fetches details + low-res GeoJSON in parallel.
+  /// The map renders immediately with straight-line approximations.
+  ///
+  /// Phase 2 (background): fetches full-res GeoJSON and progressively
+  /// replaces each activity's straight line with its real GPS trace,
+  /// starting from the last activity.
   Future<void> load(String name) async {
     if (name.isEmpty) return;
     projectName = name;
@@ -119,9 +126,10 @@ class ProjectNotifier extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // Phase 1: details + low-res geo (both fast — no polyline decoding)
       final results = await Future.wait([
         _service.getDetails(name),
-        _service.getGeo(name),
+        _service.getLowResGeo(name),
       ]);
 
       final details = results[0];
@@ -143,13 +151,68 @@ class ProjectNotifier extends ChangeNotifier {
       sleepingOptions = rawOpts is List
           ? List<String>.from(rawOpts)
           : List<String>.from(_defaultSleepingOptions);
-      geo = results[1];
+      geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
       isLoading = false;
+      notifyListeners();   // map appears here with low-res straight lines
+    }
+
+    // Phase 2: fetch full-res geo in background; replace features progressively
+    _loadFullGeoProgressively(name);
+  }
+
+  /// Fetches full-res GeoJSON and progressively replaces each activity's
+  /// straight-line approximation with its real GPS trace (last activity first).
+  Future<void> _loadFullGeoProgressively(String name) async {
+    // Guard: abort if the user navigated away before we finish
+    if (projectName != name) return;
+    try {
+      final fullGeo = await _service.getGeo(name);
+      if (projectName != name) return;
+
+      // Index full-res features by activity_id
+      final fullFeatures = <String, Map<String, dynamic>>{};
+      for (final f in (fullGeo['features'] as List? ?? [])) {
+        final actId = (f as Map)['properties']?['activity_id']?.toString();
+        if (actId != null) fullFeatures[actId] = Map<String, dynamic>.from(f);
+      }
+
+      // Ordered activity IDs from items, reversed so last activity updates first
+      final actIds = items
+          .where((i) => i['item_type'] == 'activity')
+          .map((i) => i['activity_id']?.toString())
+          .whereType<String>()
+          .toList()
+          .reversed
+          .toList();
+
+      var currentFeatures = List<dynamic>.from(geo!['features'] as List? ?? []);
+
+      for (final actId in actIds) {
+        if (projectName != name) return;
+        final full = fullFeatures[actId];
+        if (full == null) continue;
+        final idx = currentFeatures.indexWhere(
+            (f) => (f as Map)['properties']?['activity_id']?.toString() == actId);
+        if (idx >= 0) currentFeatures[idx] = full;
+        // New map reference so map layer cache invalidates
+        geo = {'type': 'FeatureCollection', 'features': List.from(currentFeatures)};
+        notifyListeners();
+        await Future.delayed(const Duration(milliseconds: 80));
+      }
+
+      if (projectName != name) return;
+      // Final sync: replace full geo (picks up any segment differences too)
+      geo = fullGeo;
+      _buildFullTrack();
+      notifyListeners();
+    } on Exception catch (e) {
+      // Non-fatal — low-res map is still shown
+      error = _msg(e);
       notifyListeners();
     }
   }
