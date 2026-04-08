@@ -193,6 +193,14 @@ class _AppScreenState extends State<AppScreen> {
     );
   }
 
+  static bool _uint8ListEquals(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   Future<void> _startOffscreenExport(_ImageExportOptions opts) async {
     final notifier = context.read<ProjectNotifier>();
     final geo = notifier.geo;
@@ -296,7 +304,26 @@ class _AppScreenState extends State<AppScreen> {
       duration: Duration(seconds: 60),
     ));
 
-    await Future.delayed(const Duration(milliseconds: 2500));
+    // Wait for tiles to settle: poll low-res thumbnails until two consecutive
+    // captures are pixel-identical (or a 12 s deadline is reached).
+    await Future.delayed(const Duration(seconds: 1)); // initial paint pass
+    {
+      Uint8List? prevBytes;
+      for (var i = 0; i < 18; i++) {
+        final b = exportKey.currentContext?.findRenderObject()
+            as RenderRepaintBoundary?;
+        if (b == null) break;
+        // Use pixelRatio 0.05 → ~120×80 px thumbnail — fast to capture & compare.
+        final probe = await b.toImage(pixelRatio: 0.05);
+        final bd = await probe.toByteData();
+        probe.dispose();
+        if (bd == null) break;
+        final bytes = bd.buffer.asUint8List();
+        if (prevBytes != null && _uint8ListEquals(prevBytes, bytes)) break;
+        prevBytes = bytes;
+        await Future.delayed(const Duration(milliseconds: 600));
+      }
+    }
 
     try {
       final boundary = exportKey.currentContext?.findRenderObject()
