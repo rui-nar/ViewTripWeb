@@ -2,7 +2,7 @@ name: viewtrip_client
 description: ViewTripWeb Flutter client — web, Android, iOS.
 publish_to: 'none'
 
-version: 0.13.0+1
+version: 0.13.1+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -30,7 +30,7 @@ dependencies:
   google_sign_in_web: ^1.1.3
 
   # File picking (web + native)
-  file_picker: ^10.3.10
+  file_picker: ^11.0.2
 
   # Open URLs in browser (Strava OAuth connect)
   url_launcher: ^6.3.0

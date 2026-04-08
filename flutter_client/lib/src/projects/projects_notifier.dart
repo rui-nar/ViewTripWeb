@@ -79,7 +79,7 @@ class ProjectsNotifier extends ChangeNotifier {
   /// Step 1 of import: open file picker and return the bytes + suggested name.
   /// Returns null if the user cancels.
   Future<({List<int> bytes, String defaultName})?> pickProjectFile() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['gettracks'],
       withData: true,
@@ -92,7 +92,7 @@ class ProjectsNotifier extends ChangeNotifier {
     final defaultName = rawName.endsWith('.gettracks')
         ? rawName.substring(0, rawName.length - '.gettracks'.length)
         : rawName;
-    return (bytes: bytes, defaultName: defaultName);
+    return (bytes: bytes as List<int>, defaultName: defaultName);
   }
 
   /// Step 2 of import: upload [bytes] as project [name].
