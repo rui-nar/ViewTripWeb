@@ -239,52 +239,66 @@ class _AppScreenState extends State<AppScreen> {
     final totalHeight = _kExportMapHeight + (opts.includeChart ? _kExportChartHeight : 0);
 
     _exportOverlay = OverlayEntry(builder: (_) {
+      // Place the widget on-screen so Flutter's paint pass runs (off-screen
+      // widgets are culled in Flutter Web and tiles are never fetched).
+      // Transform.scale shrinks it to ~12×8 px — invisible to the user — but
+      // RepaintBoundary.toImage() captures its own compositing layer at full
+      // 2400×1600 resolution regardless of the parent transform.
       return Positioned(
-        left: -(_kExportMapWidth + 20),
+        left: 0,
         top: 0,
-        width: _kExportMapWidth,
-        height: totalHeight,
-        child: RepaintBoundary(
-          key: exportKey,
-          child: Container(
-            color: Colors.white,
-            child: Column(
-              children: [
-                Expanded(
-                  child: FlutterMap(
-                    mapController: exportCtrl,
-                    options: MapOptions(
-                      initialCameraFit: allPoints.isNotEmpty
-                          ? CameraFit.bounds(
-                              bounds: LatLngBounds.fromPoints(allPoints),
-                              padding: const EdgeInsets.all(48))
-                          : null,
-                      interactionOptions:
-                          const InteractionOptions(flags: InteractiveFlag.none),
-                    ),
+        child: IgnorePointer(
+          child: SizedBox(
+            width: _kExportMapWidth,
+            height: totalHeight,
+            child: Transform.scale(
+              scale: 0.005,
+              alignment: Alignment.topLeft,
+              child: RepaintBoundary(
+                key: exportKey,
+                child: Container(
+                  color: Colors.white,
+                  child: Column(
                     children: [
-                      TileLayer(
-                        urlTemplate: kViewBasemapUrl,
-                        userAgentPackageName: 'com.viewtrip.client',
-                        tileProvider: NetworkTileProvider(),
-                        maxNativeZoom: 19,
+                      Expanded(
+                        child: FlutterMap(
+                          mapController: exportCtrl,
+                          options: MapOptions(
+                            initialCameraFit: allPoints.isNotEmpty
+                                ? CameraFit.bounds(
+                                    bounds: LatLngBounds.fromPoints(allPoints),
+                                    padding: const EdgeInsets.all(48))
+                                : null,
+                            interactionOptions: const InteractionOptions(
+                                flags: InteractiveFlag.none),
+                          ),
+                          children: [
+                            TileLayer(
+                              urlTemplate: kViewBasemapUrl,
+                              userAgentPackageName: 'com.viewtrip.client',
+                              tileProvider: NetworkTileProvider(),
+                              maxNativeZoom: 19,
+                            ),
+                            if (polylines.isNotEmpty)
+                              PolylineLayer(
+                                  polylines: polylines,
+                                  simplificationTolerance: 0),
+                          ],
+                        ),
                       ),
-                      if (polylines.isNotEmpty)
-                        PolylineLayer(polylines: polylines,
-                            simplificationTolerance: 0),
+                      if (opts.includeChart)
+                        SizedBox(
+                          height: _kExportChartHeight,
+                          child: ElevationChart(
+                            activities: notifier.activities,
+                            selectedActivityId: null,
+                            track: notifier.fullTrack,
+                          ),
+                        ),
                     ],
                   ),
                 ),
-                if (opts.includeChart)
-                  SizedBox(
-                    height: _kExportChartHeight,
-                    child: ElevationChart(
-                      activities: notifier.activities,
-                      selectedActivityId: null,
-                      track: notifier.fullTrack,
-                    ),
-                  ),
-              ],
+              ),
             ),
           ),
         ),
