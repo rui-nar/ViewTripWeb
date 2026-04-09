@@ -34,7 +34,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
   @override
   void dispose() {
-    for (final c in _optCtrls) c.dispose();
+    for (final c in _optCtrls) { c.dispose(); }
     super.dispose();
   }
 

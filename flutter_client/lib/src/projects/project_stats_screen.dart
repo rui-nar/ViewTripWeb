@@ -143,8 +143,13 @@ class _CountRow extends StatelessWidget {
 
 class ProjectStatsScreen extends StatefulWidget {
   final String projectName;
+  final List<String> availableTags;
 
-  const ProjectStatsScreen({super.key, required this.projectName});
+  const ProjectStatsScreen({
+    super.key,
+    required this.projectName,
+    this.availableTags = const [],
+  });
 
   @override
   State<ProjectStatsScreen> createState() => _ProjectStatsScreenState();
@@ -152,47 +157,99 @@ class ProjectStatsScreen extends StatefulWidget {
 
 class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
   late Future<Map<String, dynamic>> _statsFuture;
+  Set<String> _selectedTags = {};
+  List<String> _tagOptions = [];
 
   @override
   void initState() {
     super.initState();
+    _tagOptions = List.of(widget.availableTags);
     _load();
   }
 
   void _load() {
-    _statsFuture = ProjectService().getStats(widget.projectName);
+    final future = ProjectService()
+        .getStats(widget.projectName, tags: _selectedTags.toList());
+    future.then((data) {
+      if (!mounted) return;
+      final opts = data['tag_options'];
+      if (opts is List) {
+        setState(() => _tagOptions = opts.cast<String>());
+      }
+    });
+    _statsFuture = future;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('${widget.projectName} — Statistics')),
-      body: FutureBuilder<Map<String, dynamic>>(
-        future: _statsFuture,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snap.hasError) {
-            return Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Tag filter ───────────────────────────────────────────────────
+          if (_tagOptions.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
                 children: [
-                  Text('Failed to load stats: ${snap.error}',
-                      textAlign: TextAlign.center),
-                  const SizedBox(height: 12),
-                  ElevatedButton(
-                    onPressed: () => setState(_load),
-                    child: const Text('Retry'),
+                  FilterChip(
+                    label: const Text('All'),
+                    selected: _selectedTags.isEmpty,
+                    onSelected: (_) => setState(() {
+                      _selectedTags = {};
+                      _load();
+                    }),
                   ),
+                  for (final tag in _tagOptions)
+                    FilterChip(
+                      label: Text(tag),
+                      selected: _selectedTags.contains(tag),
+                      onSelected: (on) => setState(() {
+                        if (on) {
+                          _selectedTags = {..._selectedTags, tag};
+                        } else {
+                          _selectedTags = {..._selectedTags}..remove(tag);
+                        }
+                        _load();
+                      }),
+                    ),
                 ],
               ),
-            );
-          }
+            ),
+          // ── Stats content ─────────────────────────────────────────────
+          Expanded(
+            child: FutureBuilder<Map<String, dynamic>>(
+              future: _statsFuture,
+              builder: (context, snap) {
+                if (snap.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snap.hasError) {
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Failed to load stats: ${snap.error}',
+                            textAlign: TextAlign.center),
+                        const SizedBox(height: 12),
+                        ElevatedButton(
+                          onPressed: () => setState(_load),
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
 
-          final s = snap.data!;
-          return _StatsBody(stats: s, projectName: widget.projectName);
-        },
+                final s = snap.data!;
+                return _StatsBody(stats: s, projectName: widget.projectName);
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -104,7 +104,10 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          return ProjectStatsScreen(projectName: projectName);
+          final availableTags =
+              (state.extra as List<String>?) ?? const [];
+          return ProjectStatsScreen(
+              projectName: projectName, availableTags: availableTags);
         },
       ),
       GoRoute(

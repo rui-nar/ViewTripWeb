@@ -35,7 +35,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from sqlmodel import select
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -48,7 +48,7 @@ from src.models.activity import Activity
 from src.models.great_circle import great_circle_points
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
-from src.project.project_repo import ProjectRepo
+from src.project.project_repo import ProjectRepo, _compute_stats
 
 _cfg = Config("config/config.json")
 if os.environ.get("STRAVA_CLIENT_ID"):
@@ -227,8 +227,9 @@ def get_project(
 def get_project_stats(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    tags: Optional[List[str]] = Query(default=None),
 ):
-    """Return pre-computed project statistics (computed on-the-fly if not cached yet)."""
+    """Return project statistics, optionally filtered to days with matching tags."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = sess.exec(
@@ -239,8 +240,16 @@ def get_project_stats(
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+        if tags:
+            # Tag-filtered request: compute on-demand (bypass cache)
+            project = _repo.get_project(sess, user_info_id, name)
+            if project is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+            return _compute_stats(project, tag_filter=tags)
+
+        # Unfiltered: use cached stats
         if row.stats_json is None:
-            # First-time access: compute synchronously, then return
             _repo.compute_and_cache_stats(sess, user_info_id, name)
             row = sess.exec(
                 select(DBProject).where(
@@ -249,6 +258,14 @@ def get_project_stats(
                 )
             ).first()
         stats = json.loads(row.stats_json or "{}")
+
+        # Backfill tag_options if missing from cached stats (projects cached before this feature)
+        if "tag_options" not in stats:
+            stats["tag_options"] = sorted({
+                t
+                for dm in json.loads(row.day_meta_json or "{}").values()
+                for t in (dm.get("tags") or [])
+            })
     return stats
 
 

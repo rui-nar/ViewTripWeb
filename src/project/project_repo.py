@@ -760,14 +760,33 @@ def _compute_low_res_geo(project: Project) -> str:
 # Module-level stats helper (outside the class so it can be tested standalone)
 # ---------------------------------------------------------------------------
 
-def _compute_stats(project: Project) -> Dict[str, Any]:
+def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> Dict[str, Any]:
     """Compute all project statistics from an in-memory Project.
 
     Returns a dict that is stored as ``DBProject.stats_json``.
+    When *tag_filter* is non-empty, only activities whose date falls on a day
+    tagged with at least one of the filter tags are included.
     """
     from src.models.great_circle import haversine_km
 
-    # ── Aggregate totals over all activities ────────────────────────────────
+    # ── Derive tag_options (all tags defined on any day) ────────────────────
+    tag_options: List[str] = sorted({
+        t
+        for meta in project.day_meta.values()
+        for t in (meta.tags or [])
+    })
+
+    # ── Build allowed-dates set when tag filter is active ───────────────────
+    allowed_dates: Optional[set] = None
+    if tag_filter:
+        tag_set = set(tag_filter)
+        allowed_dates = {
+            date_key
+            for date_key, meta in project.day_meta.items()
+            if tag_set & set(meta.tags or [])
+        }
+
+    # ── Aggregate totals over activities (filtered if needed) ────────────────
     total_dist_m = 0.0
     total_moving_s = 0
     total_elev_m = 0.0
@@ -778,6 +797,16 @@ def _compute_stats(project: Project) -> Dict[str, Any]:
     ride_total_elev_m = 0.0
 
     for a in project.activities:
+        # Apply tag filter: skip activities not on an allowed date
+        if allowed_dates is not None:
+            act_date: Optional[str] = None
+            if a.start_date_local is not None:
+                try:
+                    act_date = a.start_date_local.date().isoformat()
+                except AttributeError:
+                    act_date = str(a.start_date_local)[:10]
+            if act_date not in allowed_dates:
+                continue
         total_dist_m   += a.distance or 0.0
         total_moving_s += a.moving_time or 0
         total_elev_m   += a.total_elevation_gain or 0.0
@@ -842,4 +871,5 @@ def _compute_stats(project: Project) -> Dict[str, Any]:
             "boat":   seg_dist["boat"],
             "bus":    seg_dist["bus"],
         },
+        "tag_options": tag_options,
     }

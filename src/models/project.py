@@ -27,6 +27,7 @@ class DayMeta:
     sleeping: Optional[str] = None
     weather: Optional[WeatherCondition] = None
     journal: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
 
 
 @dataclass
