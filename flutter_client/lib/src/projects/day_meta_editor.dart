@@ -65,6 +65,7 @@ class _DayMetaDialogWrapper extends StatelessWidget {
             dateKey: dateKey,
             initialMeta: notifier.dayMeta[dateKey] ?? {},
             sleepingOptions: notifier.sleepingOptions,
+            availableTags: notifier.availableTags,
             onSave: (meta) {
               _persist(notifier, dateKey, meta);
               Navigator.of(context, rootNavigator: true).pop();
@@ -98,6 +99,7 @@ class _DayMetaSheetWrapper extends StatelessWidget {
           dateKey: dateKey,
           initialMeta: notifier.dayMeta[dateKey] ?? {},
           sleepingOptions: notifier.sleepingOptions,
+          availableTags: notifier.availableTags,
           onSave: (meta) {
             _persist(notifier, dateKey, meta);
             Navigator.of(ctx).pop();
@@ -131,6 +133,7 @@ class DayMetaEditor extends StatefulWidget {
   final String dateKey;
   final Map<String, dynamic> initialMeta;
   final List<String> sleepingOptions;
+  final List<String> availableTags;
   final void Function(Map<String, dynamic> meta) onSave;
   final VoidCallback? onCancel;
 
@@ -139,6 +142,7 @@ class DayMetaEditor extends StatefulWidget {
     required this.dateKey,
     required this.initialMeta,
     required this.sleepingOptions,
+    this.availableTags = const [],
     required this.onSave,
     this.onCancel,
   });
@@ -152,6 +156,8 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
   String? _sleeping;
   String? _weather;
   late TextEditingController _journalCtrl;
+  late List<String> _tags;
+  final TextEditingController _tagInputCtrl = TextEditingController();
 
   @override
   void initState() {
@@ -161,12 +167,24 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _sleeping   = m['sleeping']   as String?;
     _weather    = m['weather']    as String?;
     _journalCtrl = TextEditingController(text: m['journal'] as String? ?? '');
+    final rawTags = m['tags'];
+    _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
   }
 
   @override
   void dispose() {
     _journalCtrl.dispose();
+    _tagInputCtrl.dispose();
     super.dispose();
+  }
+
+  void _addTag(String tag) {
+    final t = tag.trim();
+    if (t.isEmpty || _tags.contains(t)) return;
+    setState(() {
+      _tags.add(t);
+      _tagInputCtrl.clear();
+    });
   }
 
   Map<String, dynamic> _buildMeta() {
@@ -176,6 +194,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     if (_weather    != null) result['weather']    = _weather;
     final j = _journalCtrl.text.trim();
     if (j.isNotEmpty) result['journal'] = j;
+    if (_tags.isNotEmpty) result['tags'] = List<String>.from(_tags);
     return result;
   }
 
@@ -252,6 +271,59 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             hintText: 'Notes, highlights, thoughts…',
             contentPadding: EdgeInsets.all(12),
           ),
+        ),
+        const SizedBox(height: 20),
+
+        // ── Tags ────────────────────────────────────────────────────────
+        Text('Tags', style: labelStyle),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: [
+            // Existing project tags as toggleable chips
+            for (final tag in {
+              ...widget.availableTags,
+              ..._tags,   // include any tags on this day not yet in project-wide list
+            }.toList()..sort())
+              FilterChip(
+                label: Text(tag),
+                selected: _tags.contains(tag),
+                onSelected: (on) => setState(() {
+                  if (on) {
+                    if (!_tags.contains(tag)) _tags.add(tag);
+                  } else {
+                    _tags.remove(tag);
+                  }
+                }),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        // New tag input
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _tagInputCtrl,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  hintText: 'New tag…',
+                  border: OutlineInputBorder(),
+                  contentPadding:
+                      EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                ),
+                onSubmitted: _addTag,
+                textInputAction: TextInputAction.done,
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.outlined(
+              icon: const Icon(Icons.add),
+              tooltip: 'Add tag',
+              onPressed: () => _addTag(_tagInputCtrl.text),
+            ),
+          ],
         ),
         const SizedBox(height: 20),
 

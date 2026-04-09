@@ -105,6 +105,30 @@ class _ViewBodyState extends State<_ViewBody> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
           ),
+          Consumer<ProjectNotifier>(
+            builder: (_, n, __) {
+              final active = n.tagFilter.isNotEmpty;
+              return IconButton(
+                icon: Badge(
+                  isLabelVisible: active,
+                  label: Text('${n.tagFilter.length}'),
+                  child: Icon(
+                    Icons.label_outline,
+                    color: active ? Theme.of(context).colorScheme.primary : null,
+                  ),
+                ),
+                tooltip: 'Filter by tag',
+                onPressed: n.availableTags.isEmpty
+                    ? null
+                    : () => showModalBottomSheet<void>(
+                          context: context,
+                          useRootNavigator: true,
+                          builder: (_) => TagFilterSheet(
+                              notifier: n, readOnly: true),
+                        ),
+              );
+            },
+          ),
           IconButton(
             icon: Icon(
               Icons.fit_screen,
@@ -117,7 +141,9 @@ class _ViewBodyState extends State<_ViewBody> {
             icon: const Icon(Icons.bar_chart_outlined),
             tooltip: 'Statistics',
             onPressed: () => context.push(
-                '/stats?project=${Uri.encodeComponent(widget.projectName)}'),
+              '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+              extra: context.read<ProjectNotifier>().availableTags,
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),

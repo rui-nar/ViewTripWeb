@@ -45,6 +45,43 @@ class ProjectNotifier extends ChangeNotifier {
   /// Project-specific list of sleeping type options.
   List<String> sleepingOptions = [];
 
+  /// Active tag filter — days not matching any of these tags are hidden.
+  /// Empty = show all days.
+  Set<String> _tagFilter = {};
+  Set<String> get tagFilter => Set.unmodifiable(_tagFilter);
+
+  /// All tags currently assigned to any day in this project (sorted).
+  List<String> get availableTags {
+    final tags = <String>{};
+    for (final meta in dayMeta.values) {
+      final t = meta['tags'];
+      if (t is List) tags.addAll(t.cast<String>());
+    }
+    return tags.toList()..sort();
+  }
+
+  /// Apply a tag filter: drives selectedDays to matching day keys.
+  void setTagFilter(Set<String> tags) {
+    _tagFilter = Set.of(tags);
+    if (_tagFilter.isEmpty) {
+      selectedDays = {};
+    } else {
+      final matching = <String>{};
+      for (final entry in dayMeta.entries) {
+        final t = entry.value['tags'];
+        if (t is List && t.any((x) => _tagFilter.contains(x as String))) {
+          matching.add(entry.key);
+        }
+      }
+      selectedDays = matching;
+    }
+    selectedDay = null;
+    selectedActivityId = null;
+    selectedSegmentId = null;
+    selectedMemoryId = null;
+    notifyListeners();
+  }
+
   static const _defaultSleepingOptions = [
     'Camping', 'Bivouac', 'Shelter', 'Pension/Guesthouse', 'Hotel', 'Apartment',
   ];
@@ -333,6 +370,7 @@ class ProjectNotifier extends ChangeNotifier {
     selectedMemoryId = null;
     selectedDay = null;
     selectedDays = {};
+    _tagFilter = {};
     tripStart = null;
     dayMeta = {};
     sleepingOptions = [];

@@ -28,10 +28,15 @@ class ProjectService {
   }
 
   /// Fetches pre-computed project statistics for [name].
-  /// GET /api/projects/{name}/stats
-  Future<Map<String, dynamic>> getStats(String name) async {
+  /// Pass [tags] to filter stats to only days with matching tags.
+  /// GET /api/projects/{name}/stats[?tags=x&tags=y]
+  Future<Map<String, dynamic>> getStats(String name,
+      {List<String> tags = const []}) async {
     final encoded = Uri.encodeComponent(name);
-    final data = await api.get('/api/projects/$encoded/stats');
+    final query = tags.isEmpty
+        ? ''
+        : '?${tags.map((t) => 'tags=${Uri.encodeComponent(t)}').join('&')}';
+    final data = await api.get('/api/projects/$encoded/stats$query');
     return data as Map<String, dynamic>;
   }
 }

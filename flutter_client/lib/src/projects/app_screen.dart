@@ -444,6 +444,15 @@ class _AppScreenState extends State<AppScreen> {
     }
   }
 
+  void _showTagFilterSheet(BuildContext context, ProjectNotifier notifier,
+      {required bool readOnly}) {
+    showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => TagFilterSheet(notifier: notifier, readOnly: readOnly),
+    );
+  }
+
   Future<void> _showShareDialog() async {
     final name = widget.projectName;
     // Capture before any await so the messenger is available inside the dialog.
@@ -564,6 +573,25 @@ class _AppScreenState extends State<AppScreen> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
           ),
+          Consumer<ProjectNotifier>(
+            builder: (_, n, __) {
+              final active = n.tagFilter.isNotEmpty;
+              return IconButton(
+                icon: Badge(
+                  isLabelVisible: active,
+                  label: Text('${n.tagFilter.length}'),
+                  child: Icon(
+                    Icons.label_outline,
+                    color: active ? Theme.of(context).colorScheme.primary : null,
+                  ),
+                ),
+                tooltip: 'Filter by tag',
+                onPressed: n.availableTags.isEmpty
+                    ? null
+                    : () => _showTagFilterSheet(context, n, readOnly: false),
+              );
+            },
+          ),
           IconButton(
             icon: Icon(
               Icons.fit_screen,
@@ -598,7 +626,9 @@ class _AppScreenState extends State<AppScreen> {
             icon: const Icon(Icons.bar_chart_outlined),
             tooltip: 'Statistics',
             onPressed: () => context.push(
-                '/stats?project=${Uri.encodeComponent(widget.projectName)}'),
+              '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+              extra: context.read<ProjectNotifier>().availableTags,
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.tune),
@@ -1185,7 +1215,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
   // Multi-select state
   bool _multiSelect = false;
-  Set<String> _selectedDays = {};
+  final Set<String> _selectedDays = {};
 
   // Narrow-layout: day keys whose edit strip is revealed by swipe-right
   final Set<String> _expandedDayEdits = {};
@@ -1241,6 +1271,17 @@ class _ActivityPanelState extends State<ActivityPanel> {
         widget.notifier.selectDays({});
       }
     });
+  }
+
+  void _showBulkTagDialog(BuildContext context, ProjectNotifier notifier) {
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => _BulkTagDialog(
+        notifier: notifier,
+        selectedDays: Set.of(_selectedDays),
+      ),
+    );
   }
 
   String? _lastTripStart;
@@ -1555,6 +1596,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 visualDensity: VisualDensity.compact,
                 onPressed: _toggleMultiSelect,
               ),
+              if (_multiSelect && _selectedDays.isNotEmpty)
+                IconButton(
+                  icon: const Icon(Icons.label_outlined, size: 20),
+                  tooltip: 'Tag selected days',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _showBulkTagDialog(context, notifier),
+                ),
               const Spacer(),
               IconButton(
                 icon: Icon(
@@ -1690,6 +1738,28 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
+                              // Tag chips
+                              ...() {
+                                final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
+                                final tags = rawTags is List
+                                    ? rawTags.cast<String>()
+                                    : <String>[];
+                                return [
+                                  for (final tag in tags)
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 4),
+                                      child: Chip(
+                                        label: Text(tag,
+                                            style: theme.textTheme.labelSmall),
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 4),
+                                        materialTapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                    ),
+                                ];
+                              }(),
                               const Spacer(),
                               if (isWide)
                                 IconButton(
@@ -2879,6 +2949,201 @@ class _MobileActivityPanelOverlay extends StatelessWidget {
           notifier: notifier,
           mapController: mapController,
         ),
+      ),
+    );
+  }
+}
+
+// ── Bulk tag dialog ───────────────────────────────────────────────────────────
+
+class _BulkTagDialog extends StatefulWidget {
+  final ProjectNotifier notifier;
+  final Set<String> selectedDays;
+  const _BulkTagDialog({required this.notifier, required this.selectedDays});
+
+  @override
+  State<_BulkTagDialog> createState() => _BulkTagDialogState();
+}
+
+class _BulkTagDialogState extends State<_BulkTagDialog> {
+  late Set<String> _chosenTags;
+  final TextEditingController _inputCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _chosenTags = {};
+  }
+
+  @override
+  void dispose() {
+    _inputCtrl.dispose();
+    super.dispose();
+  }
+
+  void _addNew(String tag) {
+    final t = tag.trim();
+    if (t.isEmpty) return;
+    setState(() {
+      _chosenTags.add(t);
+      _inputCtrl.clear();
+    });
+  }
+
+  void _apply() {
+    if (_chosenTags.isEmpty) {
+      Navigator.of(context).pop();
+      return;
+    }
+    final updated = Map<String, Map<String, dynamic>>.from(widget.notifier.dayMeta);
+    for (final dateKey in widget.selectedDays) {
+      final existing = Map<String, dynamic>.from(updated[dateKey] ?? {});
+      final existingTags = (existing['tags'] as List?)?.cast<String>().toSet() ?? <String>{};
+      existing['tags'] = (existingTags..addAll(_chosenTags)).toList()..sort();
+      updated[dateKey] = existing;
+    }
+    widget.notifier.saveDayMeta(newDayMeta: updated);
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allTags = {
+      ...widget.notifier.availableTags,
+      ..._chosenTags,
+    }.toList()..sort();
+
+    return AlertDialog(
+      title: Text('Tag ${widget.selectedDays.length} day${widget.selectedDays.length == 1 ? '' : 's'}'),
+      content: SizedBox(
+        width: 400,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (allTags.isNotEmpty) ...[
+                Text('Select tags to add:',
+                    style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final tag in allTags)
+                      FilterChip(
+                        label: Text(tag),
+                        selected: _chosenTags.contains(tag),
+                        onSelected: (on) => setState(() {
+                          if (on) { _chosenTags.add(tag); } else { _chosenTags.remove(tag); }
+                        }),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _inputCtrl,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: 'New tag…',
+                        border: OutlineInputBorder(),
+                        contentPadding:
+                            EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      ),
+                      onSubmitted: _addNew,
+                      textInputAction: TextInputAction.done,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.outlined(
+                    icon: const Icon(Icons.add),
+                    tooltip: 'Add tag',
+                    onPressed: () => _addNew(_inputCtrl.text),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _chosenTags.isEmpty ? null : _apply,
+          child: const Text('Apply'),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Tag filter sheet ─────────────────────────────────────────────────────────
+
+class TagFilterSheet extends StatelessWidget {
+  final ProjectNotifier notifier;
+  final bool readOnly;
+
+  const TagFilterSheet({super.key, required this.notifier, required this.readOnly});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tags = notifier.availableTags;
+    final active = notifier.tagFilter;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('Filter by tag', style: theme.textTheme.titleMedium),
+              const Spacer(),
+              if (active.isNotEmpty)
+                TextButton(
+                  onPressed: () {
+                    notifier.setTagFilter({});
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Clear'),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                label: const Text('All days'),
+                selected: active.isEmpty,
+                onSelected: (_) {
+                  notifier.setTagFilter({});
+                  Navigator.of(context).pop();
+                },
+              ),
+              for (final tag in tags)
+                FilterChip(
+                  label: Text(tag),
+                  selected: active.contains(tag),
+                  onSelected: (on) {
+                    final next = Set<String>.of(active);
+                    if (on) { next.add(tag); } else { next.remove(tag); }
+                    notifier.setTagFilter(next);
+                  },
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
