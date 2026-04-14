@@ -218,8 +218,8 @@ class _ViewLayout extends StatelessWidget {
     final mapPanel = MapPanel(
       notifier: notifier,
       mapController: mapController,
-      basemapUrl: kViewBasemapUrl,
-      labelsUrl: kViewLabelsUrl,
+      basemapUrl: kActiveViewBasemapUrl,
+      labelsUrl: kActiveViewLabelsUrl,
     );
 
     return Column(

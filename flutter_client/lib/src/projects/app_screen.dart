@@ -274,17 +274,18 @@ class _AppScreenState extends State<AppScreen> {
                           ),
                           children: [
                             TileLayer(
-                              urlTemplate: kViewBasemapUrl,
+                              urlTemplate: kActiveViewBasemapUrl,
                               userAgentPackageName: 'com.viewtrip.client',
                               tileProvider: NetworkTileProvider(),
-                              maxNativeZoom: 19,
+                              maxNativeZoom: 22,
                             ),
-                            TileLayer(
-                              urlTemplate: kViewLabelsUrl,
-                              userAgentPackageName: 'com.viewtrip.client',
-                              tileProvider: NetworkTileProvider(),
-                              maxNativeZoom: 19,
-                            ),
+                            if (kActiveViewLabelsUrl != null)
+                              TileLayer(
+                                urlTemplate: kActiveViewLabelsUrl!,
+                                userAgentPackageName: 'com.viewtrip.client',
+                                tileProvider: NetworkTileProvider(),
+                                maxNativeZoom: 22,
+                              ),
                             if (polylines.isNotEmpty)
                               PolylineLayer(
                                   polylines: polylines,
@@ -683,8 +684,8 @@ class _AppScreenState extends State<AppScreen> {
                           notifier: n,
                           mapController: _mapController,
                           autoZoom: _autoZoom,
-                          basemapUrl: kManageBasemapUrl,
-                          basemapSubdomains: kManageBasemapSubdomains,
+                          basemapUrl: kActiveManageBasemapUrl,
+                          basemapSubdomains: kActiveManageSubdomains,
                         ),
                       ),
                       Positioned(
@@ -749,8 +750,8 @@ class _AppScreenState extends State<AppScreen> {
                     notifier: n,
                     mapController: _mapController,
                     autoZoom: _autoZoom,
-                    basemapUrl: kManageBasemapUrl,
-                    basemapSubdomains: kManageBasemapSubdomains,
+                    basemapUrl: kActiveManageBasemapUrl,
+                    basemapSubdomains: kActiveManageSubdomains,
                   ),
                 ),
 
@@ -1103,14 +1104,14 @@ class _MapPanelState extends State<MapPanel> {
               subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
-              maxNativeZoom: 19,
+              maxNativeZoom: 22,
             ),
             if (widget.labelsUrl != null)
               TileLayer(
                 urlTemplate: widget.labelsUrl!,
                 userAgentPackageName: 'com.viewtrip.client',
                 tileProvider: _tileProvider,
-                maxNativeZoom: 19,
+                maxNativeZoom: 22,
               ),
             if (polylines.isNotEmpty)
               PolylineLayer(
@@ -2607,7 +2608,7 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
               subdomains: widget.basemapSubdomains,
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
-              maxNativeZoom: 19,
+              maxNativeZoom: 22,
             ),
             if (_cachedPolylines.isNotEmpty)
               PolylineLayer(
