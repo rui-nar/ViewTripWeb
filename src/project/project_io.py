@@ -47,10 +47,13 @@ class ProjectIO:
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": [a.to_strava_dict() for a in project.activities],
             "day_meta": {
-                dk: {k: v for k, v in {
-                    "difficulty": dm.difficulty, "sleeping": dm.sleeping,
-                    "weather": dm.weather, "journal": dm.journal,
-                }.items() if v is not None}
+                dk: {
+                    **{k: v for k, v in {
+                        "difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                        "weather": dm.weather, "journal": dm.journal,
+                    }.items() if v is not None},
+                    **({"tags": dm.tags} if dm.tags else {}),
+                }
                 for dk, dm in project.day_meta.items()
             },
             "sleeping_options": project.sleeping_options,
@@ -90,10 +93,13 @@ class ProjectIO:
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": activities_out,
             "day_meta": {
-                dk: {k: v for k, v in {
-                    "difficulty": dm.difficulty, "sleeping": dm.sleeping,
-                    "weather": dm.weather, "journal": dm.journal,
-                }.items() if v is not None}
+                dk: {
+                    **{k: v for k, v in {
+                        "difficulty": dm.difficulty, "sleeping": dm.sleeping,
+                        "weather": dm.weather, "journal": dm.journal,
+                    }.items() if v is not None},
+                    **({"tags": dm.tags} if dm.tags else {}),
+                }
                 for dk, dm in project.day_meta.items()
             },
             "sleeping_options": project.sleeping_options,
@@ -128,6 +134,7 @@ class ProjectIO:
                 sleeping=v.get("sleeping"),
                 weather=v.get("weather"),
                 journal=v.get("journal"),
+                tags=v.get("tags") or [],
             )
             for dk, v in raw_dm.items()
         }
