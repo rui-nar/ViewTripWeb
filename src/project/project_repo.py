@@ -145,7 +145,8 @@ class ProjectRepo:
         })
         row.day_meta_json = json.dumps({
             dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
-                 "weather": dm.weather, "journal": dm.journal}
+                 "weather": dm.weather, "journal": dm.journal,
+                 "tags": dm.tags}
             for dk, dm in project.day_meta.items()
         })
         row.sleeping_options_json = json.dumps(project.sleeping_options)
@@ -363,7 +364,8 @@ class ProjectRepo:
             }),
             day_meta_json=json.dumps({
                 dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
-                     "weather": dm.weather, "journal": dm.journal}
+                     "weather": dm.weather, "journal": dm.journal,
+                     "tags": dm.tags}
                 for dk, dm in project.day_meta.items()
             }),
             sleeping_options_json=json.dumps(project.sleeping_options),
@@ -476,6 +478,7 @@ class ProjectRepo:
                 sleeping=v.get("sleeping"),
                 weather=v.get("weather"),
                 journal=v.get("journal"),
+                tags=v.get("tags") or [],
             )
             for dk, v in raw_dm.items()
         }
