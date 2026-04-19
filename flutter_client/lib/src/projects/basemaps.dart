@@ -13,12 +13,12 @@ const _kMapboxToken = String.fromEnvironment('MAPBOX_TOKEN');
 /// Mapbox satellite-streets — satellite imagery + labels in one layer.
 /// Used in view / share / export mode.
 const kMapboxViewUrl =
-    'https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/256/{z}/{x}/{y}@2x'
+    'https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}'
     '?access_token=$_kMapboxToken';
 
 /// Mapbox streets — labelled street/terrain map for manage mode.
 const kMapboxManageUrl =
-    'https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/256/{z}/{x}/{y}@2x'
+    'https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/tiles/256/{z}/{x}/{y}'
     '?access_token=$_kMapboxToken';
 
 // ── Esri (legacy, kept for fallback via BASEMAP_PROVIDER=ESRI) ─────────────────
@@ -38,14 +38,27 @@ const kViewBasemapUrl =
 const kViewLabelsUrl =
     'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
 
+/// CartoDB labels-only overlay — country names, capitals, major cities on a
+/// transparent background. No streets. Stacked on top of satellite in Mapbox mode.
+/// @2x retina tiles (512 px) — use with tileSize:512 + zoomOffset:1 for crisp,
+/// smaller labels.
+const kCartoDblLabelsUrl =
+    'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}@2x.png';
+const kCartoDblLabelsSubdomains = ['a', 'b', 'c', 'd'];
+
 // ── Resolved URLs (consumed by all screens) ────────────────────────────────────
 
 const kActiveViewBasemapUrl =
     kUseMapbox ? kMapboxViewUrl : kViewBasemapUrl;
 
-/// Null when Mapbox is active (labels are baked into the satellite-streets style).
-const String? kActiveViewLabelsUrl =
-    kUseMapbox ? null : kViewLabelsUrl;
+/// Labels overlay stacked on top of the satellite basemap.
+/// Mapbox mode: CartoDB light_only_labels (countries, capitals, no streets).
+/// Esri mode: Esri World Boundaries and Places.
+const String kActiveViewLabelsUrl = kViewLabelsUrl;
+///    kUseMapbox ? kCartoDblLabelsUrl : kViewLabelsUrl;
+
+const List<String> kActiveViewLabelsSubdomains =
+    kUseMapbox ? kCartoDblLabelsSubdomains : [];
 
 const kActiveManageBasemapUrl =
     kUseMapbox ? kMapboxManageUrl : kManageBasemapUrl;

@@ -45,6 +45,9 @@ class AppScreen extends StatefulWidget {
 
 class _AppScreenState extends State<AppScreen> {
   final MapController _mapController = MapController();
+  final GlobalKey<_Stage1MapPanelState> _mapPanelKey = GlobalKey();
+  // Survives _Stage1MapPanelState recreation — prevents re-fitting after user pans.
+  final ValueNotifier<bool> _mapFitted = ValueNotifier(false);
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
@@ -62,6 +65,7 @@ class _AppScreenState extends State<AppScreen> {
   @override
   void dispose() {
     _mapController.dispose();
+    _mapFitted.dispose();
     super.dispose();
   }
 
@@ -201,6 +205,19 @@ class _AppScreenState extends State<AppScreen> {
     return true;
   }
 
+  /// Returns true if the thumbnail is a near-uniform (blank/grey) image —
+  /// i.e., tiles haven't started rendering yet.
+  static bool _isThumbnailBlank(Uint8List bytes) {
+    if (bytes.length < 16) return true;
+    final ref = bytes[0];
+    // Sample R channel every 4 bytes (RGBA). Any pixel differing by >12
+    // from the first means real content has appeared.
+    for (var i = 0; i < bytes.length; i += 4) {
+      if ((bytes[i] - ref).abs() > 12) return false;
+    }
+    return true;
+  }
+
   Future<void> _startOffscreenExport(_ImageExportOptions opts) async {
     final notifier = context.read<ProjectNotifier>();
     final geo = notifier.geo;
@@ -236,74 +253,80 @@ class _AppScreenState extends State<AppScreen> {
 
     final exportKey  = GlobalKey();
     final exportCtrl = MapController();
-    final totalHeight = _kExportMapHeight + (opts.includeChart ? _kExportChartHeight : 0);
+
+    // Render at the actual screen width so the widget is within the browser
+    // viewport — Flutter Web culls off-screen widgets and tiles never load.
+    // Scale down from _kExportMapWidth proportionally, then use a matching
+    // pixelRatio in toImage() to get back to the target 2400×1600 resolution.
+    final screenSize = MediaQuery.of(context).size;
+    final renderW = screenSize.width.clamp(600.0, _kExportMapWidth);
+    final renderScale = renderW / _kExportMapWidth;
+    final renderMapH  = _kExportMapHeight   * renderScale;
+    final renderChartH = _kExportChartHeight * renderScale;
+    final totalRenderH = renderMapH + (opts.includeChart ? renderChartH : 0);
+    final captureRatio = _kExportMapWidth / renderW; // upscale back to 2400 px
 
     _exportOverlay = OverlayEntry(builder: (_) {
-      // Place the widget on-screen so Flutter's paint pass runs (off-screen
-      // widgets are culled in Flutter Web and tiles are never fetched).
-      // Transform.scale shrinks it to ~12×8 px — invisible to the user — but
-      // RepaintBoundary.toImage() captures its own compositing layer at full
-      // 2400×1600 resolution regardless of the parent transform.
+      // Widget renders at renderW×totalRenderH at position 0,0 — fully within
+      // the viewport so Flutter paints it and the tile provider fetches tiles.
+      // toImage(pixelRatio: captureRatio) upscales the capture to the target
+      // 2400×1600 resolution. No transform or opacity tricks needed.
       return Positioned(
         left: 0,
         top: 0,
         child: IgnorePointer(
           child: SizedBox(
-            width: _kExportMapWidth,
-            height: totalHeight,
-            child: Transform.scale(
-              scale: 0.005,
-              alignment: Alignment.topLeft,
-              child: RepaintBoundary(
-                key: exportKey,
-                child: Container(
-                  color: Colors.white,
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: FlutterMap(
-                          mapController: exportCtrl,
-                          options: MapOptions(
-                            initialCameraFit: allPoints.isNotEmpty
-                                ? CameraFit.bounds(
-                                    bounds: LatLngBounds.fromPoints(allPoints),
-                                    padding: const EdgeInsets.all(48))
-                                : null,
-                            interactionOptions: const InteractionOptions(
-                                flags: InteractiveFlag.none),
+            width: renderW,
+            height: totalRenderH,
+            child: RepaintBoundary(
+              key: exportKey,
+              child: Container(
+                color: Colors.white,
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: FlutterMap(
+                        mapController: exportCtrl,
+                        options: MapOptions(
+                          initialCameraFit: allPoints.isNotEmpty
+                              ? CameraFit.bounds(
+                                  bounds: LatLngBounds.fromPoints(allPoints),
+                                  padding: const EdgeInsets.all(48))
+                              : null,
+                          interactionOptions: const InteractionOptions(
+                              flags: InteractiveFlag.none),
+                        ),
+                        children: [
+                          TileLayer(
+                            urlTemplate: kActiveViewBasemapUrl,
+                            userAgentPackageName: 'com.viewtrip.client',
+                            tileProvider: NetworkTileProvider(),
+                            maxNativeZoom: 22,
                           ),
-                          children: [
-                            TileLayer(
-                              urlTemplate: kActiveViewBasemapUrl,
-                              userAgentPackageName: 'com.viewtrip.client',
-                              tileProvider: NetworkTileProvider(),
-                              maxNativeZoom: 22,
-                            ),
-                            if (kActiveViewLabelsUrl != null)
-                              TileLayer(
-                                urlTemplate: kActiveViewLabelsUrl!,
-                                userAgentPackageName: 'com.viewtrip.client',
-                                tileProvider: NetworkTileProvider(),
-                                maxNativeZoom: 22,
-                              ),
-                            if (polylines.isNotEmpty)
-                              PolylineLayer(
-                                  polylines: polylines,
-                                  simplificationTolerance: 0),
-                          ],
+                          TileLayer(
+                            urlTemplate: kActiveViewLabelsUrl,
+                            subdomains: kActiveViewLabelsSubdomains,
+                            userAgentPackageName: 'com.viewtrip.client',
+                            tileProvider: NetworkTileProvider(),
+                            maxNativeZoom: 22,
+                          ),
+                          if (polylines.isNotEmpty)
+                            PolylineLayer(
+                                polylines: polylines,
+                                simplificationTolerance: 0),
+                        ],
+                      ),
+                    ),
+                    if (opts.includeChart)
+                      SizedBox(
+                        height: renderChartH,
+                        child: ElevationChart(
+                          activities: notifier.activities,
+                          selectedActivityId: null,
+                          track: notifier.fullTrack,
                         ),
                       ),
-                      if (opts.includeChart)
-                        SizedBox(
-                          height: _kExportChartHeight,
-                          child: ElevationChart(
-                            activities: notifier.activities,
-                            selectedActivityId: null,
-                            track: notifier.fullTrack,
-                          ),
-                        ),
-                    ],
-                  ),
+                  ],
                 ),
               ),
             ),
@@ -340,7 +363,9 @@ class _AppScreenState extends State<AppScreen> {
         probe.dispose();
         if (bd == null) break;
         final bytes = bd.buffer.asUint8List();
-        if (prevBytes != null && _uint8ListEquals(prevBytes, bytes)) break;
+        if (prevBytes != null &&
+            _uint8ListEquals(prevBytes, bytes) &&
+            !_isThumbnailBlank(bytes)) { break; }
         prevBytes = bytes;
         await Future.delayed(const Duration(milliseconds: 600));
       }
@@ -351,7 +376,7 @@ class _AppScreenState extends State<AppScreen> {
           as RenderRepaintBoundary?;
       if (boundary == null) return;
 
-      ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      ui.Image image = await boundary.toImage(pixelRatio: captureRatio);
 
       // Composite onto white background + optional title overlay.
       {
@@ -681,11 +706,13 @@ class _AppScreenState extends State<AppScreen> {
                     children: [
                       Consumer<ProjectNotifier>(
                         builder: (_, n, __) => _Stage1MapPanel(
+                          key: _mapPanelKey,
                           notifier: n,
                           mapController: _mapController,
                           autoZoom: _autoZoom,
                           basemapUrl: kActiveManageBasemapUrl,
                           basemapSubdomains: kActiveManageSubdomains,
+                          fittedNotifier: _mapFitted,
                         ),
                       ),
                       Positioned(
@@ -747,11 +774,13 @@ class _AppScreenState extends State<AppScreen> {
                 // Base: full-height map
                 Consumer<ProjectNotifier>(
                   builder: (_, n, __) => _Stage1MapPanel(
+                    key: _mapPanelKey,
                     notifier: n,
                     mapController: _mapController,
                     autoZoom: _autoZoom,
                     basemapUrl: kActiveManageBasemapUrl,
                     basemapSubdomains: kActiveManageSubdomains,
+                    fittedNotifier: _mapFitted,
                   ),
                 ),
 
@@ -1064,8 +1093,9 @@ class _MapPanelState extends State<MapPanel> {
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
-    if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
-        selSegId.toString() != (_lastSelectedSegId ?? '').toString()) {
+    final selectionChanged = selActId != _lastSelectedId ||
+        selSegId?.toString() != _lastSelectedSegId?.toString();
+    if (!identical(geo, _lastGeo) || selectionChanged) {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
@@ -1075,6 +1105,10 @@ class _MapPanelState extends State<MapPanel> {
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];
+      // Only re-fit when the selection changes (user picks a different
+      // activity/segment). A geo update from progressive track loading
+      // should never reset the viewport the user has already panned/zoomed.
+      if (selectionChanged) _fittedBounds = false;
     }
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
@@ -1105,13 +1139,23 @@ class _MapPanelState extends State<MapPanel> {
               userAgentPackageName: 'com.viewtrip.client',
               tileProvider: _tileProvider,
               maxNativeZoom: 22,
+              retinaMode: RetinaMode.isHighDensity(context),
             ),
             if (widget.labelsUrl != null)
-              TileLayer(
-                urlTemplate: widget.labelsUrl!,
-                userAgentPackageName: 'com.viewtrip.client',
-                tileProvider: _tileProvider,
-                maxNativeZoom: 22,
+              ColorFiltered(
+                colorFilter: ColorFilter.matrix(<double>[
+                  1, 0, 0, 0, 0,
+                  0, 1, 0, 0, 0,
+                  0, 0, 1, 0, 0,
+                  0, 0, 0, 0.5, 0,
+                ]),
+                child: TileLayer(
+                  urlTemplate: widget.labelsUrl!,
+                  subdomains: kActiveViewLabelsSubdomains,
+                  userAgentPackageName: 'com.viewtrip.client',
+                  tileProvider: _tileProvider,
+                  maxNativeZoom: 22,
+                ),
               ),
             if (polylines.isNotEmpty)
               PolylineLayer(
@@ -2138,11 +2182,14 @@ class _Stage1MapPanel extends StatefulWidget {
   final bool autoZoom;
   final String basemapUrl;
   final List<String> basemapSubdomains;
+  final ValueNotifier<bool> fittedNotifier;
 
   const _Stage1MapPanel({
+    super.key,
     required this.notifier,
     required this.mapController,
     required this.basemapUrl,
+    required this.fittedNotifier,
     this.autoZoom = false,
     this.basemapSubdomains = const [],
   });
@@ -2153,7 +2200,6 @@ class _Stage1MapPanel extends StatefulWidget {
 
 class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   late final NetworkTileProvider _tileProvider;
-  bool _fittedBounds = false;
 
   // Polyline + marker cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
@@ -2303,6 +2349,14 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   void initState() {
     super.initState();
     _tileProvider = NetworkTileProvider();
+    // Initialise "last" selection state from the current notifier values so that
+    // a spurious selectionChanged2=true (which resets the fit flag) is never
+    // triggered when this state is (re)created while a fit has already happened.
+    _lastSelectedId = widget.notifier.selectedActivityId;
+    _lastSelectedSegId = widget.notifier.selectedSegmentId;
+    _lastSelectedDay = widget.notifier.selectedDay;
+    _lastSelectedDays = Set.from(widget.notifier.selectedDays);
+    _lastSelectedMemId = widget.notifier.selectedMemoryId;
   }
 
   @override
@@ -2311,8 +2365,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   }
 
   void _fitBoundsOnce(List<LatLng> points) {
-    if (_fittedBounds || points.isEmpty) return;
-    _fittedBounds = true;
+    if (widget.fittedNotifier.value || points.isEmpty) return;
+    widget.fittedNotifier.value = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       double minLat = points.first.latitude, maxLat = points.first.latitude;
@@ -2514,13 +2568,13 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     final selDays = notifier.selectedDays;
     final selMemId = notifier.selectedMemoryId;
     final items = notifier.items;
-    if (!identical(geo, _lastGeo) || selActId != _lastSelectedId ||
-        selSegId.toString() != (_lastSelectedSegId ?? '').toString() ||
+    final selectionChanged2 = selActId != _lastSelectedId ||
+        selSegId?.toString() != _lastSelectedSegId?.toString() ||
         selDay != _lastSelectedDay ||
         !_setEquals(selDays, _lastSelectedDays) ||
-        selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString() ||
-        !identical(items, _lastItems)) {
-      if (!identical(geo, _lastGeo)) _fittedBounds = false;
+        selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString();
+    if (!identical(geo, _lastGeo) || selectionChanged2 || !identical(items, _lastItems)) {
+      if (selectionChanged2) widget.fittedNotifier.value = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
