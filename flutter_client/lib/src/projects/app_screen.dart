@@ -1261,6 +1261,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
   // Multi-select state
   bool _multiSelect = false;
   final Set<String> _selectedDays = {};
+  String? _anchorDayKey; // last day tapped without Shift — range-select anchor
 
   // Narrow-layout: day keys whose edit strip is revealed by swipe-right
   final Set<String> _expandedDayEdits = {};
@@ -1310,13 +1311,56 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
   void _toggleMultiSelect() {
     setState(() {
-      _multiSelect = !_multiSelect;
-      if (!_multiSelect) {
-        _selectedDays.clear();
-        widget.notifier.selectDays({});
-      }
+      _multiSelect = false;
+      _selectedDays.clear();
+      _anchorDayKey = null;
+      widget.notifier.selectDays({});
     });
   }
+
+  void _enterMultiSelectWithDay(String dateKey) {
+    setState(() {
+      _multiSelect = true;
+      _selectedDays.add(dateKey);
+      _anchorDayKey = dateKey;
+      _selectedDay = null;
+    });
+    widget.notifier.selectDays(Set.from(_selectedDays));
+  }
+
+  void _handleMultiSelectTap(String dateKey) {
+    final isShift = HardwareKeyboard.instance.isShiftPressed;
+    setState(() {
+      if (isShift && _anchorDayKey != null) {
+        final keys = _orderedDayKeys();
+        final a = keys.indexOf(_anchorDayKey!);
+        final b = keys.indexOf(dateKey);
+        if (a != -1 && b != -1) {
+          final lo = a < b ? a : b;
+          final hi = a < b ? b : a;
+          _selectedDays.addAll(keys.sublist(lo, hi + 1));
+        }
+        // anchor unchanged on Shift-click
+      } else {
+        if (_selectedDays.contains(dateKey)) {
+          _selectedDays.remove(dateKey);
+        } else {
+          _selectedDays.add(dateKey);
+        }
+        _anchorDayKey = dateKey;
+        if (_selectedDays.isEmpty) {
+          _multiSelect = false;
+          _anchorDayKey = null;
+        }
+      }
+    });
+    widget.notifier.selectDays(Set.from(_selectedDays));
+  }
+
+  List<String> _orderedDayKeys() => _displayList
+      .whereType<_DayHeader>()
+      .map((h) => h.dateKey)
+      .toList();
 
   void _showBulkTagDialog(BuildContext context, ProjectNotifier notifier) {
     showDialog<void>(
@@ -1610,44 +1654,47 @@ class _ActivityPanelState extends State<ActivityPanel> {
           ),
           child: Row(
             children: [
-              IconButton(
-                icon: const Icon(Icons.unfold_less, size: 20),
-                tooltip: 'Collapse all',
-                visualDensity: VisualDensity.compact,
-                onPressed: () => setState(() {
-                  _collapsedDays = {
-                    for (final o in _displayList) if (o is _DayHeader) o.dayNumber
-                  };
-                  _lastItems = null;
-                }),
-              ),
-              IconButton(
-                icon: const Icon(Icons.unfold_more, size: 20),
-                tooltip: 'Expand all',
-                visualDensity: VisualDensity.compact,
-                onPressed: () => setState(() {
-                  _collapsedDays = {};
-                  _lastItems = null;
-                }),
-              ),
-              IconButton(
-                icon: Icon(
-                  _multiSelect
-                      ? Icons.check_box_outlined
-                      : Icons.check_box_outline_blank,
-                  size: 20,
-                ),
-                tooltip: _multiSelect ? 'Exit multi-select' : 'Multi-select days',
-                visualDensity: VisualDensity.compact,
-                onPressed: _toggleMultiSelect,
-              ),
-              if (_multiSelect && _selectedDays.isNotEmpty)
+              if (_multiSelect) ...[
                 IconButton(
-                  icon: const Icon(Icons.label_outlined, size: 20),
-                  tooltip: 'Tag selected days',
+                  icon: const Icon(Icons.close, size: 20),
+                  tooltip: 'Exit multi-select',
                   visualDensity: VisualDensity.compact,
-                  onPressed: () => _showBulkTagDialog(context, notifier),
+                  onPressed: _toggleMultiSelect,
                 ),
+                const SizedBox(width: 4),
+                Text(
+                  '${_selectedDays.length} day${_selectedDays.length == 1 ? '' : 's'}',
+                  style: theme.textTheme.labelMedium,
+                ),
+                if (_selectedDays.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.label_outlined, size: 20),
+                    tooltip: 'Tag selected days',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _showBulkTagDialog(context, notifier),
+                  ),
+              ] else ...[
+                IconButton(
+                  icon: const Icon(Icons.unfold_less, size: 20),
+                  tooltip: 'Collapse all',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => setState(() {
+                    _collapsedDays = {
+                      for (final o in _displayList) if (o is _DayHeader) o.dayNumber
+                    };
+                    _lastItems = null;
+                  }),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.unfold_more, size: 20),
+                  tooltip: 'Expand all',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => setState(() {
+                    _collapsedDays = {};
+                    _lastItems = null;
+                  }),
+                ),
+              ],
               const Spacer(),
               IconButton(
                 icon: Icon(
@@ -1720,60 +1767,55 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               setState(() => _expandedDayEdits.remove(h.dateKey));
                             }
                             if (_multiSelect) {
-                              setState(() {
-                                if (isMultiChecked) {
-                                  _selectedDays.remove(h.dateKey);
-                                } else {
-                                  _selectedDays.add(h.dateKey);
-                                }
-                              });
-                              notifier.selectDays(Set.from(_selectedDays));
+                              _handleMultiSelectTap(h.dateKey);
                             } else {
-                              final newDay = isSingleSelected ? null : h.dateKey;
-                              setState(() => _selectedDay = newDay);
-                              notifier.selectDay(newDay);
+                              final isCtrl =
+                                  HardwareKeyboard.instance.isControlPressed ||
+                                  HardwareKeyboard.instance.isMetaPressed;
+                              if (isCtrl) {
+                                _enterMultiSelectWithDay(h.dateKey);
+                              } else {
+                                final newDay = isSingleSelected ? null : h.dateKey;
+                                setState(() => _selectedDay = newDay);
+                                notifier.selectDay(newDay);
+                              }
                             }
                           },
+                          onLongPress: () => _enterMultiSelectWithDay(h.dateKey),
                           child: Container(
-                            color: isHighlighted
-                                ? theme.colorScheme.primaryContainer
-                                    .withValues(alpha: 0.4)
-                                : null,
+                            decoration: BoxDecoration(
+                              color: isHighlighted
+                                  ? theme.colorScheme.primaryContainer
+                                      .withValues(alpha: 0.4)
+                                  : null,
+                              border: (_multiSelect && isMultiChecked)
+                                  ? Border(
+                                      left: BorderSide(
+                                        color: theme.colorScheme.primary,
+                                        width: 3,
+                                      ),
+                                    )
+                                  : null,
+                            ),
                             padding: const EdgeInsets.fromLTRB(4, 2, 8, 0),
                             child: Row(children: [
-                              if (_multiSelect)
-                                Checkbox(
-                                  value: isMultiChecked,
-                                  visualDensity: VisualDensity.compact,
-                                  onChanged: (_) {
-                                    setState(() {
-                                      if (isMultiChecked) {
-                                        _selectedDays.remove(h.dateKey);
-                                      } else {
-                                        _selectedDays.add(h.dateKey);
-                                      }
-                                    });
-                                    notifier.selectDays(Set.from(_selectedDays));
-                                  },
-                                )
-                              else
-                                IconButton(
-                                  icon: Icon(
-                                    isCollapsed
-                                        ? Icons.chevron_right
-                                        : Icons.expand_more,
-                                    size: 20,
-                                  ),
-                                  visualDensity: VisualDensity.compact,
-                                  onPressed: () => setState(() {
-                                    if (isCollapsed) {
-                                      _collapsedDays.remove(h.dayNumber);
-                                    } else {
-                                      _collapsedDays.add(h.dayNumber);
-                                    }
-                                    _lastItems = null;
-                                  }),
+                              IconButton(
+                                icon: Icon(
+                                  isCollapsed
+                                      ? Icons.chevron_right
+                                      : Icons.expand_more,
+                                  size: 20,
                                 ),
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => setState(() {
+                                  if (isCollapsed) {
+                                    _collapsedDays.remove(h.dayNumber);
+                                  } else {
+                                    _collapsedDays.add(h.dayNumber);
+                                  }
+                                  _lastItems = null;
+                                }),
+                              ),
                               Text(
                                 'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
                                 style: theme.textTheme.labelMedium?.copyWith(
@@ -1977,7 +2019,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   insertAfterIndex: i,
                                 ),
                               ),
-                              onTap: () => _flyToActivity(a),
+                              onTap: _multiSelect ? null : () => _flyToActivity(a),
                             ),
                           ),
                         );
@@ -2033,7 +2075,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                     notifier: notifier, editMemory: mem),
                               ),
                             ),
-                            onTap: () => _flyToMemory(mem),
+                            onTap: _multiSelect ? null : () => _flyToMemory(mem),
                           ),
                         );
                       } else {
@@ -2111,7 +2153,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ),
                                 ],
                               ),
-                              onTap: () => _flyToSegment(seg),
+                              onTap: _multiSelect ? null : () => _flyToSegment(seg),
                             ),
                           ),
                         );
