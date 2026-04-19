@@ -1825,7 +1825,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              // Tag chips
+                              // Tag badges
                               ...() {
                                 final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
                                 final tags = rawTags is List
@@ -1835,14 +1835,25 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   for (final tag in tags)
                                     Padding(
                                       padding: const EdgeInsets.only(left: 4),
-                                      child: Chip(
-                                        label: Text(tag,
-                                            style: theme.textTheme.labelSmall),
-                                        visualDensity: VisualDensity.compact,
+                                      child: Container(
                                         padding: const EdgeInsets.symmetric(
-                                            horizontal: 4),
-                                        materialTapTargetSize:
-                                            MaterialTapTargetSize.shrinkWrap,
+                                            horizontal: 4, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          color: theme.colorScheme
+                                              .secondaryContainer,
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          tag,
+                                          style: theme.textTheme.labelSmall
+                                              ?.copyWith(
+                                            fontSize: 9,
+                                            height: 1.1,
+                                            color: theme.colorScheme
+                                                .onSecondaryContainer,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                 ];
@@ -3191,57 +3202,62 @@ class TagFilterSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tags = notifier.availableTags;
-    final active = notifier.tagFilter;
+    return ListenableBuilder(
+      listenable: notifier,
+      builder: (context, _) {
+        final theme = Theme.of(context);
+        final tags = notifier.availableTags;
+        final active = notifier.tagFilter;
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Filter by tag', style: theme.textTheme.titleMedium),
-              const Spacer(),
-              if (active.isNotEmpty)
-                TextButton(
-                  onPressed: () {
-                    notifier.setTagFilter({});
-                    Navigator.of(context).pop();
-                  },
-                  child: const Text('Clear'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilterChip(
-                label: const Text('All days'),
-                selected: active.isEmpty,
-                onSelected: (_) {
-                  notifier.setTagFilter({});
-                  Navigator.of(context).pop();
-                },
+              Row(
+                children: [
+                  Text('Filter by tag', style: theme.textTheme.titleMedium),
+                  const Spacer(),
+                  if (active.isNotEmpty)
+                    TextButton(
+                      onPressed: () {
+                        notifier.setTagFilter({});
+                        Navigator.of(context).pop();
+                      },
+                      child: const Text('Clear'),
+                    ),
+                ],
               ),
-              for (final tag in tags)
-                FilterChip(
-                  label: Text(tag),
-                  selected: active.contains(tag),
-                  onSelected: (on) {
-                    final next = Set<String>.of(active);
-                    if (on) { next.add(tag); } else { next.remove(tag); }
-                    notifier.setTagFilter(next);
-                  },
-                ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilterChip(
+                    label: const Text('All days'),
+                    selected: active.isEmpty,
+                    onSelected: (_) {
+                      notifier.setTagFilter({});
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                  for (final tag in tags)
+                    FilterChip(
+                      label: Text(tag),
+                      selected: active.contains(tag),
+                      onSelected: (on) {
+                        final next = Set<String>.of(active);
+                        if (on) { next.add(tag); } else { next.remove(tag); }
+                        notifier.setTagFilter(next);
+                      },
+                    ),
+                ],
+              ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
