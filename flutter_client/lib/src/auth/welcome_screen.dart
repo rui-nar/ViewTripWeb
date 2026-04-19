@@ -128,10 +128,10 @@ TextStyle _inter(double size, FontWeight weight, Color color,
 TextStyle _mono(double size, FontWeight weight, Color color) =>
     GoogleFonts.jetBrainsMono(fontSize: size, fontWeight: weight, color: color);
 
-Widget _gradientText(String text, TextStyle style) => ShaderMask(
+Widget _gradientText(String text, TextStyle style, {TextAlign? textAlign}) => ShaderMask(
   blendMode: BlendMode.srcIn,
   shaderCallback: (b) => _gradText.createShader(b),
-  child: Text(text, style: style.copyWith(color: Colors.white)),
+  child: Text(text, textAlign: textAlign, style: style.copyWith(color: Colors.white)),
 );
 
 Future<void> _openUrl(String url) async {
@@ -404,14 +404,13 @@ class _HeroText extends StatelessWidget {
         Text('Your adventure,',
             textAlign: align,
             style: _inter(64, FontWeight.w800, fg1, height: 1.02, spacing: -0.035)),
-        Row(
-          mainAxisAlignment: centered ? MainAxisAlignment.center : MainAxisAlignment.start,
-          children: [
-            _gradientText(
-              'stitched end-to-end.',
-              _inter(64, FontWeight.w800, Colors.white, height: 1.02, spacing: -0.035),
-            ),
-          ],
+        SizedBox(
+          width: double.infinity,
+          child: _gradientText(
+            'stitched end-to-end.',
+            _inter(64, FontWeight.w800, Colors.white, height: 1.02, spacing: -0.035),
+            textAlign: centered ? TextAlign.center : TextAlign.start,
+          ),
         ),
         const SizedBox(height: 20),
 
