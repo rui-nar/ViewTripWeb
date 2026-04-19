@@ -1587,6 +1587,27 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return last;
   }
 
+  List<Object> _applyTagFilter(
+    List<Object> list,
+    Set<String> filter,
+    Map<String, Map<String, dynamic>> dayMeta,
+  ) {
+    if (filter.isEmpty) return list;
+    final result = <Object>[];
+    bool include = false;
+    for (final entry in list) {
+      if (entry is _DayHeader) {
+        final rawTags = dayMeta[entry.dateKey]?['tags'];
+        final tags = rawTags is List ? rawTags.cast<String>().toSet() : const <String>{};
+        include = tags.any((t) => filter.contains(t));
+        if (include) result.add(entry);
+      } else if (include) {
+        result.add(entry);
+      }
+    }
+    return result;
+  }
+
   List<Object> _applyMemoriesFilter(List<Object> list) {
     // Build an uncollapsed version of the display list so collapsed days
     // don't hide their memory items from the filter.
@@ -1725,9 +1746,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
               : Builder(builder: (context) {
                   // Rebuild display list if items changed.
                   _rebuildDisplayList(items, notifier.tripStart);
-                  final displayList = _memoriesOnly
-                      ? _applyMemoriesFilter(_displayList)
-                      : _displayList;
+                  var displayList = _displayList;
+                  final tagFilter = notifier.tagFilter;
+                  if (tagFilter.isNotEmpty) {
+                    displayList = _applyTagFilter(
+                        displayList, tagFilter, notifier.dayMeta);
+                  }
+                  if (_memoriesOnly) {
+                    displayList = _applyMemoriesFilter(displayList);
+                  }
                   return ReorderableListView.builder(
                     scrollController: widget.scrollController,
                     buildDefaultDragHandles: false,
