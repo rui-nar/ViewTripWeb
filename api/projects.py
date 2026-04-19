@@ -312,7 +312,7 @@ def update_project(
 
 
 class DayMetaUpdateRequest(BaseModel):
-    day_meta: Dict[str, Dict[str, Optional[str]]]
+    day_meta: Dict[str, Dict[str, Any]]
     sleeping_options: Optional[List[str]] = None
 
 
