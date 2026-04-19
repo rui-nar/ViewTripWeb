@@ -40,6 +40,9 @@ dependencies:
   # Persist user preferences (theme mode)
   shared_preferences: ^2.3.2
 
+  # Typography
+  google_fonts: ^6.2.1
+
   # Map + charts
   flutter_map: ^8.2.2
   latlong2: ^0.9.1

@@ -150,7 +150,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(Icons.map_rounded,
-                              color: theme.colorScheme.primary, size: 28),
+                              color: theme.colorScheme.primary, size: 32),
                           const SizedBox(width: 10),
                           Text('ViewTrip',
                               style: theme.textTheme.headlineMedium),

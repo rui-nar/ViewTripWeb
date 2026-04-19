@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 
 import '../api/client.dart';
 import '../auth/auth_notifier.dart';
+import '../core/design_tokens.dart';
 import '../map/polyline_decoder.dart';
 import 'basemaps.dart';
 import 'project_notifier.dart';
@@ -1247,6 +1248,40 @@ class _PanelItem {
   const _PanelItem(this.originalIndex, this.item, this.dateKey);
 }
 
+class _ActivityIconBox extends StatelessWidget {
+  final String? type;
+  const _ActivityIconBox({this.type});
+
+  static Color _color(String? t) => switch (t?.toLowerCase()) {
+        'ride' || 'virtualride' || 'ebikeride' => kColorRide,
+        'run' || 'virtualrun'                  => kColorRun,
+        'hike' || 'walk'                       => kColorHike,
+        _                                      => kColorAlt,
+      };
+
+  static IconData _icon(String? t) => switch (t?.toLowerCase()) {
+        'run' || 'virtualrun'  => Icons.directions_run,
+        'ride' || 'virtualride' || 'ebikeride' => Icons.directions_bike,
+        'hike' || 'walk'       => Icons.hiking,
+        _                      => Icons.map,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _color(type);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      width: 32,
+      height: 32,
+      decoration: BoxDecoration(
+        color: iconBoxBg(c),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(_icon(type), size: 17, color: iconBoxFg(c, dark: dark)),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ActivityPanelState extends State<ActivityPanel> {
@@ -1470,18 +1505,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
         theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
   }
 
-  static IconData _iconForActivityType(String? type) {
-    switch (type?.toLowerCase()) {
-      case 'run':
-        return Icons.directions_run;
-      case 'ride':
-        return Icons.directions_bike;
-      case 'hike':
-        return Icons.hiking;
-      default:
-        return Icons.map;
-    }
-  }
 
   static IconData _iconForSegmentType(String? type) {
     switch (type?.toLowerCase()) {
@@ -1869,49 +1892,57 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   _lastItems = null;
                                 }),
                               ),
-                              Text(
-                                'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
-                                style: theme.textTheme.labelMedium?.copyWith(
-                                  color: isHighlighted
-                                      ? theme.colorScheme.primary
-                                      : theme.colorScheme.onSurfaceVariant,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              // Tag badges
-                              ...() {
-                                final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
-                                final tags = rawTags is List
-                                    ? rawTags.cast<String>()
-                                    : <String>[];
-                                return [
-                                  for (final tag in tags)
-                                    Padding(
-                                      padding: const EdgeInsets.only(left: 4),
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 4, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: theme.colorScheme
-                                              .secondaryContainer,
-                                          borderRadius:
-                                              BorderRadius.circular(4),
-                                        ),
-                                        child: Text(
-                                          tag,
-                                          style: theme.textTheme.labelSmall
-                                              ?.copyWith(
-                                            fontSize: 9,
-                                            height: 1.1,
-                                            color: theme.colorScheme
-                                                .onSecondaryContainer,
-                                          ),
+                              Expanded(
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.labelMedium?.copyWith(
+                                          color: isHighlighted
+                                              ? theme.colorScheme.primary
+                                              : theme.colorScheme.onSurfaceVariant,
+                                          fontWeight: FontWeight.w600,
                                         ),
                                       ),
                                     ),
-                                ];
-                              }(),
-                              const Spacer(),
+                                    ...() {
+                                      final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
+                                      final tags = rawTags is List
+                                          ? rawTags.cast<String>()
+                                          : <String>[];
+                                      return [
+                                        for (final tag in tags)
+                                          Padding(
+                                            padding: const EdgeInsets.only(left: 4),
+                                            child: Container(
+                                              padding: const EdgeInsets.symmetric(
+                                                  horizontal: 4, vertical: 1),
+                                              decoration: BoxDecoration(
+                                                color: theme.colorScheme
+                                                    .secondaryContainer,
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                              child: Text(
+                                                tag,
+                                                style: theme.textTheme.labelSmall
+                                                    ?.copyWith(
+                                                  fontSize: 9,
+                                                  height: 1.1,
+                                                  color: theme.colorScheme
+                                                      .onSecondaryContainer,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ];
+                                    }(),
+                                  ],
+                                ),
+                              ),
                               if (isWide)
                                 IconButton(
                                   icon: const Icon(Icons.edit_outlined, size: 16),
@@ -2056,14 +2087,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   : null,
                               leading: dragHandle,
                               title: Row(children: [
-                                Icon(
-                                  _iconForActivityType(type),
-                                  size: 16,
-                                  color: isSelected
-                                      ? theme.colorScheme.primary
-                                      : theme.colorScheme.primary
-                                          .withValues(alpha: 0.7),
-                                ),
+                                _ActivityIconBox(type: type),
                                 const SizedBox(width: 8),
                                 Flexible(
                                   child: Text(name,
@@ -2176,13 +2200,19 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   : null,
                               leading: dragHandle,
                               title: Row(children: [
-                                Icon(
-                                  _iconForSegmentType(segType),
-                                  size: 16,
-                                  color: isSelected
-                                      ? theme.colorScheme.secondary
-                                      : theme.colorScheme.secondary
-                                          .withValues(alpha: 0.7),
+                                Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF94A3B8)
+                                        .withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(
+                                    _iconForSegmentType(segType),
+                                    size: 17,
+                                    color: const Color(0xFF64748B),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Flexible(
@@ -2234,7 +2264,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  icon: const Icon(Icons.add, size: 16),
+                  icon: const Icon(Icons.add, size: 10),
                   label: const Text('Add segment'),
                   onPressed: () => _showSegmentDialog(
                     context,
@@ -2246,7 +2276,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
               const SizedBox(width: 8),
               Expanded(
                 child: OutlinedButton.icon(
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 10),
                   label: const Text('Add memory'),
                   onPressed: () => showDialog(
                     context: context,
