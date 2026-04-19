@@ -1321,6 +1321,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void _enterMultiSelectWithDay(String dateKey) {
     setState(() {
       _multiSelect = true;
+      // Carry the existing single-selected day into the multi-select set
+      // so Ctrl+click or long-press never silently drops what was selected.
+      if (_selectedDay != null) _selectedDays.add(_selectedDay!);
       _selectedDays.add(dateKey);
       _anchorDayKey = dateKey;
       _selectedDay = null;
@@ -1799,10 +1802,33 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               final isCtrl =
                                   HardwareKeyboard.instance.isControlPressed ||
                                   HardwareKeyboard.instance.isMetaPressed;
-                              if (isCtrl) {
+                              final isShift =
+                                  HardwareKeyboard.instance.isShiftPressed;
+                              if (isShift && _selectedDay != null) {
+                                // Range-select from the single-selected day
+                                // into multi-select mode.
+                                final anchor = _selectedDay!;
+                                setState(() {
+                                  _multiSelect = true;
+                                  _selectedDay = null;
+                                  _anchorDayKey = anchor;
+                                  final keys = _orderedDayKeys();
+                                  final a = keys.indexOf(anchor);
+                                  final b = keys.indexOf(h.dateKey);
+                                  if (a != -1 && b != -1) {
+                                    final lo = a < b ? a : b;
+                                    final hi = a < b ? b : a;
+                                    _selectedDays
+                                        .addAll(keys.sublist(lo, hi + 1));
+                                  }
+                                });
+                                notifier
+                                    .selectDays(Set.from(_selectedDays));
+                              } else if (isCtrl) {
                                 _enterMultiSelectWithDay(h.dateKey);
                               } else {
-                                final newDay = isSingleSelected ? null : h.dateKey;
+                                final newDay =
+                                    isSingleSelected ? null : h.dateKey;
                                 setState(() => _selectedDay = newDay);
                                 notifier.selectDay(newDay);
                               }
