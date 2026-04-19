@@ -8,6 +8,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 // ── Brand seed color ───────────────────────────────────────────────────────────
 const _seed = Color(0xFF0D6EFD); // blue — matches GetTracks brand feel
@@ -38,6 +39,7 @@ const _lightHint = Color(0xFF94A3B8); // slate-400
 final ThemeData darkTheme = ThemeData(
   useMaterial3: true,
   brightness: Brightness.dark,
+  fontFamily: GoogleFonts.inter().fontFamily,
   colorScheme: ColorScheme.fromSeed(
     seedColor: _seed,
     brightness: Brightness.dark,
@@ -49,12 +51,16 @@ final ThemeData darkTheme = ThemeData(
   ),
   scaffoldBackgroundColor: _darkBg,
   appBarTheme: const AppBarTheme(
-    backgroundColor: _darkBg,
+    backgroundColor: _darkCard,
     foregroundColor: _darkOnBg,
     elevation: 0,
+    scrolledUnderElevation: 0,
+    surfaceTintColor: Colors.transparent,
+    shadowColor: _darkBorder,
     centerTitle: false,
     titleTextStyle: TextStyle(
         color: _darkOnBg, fontSize: 18, fontWeight: FontWeight.w600),
+    shape: Border(bottom: BorderSide(color: _darkBorder, width: 1)),
   ),
   cardTheme: const CardThemeData(
     color: _darkCard,
@@ -118,6 +124,18 @@ final ThemeData darkTheme = ThemeData(
     bodyMedium: TextStyle(color: _darkOnCard),
     bodySmall: TextStyle(color: _darkHint),
   ),
+  segmentedButtonTheme: SegmentedButtonThemeData(
+    style: ButtonStyle(
+      shape: const WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
+      ),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      textStyle: const WidgetStatePropertyAll(
+        TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+      ),
+    ),
+  ),
   dividerTheme: const DividerThemeData(color: _darkBorder, thickness: 1),
   snackBarTheme: const SnackBarThemeData(
     backgroundColor: _darkCard,
@@ -129,6 +147,7 @@ final ThemeData darkTheme = ThemeData(
 final ThemeData lightTheme = ThemeData(
   useMaterial3: true,
   brightness: Brightness.light,
+  fontFamily: GoogleFonts.inter().fontFamily,
   colorScheme: ColorScheme.fromSeed(
     seedColor: _seed,
     brightness: Brightness.light,
@@ -143,9 +162,13 @@ final ThemeData lightTheme = ThemeData(
     backgroundColor: _lightCard,
     foregroundColor: _lightOnBg,
     elevation: 0,
+    scrolledUnderElevation: 0,
+    surfaceTintColor: Colors.transparent,
+    shadowColor: _lightBorder,
     centerTitle: false,
     titleTextStyle: TextStyle(
         color: _lightOnBg, fontSize: 18, fontWeight: FontWeight.w600),
+    shape: Border(bottom: BorderSide(color: _lightBorder, width: 1)),
   ),
   cardTheme: const CardThemeData(
     color: _lightCard,
@@ -209,8 +232,19 @@ final ThemeData lightTheme = ThemeData(
     bodyMedium: TextStyle(color: _lightOnCard),
     bodySmall: TextStyle(color: _lightHint),
   ),
-  dividerTheme:
-      const DividerThemeData(color: _lightBorder, thickness: 1),
+  segmentedButtonTheme: SegmentedButtonThemeData(
+    style: ButtonStyle(
+      shape: const WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
+      ),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      textStyle: const WidgetStatePropertyAll(
+        TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+      ),
+    ),
+  ),
+  dividerTheme: const DividerThemeData(color: _lightBorder, thickness: 1),
   snackBarTheme: const SnackBarThemeData(
     backgroundColor: _lightCard,
     contentTextStyle: TextStyle(color: _lightOnBg),

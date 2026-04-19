@@ -85,9 +85,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(Icons.map_rounded,
-                              color: theme.colorScheme.primary, size: 28),
+                              color: theme.colorScheme.primary, size: 32),
                           const SizedBox(width: 10),
-                          Text('ViewTripWeb',
+                          Text('ViewTrip',
                               style: theme.textTheme.headlineMedium),
                         ],
                       ),
