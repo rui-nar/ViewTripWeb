@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../auth/auth_notifier.dart';
 import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
+import '../auth/welcome_screen.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/view_screen.dart';
@@ -22,9 +23,9 @@ import '../shared/shared_project_screen.dart';
 /// deep links (e.g. /share/TOKEN) are honoured even before auth resolves.
 /// Falls back to /login on non-web platforms.
 String _initialLocation() {
-  if (!kIsWeb) return '/login';
+  if (!kIsWeb) return '/';
   final path = Uri.base.path;
-  return (path.isEmpty || path == '/') ? '/login' : path;
+  return (path.isEmpty || path == '/') ? '/' : path;
 }
 
 GoRouter buildRouter(BuildContext context) {
@@ -50,16 +51,20 @@ GoRouter buildRouter(BuildContext context) {
       if (loc.startsWith('/share/')) return null;
 
       // Redirect unauthenticated users away from protected routes.
-      final isAuthPage = loc == '/login' || loc == '/register';
-      if (!isLoggedIn && !isAuthPage) return '/login';
+      final isPublicPage = loc == '/' || loc == '/login' || loc == '/register';
+      if (!isLoggedIn && !isPublicPage) return '/';
 
-      // Redirect authenticated users away from auth pages.
-      if (isLoggedIn && isAuthPage) return '/projects';
+      // Redirect authenticated users away from public pages.
+      if (isLoggedIn && isPublicPage) return '/projects';
 
       return null;
     },
 
     routes: [
+      GoRoute(
+        path: '/',
+        builder: (context, state) => const WelcomeScreen(),
+      ),
       GoRoute(
         path: '/login',
         builder: (context, state) => const LoginScreen(),
