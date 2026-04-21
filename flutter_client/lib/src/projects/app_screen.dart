@@ -1309,6 +1309,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
   List<Object> _displayList = [];
   bool _initialCollapseApplied = false;
 
+  // Filtered display list cache — rebuilt only when base list, tag filter,
+  // or memories-only toggle actually changes.
+  List<Object>? _cachedBaseList;     // which _displayList the cache was built from
+  List<Object>? _cachedFilteredList;
+  Set<String>? _lastTagFilter;
+  bool? _lastMemoriesOnly;
+
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
   TextStyle? _segmentTitleStyle;
@@ -1770,17 +1777,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   ),
                 )
               : Builder(builder: (context) {
-                  // Rebuild display list if items changed.
                   _rebuildDisplayList(items, notifier.tripStart);
-                  var displayList = _displayList;
                   final tagFilter = notifier.tagFilter;
-                  if (tagFilter.isNotEmpty) {
-                    displayList = _applyTagFilter(
-                        displayList, tagFilter, notifier.dayMeta);
+                  // Recompute filtered list only when inputs actually change.
+                  if (!identical(_displayList, _cachedBaseList) ||
+                      _lastTagFilter != tagFilter ||
+                      _lastMemoriesOnly != _memoriesOnly) {
+                    var dl = _displayList;
+                    if (tagFilter.isNotEmpty) {
+                      dl = _applyTagFilter(dl, tagFilter, notifier.dayMeta);
+                    }
+                    if (_memoriesOnly) dl = _applyMemoriesFilter(dl);
+                    _cachedBaseList = _displayList;
+                    _cachedFilteredList = dl;
+                    _lastTagFilter = Set.unmodifiable(tagFilter);
+                    _lastMemoriesOnly = _memoriesOnly;
                   }
-                  if (_memoriesOnly) {
-                    displayList = _applyMemoriesFilter(displayList);
-                  }
+                  final displayList = _cachedFilteredList!;
                   return ReorderableListView.builder(
                     scrollController: widget.scrollController,
                     buildDefaultDragHandles: false,
