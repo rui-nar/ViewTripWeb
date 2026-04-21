@@ -895,10 +895,13 @@ class MapPanel extends StatefulWidget {
 
 class _MapPanelState extends State<MapPanel> {
   bool _fittedBounds = false;
-  // Polyline + bounds cache — only rebuilt when geo or selection changes.
+  // Polyline + bounds cache — only rebuilt when geo, selection, or style changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
+  Color? _lastTrackColor;
+  double? _lastTrackWidth;
+  bool? _lastAlternating;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
@@ -912,13 +915,36 @@ class _MapPanelState extends State<MapPanel> {
     _tileProvider = NetworkTileProvider();
   }
 
+  static Color _alternateColor(Color base) {
+    final hsl = HSLColor.fromColor(base);
+    return hsl
+        .withSaturation((hsl.saturation * 0.42).clamp(0.0, 1.0))
+        .withLightness((hsl.lightness * 1.18).clamp(0.0, 1.0))
+        .toColor();
+  }
+
   List<Polyline> _buildPolylines(
     Map<String, dynamic> geo,
     dynamic selectedActivityId,
     dynamic selectedSegmentId,
+    Color trackColor,
+    double trackWidth,
+    bool alternating,
+    List<Map<String, dynamic>> items,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
+
+    // Build activity-index map for alternating colours.
+    final actIdx = <String, int>{};
+    int ai = 0;
+    for (final item in items) {
+      if (item['item_type'] == 'activity') {
+        final id = item['activity_id']?.toString();
+        if (id != null) actIdx[id] = ai++;
+      }
+    }
+    final altColor = _alternateColor(trackColor);
 
     final polylines = <Polyline>[];
     final hasSelection = selectedActivityId != null || selectedSegmentId != null;
@@ -932,42 +958,42 @@ class _MapPanelState extends State<MapPanel> {
       final points = <LatLng>[];
       for (final c in coords) {
         if (c is List && c.length >= 2) {
-          final lon = (c[0] as num).toDouble();
-          final lat = (c[1] as num).toDouble();
-          points.add(LatLng(lat, lon));
+          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
         }
       }
       if (points.isEmpty) continue;
 
       final isSegment = props['type'] == 'segment';
+      final actId = props['activity_id']?.toString();
       final isSelAct = selectedActivityId != null &&
-          props['activity_id']?.toString() == selectedActivityId.toString();
+          actId == selectedActivityId.toString();
       final isSelSeg = selectedSegmentId != null &&
           props['segment_id']?.toString() == selectedSegmentId.toString();
+      final isOdd = alternating && actId != null && (actIdx[actId] ?? 0).isOdd;
 
       final Color color;
       final double strokeWidth;
       if (isSegment) {
         if (isSelSeg) {
-          color = const Color(0xFF44AAFF);   // bright blue — selected segment
+          color = const Color(0xFF44AAFF);
           strokeWidth = 4.0;
         } else if (hasSelection) {
-          color = const Color(0x60888888);   // dimmed grey
+          color = const Color(0x60888888);
           strokeWidth = 2.0;
         } else {
-          color = const Color(0xFF888888);   // normal grey
+          color = const Color(0xFF888888);
           strokeWidth = 2.0;
         }
       } else {
         if (isSelAct) {
-          color = const Color(0xFFEF4444);   // red — selected activity
-          strokeWidth = 5.0;
+          color = trackColor;
+          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
         } else if (hasSelection) {
-          color = const Color(0x60F97316);   // dimmed orange
-          strokeWidth = 2.5;
+          color = trackColor.withAlpha(0x60);
+          strokeWidth = trackWidth;
         } else {
-          color = const Color(0xFFF97316);   // full orange
-          strokeWidth = 2.5;
+          color = isOdd ? altColor : trackColor;
+          strokeWidth = trackWidth;
         }
       }
       polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
@@ -1090,17 +1116,28 @@ class _MapPanelState extends State<MapPanel> {
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
 
-    // Recompute polylines only when geo or selection changes.
+    // Recompute polylines only when geo, selection, or track style changes.
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
+    final trackColor = notifier.trackColor;
+    final trackWidth = notifier.trackWidth;
+    final alternating = notifier.alternatingTrackColors;
     final selectionChanged = selActId != _lastSelectedId ||
         selSegId?.toString() != _lastSelectedSegId?.toString();
-    if (!identical(geo, _lastGeo) || selectionChanged) {
+    final styleChanged = trackColor != _lastTrackColor ||
+        trackWidth != _lastTrackWidth || alternating != _lastAlternating;
+    if (!identical(geo, _lastGeo) || selectionChanged || styleChanged) {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
-      _cachedPolylines = geo != null ? _buildPolylines(geo, selActId, selSegId) : [];
+      _lastTrackColor = trackColor;
+      _lastTrackWidth = trackWidth;
+      _lastAlternating = alternating;
+      _cachedPolylines = geo != null
+          ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
+              alternating, notifier.items)
+          : [];
       _cachedAllPoints = _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null;
       _cachedSegmentMarkers = geo != null
@@ -2363,6 +2400,10 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   List<Marker> _cachedMemoryMarkers = [];
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
+  // Track-style cache fields.
+  Color? _lastTrackColor;
+  double? _lastTrackWidth;
+  bool? _lastAlternating;
 
   static const _sentinel = Object();
 
@@ -2627,9 +2668,23 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     Set<String> effectiveDays,
     Map<dynamic, Map<String, dynamic>> activityById,
     List<Map<String, dynamic>> items,
+    Color trackColor,
+    double trackWidth,
+    bool alternating,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
+
+    // Build activity-index map for alternating colours.
+    final actIdx = <String, int>{};
+    int ai = 0;
+    for (final item in items) {
+      if (item['item_type'] == 'activity') {
+        final id = item['activity_id']?.toString();
+        if (id != null) actIdx[id] = ai++;
+      }
+    }
+    final altColor = _MapPanelState._alternateColor(trackColor);
 
     // For day selection, union ids across all selected days.
     Set<String>? dayActIds;
@@ -2679,6 +2734,9 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
             featureId == selectedActivityId.toString();
       }
 
+      final isOdd = alternating && !isSegment && featureId != null &&
+          (actIdx[featureId] ?? 0).isOdd;
+
       final Color color;
       final double strokeWidth;
       if (isSegment) {
@@ -2694,14 +2752,14 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
         }
       } else {
         if (isHighlighted) {
-          color = const Color(0xFFEF4444);
-          strokeWidth = 5.0;
+          color = trackColor;
+          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
         } else if (hasSelection) {
-          color = const Color(0x60F97316);
-          strokeWidth = 2.5;
+          color = trackColor.withAlpha(0x60);
+          strokeWidth = trackWidth;
         } else {
-          color = const Color(0xFFF97316);
-          strokeWidth = 2.5;
+          color = isOdd ? altColor : trackColor;
+          strokeWidth = trackWidth;
         }
       }
       polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
@@ -2719,12 +2777,18 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
     final selDays = notifier.selectedDays;
     final selMemId = notifier.selectedMemoryId;
     final items = notifier.items;
+    final trackColor = notifier.trackColor;
+    final trackWidth = notifier.trackWidth;
+    final alternating = notifier.alternatingTrackColors;
     final selectionChanged2 = selActId != _lastSelectedId ||
         selSegId?.toString() != _lastSelectedSegId?.toString() ||
         selDay != _lastSelectedDay ||
         !_setEquals(selDays, _lastSelectedDays) ||
         selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString();
-    if (!identical(geo, _lastGeo) || selectionChanged2 || !identical(items, _lastItems)) {
+    final styleChanged2 = trackColor != _lastTrackColor ||
+        trackWidth != _lastTrackWidth || alternating != _lastAlternating;
+    if (!identical(geo, _lastGeo) || selectionChanged2 ||
+        !identical(items, _lastItems) || styleChanged2) {
       if (selectionChanged2) widget.fittedNotifier.value = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
@@ -2733,6 +2797,9 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       _lastSelectedDays = Set.from(selDays);
       _lastSelectedMemId = selMemId;
       _lastItems = items;
+      _lastTrackColor = trackColor;
+      _lastTrackWidth = trackWidth;
+      _lastAlternating = alternating;
       // Multi-select takes priority over single-day selection.
       final effectiveDays = selDays.isNotEmpty
           ? selDays
@@ -2742,7 +2809,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
         for (final a in notifier.activities) a['id']: a
       };
       _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById, items)
+          ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById,
+              items, trackColor, trackWidth, alternating)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null;

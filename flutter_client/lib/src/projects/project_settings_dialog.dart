@@ -17,6 +17,24 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
   late List<TextEditingController> _optCtrls;
 
+  // Track style
+  late Color _trackColor;
+  late double _trackWidth;
+  late bool _alternating;
+
+  static const _presetColors = [
+    Color(0xFFF97316), // orange (default)
+    Color(0xFFEF4444), // red
+    Color(0xFF3B82F6), // blue
+    Color(0xFF22C55E), // green
+    Color(0xFFA855F7), // purple
+    Color(0xFFEC4899), // pink
+    Color(0xFFEAB308), // yellow
+    Color(0xFF06B6D4), // cyan
+    Color(0xFFFFFFFF), // white
+    Color(0xFF374151), // dark grey
+  ];
+
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
   static String _toIso(DateTime d) =>
@@ -30,6 +48,9 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     _optCtrls = widget.notifier.sleepingOptions
         .map((opt) => TextEditingController(text: opt))
         .toList();
+    _trackColor = widget.notifier.trackColor;
+    _trackWidth = widget.notifier.trackWidth;
+    _alternating = widget.notifier.alternatingTrackColors;
   }
 
   @override
@@ -56,7 +77,41 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
         .where((s) => s.isNotEmpty)
         .toList();
     await widget.notifier.updateSleepingOptions(updatedOpts);
+    widget.notifier.setTrackStyle(
+      color: _trackColor,
+      width: _trackWidth,
+      alternating: _alternating,
+    );
     if (mounted) Navigator.of(context).pop();
+  }
+
+  // Preview swatch showing primary + alternate colour when alternating is on.
+  Widget _colorPreview(Color base) {
+    final alt = _MapPanelStateColorHelper.alternateColor(base);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 24, height: 24,
+          decoration: BoxDecoration(
+            color: base,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white24, width: 1),
+          ),
+        ),
+        if (_alternating) ...[
+          const SizedBox(width: 4),
+          Container(
+            width: 24, height: 24,
+            decoration: BoxDecoration(
+              color: alt,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white24, width: 1),
+            ),
+          ),
+        ],
+      ],
+    );
   }
 
   @override
@@ -127,6 +182,100 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
               const Divider(height: 24),
 
+              // ── Track style ───────────────────────────────────────────
+              Text('Track style', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 12),
+
+              // Color swatches
+              Text('Colour', style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              )),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: _presetColors.map((c) {
+                  final selected = _trackColor.toARGB32() == c.toARGB32();
+                  return GestureDetector(
+                    onTap: () => setState(() => _trackColor = c),
+                    child: Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        color: c,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: selected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outlineVariant,
+                          width: selected ? 2.5 : 1,
+                        ),
+                        boxShadow: selected
+                            ? [BoxShadow(
+                                color: theme.colorScheme.primary.withAlpha(80),
+                                blurRadius: 6)]
+                            : null,
+                      ),
+                      child: selected
+                          ? Icon(Icons.check,
+                              size: 16,
+                              color: ThemeData.estimateBrightnessForColor(c) ==
+                                      Brightness.dark
+                                  ? Colors.white
+                                  : Colors.black87)
+                          : null,
+                    ),
+                  );
+                }).toList(),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Thickness slider
+              Row(
+                children: [
+                  Text('Thickness', style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  )),
+                  const Spacer(),
+                  Text(_trackWidth.toStringAsFixed(1),
+                      style: theme.textTheme.bodySmall),
+                ],
+              ),
+              Slider(
+                value: _trackWidth,
+                min: 1.0,
+                max: 6.0,
+                divisions: 10,
+                onChanged: (v) => setState(() => _trackWidth = v),
+              ),
+
+              const SizedBox(height: 4),
+
+              // Alternating colours checkbox + preview
+              Row(
+                children: [
+                  Checkbox(
+                    value: _alternating,
+                    visualDensity: VisualDensity.compact,
+                    onChanged: (v) => setState(() => _alternating = v ?? false),
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => setState(() => _alternating = !_alternating),
+                      child: Text(
+                        'Alternating colours — every other activity uses a muted hue',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _colorPreview(_trackColor),
+                ],
+              ),
+
+              const Divider(height: 24),
+
               // ── Sleeping options ──────────────────────────────────────
               Text('Sleeping options', style: theme.textTheme.labelMedium),
               const SizedBox(height: 4),
@@ -191,5 +340,17 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
         ),
       ],
     );
+  }
+}
+
+// Thin helper so the dialog can reuse _alternateColor without depending on
+// the private _MapPanelState class.
+class _MapPanelStateColorHelper {
+  static Color alternateColor(Color base) {
+    final hsl = HSLColor.fromColor(base);
+    return hsl
+        .withSaturation((hsl.saturation * 0.42).clamp(0.0, 1.0))
+        .withLightness((hsl.lightness * 1.18).clamp(0.0, 1.0))
+        .toColor();
   }
 }

@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
@@ -79,6 +80,18 @@ class ProjectNotifier extends ChangeNotifier {
     selectedActivityId = null;
     selectedSegmentId = null;
     selectedMemoryId = null;
+    notifyListeners();
+  }
+
+  // ── Track style (UI-only, not persisted to server) ───────────────────────
+  Color trackColor = const Color(0xFFF97316);
+  double trackWidth = 2.5;
+  bool alternatingTrackColors = false;
+
+  void setTrackStyle({Color? color, double? width, bool? alternating}) {
+    if (color != null) trackColor = color;
+    if (width != null) trackWidth = width;
+    if (alternating != null) alternatingTrackColors = alternating;
     notifyListeners();
   }
 
