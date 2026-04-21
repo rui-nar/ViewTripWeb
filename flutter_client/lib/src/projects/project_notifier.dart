@@ -229,6 +229,8 @@ class ProjectNotifier extends ChangeNotifier {
 
       var currentFeatures = List<dynamic>.from(geo!['features'] as List? ?? []);
 
+      const batchSize = 3;
+      int batchCount = 0;
       for (final actId in actIds) {
         if (projectName != name) return;
         final full = fullFeatures[actId];
@@ -236,10 +238,12 @@ class ProjectNotifier extends ChangeNotifier {
         final idx = currentFeatures.indexWhere(
             (f) => (f as Map)['properties']?['activity_id']?.toString() == actId);
         if (idx >= 0) currentFeatures[idx] = full;
-        // New map reference so map layer cache invalidates
         geo = {'type': 'FeatureCollection', 'features': List.from(currentFeatures)};
-        notifyListeners();
-        await Future.delayed(const Duration(milliseconds: 80));
+        batchCount++;
+        if (batchCount % batchSize == 0) {
+          notifyListeners();
+          await Future.delayed(const Duration(milliseconds: 80));
+        }
       }
 
       if (projectName != name) return;
