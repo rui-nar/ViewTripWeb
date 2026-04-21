@@ -1,6 +1,8 @@
 /// Notifier for a single open project — loads details + GeoJSON in parallel.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
@@ -546,7 +548,7 @@ class ProjectNotifier extends ChangeNotifier {
     items.insert(insertAt, placeholder);
     notifyListeners();
     try {
-      await api.post(
+      final result = await api.post(
         '/api/projects/${Uri.encodeComponent(name)}/segments',
         {
           'segment_type': segmentType,
@@ -558,8 +560,11 @@ class ProjectNotifier extends ChangeNotifier {
           if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
           if (date != null) 'date': date,
         },
-      );
-      await _silentReload(name);
+      ) as Map<String, dynamic>;
+      final newId = result['id'] as String;
+      _upsertSegmentInGeo(newId, _segmentFeature(
+          newId, segmentType, label, startLat, startLon, endLat, endLon));
+      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -605,7 +610,9 @@ class ProjectNotifier extends ChangeNotifier {
           if (date != null) 'date': date,
         },
       );
-      await _silentReload(name);
+      _upsertSegmentInGeo(segId, _segmentFeature(
+          segId, segmentType, label, startLat, startLon, endLat, endLon));
+      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -622,7 +629,8 @@ class ProjectNotifier extends ChangeNotifier {
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');
-      await _silentReload(name);
+      _removeSegmentFromGeo(segId);
+      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -875,5 +883,81 @@ class ProjectNotifier extends ChangeNotifier {
     final s = e.toString();
     final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(s);
     return m?.group(1) ?? s.replaceFirst('Exception: ', '');
+  }
+
+  // ── Great-circle helpers (mirrors src/models/great_circle.py) ─────────────
+
+  /// SLERP great-circle arc — returns GeoJSON [lon, lat] coordinate pairs.
+  static List<List<double>> _greatCircleCoords(
+    double lat1, double lon1, double lat2, double lon2, {int n = 50}) {
+    double r(double d) => d * math.pi / 180;
+    double d(double r) => r * 180 / math.pi;
+
+    final p1 = r(lat1), l1 = r(lon1), p2 = r(lat2), l2 = r(lon2);
+    final x1 = math.cos(p1) * math.cos(l1);
+    final y1 = math.cos(p1) * math.sin(l1);
+    final z1 = math.sin(p1);
+    final x2 = math.cos(p2) * math.cos(l2);
+    final y2 = math.cos(p2) * math.sin(l2);
+    final z2 = math.sin(p2);
+
+    final dot = (x1*x2 + y1*y2 + z1*z2).clamp(-1.0, 1.0);
+    final omega = math.acos(dot);
+
+    if (omega < 1e-10 || (omega - math.pi).abs() < 1e-10) {
+      return [[lon1, lat1], [lon2, lat2]];
+    }
+    final sinOmega = math.sin(omega);
+    return List.generate(n, (i) {
+      final t = i / (n - 1);
+      final k1 = math.sin((1 - t) * omega) / sinOmega;
+      final k2 = math.sin(t * omega) / sinOmega;
+      final lat = d(math.asin((k1*z1 + k2*z2).clamp(-1.0, 1.0)));
+      final lon = d(math.atan2(k1*y1 + k2*y2, k1*x1 + k2*x2));
+      return [lon, lat];
+    });
+  }
+
+  static Map<String, dynamic> _segmentFeature(
+    String id, String type, String label,
+    double startLat, double startLon, double endLat, double endLon) {
+    return {
+      'type': 'Feature',
+      'geometry': {
+        'type': 'LineString',
+        'coordinates': _greatCircleCoords(startLat, startLon, endLat, endLon),
+      },
+      'properties': {
+        'type': 'segment',
+        'segment_id': id,
+        'segment_type': type,
+        'label': label,
+      },
+    };
+  }
+
+  /// Upsert a segment feature into [geo] by segment_id (adds if absent).
+  void _upsertSegmentInGeo(String segId, Map<String, dynamic> feature) {
+    final current = geo;
+    if (current == null) return;
+    final features = List<dynamic>.from(current['features'] as List? ?? []);
+    final idx = features.indexWhere(
+        (f) => (f as Map)['properties']?['segment_id']?.toString() == segId);
+    if (idx >= 0) {
+      features[idx] = feature;
+    } else {
+      features.add(feature);
+    }
+    geo = {'type': 'FeatureCollection', 'features': features};
+  }
+
+  /// Remove a segment feature from [geo] by segment_id.
+  void _removeSegmentFromGeo(String segId) {
+    final current = geo;
+    if (current == null) return;
+    final features = List<dynamic>.from(current['features'] as List? ?? []);
+    features.removeWhere(
+        (f) => (f as Map)['properties']?['segment_id']?.toString() == segId);
+    geo = {'type': 'FeatureCollection', 'features': features};
   }
 }
