@@ -21,11 +21,12 @@ import 'src/core/theme.dart';
 const _kGoogleServerClientId =
     '544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com';
 
-void main() async {
+void main() {
   if (kIsWeb) usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
-  // Initialize GoogleSignIn exactly once before the widget tree starts.
-  await GoogleSignIn.instance.initialize(
+  // Fire-and-forget: login_screen.initState calls attemptLightweightAuthentication()
+  // which handles ordering internally. Deferring unblocks the first frame.
+  GoogleSignIn.instance.initialize(
     serverClientId: kIsWeb ? null : _kGoogleServerClientId,
   );
   runApp(
