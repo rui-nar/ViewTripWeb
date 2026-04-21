@@ -1,12 +1,12 @@
 {
-    "name": "viewtrip_client",
-    "short_name": "viewtrip_client",
+    "name": "ViewTrip",
+    "short_name": "ViewTrip",
+    "description": "Merge Strava rides, segments and memories into one continuous journey.",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#0D1B2A",
+    "theme_color": "#1D6CF6",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {
