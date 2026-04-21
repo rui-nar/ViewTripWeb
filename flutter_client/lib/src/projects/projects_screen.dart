@@ -143,7 +143,29 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      body: SingleChildScrollView(
+      body: Stack(
+        children: [
+          // ── Background: gradient + angular geometry ───────────────────────
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: theme.brightness == Brightness.dark
+                      ? const [Color(0xFF0D1B2A), Color(0xFF1B2838)]
+                      : const [Color(0xFFF1F5F9), Color(0xFFE2E8F0)],
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _BgPainter(theme.brightness == Brightness.dark),
+            ),
+          ),
+          // ── Content ───────────────────────────────────────────────────────
+          SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Center(
           child: ConstrainedBox(
@@ -343,9 +365,51 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
             ),
           ),
         ),
-      ),
+        ),  // SingleChildScrollView
+        ],  // Stack children
+      ),   // Stack
     );
   }
+}
+
+// ── Background painter ────────────────────────────────────────────────────────
+
+class _BgPainter extends CustomPainter {
+  final bool dark;
+  const _BgPainter(this.dark);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+
+    // Diagonal hairline grid (45°)
+    final gp = Paint()
+      ..color = dark
+          ? const Color(0xFFFFFFFF).withValues(alpha: 0.03)
+          : const Color(0xFF1D6CF6).withValues(alpha: 0.04)
+      ..strokeWidth = 1;
+    const step = 48.0;
+    for (double t = -h; t < w + h; t += step) {
+      canvas.drawLine(Offset(t, 0), Offset(t + h, h), gp);
+    }
+
+    // Angular corner wedge (top-right)
+    final ap = Paint()
+      ..color = const Color(0xFF1D6CF6)
+          .withValues(alpha: dark ? 0.05 : 0.04);
+    canvas.drawPath(
+      Path()
+        ..moveTo(w * 0.42, 0)
+        ..lineTo(w, 0)
+        ..lineTo(w, h * 0.36)
+        ..close(),
+      ap,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_BgPainter old) => old.dark != dark;
 }
 
 // ── Reusable section card ─────────────────────────────────────────────────────
