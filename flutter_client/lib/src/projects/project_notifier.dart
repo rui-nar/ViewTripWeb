@@ -415,7 +415,7 @@ class ProjectNotifier extends ChangeNotifier {
         '/api/projects/${Uri.encodeComponent(name)}',
         {'trip_start': dateStr},
       );
-      await _silentReload(name);
+      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -491,7 +491,7 @@ class ProjectNotifier extends ChangeNotifier {
         '/api/projects/${Uri.encodeComponent(name)}/items/reorder',
         {'from_index': fromIndex, 'to_index': toIndex},
       );
-      await _silentReload(name);
+      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -658,7 +658,7 @@ class ProjectNotifier extends ChangeNotifier {
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
-      await _silentReload(projectName);
+      await _silentReloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -704,7 +704,7 @@ class ProjectNotifier extends ChangeNotifier {
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
       });
-      await _silentReload(projectName);
+      await _silentReloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -720,7 +720,7 @@ class ProjectNotifier extends ChangeNotifier {
     notifyListeners();
     try {
       await api.delete('/api/memories/$memoryId');
-      await _silentReload(projectName);
+      await _silentReloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -763,7 +763,7 @@ class ProjectNotifier extends ChangeNotifier {
     final projectName = this.projectName;
     try {
       await api.delete('/api/memories/$memoryId/photos/$photoUuid');
-      if (projectName != null) await _silentReload(projectName);
+      if (projectName != null) await _silentReloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -799,6 +799,8 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> updateSleepingOptions(List<String> opts) =>
       saveDayMeta(newDayMeta: dayMeta, newSleepingOptions: opts);
 
+  /// Full reload: details + geo. Use when a mutation can change map geometry
+  /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(String name) async {
     try {
       final results = await Future.wait([
@@ -806,24 +808,7 @@ class ProjectNotifier extends ChangeNotifier {
         _service.getGeo(name),
       ]);
       final details = results[0];
-      projectName = details['name'] as String? ?? name;
-      tripStart = details['trip_start'] as String?;
-      final rawActivities = details['activities'];
-      activities = rawActivities is List
-          ? rawActivities.cast<Map<String, dynamic>>()
-          : [];
-      final rawItems = details['items'];
-      items = rawItems is List
-          ? rawItems.cast<Map<String, dynamic>>()
-          : [];
-      final rawDm = details['day_meta'];
-      dayMeta = rawDm is Map
-          ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
-          : {};
-      final rawOpts = details['sleeping_options'];
-      sleepingOptions = rawOpts is List
-          ? List<String>.from(rawOpts)
-          : List<String>.from(_defaultSleepingOptions);
+      _applyDetails(details, name);
       geo = results[1];
       _updateStats();
       _buildFullTrack();
@@ -832,6 +817,41 @@ class ProjectNotifier extends ChangeNotifier {
     } finally {
       notifyListeners();
     }
+  }
+
+  /// Details-only reload: skips the heavy GeoJSON fetch. Use when a mutation
+  /// cannot change map geometry (reorder, trip-start, memory CRUD).
+  Future<void> _silentReloadDetailsOnly(String name) async {
+    try {
+      final details = await _service.getDetails(name);
+      _applyDetails(details, name);
+      _updateStats();
+    } on Exception catch (e) {
+      error = _msg(e);
+    } finally {
+      notifyListeners();
+    }
+  }
+
+  void _applyDetails(dynamic details, String name) {
+    projectName = details['name'] as String? ?? name;
+    tripStart   = details['trip_start'] as String?;
+    final rawActivities = details['activities'];
+    activities = rawActivities is List
+        ? rawActivities.cast<Map<String, dynamic>>()
+        : [];
+    final rawItems = details['items'];
+    items = rawItems is List
+        ? rawItems.cast<Map<String, dynamic>>()
+        : [];
+    final rawDm = details['day_meta'];
+    dayMeta = rawDm is Map
+        ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
+        : {};
+    final rawOpts = details['sleeping_options'];
+    sleepingOptions = rawOpts is List
+        ? List<String>.from(rawOpts)
+        : List<String>.from(_defaultSleepingOptions);
   }
 
   String _msg(Exception e) {
