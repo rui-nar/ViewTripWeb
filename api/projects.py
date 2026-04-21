@@ -259,13 +259,13 @@ def get_project_stats(
             ).first()
         stats = json.loads(row.stats_json or "{}")
 
-        # Backfill tag_options if missing from cached stats (projects cached before this feature)
-        if "tag_options" not in stats:
-            stats["tag_options"] = sorted({
-                t
-                for dm in json.loads(row.day_meta_json or "{}").values()
-                for t in (dm.get("tags") or [])
-            })
+        # Always derive tag_options live from day_meta_json so they are never
+        # stale (cached stats pre-date the tag-save fix and stored [] here).
+        stats["tag_options"] = sorted({
+            t
+            for dm in json.loads(row.day_meta_json or "{}").values()
+            for t in (dm.get("tags") or [])
+        })
     return stats
 
 
