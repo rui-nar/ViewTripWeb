@@ -13,6 +13,7 @@ const _kApiBaseUrl = String.fromEnvironment('API_BASE_URL');
 
 class ApiClient {
   final String baseUrl;
+  final http.Client _client = http.Client();
   String? _token;
 
   ApiClient({this.baseUrl = _kApiBaseUrl});
@@ -31,12 +32,12 @@ class ApiClient {
   };
 
   Future<dynamic> get(String path) async {
-    final res = await http.get(Uri.parse('$baseUrl$path'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl$path'), headers: _headers);
     return _handle(res);
   }
 
   Future<dynamic> post(String path, Map<String, dynamic> body) async {
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl$path'),
       headers: _headers,
       body: jsonEncode(body),
@@ -45,7 +46,7 @@ class ApiClient {
   }
 
   Future<dynamic> put(String path, Map<String, dynamic> body) async {
-    final res = await http.put(
+    final res = await _client.put(
       Uri.parse('$baseUrl$path'),
       headers: _headers,
       body: jsonEncode(body),
@@ -54,14 +55,14 @@ class ApiClient {
   }
 
   Future<dynamic> delete(String path) async {
-    final res = await http.delete(Uri.parse('$baseUrl$path'), headers: _headers);
+    final res = await _client.delete(Uri.parse('$baseUrl$path'), headers: _headers);
     return _handle(res);
   }
 
   /// Fetch a binary resource and return the raw response.
   /// Use this for file downloads where the body is not JSON.
   Future<http.Response> getRaw(String path) async {
-    final res = await http.get(Uri.parse('$baseUrl$path'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl$path'), headers: _headers);
     if (res.statusCode >= 200 && res.statusCode < 300) return res;
     throw ApiException(res.statusCode, res.body);
   }
