@@ -23,6 +23,28 @@
   <!-- Google Sign-In (required by google_sign_in_web) -->
   <meta name="google-signin-client_id" content="544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com">
 
+  <!-- Start DNS + TLS for Google Fonts CDN before Flutter boots -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+  <!-- Loading indicator shown until Flutter engine renders its first frame -->
+  <style>
+    body { margin: 0; background: #0D1B2A; }
+    #fl-loading {
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #fl-loading::after {
+      content: '';
+      width: 36px; height: 36px;
+      border: 3px solid #1e3a5f;
+      border-top-color: #1D6CF6;
+      border-radius: 50%;
+      animation: vt-spin 0.8s linear infinite;
+    }
+    @keyframes vt-spin { to { transform: rotate(360deg); } }
+  </style>
+
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -36,14 +58,7 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
+  <div id="fl-loading"></div>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
