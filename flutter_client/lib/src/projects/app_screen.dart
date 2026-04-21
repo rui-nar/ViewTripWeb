@@ -2361,6 +2361,8 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
+  // Points queued for auto-zoom on the next frame; null = nothing pending.
+  List<LatLng>? _pendingAutoZoomPts;
 
   static const _sentinel = Object();
 
@@ -2750,8 +2752,9 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
 
-      // Auto-zoom to selection
-      if (widget.autoZoom && geo != null &&
+      // Queue auto-zoom only when selection genuinely changed (not on geo updates
+      // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
+      if (selectionChanged2 && widget.autoZoom && geo != null &&
           (effectiveDays.isNotEmpty || selActId != null || selSegId != null)) {
         Set<String>? dayActIds;
         Set<String>? daySegIds;
@@ -2764,33 +2767,40 @@ class _Stage1MapPanelState extends State<_Stage1MapPanel> {
             daySegIds.addAll(r.segIds);
           }
         }
-        final pts = _extractSelectedPoints(
+        _pendingAutoZoomPts = _extractSelectedPoints(
             geo, selActId, selSegId, dayActIds, daySegIds);
-        if (pts.isNotEmpty) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            double minLat = pts.first.latitude, maxLat = pts.first.latitude;
-            double minLon = pts.first.longitude, maxLon = pts.first.longitude;
-            for (final p in pts) {
-              if (p.latitude < minLat) minLat = p.latitude;
-              if (p.latitude > maxLat) maxLat = p.latitude;
-              if (p.longitude < minLon) minLon = p.longitude;
-              if (p.longitude > maxLon) maxLon = p.longitude;
-            }
-            widget.mapController.fitCamera(
-              CameraFit.bounds(
-                bounds: LatLngBounds(
-                    LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
-                padding: const EdgeInsets.fromLTRB(48, 48, 48, 48 + 160),
-              ),
-            );
-          });
-        }
+      } else if (selectionChanged2) {
+        _pendingAutoZoomPts = null;
       }
     }
 
     if (!notifier.isLoading) {
       _fitBoundsOnce(_cachedPolylines.expand((p) => p.points).toList());
+    }
+
+    // Schedule auto-zoom AFTER _fitBoundsOnce so its postFrameCallback runs
+    // last and takes priority over the whole-track fit.
+    final pendingPts = _pendingAutoZoomPts;
+    if (pendingPts != null && pendingPts.isNotEmpty) {
+      _pendingAutoZoomPts = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        double minLat = pendingPts.first.latitude, maxLat = pendingPts.first.latitude;
+        double minLon = pendingPts.first.longitude, maxLon = pendingPts.first.longitude;
+        for (final p in pendingPts) {
+          if (p.latitude < minLat) minLat = p.latitude;
+          if (p.latitude > maxLat) maxLat = p.latitude;
+          if (p.longitude < minLon) minLon = p.longitude;
+          if (p.longitude > maxLon) maxLon = p.longitude;
+        }
+        widget.mapController.fitCamera(
+          CameraFit.bounds(
+            bounds: LatLngBounds(
+                LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+            padding: const EdgeInsets.fromLTRB(48, 48, 48, 48 + 160),
+          ),
+        );
+      });
     }
 
     return Stack(
