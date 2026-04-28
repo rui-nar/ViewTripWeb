@@ -1996,7 +1996,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               if (isWide)
                                 IconButton(
                                   icon: const Icon(Icons.edit_outlined, size: 16),
-                                  tooltip: 'Edit day',
                                   visualDensity: VisualDensity.compact,
                                   onPressed: () => showDayMetaDialog(context, notifier, h.dateKey),
                                 ),
@@ -2004,7 +2003,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 icon: const Icon(
                                     Icons.add_photo_alternate_outlined,
                                     size: 16),
-                                tooltip: 'Add memory',
                                 visualDensity: VisualDensity.compact,
                                 onPressed: () => showDialog(
                                   context: context,
@@ -2150,7 +2148,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               ),
                               trailing: IconButton(
                                 icon: const Icon(Icons.add_road, size: 18),
-                                tooltip: 'Add connecting segment after',
                                 onPressed: () => _showSegmentDialog(
                                   context,
                                   notifier,
@@ -2205,7 +2202,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 : null,
                             trailing: IconButton(
                               icon: const Icon(Icons.edit_outlined, size: 18),
-                              tooltip: 'Edit memory',
                               onPressed: () => showDialog(
                                 context: context,
                                 useRootNavigator: true,
@@ -2278,7 +2274,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   IconButton(
                                     icon: const Icon(Icons.edit_outlined,
                                         size: 18),
-                                    tooltip: 'Edit segment',
                                     onPressed: () => _showSegmentDialog(
                                       context,
                                       notifier,
@@ -2288,7 +2283,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ),
                                   IconButton(
                                     icon: const Icon(Icons.add_road, size: 18),
-                                    tooltip: 'Add connecting segment after',
                                     onPressed: () => _showSegmentDialog(
                                       context,
                                       notifier,
@@ -2350,14 +2344,22 @@ Future<void> _showSegmentDialog(
   Map<String, dynamic>? editSegment,
   int? insertAfterIndex,
 }) async {
-  await showDialog<void>(
-    context: context,
-    builder: (ctx) => SegmentDialog(
-      notifier: notifier,
-      editSegment: editSegment,
-      insertAfterIndex: insertAfterIndex,
-    ),
-  );
+  // Defer to a post-frame callback so the dialog is added to the overlay
+  // after the current frame's layout pass completes. Without this, the
+  // Overlay rebuild that showDialog triggers can cause the ReorderableListView's
+  // LayoutBuilder to process dirty elements (including OverlayPortal tooltips)
+  // during its layout callback, violating Flutter's render-mutation invariant.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!context.mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => SegmentDialog(
+        notifier: notifier,
+        editSegment: editSegment,
+        insertAfterIndex: insertAfterIndex,
+      ),
+    );
+  });
 }
 
 // ── _Stage1MapPanel — bare TileLayer, no controller, no polylines ─────────────

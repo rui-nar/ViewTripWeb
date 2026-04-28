@@ -46,7 +46,11 @@ class ConnectingSegment:
     end: SegmentEndpoint = field(default_factory=lambda: SegmentEndpoint(0.0, 0.0))
     label: str = ""   # e.g. "Basel → Paris (TGV)"
     date: Optional[str] = None  # ISO date "YYYY-MM-DD"
-    # Great-circle points are regenerated at load time — never stored in the file.
+    # Rail-track fields — only relevant for segment_type == "train"
+    route_mode: Literal["great_circle", "rail"] = "great_circle"
+    train_number: Optional[str] = None      # e.g. "ICE 596"
+    hafas_provider: Optional[str] = None    # e.g. "db"
+    route_polyline: Optional[str] = None    # JSON-encoded [[lon,lat],…], stored once
 
 
 @dataclass

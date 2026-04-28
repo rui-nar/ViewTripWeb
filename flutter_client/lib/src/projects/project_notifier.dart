@@ -519,7 +519,7 @@ class ProjectNotifier extends ChangeNotifier {
 
   // ── Segment CRUD ───────────────────────────────────────────────────────────
 
-  Future<void> addSegment({
+  Future<String> addSegment({
     required String segmentType,
     required String label,
     required double startLat,
@@ -528,9 +528,11 @@ class ProjectNotifier extends ChangeNotifier {
     required double endLon,
     int? insertAfterIndex,
     String? date,
+    String? trainNumber,
+    String? hafasProvider,
   }) async {
     final name = projectName;
-    if (name == null) return;
+    if (name == null) return '';
     final placeholder = {
       'item_type': 'segment',
       'segment': {
@@ -559,15 +561,19 @@ class ProjectNotifier extends ChangeNotifier {
           'end_lon': endLon,
           if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
           if (date != null) 'date': date,
+          if (trainNumber != null) 'train_number': trainNumber,
+          if (hafasProvider != null) 'hafas_provider': hafasProvider,
         },
       ) as Map<String, dynamic>;
       final newId = result['id'] as String;
       _upsertSegmentInGeo(newId, _segmentFeature(
           newId, segmentType, label, startLat, startLon, endLat, endLon));
       await _silentReloadDetailsOnly(name);
+      return newId;
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
+      return '';
     }
   }
 
@@ -580,13 +586,24 @@ class ProjectNotifier extends ChangeNotifier {
     required double endLat,
     required double endLon,
     String? date,
+    String? trainNumber,
+    String? hafasProvider,
+    String? routeMode,
   }) async {
     final name = projectName;
     if (name == null) return;
+    String? prevRouteMode;
+    double? prevStartLat, prevStartLon, prevEndLat, prevEndLon;
     for (final item in items) {
       if (item['item_type'] == 'segment' &&
           item['segment']?['id']?.toString() == segId) {
-        final seg = Map<String, dynamic>.from(item['segment'] as Map);
+        final old = item['segment'] as Map;
+        prevRouteMode = old['route_mode'] as String?;
+        prevStartLat  = (old['start']?['lat'] as num?)?.toDouble();
+        prevStartLon  = (old['start']?['lon'] as num?)?.toDouble();
+        prevEndLat    = (old['end']?['lat'] as num?)?.toDouble();
+        prevEndLon    = (old['end']?['lon'] as num?)?.toDouble();
+        final seg = Map<String, dynamic>.from(old);
         seg['segment_type'] = segmentType;
         seg['label'] = label;
         seg['date'] = date;
@@ -608,15 +625,75 @@ class ProjectNotifier extends ChangeNotifier {
           'end_lat': endLat,
           'end_lon': endLon,
           if (date != null) 'date': date,
+          if (trainNumber != null) 'train_number': trainNumber,
+          if (hafasProvider != null) 'hafas_provider': hafasProvider,
+          if (routeMode != null) 'route_mode': routeMode,
         },
       );
-      _upsertSegmentInGeo(segId, _segmentFeature(
-          segId, segmentType, label, startLat, startLon, endLat, endLon));
+      final coordsChanged = prevStartLat != startLat || prevStartLon != startLon ||
+          prevEndLat != endLat || prevEndLon != endLon;
+      final resetToGreatCircle = coordsChanged || routeMode == 'great_circle';
+      if (resetToGreatCircle || prevRouteMode != 'rail') {
+        _upsertSegmentInGeo(segId, _segmentFeature(
+            segId, segmentType, label, startLat, startLon, endLat, endLon));
+      }
       await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
     }
+  }
+
+  /// Resolve real railway geometry for a train segment via HAFAS + Overpass.
+  /// On success updates the segment's feature in [geo] and notifies listeners.
+  /// Returns the result map or throws on error.
+  Future<Map<String, dynamic>> resolveTrainRoute(
+    String segId, {
+    String? hafasProvider,
+    String? trainNumber,
+    String? date,
+  }) async {
+    final name = projectName;
+    if (name == null) throw Exception('No project open');
+    final result = await _service.resolveTrainRoute(
+      name, segId,
+      hafasProvider: hafasProvider,
+      trainNumber: trainNumber,
+      date: date,
+    );
+    final rawPolyline = result['polyline'];
+    if (rawPolyline is List) {
+      final coords = rawPolyline
+          .map((pt) => (pt is List) ? [pt[0] as num, pt[1] as num] : null)
+          .whereType<List<num>>()
+          .map((pt) => [pt[0].toDouble(), pt[1].toDouble()])
+          .toList();
+      // Patch the segment's geo feature with the resolved rail polyline
+      final feature = {
+        'type': 'Feature',
+        'geometry': {'type': 'LineString', 'coordinates': coords},
+        'properties': {
+          'type': 'segment',
+          'segment_id': segId,
+          'route_mode': 'rail',
+        },
+      };
+      _upsertSegmentInGeo(segId, feature);
+      // Update route_mode in local items list
+      for (final item in items) {
+        if (item['item_type'] == 'segment' &&
+            item['segment']?['id']?.toString() == segId) {
+          final seg = Map<String, dynamic>.from(item['segment'] as Map);
+          seg['route_mode'] = 'rail';
+          if (trainNumber != null) seg['train_number'] = trainNumber;
+          if (hafasProvider != null) seg['hafas_provider'] = hafasProvider;
+          item['segment'] = seg;
+          break;
+        }
+      }
+      notifyListeners();
+    }
+    return result;
   }
 
   Future<void> deleteSegment(String segId) async {

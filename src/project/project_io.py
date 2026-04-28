@@ -196,6 +196,10 @@ class ProjectIO:
                     "lon": seg.end.lon,
                     "source": seg.end.source,
                 },
+                "route_mode": seg.route_mode,
+                "train_number": seg.train_number,
+                "hafas_provider": seg.hafas_provider,
+                "route_polyline": seg.route_polyline,
             }
         return d
 
@@ -234,5 +238,9 @@ class ProjectIO:
                 lon=sd.get("end", {}).get("lon", 0.0),
                 source=sd.get("end", {}).get("source", "auto"),
             ),
+            route_mode=sd.get("route_mode", "great_circle"),
+            train_number=sd.get("train_number"),
+            hafas_provider=sd.get("hafas_provider"),
+            route_polyline=sd.get("route_polyline"),
         )
         return ProjectItem(item_type="segment", segment=seg)

@@ -680,6 +680,7 @@ class ProjectRepo:
             id=sd.get("id", ""),
             segment_type=sd.get("segment_type", "flight"),
             label=sd.get("label", ""),
+            date=sd.get("date"),
             start=SegmentEndpoint(
                 lat=sd.get("start", {}).get("lat", 0.0),
                 lon=sd.get("start", {}).get("lon", 0.0),
@@ -690,6 +691,10 @@ class ProjectRepo:
                 lon=sd.get("end", {}).get("lon", 0.0),
                 source=sd.get("end", {}).get("source", "auto"),
             ),
+            route_mode=sd.get("route_mode", "great_circle"),
+            train_number=sd.get("train_number"),
+            hafas_provider=sd.get("hafas_provider"),
+            route_polyline=sd.get("route_polyline"),
         )
 
     @staticmethod
@@ -737,12 +742,15 @@ def _compute_low_res_geo(project: Project) -> str:
             })
         elif item.item_type == "segment" and item.segment is not None:
             seg = item.segment
-            pts = great_circle_points(
-                seg.start.lat, seg.start.lon,
-                seg.end.lat,   seg.end.lon,
-                n_points=50,
-            )
-            coords = [[lon, lat] for lat, lon in pts]
+            if seg.route_mode == "rail" and seg.route_polyline:
+                coords = json.loads(seg.route_polyline)
+            else:
+                pts = great_circle_points(
+                    seg.start.lat, seg.start.lon,
+                    seg.end.lat,   seg.end.lon,
+                    n_points=50,
+                )
+                coords = [[lon, lat] for lat, lon in pts]
             if len(coords) < 2:
                 continue
             features.append({
@@ -753,6 +761,7 @@ def _compute_low_res_geo(project: Project) -> str:
                     "segment_id": seg.id,
                     "segment_type": seg.segment_type,
                     "label": seg.label,
+                    "route_mode": seg.route_mode,
                 },
             })
 

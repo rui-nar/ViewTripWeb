@@ -39,4 +39,28 @@ class ProjectService {
     final data = await api.get('/api/projects/$encoded/stats$query');
     return data as Map<String, dynamic>;
   }
+
+  /// POST /api/projects/{name}/segments/{segId}/resolve-route
+  Future<Map<String, dynamic>> resolveTrainRoute(
+    String projectName,
+    String segId, {
+    String? hafasProvider,
+    String? trainNumber,
+    String? date,
+  }) async {
+    final enc = Uri.encodeComponent(projectName);
+    final sid = Uri.encodeComponent(segId);
+    final body = <String, dynamic>{
+      if (hafasProvider != null && hafasProvider.isNotEmpty)
+        'hafas_provider': hafasProvider,
+      if (trainNumber != null && trainNumber.isNotEmpty)
+        'train_number': trainNumber,
+      if (date != null && date.isNotEmpty) 'date': date,
+    };
+    final data = await api.post(
+      '/api/projects/$enc/segments/$sid/resolve-route',
+      body,
+    );
+    return data as Map<String, dynamic>;
+  }
 }

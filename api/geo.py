@@ -132,13 +132,17 @@ def project_geo(
 
         elif item.item_type == "segment" and item.segment is not None:
             seg = item.segment
-            # great_circle_points returns [(lat, lon), ...]
-            pts = great_circle_points(
-                seg.start.lat, seg.start.lon,
-                seg.end.lat, seg.end.lon,
-                n_points=50,
-            )
-            coords = [[lon, lat] for lat, lon in pts]
+            if seg.route_mode == "rail" and seg.route_polyline:
+                import json as _json
+                coords = _json.loads(seg.route_polyline)
+            else:
+                # great_circle_points returns [(lat, lon), ...]
+                pts = great_circle_points(
+                    seg.start.lat, seg.start.lon,
+                    seg.end.lat, seg.end.lon,
+                    n_points=50,
+                )
+                coords = [[lon, lat] for lat, lon in pts]
             if len(coords) < 2:
                 continue
             features.append(_linestring(coords, {
@@ -146,6 +150,7 @@ def project_geo(
                 "segment_id": seg.id,
                 "segment_type": seg.segment_type,
                 "label": seg.label,
+                "route_mode": seg.route_mode,
             }))
 
     return {"type": "FeatureCollection", "features": features}

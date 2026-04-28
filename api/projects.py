@@ -798,6 +798,9 @@ class SegmentBody(BaseModel):
     end_lon: float = 0.0
     insert_after_index: Optional[int] = None  # POST only
     date: Optional[str] = None  # ISO date "YYYY-MM-DD"
+    train_number: Optional[str] = None
+    hafas_provider: Optional[str] = None
+    route_mode: Optional[str] = None  # "great_circle" | "rail"; None = preserve
 
 
 @router.post("/{name}/segments", status_code=status.HTTP_201_CREATED)
@@ -815,6 +818,8 @@ def create_segment(
         date=body.date,
         start=SegmentEndpoint(lat=body.start_lat, lon=body.start_lon),
         end=SegmentEndpoint(lat=body.end_lat, lon=body.end_lon),
+        train_number=body.train_number,
+        hafas_provider=body.hafas_provider,
     )
     item = ProjectItem(item_type="segment", segment=seg)
 
@@ -852,11 +857,23 @@ def update_segment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         for item in project.items:
             if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
-                item.segment.segment_type = body.segment_type
-                item.segment.label = body.label
-                item.segment.date = body.date
-                item.segment.start = SegmentEndpoint(lat=body.start_lat, lon=body.start_lon)
-                item.segment.end = SegmentEndpoint(lat=body.end_lat, lon=body.end_lon)
+                seg = item.segment
+                coords_changed = (
+                    seg.start.lat != body.start_lat or seg.start.lon != body.start_lon or
+                    seg.end.lat != body.end_lat     or seg.end.lon != body.end_lon
+                )
+                seg.segment_type  = body.segment_type
+                seg.label         = body.label
+                seg.date          = body.date
+                seg.start         = SegmentEndpoint(lat=body.start_lat, lon=body.start_lon)
+                seg.end           = SegmentEndpoint(lat=body.end_lat,   lon=body.end_lon)
+                seg.train_number  = body.train_number
+                seg.hafas_provider = body.hafas_provider
+                if coords_changed or body.route_mode == "great_circle":
+                    seg.route_mode     = "great_circle"
+                    seg.route_polyline = None
+                elif body.route_mode == "rail":
+                    seg.route_mode = "rail"
                 _repo.save_project(sess, user_info_id, project)
                 background_tasks.add_task(_refresh_stats_background, user_info_id, name)
                 return
@@ -913,6 +930,92 @@ def create_share_link(
             sess.commit()
         token = row.share_token
     return {"share_token": token}
+
+
+class ResolveRouteRequest(BaseModel):
+    hafas_provider: Optional[str] = None   # omit to skip HAFAS
+    train_number: Optional[str] = None
+    date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
+
+
+@router.post("/{name}/segments/{seg_id}/resolve-route")
+def resolve_segment_route(
+    name: str,
+    seg_id: str,
+    body: ResolveRouteRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """
+    Resolve the actual railway geometry for a train segment.
+
+    Calls the HAFAS schedule API (optional) to get the stop sequence, then
+    queries Overpass for the corresponding rail track geometry.
+    Stores the result in segment.route_polyline and sets route_mode="rail".
+
+    Returns {"polyline": [[lon,lat],…], "stop_count": N}.
+    On any unrecoverable error returns 422 and leaves the segment unchanged.
+    """
+    from src.services.hafas_service import HafasError, get_stop_sequence
+    from src.services.overpass_service import OverpassError, get_rail_geometry
+
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+        seg = next(
+            (i.segment for i in project.items
+             if i.item_type == "segment" and i.segment and i.segment.id == seg_id),
+            None,
+        )
+        if seg is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+
+        use_date = body.date or seg.date
+        stops: list[dict] = [
+            {"lat": seg.start.lat, "lon": seg.start.lon},
+            {"lat": seg.end.lat,   "lon": seg.end.lon},
+        ]
+
+        # Step 1: HAFAS stop sequence (optional)
+        if body.hafas_provider and body.train_number:
+            try:
+                stops = get_stop_sequence(
+                    provider=body.hafas_provider,
+                    train_number=body.train_number,
+                    date=use_date or "",
+                    start_lat=seg.start.lat,
+                    start_lon=seg.start.lon,
+                    end_lat=seg.end.lat,
+                    end_lon=seg.end.lon,
+                )
+            except HafasError:
+                # Fallback: coordinate-only; stops stays as start+end pair
+                pass
+
+        # Step 2: Overpass railway geometry
+        try:
+            polyline = get_rail_geometry(stops)
+        except OverpassError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not resolve rail geometry: {exc}",
+            )
+
+        # Step 3: Persist
+        seg.route_mode     = "rail"
+        seg.route_polyline = json.dumps(polyline)
+        if body.train_number:
+            seg.train_number = body.train_number
+        if body.hafas_provider:
+            seg.hafas_provider = body.hafas_provider
+        _repo.save_project(sess, user_info_id, project)
+
+    return {"polyline": polyline, "stop_count": len(stops)}
 
 
 @router.delete("/{name}/share", status_code=status.HTTP_204_NO_CONTENT)

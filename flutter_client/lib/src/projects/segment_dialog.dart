@@ -34,6 +34,21 @@ class _SegmentDialogState extends State<SegmentDialog> {
   bool _saving = false;
   Timer? _previewDebounce;
 
+  // Rail-track fields (train segments only)
+  String _routeMode = 'great_circle';
+  String _hafasProvider = 'db';
+  late TextEditingController _trainNumberCtrl;
+
+  static const _operators = [
+    ('db',   'DB (Deutsche Bahn)'),
+    ('obb',  'ÖBB (Austria)'),
+    ('sncf', 'SNCF (France)'),
+    ('sj',   'SJ (Sweden)'),
+    ('dsb',  'DSB (Denmark)'),
+    ('vr',   'VR (Finland)'),
+    ('nsb',  'NSB / Vy (Norway)'),
+  ];
+
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
   static String _toIso(DateTime d) =>
@@ -60,6 +75,11 @@ class _SegmentDialogState extends State<SegmentDialog> {
       _date = DateTime.tryParse(dateStr);
     }
 
+    // Rail-track fields
+    _routeMode     = (seg?['route_mode'] as String?) ?? 'great_circle';
+    _hafasProvider = (seg?['hafas_provider'] as String?) ?? 'db';
+    _trainNumberCtrl = TextEditingController(
+        text: seg?['train_number'] as String? ?? '');
     // Auto-populate from adjacent activities if creating new segment
     if (seg == null) _autoPopulate();
 
@@ -181,6 +201,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     _startLonCtrl.dispose();
     _endLatCtrl.dispose();
     _endLonCtrl.dispose();
+    _trainNumberCtrl.dispose();
     super.dispose();
   }
 
@@ -224,7 +245,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final endLat = double.parse(_endLatCtrl.text.trim());
     final endLon = double.parse(_endLonCtrl.text.trim());
     final dateStr = _date != null ? _toIso(_date!) : null;
+    final trainNum = _trainNumberCtrl.text.trim().isEmpty
+        ? null
+        : _trainNumberCtrl.text.trim();
+    final needsResolve = _segmentType == 'train' && _routeMode == 'rail';
 
+    String resolveSegId = '';
     if (widget.editSegment != null) {
       await widget.notifier.updateSegment(
         widget.editSegment!['id'] as String,
@@ -235,9 +261,13 @@ class _SegmentDialogState extends State<SegmentDialog> {
         endLat: endLat,
         endLon: endLon,
         date: dateStr,
+        trainNumber: trainNum,
+        hafasProvider: needsResolve ? _hafasProvider : null,
+        routeMode: _segmentType == 'train' ? _routeMode : null,
       );
+      resolveSegId = widget.editSegment!['id'] as String;
     } else {
-      await widget.notifier.addSegment(
+      resolveSegId = await widget.notifier.addSegment(
         segmentType: _segmentType,
         label: _labelCtrl.text.trim(),
         startLat: startLat,
@@ -246,10 +276,56 @@ class _SegmentDialogState extends State<SegmentDialog> {
         endLon: endLon,
         insertAfterIndex: widget.insertAfterIndex,
         date: dateStr,
+        trainNumber: trainNum,
+        hafasProvider: needsResolve ? _hafasProvider : null,
       );
     }
 
-    if (mounted) Navigator.of(context).pop();
+    if (!mounted) return;
+
+    if (needsResolve && resolveSegId.isNotEmpty) {
+      final messenger = ScaffoldMessenger.of(context);
+      final notifier  = widget.notifier;
+      final provider  = _hafasProvider;
+      final segId     = resolveSegId;
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Calculating rail route — this may take up to a minute…'),
+        duration: Duration(seconds: 10),
+      ));
+      Navigator.of(context).pop();
+      unawaited(_resolveAsync(notifier, segId, provider, trainNum, dateStr, messenger));
+    } else {
+      Navigator.of(context).pop();
+    }
+  }
+
+  static Future<void> _resolveAsync(
+    ProjectNotifier notifier,
+    String segId,
+    String hafasProvider,
+    String? trainNumber,
+    String? date,
+    ScaffoldMessengerState messenger,
+  ) async {
+    try {
+      final result = await notifier.resolveTrainRoute(
+        segId,
+        hafasProvider: hafasProvider,
+        trainNumber: trainNumber,
+        date: date,
+      );
+      final stopCount = result['stop_count'] as int? ?? 0;
+      messenger.showSnackBar(SnackBar(
+        content: Text('Rail route resolved · $stopCount stops'),
+        duration: const Duration(seconds: 5),
+      ));
+    } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      messenger.showSnackBar(SnackBar(
+        content: Text('Rail route unavailable: $msg'),
+        duration: const Duration(seconds: 6),
+      ));
+    }
   }
 
   String? _validateCoord(String? v) {
@@ -264,8 +340,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final isEdit = widget.editSegment != null;
     return AlertDialog(
       title: Text(isEdit ? 'Edit Segment' : 'Add Segment'),
-      content: SingleChildScrollView(
-        child: Form(
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Form(
           key: _formKey,
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -428,8 +506,64 @@ class _SegmentDialogState extends State<SegmentDialog> {
                   ),
                 ],
               ),
+
+              // ── Rail track section (train only) ──────────────────────
+              if (_segmentType == 'train') ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                Text('Rail track', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'great_circle',
+                        icon: Icon(Icons.show_chart, size: 16),
+                        label: Text('Great circle'),
+                      ),
+                      ButtonSegment(
+                        value: 'rail',
+                        icon: Icon(Icons.train, size: 16),
+                        label: Text('Follow rail lines'),
+                      ),
+                    ],
+                    selected: {_routeMode},
+                    onSelectionChanged: (s) =>
+                        setState(() => _routeMode = s.first),
+                    multiSelectionEnabled: false,
+                  ),
+                ),
+                if (_routeMode == 'rail') ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: _hafasProvider,
+                    decoration: const InputDecoration(
+                      labelText: 'Operator',
+                      isDense: true,
+                    ),
+                    items: _operators
+                        .map((o) => DropdownMenuItem(value: o.$1, child: Text(o.$2)))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setState(() => _hafasProvider = v);
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _trainNumberCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Train number (optional)',
+                      hintText: 'e.g. ICE 596',
+                      isDense: true,
+                    ),
+                  ),
+                ],
+              ],
             ],
           ),
+        ),
         ),
       ),
       actions: [
