@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Dict, List, Literal, Optional
 
 from src.models.activity import Activity
@@ -128,7 +129,22 @@ class Project:
                 existing_ids.add(act.id)
                 self.items.append(ProjectItem(item_type="activity", activity_id=act.id))
                 added += 1
+        if added:
+            self._fill_day_gaps()
         return added
+
+    def _fill_day_gaps(self) -> None:
+        """Create empty DayMeta entries for any dates missing between the first and last activity."""
+        dates = {a.start_date_local.date() for a in self.activities}
+        if not dates:
+            return
+        first, last = min(dates), max(dates)
+        cur = first
+        while cur <= last:
+            key = cur.isoformat()
+            if key not in self.day_meta:
+                self.day_meta[key] = DayMeta()
+            cur += timedelta(days=1)
 
     def remove_item(self, index: int) -> None:
         """Remove item at *index* from the ordered list (does not remove activity data)."""
