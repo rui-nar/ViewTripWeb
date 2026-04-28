@@ -1997,7 +1997,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 IconButton(
                                   icon: const Icon(Icons.edit_outlined, size: 16),
                                   visualDensity: VisualDensity.compact,
-                                  onPressed: () => showDayMetaDialog(context, notifier, h.dateKey),
+                                  onPressed: () => showDayMetaDialog(
+                                    context, notifier, h.dateKey,
+                                    orderedDateKeys: _orderedDayKeys(),
+                                  ),
                                 ),
                               IconButton(
                                 icon: const Icon(

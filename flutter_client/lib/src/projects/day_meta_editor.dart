@@ -25,12 +25,17 @@ const _weatherOptions = [
 void showDayMetaDialog(
   BuildContext context,
   ProjectNotifier notifier,
-  String dateKey,
-) {
+  String dateKey, {
+  List<String> orderedDateKeys = const [],
+}) {
   showDialog(
     context: context,
     useRootNavigator: true,
-    builder: (_) => _DayMetaDialogWrapper(notifier: notifier, dateKey: dateKey),
+    builder: (_) => _DayMetaDialogWrapper(
+      notifier: notifier,
+      dateKey: dateKey,
+      orderedDateKeys: orderedDateKeys,
+    ),
   );
 }
 
@@ -46,31 +51,125 @@ void showDayMetaSheet(
   );
 }
 
-// ── Dialog wrapper ─────────────────────────────────────────────────────────
+// ── Dialog wrapper — stateful for prev/next navigation ─────────────────────
 
-class _DayMetaDialogWrapper extends StatelessWidget {
+class _DayMetaDialogWrapper extends StatefulWidget {
   final ProjectNotifier notifier;
   final String dateKey;
+  final List<String> orderedDateKeys;
 
-  const _DayMetaDialogWrapper({required this.notifier, required this.dateKey});
+  const _DayMetaDialogWrapper({
+    required this.notifier,
+    required this.dateKey,
+    this.orderedDateKeys = const [],
+  });
+
+  @override
+  State<_DayMetaDialogWrapper> createState() => _DayMetaDialogWrapperState();
+}
+
+class _DayMetaDialogWrapperState extends State<_DayMetaDialogWrapper> {
+  late String _currentDateKey;
+  final _editorKey = GlobalKey<_DayMetaEditorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _currentDateKey = widget.dateKey;
+  }
+
+  int get _currentIdx => widget.orderedDateKeys.indexOf(_currentDateKey);
+  bool get _hasPrev => _currentIdx > 0;
+  bool get _hasNext => _currentIdx < widget.orderedDateKeys.length - 1;
+
+  Future<void> _navigate(int delta) async {
+    final nextIdx = _currentIdx + delta;
+    if (nextIdx < 0 || nextIdx >= widget.orderedDateKeys.length) return;
+    final nextKey = widget.orderedDateKeys[nextIdx];
+
+    if (_editorKey.currentState?._dirty ?? false) {
+      final result = await showDialog<String>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Unsaved changes'),
+          content: const Text('Save changes to this day before navigating?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('cancel'),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('discard'),
+              child: const Text('Discard'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop('save'),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || result == null || result == 'cancel') return;
+      if (result == 'save') {
+        final meta = _editorKey.currentState?._buildMeta() ?? {};
+        _persist(widget.notifier, _currentDateKey, meta);
+      }
+    }
+
+    setState(() => _currentDateKey = nextKey);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text('Edit day · $dateKey'),
-      content: SizedBox(
-        width: 440,
-        child: SingleChildScrollView(
-          child: DayMetaEditor(
-            dateKey: dateKey,
-            initialMeta: notifier.dayMeta[dateKey] ?? {},
-            sleepingOptions: notifier.sleepingOptions,
-            availableTags: notifier.availableTags,
-            onSave: (meta) {
-              _persist(notifier, dateKey, meta);
-              Navigator.of(context, rootNavigator: true).pop();
-            },
-            onCancel: () => Navigator.of(context, rootNavigator: true).pop(),
+    final hasNav = widget.orderedDateKeys.length > 1;
+
+    return GestureDetector(
+      onHorizontalDragEnd: hasNav
+          ? (details) {
+              final v = details.primaryVelocity ?? 0;
+              if (v < -300) _navigate(1);
+              if (v > 300) _navigate(-1);
+            }
+          : null,
+      child: AlertDialog(
+        title: hasNav
+            ? Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.chevron_left),
+                    onPressed: _hasPrev ? () => _navigate(-1) : null,
+                  ),
+                  Expanded(
+                    child: Text(
+                      'Edit day · $_currentDateKey',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.chevron_right),
+                    onPressed: _hasNext ? () => _navigate(1) : null,
+                  ),
+                ],
+              )
+            : Text('Edit day · $_currentDateKey'),
+        content: SizedBox(
+          width: 440,
+          child: SingleChildScrollView(
+            child: DayMetaEditor(
+              key: _editorKey,
+              dateKey: _currentDateKey,
+              initialMeta: widget.notifier.dayMeta[_currentDateKey] ?? {},
+              sleepingOptions: widget.notifier.sleepingOptions,
+              availableTags: widget.notifier.availableTags,
+              onSaveOnly: (meta) => _persist(widget.notifier, _currentDateKey, meta),
+              onSave: (meta) {
+                _persist(widget.notifier, _currentDateKey, meta);
+                Navigator.of(context, rootNavigator: true).pop();
+              },
+              onCancel: () => Navigator.of(context, rootNavigator: true).pop(),
+            ),
           ),
         ),
       ),
@@ -100,6 +199,7 @@ class _DayMetaSheetWrapper extends StatelessWidget {
           initialMeta: notifier.dayMeta[dateKey] ?? {},
           sleepingOptions: notifier.sleepingOptions,
           availableTags: notifier.availableTags,
+          onSaveOnly: (meta) => _persist(notifier, dateKey, meta),
           onSave: (meta) {
             _persist(notifier, dateKey, meta);
             Navigator.of(ctx).pop();
@@ -135,6 +235,7 @@ class DayMetaEditor extends StatefulWidget {
   final List<String> sleepingOptions;
   final List<String> availableTags;
   final void Function(Map<String, dynamic> meta) onSave;
+  final void Function(Map<String, dynamic> meta)? onSaveOnly;
   final VoidCallback? onCancel;
 
   const DayMetaEditor({
@@ -144,6 +245,7 @@ class DayMetaEditor extends StatefulWidget {
     required this.sleepingOptions,
     this.availableTags = const [],
     required this.onSave,
+    this.onSaveOnly,
     this.onCancel,
   });
 
@@ -158,15 +260,39 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
   late TextEditingController _journalCtrl;
   late List<String> _tags;
   final TextEditingController _tagInputCtrl = TextEditingController();
+  bool _dirty = false;
 
   @override
   void initState() {
     super.initState();
-    final m = widget.initialMeta;
+    _applyMeta(widget.initialMeta);
+  }
+
+  @override
+  void didUpdateWidget(DayMetaEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.dateKey != widget.dateKey) {
+      _journalCtrl.text = widget.initialMeta['journal'] as String? ?? '';
+      setState(() {
+        _applyMetaNoJournal(widget.initialMeta);
+        _dirty = false;
+      });
+    }
+  }
+
+  void _applyMeta(Map<String, dynamic> m) {
+    _difficulty  = m['difficulty'] as String?;
+    _sleeping    = m['sleeping']   as String?;
+    _weather     = m['weather']    as String?;
+    _journalCtrl = TextEditingController(text: m['journal'] as String? ?? '');
+    final rawTags = m['tags'];
+    _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
+  }
+
+  void _applyMetaNoJournal(Map<String, dynamic> m) {
     _difficulty = m['difficulty'] as String?;
     _sleeping   = m['sleeping']   as String?;
     _weather    = m['weather']    as String?;
-    _journalCtrl = TextEditingController(text: m['journal'] as String? ?? '');
     final rawTags = m['tags'];
     _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
   }
@@ -184,6 +310,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     setState(() {
       _tags.add(t);
       _tagInputCtrl.clear();
+      _dirty = true;
     });
   }
 
@@ -217,7 +344,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
               ChoiceChip(
                 label: Text(label),
                 selected: _difficulty == val,
-                onSelected: (_) => setState(() => _difficulty = val),
+                onSelected: (_) => setState(() { _difficulty = val; _dirty = true; }),
               ),
           ],
         ),
@@ -233,7 +360,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
               ChoiceChip(
                 label: Text(label),
                 selected: _weather == val,
-                onSelected: (_) => setState(() => _weather = val),
+                onSelected: (_) => setState(() { _weather = val; _dirty = true; }),
               ),
           ],
         ),
@@ -254,7 +381,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             for (final opt in widget.sleepingOptions)
               DropdownMenuItem(value: opt, child: Text(opt)),
           ],
-          onChanged: (v) => setState(() => _sleeping = v),
+          onChanged: (v) => setState(() { _sleeping = v; _dirty = true; }),
         ),
         const SizedBox(height: 16),
 
@@ -271,6 +398,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             hintText: 'Notes, highlights, thoughts…',
             contentPadding: EdgeInsets.all(12),
           ),
+          onChanged: (_) => setState(() => _dirty = true),
         ),
         const SizedBox(height: 20),
 
@@ -281,10 +409,9 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
           spacing: 6,
           runSpacing: 4,
           children: [
-            // Existing project tags as toggleable chips
             for (final tag in {
               ...widget.availableTags,
-              ..._tags,   // include any tags on this day not yet in project-wide list
+              ..._tags,
             }.toList()..sort())
               FilterChip(
                 label: Text(tag),
@@ -295,12 +422,12 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                   } else {
                     _tags.remove(tag);
                   }
+                  _dirty = true;
                 }),
               ),
           ],
         ),
         const SizedBox(height: 8),
-        // New tag input
         Row(
           children: [
             Expanded(
@@ -310,8 +437,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                   isDense: true,
                   hintText: 'New tag…',
                   border: OutlineInputBorder(),
-                  contentPadding:
-                      EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 ),
                 onSubmitted: _addTag,
                 textInputAction: TextInputAction.done,
@@ -320,7 +446,6 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             const SizedBox(width: 8),
             IconButton.outlined(
               icon: const Icon(Icons.add),
-              tooltip: 'Add tag',
               onPressed: () => _addTag(_tagInputCtrl.text),
             ),
           ],
@@ -337,10 +462,23 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                 child: const Text('Cancel'),
               ),
             const SizedBox(width: 8),
+            if (widget.onSaveOnly != null) ...[
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
+                onPressed: _dirty
+                    ? () {
+                        widget.onSaveOnly!(_buildMeta());
+                        setState(() => _dirty = false);
+                      }
+                    : null,
+                child: const Text('Save'),
+              ),
+              const SizedBox(width: 8),
+            ],
             ElevatedButton(
               style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
-              onPressed: () => widget.onSave(_buildMeta()),
-              child: const Text('Save'),
+              onPressed: _dirty ? () => widget.onSave(_buildMeta()) : null,
+              child: Text(widget.onSaveOnly != null ? 'Save & Close' : 'Save'),
             ),
           ],
         ),
