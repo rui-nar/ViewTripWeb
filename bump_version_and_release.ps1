@@ -44,7 +44,7 @@ function Step([string]$msg) {
 Step "Reading current version from pubspec.yaml"
 
 $pubspecContent = Get-Content $PUBSPEC -Raw
-if ($pubspecContent -notmatch '^version:\s*(\d+)\.(\d+)\.(\d+)\+(\d+)'  ) {
+if ($pubspecContent -notmatch '(?m)^version:\s*(\d+)\.(\d+)\.(\d+)\+(\d+)') {
     Die "Could not parse 'version: X.Y.Z+N' from pubspec.yaml"
 }
 $major = [int]$Matches[1]
@@ -87,7 +87,7 @@ Write-Host $releaseBody
 
 # ── 4. Update pubspec.yaml ────────────────────────────────────────────────────
 Step "Updating pubspec.yaml to $newVersion"
-$updated = $pubspecContent -replace "^(version:\s*)$([regex]::Escape($oldVersion))", "`${1}$newVersion"
+$updated = $pubspecContent -replace "(?m)^(version:\s*)$([regex]::Escape($oldVersion))", "`${1}$newVersion"
 Set-Content -Path $PUBSPEC -Value $updated -NoNewline
 
 # ── 5. Commit ─────────────────────────────────────────────────────────────────
