@@ -553,12 +553,25 @@ class _AppScreenState extends State<AppScreen> {
       (n) => n.projectName ?? widget.projectName,
     );
 
+    final isNarrow = MediaQuery.sizeOf(context).width < 720;
+
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/projects'),
-        ),
+        leading: isNarrow
+            ? IconButton(
+                icon: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: Icon(
+                    _panelOpen ? Icons.menu_open : Icons.menu,
+                    key: ValueKey(_panelOpen),
+                  ),
+                ),
+                onPressed: _togglePanel,
+              )
+            : IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => context.go('/projects'),
+              ),
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -577,6 +590,12 @@ class _AppScreenState extends State<AppScreen> {
           ],
         ),
         actions: [
+          if (isNarrow)
+            IconButton(
+              icon: const Icon(Icons.arrow_back),
+              tooltip: 'Back to projects',
+              onPressed: () => context.go('/projects'),
+            ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
             child: SegmentedButton<bool>(
@@ -843,25 +862,6 @@ class _AppScreenState extends State<AppScreen> {
                   ),
                 ),
 
-                // Toggle FAB: sits just above the elevation chart
-                Positioned(
-                  left: 12,
-                  bottom: 172,
-                  child: Builder(builder: (ctx) {
-                    final theme = Theme.of(ctx);
-                    return FloatingActionButton.small(
-                      heroTag: 'activityPanelToggle',
-                      backgroundColor: theme.colorScheme.surface,
-                      foregroundColor: theme.colorScheme.onSurface,
-                      onPressed: _togglePanel,
-                      child: AnimatedRotation(
-                        turns: _panelOpen ? 0.5 : 0.0,
-                        duration: const Duration(milliseconds: 280),
-                        child: const Icon(Icons.chevron_right),
-                      ),
-                    );
-                  }),
-                ),
               ],
             );
           }
