@@ -11,8 +11,10 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
-import 'app_screen.dart';
+import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'elevation_chart.dart';
+import 'map_panel.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
 

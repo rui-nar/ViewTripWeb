@@ -6,8 +6,9 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart';
-import '../projects/app_screen.dart';
 import '../projects/basemaps.dart';
+import '../projects/elevation_chart.dart';
+import '../projects/map_panel.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
 

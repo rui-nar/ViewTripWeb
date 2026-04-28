@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../map/great_circle.dart';
-import '../map/location_picker_dialog.dart';
+import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
 
 class SegmentDialog extends StatefulWidget {
@@ -107,9 +107,9 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final lat2 = double.tryParse(_endLatCtrl.text.trim());
     final lon2 = double.tryParse(_endLonCtrl.text.trim());
     if (lat1 != null && lon1 != null && lat2 != null && lon2 != null) {
-      widget.notifier.setPreviewArc(greatCirclePoints(lat1, lon1, lat2, lon2));
+      widget.notifier.previewArcNotifier.value = greatCirclePoints(lat1, lon1, lat2, lon2);
     } else {
-      widget.notifier.setPreviewArc(null);
+      widget.notifier.previewArcNotifier.value = null;
     }
   }
 
@@ -194,7 +194,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     // locked during unmount (finalizeTree / lockState).
     final notifier = widget.notifier;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      notifier.setPreviewArc(null);
+      notifier.previewArcNotifier.value = null;
     });
     _labelCtrl.dispose();
     _startLatCtrl.dispose();
@@ -222,7 +222,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         initialLat: double.tryParse(latCtrl.text.trim()),
         initialLon: double.tryParse(lonCtrl.text.trim()),
         geo: widget.notifier.geo,
-        notifier: widget.notifier,
+        previewArcNotifier: widget.notifier.previewArcNotifier,
         otherLat: double.tryParse(otherLatCtrl.text.trim()),
         otherLon: double.tryParse(otherLonCtrl.text.trim()),
         isStart: isStart,

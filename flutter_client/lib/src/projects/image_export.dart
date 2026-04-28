@@ -1,0 +1,320 @@
+// ignore_for_file: avoid_web_libraries_in_flutter
+library;
+
+import 'dart:html' as html;
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+
+import 'basemaps.dart';
+import 'elevation_chart.dart';
+import 'project_notifier.dart';
+
+const _kExportMapWidth    = 2400.0;
+const _kExportMapHeight   = 1600.0;
+const _kExportChartHeight = 200.0;
+
+class ImageExportOptions {
+  final bool includeChart;
+  final bool includeTitle;
+  const ImageExportOptions({
+    required this.includeChart,
+    required this.includeTitle,
+  });
+}
+
+class ImageExportDialog extends StatefulWidget {
+  final String projectName;
+  final void Function(ImageExportOptions) onExport;
+  const ImageExportDialog({required this.projectName, required this.onExport});
+  @override
+  State<ImageExportDialog> createState() => _ImageExportDialogState();
+}
+
+class _ImageExportDialogState extends State<ImageExportDialog> {
+  bool _includeChart = true;
+  bool _includeTitle = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Export image'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Canvas: 2400 × 1600 px',
+              style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            title: const Text('Include elevation chart'),
+            value: _includeChart,
+            onChanged: (v) => setState(() => _includeChart = v!),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+          ),
+          CheckboxListTile(
+            title: const Text('Include project title'),
+            value: _includeTitle,
+            onChanged: (v) => setState(() => _includeTitle = v!),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final opts = ImageExportOptions(
+              includeChart: _includeChart,
+              includeTitle: _includeTitle,
+            );
+            Navigator.of(context).pop();
+            widget.onExport(opts);
+          },
+          child: const Text('Export PNG'),
+        ),
+      ],
+    );
+  }
+}
+
+bool uint8ListEquals(Uint8List a, Uint8List b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+/// Returns true if the thumbnail is a near-uniform (blank/grey) image —
+/// i.e., tiles haven't started rendering yet.
+bool isThumbnailBlank(Uint8List bytes) {
+  if (bytes.length < 16) return true;
+  final ref = bytes[0];
+  // Sample R channel every 4 bytes (RGBA). Any pixel differing by >12
+  // from the first means real content has appeared.
+  for (var i = 0; i < bytes.length; i += 4) {
+    if ((bytes[i] - ref).abs() > 12) return false;
+  }
+  return true;
+}
+
+/// Renders an offscreen map + optional elevation chart, polls until tiles
+/// settle, then triggers a PNG download.
+Future<void> performOffscreenExport({
+  required BuildContext context,
+  required ProjectNotifier notifier,
+  required String projectName,
+  required ImageExportOptions opts,
+}) async {
+  final geo = notifier.geo;
+  if (geo == null) return;
+
+  final allPoints = <LatLng>[];
+  final polylines = <Polyline>[];
+  final features = geo['features'];
+  if (features is List) {
+    for (final feature in features) {
+      if (feature is! Map) continue;
+      final geometry = feature['geometry'] as Map? ?? {};
+      final coords = geometry['coordinates'];
+      if (coords is! List) continue;
+      final points = <LatLng>[];
+      for (final c in coords) {
+        if (c is List && c.length >= 2) {
+          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+        }
+      }
+      if (points.isEmpty) continue;
+      allPoints.addAll(points);
+      final props = feature['properties'] as Map? ?? {};
+      final isSegment = props['type'] == 'segment';
+      polylines.add(Polyline(
+        points: points,
+        color: isSegment ? const Color(0xFF888888) : const Color(0xFFF97316),
+        strokeWidth: isSegment ? 2.0 : 2.5,
+      ));
+    }
+  }
+
+  final exportKey  = GlobalKey();
+  final exportCtrl = MapController();
+
+  // Render at the actual screen width so the widget is within the browser
+  // viewport — Flutter Web culls off-screen widgets and tiles never load.
+  // Scale down from _kExportMapWidth proportionally, then use a matching
+  // pixelRatio in toImage() to get back to the target 2400×1600 resolution.
+  final screenSize = MediaQuery.of(context).size;
+  final renderW = screenSize.width.clamp(600.0, _kExportMapWidth);
+  final renderScale = renderW / _kExportMapWidth;
+  final renderMapH   = _kExportMapHeight   * renderScale;
+  final renderChartH = _kExportChartHeight * renderScale;
+  final totalRenderH = renderMapH + (opts.includeChart ? renderChartH : 0);
+  final captureRatio = _kExportMapWidth / renderW;
+
+  final overlay = OverlayEntry(builder: (_) {
+    // Widget renders at renderW×totalRenderH at position 0,0 — fully within
+    // the viewport so Flutter paints it and the tile provider fetches tiles.
+    // toImage(pixelRatio: captureRatio) upscales the capture to the target
+    // 2400×1600 resolution.
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: IgnorePointer(
+        child: SizedBox(
+          width: renderW,
+          height: totalRenderH,
+          child: RepaintBoundary(
+            key: exportKey,
+            child: Container(
+              color: Colors.white,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: FlutterMap(
+                      mapController: exportCtrl,
+                      options: MapOptions(
+                        initialCameraFit: allPoints.isNotEmpty
+                            ? CameraFit.bounds(
+                                bounds: LatLngBounds.fromPoints(allPoints),
+                                padding: const EdgeInsets.all(48))
+                            : null,
+                        interactionOptions: const InteractionOptions(
+                            flags: InteractiveFlag.none),
+                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate: kActiveViewBasemapUrl,
+                          userAgentPackageName: 'com.viewtrip.client',
+                          tileProvider: NetworkTileProvider(),
+                          maxNativeZoom: 22,
+                        ),
+                        TileLayer(
+                          urlTemplate: kActiveViewLabelsUrl,
+                          subdomains: kActiveViewLabelsSubdomains,
+                          userAgentPackageName: 'com.viewtrip.client',
+                          tileProvider: NetworkTileProvider(),
+                          maxNativeZoom: 22,
+                        ),
+                        if (polylines.isNotEmpty)
+                          PolylineLayer(
+                              polylines: polylines,
+                              simplificationTolerance: 0),
+                      ],
+                    ),
+                  ),
+                  if (opts.includeChart)
+                    SizedBox(
+                      height: renderChartH,
+                      child: ElevationChart(
+                        activities: notifier.activities,
+                        selectedActivityId: null,
+                        track: notifier.fullTrack,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
+  Overlay.of(context).insert(overlay);
+
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.showSnackBar(const SnackBar(
+    content: Row(children: [
+      SizedBox(width: 16, height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+      SizedBox(width: 12),
+      Text('Preparing map export…'),
+    ]),
+    duration: Duration(seconds: 60),
+  ));
+
+  // Wait for tiles to settle: poll low-res thumbnails until two consecutive
+  // captures are pixel-identical (or a 12 s deadline is reached).
+  await Future.delayed(const Duration(seconds: 1));
+  {
+    Uint8List? prevBytes;
+    for (var i = 0; i < 18; i++) {
+      final b = exportKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (b == null) break;
+      // Use pixelRatio 0.05 → ~120×80 px thumbnail — fast to capture & compare.
+      final probe = await b.toImage(pixelRatio: 0.05);
+      final bd = await probe.toByteData();
+      probe.dispose();
+      if (bd == null) break;
+      final bytes = bd.buffer.asUint8List();
+      if (prevBytes != null &&
+          uint8ListEquals(prevBytes, bytes) &&
+          !isThumbnailBlank(bytes)) { break; }
+      prevBytes = bytes;
+      await Future.delayed(const Duration(milliseconds: 600));
+    }
+  }
+
+  try {
+    final boundary = exportKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null) return;
+
+    ui.Image image = await boundary.toImage(pixelRatio: captureRatio);
+
+    // Composite onto white background + optional title overlay.
+    {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+      canvas.drawImage(image, Offset.zero, Paint());
+      if (opts.includeTitle) {
+        final tp = TextPainter(
+          text: TextSpan(
+            text: projectName,
+            style: const TextStyle(
+              color: Colors.black,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: image.width.toDouble() - 32);
+        tp.paint(canvas, const Offset(16, 16));
+      }
+      final picture = recorder.endRecording();
+      image = await picture.toImage(image.width, image.height);
+    }
+
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null) return;
+    final bytes = byteData.buffer.asUint8List();
+    final blob = html.Blob([bytes], 'image/png');
+    final url  = html.Url.createObjectUrlFromBlob(blob);
+    html.AnchorElement(href: url)
+      ..setAttribute('download', '$projectName.png')
+      ..click();
+    html.Url.revokeObjectUrl(url);
+
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(const SnackBar(
+        content: Text('Export complete'), duration: Duration(seconds: 3)));
+  } finally {
+    overlay.remove();
+    exportCtrl.dispose();
+  }
+}

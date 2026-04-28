@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
-import '../map/location_picker_dialog.dart';
+import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
 
 /// Dialog to create or edit a memory.

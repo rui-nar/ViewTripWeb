@@ -287,15 +287,9 @@ class ProjectNotifier extends ChangeNotifier {
     totalElevationGainM = elev;
   }
 
-  /// Live arc preview while a SegmentDialog is open.
-  /// Uses a ValueNotifier so updates don't trigger a full notifyListeners().
+  /// Live arc preview while a SegmentDialog or LocationPickerDialog is open.
+  /// Callers write directly to `.value` — updates don't trigger notifyListeners().
   final ValueNotifier<List<LatLng>?> previewArcNotifier = ValueNotifier(null);
-
-  List<LatLng>? get previewArc => previewArcNotifier.value;
-
-  void setPreviewArc(List<LatLng>? arc) {
-    previewArcNotifier.value = arc; // no notifyListeners() — only arc layer rebuilds
-  }
 
   /// Map cursor driven by the elevation chart touch position.
   /// Uses a ValueNotifier so only the marker layer rebuilds on cursor moves.
@@ -421,6 +415,51 @@ class ProjectNotifier extends ChangeNotifier {
       error = _msg(e);
       notifyListeners();
       return null;
+    }
+  }
+
+  // ── API config pass-throughs ───────────────────────────────────────────────
+
+  String get apiBaseUrl => api.baseUrl;
+  String? get apiToken => api.tokenForUpload;
+
+  // ── Share ──────────────────────────────────────────────────────────────────
+
+  /// Creates (or retrieves) the public share token for this project.
+  /// Throws [Exception] with a user-readable message on API error.
+  Future<String> createShareToken() async {
+    final name = projectName;
+    if (name == null) throw Exception('No project open');
+    try {
+      final result = await api.post(
+        '/api/projects/${Uri.encodeComponent(name)}/share',
+        {},
+      ) as Map<String, dynamic>;
+      return result['share_token'] as String? ?? '';
+    } on ApiException catch (e) {
+      throw Exception(e.body);
+    }
+  }
+
+  /// Revokes the public share token for this project.
+  /// Throws [Exception] with a user-readable message on API error.
+  Future<void> revokeShareToken() async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      await api.delete('/api/projects/${Uri.encodeComponent(name)}/share');
+    } on ApiException catch (e) {
+      throw Exception(e.body);
+    }
+  }
+
+  /// Fetches raw bytes for an export API path.
+  /// Throws [Exception] with a user-readable message on API error.
+  Future<http.Response> fetchExportBytes(String apiPath) async {
+    try {
+      return await api.getRaw(apiPath);
+    } on ApiException catch (e) {
+      throw Exception(e.body);
     }
   }
 

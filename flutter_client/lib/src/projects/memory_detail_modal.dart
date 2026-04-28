@@ -1,7 +1,6 @@
 // ignore_for_file: deprecated_member_use
 import 'package:flutter/material.dart';
 
-import '../api/client.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
 
@@ -112,17 +111,18 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
 
   String _photoThumbUrl(String uuid) {
     final id = _current['id']?.toString() ?? '';
-    return '${api.baseUrl}/api/memories/$id/photos/$uuid/thumb';
+    return '${widget.notifier.apiBaseUrl}/api/memories/$id/photos/$uuid/thumb';
   }
 
   String _photoFullUrl(String uuid) {
     final id = _current['id']?.toString() ?? '';
-    return '${api.baseUrl}/api/memories/$id/photos/$uuid';
+    return '${widget.notifier.apiBaseUrl}/api/memories/$id/photos/$uuid';
   }
 
-  Map<String, String> get _authHeaders => api.tokenForUpload != null
-      ? {'Authorization': 'Bearer ${api.tokenForUpload}'}
-      : {};
+  Map<String, String> get _authHeaders {
+    final token = widget.notifier.apiToken;
+    return token != null ? {'Authorization': 'Bearer $token'} : {};
+  }
 
   @override
   Widget build(BuildContext context) {

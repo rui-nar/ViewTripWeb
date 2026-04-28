@@ -7,8 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
-import 'great_circle.dart';
-import '../projects/project_notifier.dart';
+import '../map/great_circle.dart';
 
 typedef LatLonResult = ({double lat, double lon});
 
@@ -25,7 +24,7 @@ class LocationPickerDialog extends StatefulWidget {
   final Map<String, dynamic>? geo;
 
   /// When set, the picker updates the live segment arc preview on the main map.
-  final ProjectNotifier? notifier;
+  final ValueNotifier<List<LatLng>?>? previewArcNotifier;
 
   /// Coordinates of the *other* endpoint — used to draw the preview arc.
   final double? otherLat;
@@ -40,7 +39,7 @@ class LocationPickerDialog extends StatefulWidget {
     this.initialLat,
     this.initialLon,
     this.geo,
-    this.notifier,
+    this.previewArcNotifier,
     this.otherLat,
     this.otherLon,
     this.isStart = true,
@@ -75,15 +74,15 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
     setState(() => _picked = latlng);
     _mapController.move(latlng, _mapController.camera.zoom);
     // Drive live arc preview on the main map if both endpoints are known
-    final notifier = widget.notifier;
+    final arcNotifier = widget.previewArcNotifier;
     final oLat = widget.otherLat;
     final oLon = widget.otherLon;
-    if (notifier != null && oLat != null && oLon != null) {
+    if (arcNotifier != null && oLat != null && oLon != null) {
       final lat1 = widget.isStart ? latlng.latitude  : oLat;
       final lon1 = widget.isStart ? latlng.longitude : oLon;
       final lat2 = widget.isStart ? oLat  : latlng.latitude;
       final lon2 = widget.isStart ? oLon  : latlng.longitude;
-      notifier.setPreviewArc(greatCirclePoints(lat1, lon1, lat2, lon2));
+      arcNotifier.value = greatCirclePoints(lat1, lon1, lat2, lon2);
     }
   }
 
