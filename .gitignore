@@ -56,3 +56,5 @@ web_client/
 
 # Deployment script — contains credentials, not for version control
 deploy.ps1
+dev.bat
+dev client.bat
