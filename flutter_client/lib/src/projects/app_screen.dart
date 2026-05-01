@@ -11,7 +11,6 @@ import 'package:provider/provider.dart';
 
 import 'package:flutter/services.dart';
 
-import '../auth/auth_notifier.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
 import 'project_notifier.dart';
@@ -55,10 +54,6 @@ class _AppScreenState extends State<AppScreen> {
     super.dispose();
   }
 
-  Future<void> _logout() async {
-    await context.read<AuthNotifier>().logout();
-    if (mounted) context.go('/login');
-  }
 
   Future<void> _downloadFile(String apiPath, String fallbackFilename) async {
     setState(() => _isExporting = true);
@@ -326,11 +321,7 @@ class _AppScreenState extends State<AppScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          tooltip: 'Back to projects',
-          onPressed: () => context.go('/projects'),
-        ),
+        automaticallyImplyLeading: false,
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -449,7 +440,7 @@ class _AppScreenState extends State<AppScreen> {
                     ),
                   );
                   case 3: context.push('/settings');
-                  case 4: _logout();
+                  case 4: context.go('/projects');
                 }
               },
               itemBuilder: (_) => [
@@ -489,8 +480,8 @@ class _AppScreenState extends State<AppScreen> {
                 const PopupMenuItem(
                   value: 4,
                   child: ListTile(
-                    leading: Icon(Icons.logout),
-                    title: Text('Logout'),
+                    leading: Icon(Icons.arrow_back),
+                    title: Text('Back to projects'),
                   ),
                 ),
               ],
@@ -541,9 +532,9 @@ class _AppScreenState extends State<AppScreen> {
               onPressed: () => context.push('/settings'),
             ),
             IconButton(
-              icon: const Icon(Icons.logout),
-              tooltip: 'Logout',
-              onPressed: _logout,
+              icon: const Icon(Icons.arrow_back),
+              tooltip: 'Back to projects',
+              onPressed: () => context.go('/projects'),
             ),
             const SizedBox(width: 4),
           ],
