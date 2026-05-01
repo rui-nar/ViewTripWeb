@@ -349,6 +349,7 @@ class _AppScreenState extends State<AppScreen> {
           ],
         ),
         actions: [
+          // Hamburger — narrow only
           if (isNarrow)
             IconButton(
               icon: AnimatedSwitcher(
@@ -360,6 +361,8 @@ class _AppScreenState extends State<AppScreen> {
               ),
               onPressed: _togglePanel,
             ),
+
+          // View mode toggle — always
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
             child: SegmentedButton<bool>(
@@ -383,6 +386,8 @@ class _AppScreenState extends State<AppScreen> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
           ),
+
+          // Tag filter — always visible
           Consumer<ProjectNotifier>(
             builder: (_, n, __) {
               final active = n.tagFilter.isNotEmpty;
@@ -402,6 +407,8 @@ class _AppScreenState extends State<AppScreen> {
               );
             },
           ),
+
+          // Auto-zoom — always visible
           IconButton(
             icon: Icon(
               Icons.fit_screen,
@@ -410,58 +417,136 @@ class _AppScreenState extends State<AppScreen> {
             tooltip: _autoZoom ? 'Auto-zoom on (tap to disable)' : 'Auto-zoom to selection',
             onPressed: () => setState(() => _autoZoom = !_autoZoom),
           ),
-          IconButton(
-            icon: _isExporting
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download),
-            tooltip: 'Export project',
-            onPressed: _isExporting ? null : _exportOptions,
-          ),
-          IconButton(
-            icon: const Icon(Icons.playlist_add),
-            tooltip: 'Import activities from Strava',
-            onPressed: () => context.push(
-                '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.share_outlined),
-            tooltip: 'Share project',
-            onPressed: _showShareDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.bar_chart_outlined),
-            tooltip: 'Statistics',
-            onPressed: () => context.push(
-              '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-              extra: context.read<ProjectNotifier>().availableTags,
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.tune),
-            tooltip: 'Project settings',
-            onPressed: () => showDialog<void>(
-              context: context,
-              useRootNavigator: true,
-              builder: (_) => ProjectSettingsDialog(
-                notifier: context.read<ProjectNotifier>(),
+
+          if (isNarrow) ...[
+            // ── Narrow: stats + strava visible; rest in overflow ──────────
+            IconButton(
+              icon: const Icon(Icons.bar_chart_outlined),
+              tooltip: 'Statistics',
+              onPressed: () => context.push(
+                '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+                extra: context.read<ProjectNotifier>().availableTags,
               ),
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Settings',
-            onPressed: () => context.push('/settings'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: _logout,
-          ),
-          const SizedBox(width: 4),
+            IconButton(
+              icon: const Icon(Icons.playlist_add),
+              tooltip: 'Import activities from Strava',
+              onPressed: () => context.push(
+                  '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+            ),
+            PopupMenuButton<int>(
+              icon: const Icon(Icons.more_vert),
+              tooltip: 'More options',
+              onSelected: (v) {
+                switch (v) {
+                  case 0: if (!_isExporting) _exportOptions();
+                  case 1: _showShareDialog();
+                  case 2: showDialog<void>(
+                    context: context,
+                    useRootNavigator: true,
+                    builder: (_) => ProjectSettingsDialog(
+                      notifier: context.read<ProjectNotifier>(),
+                    ),
+                  );
+                  case 3: context.push('/settings');
+                  case 4: _logout();
+                }
+              },
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: 0,
+                  enabled: !_isExporting,
+                  child: ListTile(
+                    leading: _isExporting
+                        ? const SizedBox(width: 24, height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.download),
+                    title: const Text('Export project'),
+                    enabled: !_isExporting,
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 1,
+                  child: ListTile(
+                    leading: Icon(Icons.share_outlined),
+                    title: Text('Share'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 2,
+                  child: ListTile(
+                    leading: Icon(Icons.tune),
+                    title: Text('Project settings'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 3,
+                  child: ListTile(
+                    leading: Icon(Icons.settings_outlined),
+                    title: Text('Settings'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 4,
+                  child: ListTile(
+                    leading: Icon(Icons.logout),
+                    title: Text('Logout'),
+                  ),
+                ),
+              ],
+            ),
+          ] else ...[
+            // ── Wide: all icons in original order ─────────────────────────
+            IconButton(
+              icon: _isExporting
+                  ? const SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.download),
+              tooltip: 'Export project',
+              onPressed: _isExporting ? null : _exportOptions,
+            ),
+            IconButton(
+              icon: const Icon(Icons.playlist_add),
+              tooltip: 'Import activities from Strava',
+              onPressed: () => context.push(
+                  '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.share_outlined),
+              tooltip: 'Share project',
+              onPressed: _showShareDialog,
+            ),
+            IconButton(
+              icon: const Icon(Icons.bar_chart_outlined),
+              tooltip: 'Statistics',
+              onPressed: () => context.push(
+                '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+                extra: context.read<ProjectNotifier>().availableTags,
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.tune),
+              tooltip: 'Project settings',
+              onPressed: () => showDialog<void>(
+                context: context,
+                useRootNavigator: true,
+                builder: (_) => ProjectSettingsDialog(
+                  notifier: context.read<ProjectNotifier>(),
+                ),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.settings_outlined),
+              tooltip: 'Settings',
+              onPressed: () => context.push('/settings'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.logout),
+              tooltip: 'Logout',
+              onPressed: _logout,
+            ),
+            const SizedBox(width: 4),
+          ],
         ],
       ),
       body: LayoutBuilder(
