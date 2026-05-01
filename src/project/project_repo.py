@@ -854,6 +854,14 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
         best_dist_day = best_elev_day = None
         best_dist_m   = best_elev_m   = 0.0
 
+    # ── Sleeping counts ──────────────────────────────────────────────────────
+    sleeping_counts: Dict[str, int] = defaultdict(int)
+    for date_key, meta in project.day_meta.items():
+        if allowed_dates is not None and date_key not in allowed_dates:
+            continue
+        if meta.sleeping:
+            sleeping_counts[meta.sleeping] += 1
+
     # ── Distance + counts by segment type ───────────────────────────────────
     seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}
     seg_counts: Dict[str, int] = defaultdict(int)
@@ -885,5 +893,6 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
             "boat":   seg_dist["boat"],
             "bus":    seg_dist["bus"],
         },
+        "sleeping_counts": dict(sleeping_counts),
         "tag_options": tag_options,
     }

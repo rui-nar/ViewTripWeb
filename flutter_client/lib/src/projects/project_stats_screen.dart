@@ -45,6 +45,21 @@ String _fmtDate(String? isoDate) {
 String _capitalize(String s) =>
     s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 
+// ── Sleeping colours (cycling palette) ────────────────────────────────────────
+
+const _sleepingPalette = [
+  Color(0xFF6366F1), // indigo
+  Color(0xFF10B981), // emerald
+  Color(0xFFF59E0B), // amber
+  Color(0xFFEF4444), // red
+  Color(0xFF3B82F6), // blue
+  Color(0xFFEC4899), // pink
+  Color(0xFF14B8A6), // teal
+  Color(0xFFF97316), // orange
+];
+
+Color _sleepingColor(int index) => _sleepingPalette[index % _sleepingPalette.length];
+
 // ── Mode colours ──────────────────────────────────────────────────────────────
 
 const _modeColors = {
@@ -287,6 +302,15 @@ class _StatsBody extends StatelessWidget {
     final byMode =
         (stats['distance_by_mode'] as Map<String, dynamic>?) ?? {};
 
+    final sleepingCounts =
+        (stats['sleeping_counts'] as Map<String, dynamic>?) ?? {};
+    final sleepingEntries = sleepingCounts.entries
+        .where((e) => (e.value as num? ?? 0) > 0)
+        .toList()
+      ..sort((a, b) => (b.value as num).compareTo(a.value as num));
+    final totalSleepingNights =
+        sleepingEntries.fold<int>(0, (s, e) => s + (e.value as num).toInt());
+
     // Filter to modes with non-zero distance.
     final modeEntries = _modeColors.entries
         .where((e) => ((byMode[e.key] as num?)?.toDouble() ?? 0.0) > 0)
@@ -500,6 +524,62 @@ class _StatsBody extends StatelessWidget {
                     const SizedBox(width: 4),
                     Text('${_modeLabels[e.key] ?? e.key}  '
                         '${_fmtDistance(m)}'),
+                  ],
+                );
+              }).toList(),
+            ),
+          ],
+
+          // ── Sleeping pie chart ─────────────────────────────────────────
+          if (sleepingEntries.isNotEmpty) ...[
+            _SectionHeader('Nights by sleeping mode'),
+            SizedBox(
+              height: 240,
+              child: PieChart(
+                PieChartData(
+                  sectionsSpace: 2,
+                  centerSpaceRadius: 48,
+                  sections: sleepingEntries.indexed.map((pair) {
+                    final idx = pair.$1;
+                    final entry = pair.$2;
+                    final count = (entry.value as num).toInt();
+                    final pct = totalSleepingNights > 0
+                        ? count / totalSleepingNights * 100
+                        : 0.0;
+                    return PieChartSectionData(
+                      color: _sleepingColor(idx),
+                      value: count.toDouble(),
+                      title: '${pct.toStringAsFixed(0)}%',
+                      radius: 72,
+                      titleStyle: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 16,
+              runSpacing: 8,
+              children: sleepingEntries.indexed.map((pair) {
+                final idx = pair.$1;
+                final entry = pair.$2;
+                final count = (entry.value as num).toInt();
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                          color: _sleepingColor(idx), shape: BoxShape.circle),
+                    ),
+                    const SizedBox(width: 4),
+                    Text('${entry.key}  ·  ${count}n'),
                   ],
                 );
               }).toList(),
