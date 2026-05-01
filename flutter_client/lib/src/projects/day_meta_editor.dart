@@ -42,12 +42,17 @@ void showDayMetaDialog(
 void showDayMetaSheet(
   BuildContext context,
   ProjectNotifier notifier,
-  String dateKey,
-) {
+  String dateKey, {
+  List<String> orderedDateKeys = const [],
+}) {
   showModalBottomSheet(
     context: context,
     isScrollControlled: true,
-    builder: (_) => _DayMetaSheetWrapper(notifier: notifier, dateKey: dateKey),
+    builder: (_) => _DayMetaSheetWrapper(
+      notifier: notifier,
+      dateKey: dateKey,
+      orderedDateKeys: orderedDateKeys,
+    ),
   );
 }
 
@@ -179,43 +184,139 @@ class _DayMetaDialogWrapperState extends State<_DayMetaDialogWrapper> {
 
 // ── Bottom-sheet wrapper ───────────────────────────────────────────────────
 
-class _DayMetaSheetWrapper extends StatelessWidget {
+class _DayMetaSheetWrapper extends StatefulWidget {
   final ProjectNotifier notifier;
   final String dateKey;
+  final List<String> orderedDateKeys;
 
-  const _DayMetaSheetWrapper({required this.notifier, required this.dateKey});
+  const _DayMetaSheetWrapper({
+    required this.notifier,
+    required this.dateKey,
+    this.orderedDateKeys = const [],
+  });
+
+  @override
+  State<_DayMetaSheetWrapper> createState() => _DayMetaSheetWrapperState();
+}
+
+class _DayMetaSheetWrapperState extends State<_DayMetaSheetWrapper> {
+  late String _currentDateKey;
+  final _editorKey = GlobalKey<_DayMetaEditorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _currentDateKey = widget.dateKey;
+  }
+
+  int get _currentIdx => widget.orderedDateKeys.indexOf(_currentDateKey);
+  bool get _hasPrev => _currentIdx > 0;
+  bool get _hasNext => _currentIdx < widget.orderedDateKeys.length - 1;
+  bool get _hasNav => widget.orderedDateKeys.length > 1;
+
+  Future<void> _navigate(int delta) async {
+    final nextIdx = _currentIdx + delta;
+    if (nextIdx < 0 || nextIdx >= widget.orderedDateKeys.length) return;
+    final nextKey = widget.orderedDateKeys[nextIdx];
+
+    if (_editorKey.currentState?._dirty ?? false) {
+      final result = await showDialog<String>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Unsaved changes'),
+          content: const Text('Save changes to this day before navigating?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('cancel'),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('discard'),
+              child: const Text('Discard'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop('save'),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || result == null || result == 'cancel') return;
+      if (result == 'save') {
+        final meta = _editorKey.currentState?._buildMeta() ?? {};
+        _persist(widget.notifier, _currentDateKey, meta);
+      }
+    }
+
+    setState(() => _currentDateKey = nextKey);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return DraggableScrollableSheet(
       initialChildSize: 0.65,
       minChildSize: 0.4,
       maxChildSize: 0.95,
       expand: false,
-      builder: (ctx, sc) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: Column(
-          children: [
-            const _SheetHandle(),
-            Expanded(
-              child: SingleChildScrollView(
-                controller: sc,
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                child: DayMetaEditor(
-                  dateKey: dateKey,
-                  initialMeta: notifier.dayMeta[dateKey] ?? {},
-                  sleepingOptions: notifier.sleepingOptions,
-                  availableTags: notifier.availableTags,
-                  onSaveOnly: (meta) => _persist(notifier, dateKey, meta),
-                  onSave: (meta) {
-                    _persist(notifier, dateKey, meta);
-                    Navigator.of(ctx).pop();
-                  },
-                  onCancel: () => Navigator.of(ctx).pop(),
+      builder: (ctx, sc) => GestureDetector(
+        onHorizontalDragEnd: _hasNav
+            ? (details) {
+                final v = details.primaryVelocity ?? 0;
+                if (v < -300) _navigate(1);
+                if (v > 300) _navigate(-1);
+              }
+            : null,
+        child: Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Column(
+            children: [
+              const _SheetHandle(),
+              if (_hasNav)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.chevron_left),
+                        onPressed: _hasPrev ? () => _navigate(-1) : null,
+                      ),
+                      Expanded(
+                        child: Text(
+                          _currentDateKey,
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.titleSmall,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.chevron_right),
+                        onPressed: _hasNext ? () => _navigate(1) : null,
+                      ),
+                    ],
+                  ),
+                ),
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: sc,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: DayMetaEditor(
+                    key: _editorKey,
+                    dateKey: _currentDateKey,
+                    initialMeta: widget.notifier.dayMeta[_currentDateKey] ?? {},
+                    sleepingOptions: widget.notifier.sleepingOptions,
+                    availableTags: widget.notifier.availableTags,
+                    onSaveOnly: (meta) => _persist(widget.notifier, _currentDateKey, meta),
+                    onSave: (meta) {
+                      _persist(widget.notifier, _currentDateKey, meta);
+                      Navigator.of(ctx).pop();
+                    },
+                    onCancel: () => Navigator.of(ctx).pop(),
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

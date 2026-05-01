@@ -814,7 +814,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                         label: const Text('Edit day'),
                                         onPressed: () {
                                           setState(() => _expandedDayEdits.remove(h.dateKey));
-                                          showDayMetaSheet(context, notifier, h.dateKey);
+                                          showDayMetaSheet(context, notifier, h.dateKey,
+                                              orderedDateKeys: _orderedDayKeys());
                                         },
                                       ),
                                       const SizedBox(width: 8),
