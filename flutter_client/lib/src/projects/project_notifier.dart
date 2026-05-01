@@ -200,9 +200,8 @@ class ProjectNotifier extends ChangeNotifier {
           ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
           : {};
       final rawOpts = details['sleeping_options'];
-      sleepingOptions = rawOpts is List
-          ? List<String>.from(rawOpts)
-          : List<String>.from(_defaultSleepingOptions);
+      final optList = rawOpts is List ? List<String>.from(rawOpts) : <String>[];
+      sleepingOptions = optList.isNotEmpty ? optList : List<String>.from(_defaultSleepingOptions);
       geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();

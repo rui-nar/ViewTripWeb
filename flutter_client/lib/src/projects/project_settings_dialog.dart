@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'project_notifier.dart';
 
+const _kAppVersion = '0.20.0';
+
 class ProjectSettingsDialog extends StatefulWidget {
   final ProjectNotifier notifier;
 
@@ -324,7 +326,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
               const Divider(height: 32),
 
               Text(
-                '© ${DateTime.now().year} ViewTripWeb · v0.19.0',
+                '© ${DateTime.now().year} ViewTripWeb · v$_kAppVersion',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),

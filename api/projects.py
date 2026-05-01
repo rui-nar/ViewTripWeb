@@ -334,7 +334,7 @@ def update_day_meta(
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         row.day_meta_json = json.dumps(body.day_meta)
-        if body.sleeping_options is not None:
+        if body.sleeping_options:  # ignore empty list — never wipe sleeping options
             row.sleeping_options_json = json.dumps(body.sleeping_options)
         row.updated_at = time.time()
         sess.add(row)

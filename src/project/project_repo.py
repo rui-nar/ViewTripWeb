@@ -149,7 +149,9 @@ class ProjectRepo:
                  "tags": dm.tags}
             for dk, dm in project.day_meta.items()
         })
-        row.sleeping_options_json = json.dumps(project.sleeping_options)
+        row.sleeping_options_json = json.dumps(
+            project.sleeping_options if project.sleeping_options else DEFAULT_SLEEPING_OPTIONS
+        )
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
 
