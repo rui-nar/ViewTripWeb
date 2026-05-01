@@ -326,21 +326,11 @@ class _AppScreenState extends State<AppScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        leading: isNarrow
-            ? IconButton(
-                icon: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    _panelOpen ? Icons.menu_open : Icons.menu,
-                    key: ValueKey(_panelOpen),
-                  ),
-                ),
-                onPressed: _togglePanel,
-              )
-            : IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => context.go('/projects'),
-              ),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: 'Back to projects',
+          onPressed: () => context.go('/projects'),
+        ),
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -361,9 +351,14 @@ class _AppScreenState extends State<AppScreen> {
         actions: [
           if (isNarrow)
             IconButton(
-              icon: const Icon(Icons.arrow_back),
-              tooltip: 'Back to projects',
-              onPressed: () => context.go('/projects'),
+              icon: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: Icon(
+                  _panelOpen ? Icons.menu_open : Icons.menu,
+                  key: ValueKey(_panelOpen),
+                ),
+              ),
+              onPressed: _togglePanel,
             ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),

@@ -154,8 +154,8 @@ class _DayMetaDialogWrapperState extends State<_DayMetaDialogWrapper> {
                 ],
               )
             : Text('Edit day · $_currentDateKey'),
-        content: SizedBox(
-          width: 440,
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
           child: SingleChildScrollView(
             child: DayMetaEditor(
               key: _editorKey,
@@ -194,17 +194,49 @@ class _DayMetaSheetWrapper extends StatelessWidget {
       expand: false,
       builder: (ctx, sc) => Padding(
         padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: DayMetaEditor(
-          dateKey: dateKey,
-          initialMeta: notifier.dayMeta[dateKey] ?? {},
-          sleepingOptions: notifier.sleepingOptions,
-          availableTags: notifier.availableTags,
-          onSaveOnly: (meta) => _persist(notifier, dateKey, meta),
-          onSave: (meta) {
-            _persist(notifier, dateKey, meta);
-            Navigator.of(ctx).pop();
-          },
-          onCancel: () => Navigator.of(ctx).pop(),
+        child: Column(
+          children: [
+            const _SheetHandle(),
+            Expanded(
+              child: SingleChildScrollView(
+                controller: sc,
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                child: DayMetaEditor(
+                  dateKey: dateKey,
+                  initialMeta: notifier.dayMeta[dateKey] ?? {},
+                  sleepingOptions: notifier.sleepingOptions,
+                  availableTags: notifier.availableTags,
+                  onSaveOnly: (meta) => _persist(notifier, dateKey, meta),
+                  onSave: (meta) {
+                    _persist(notifier, dateKey, meta);
+                    Navigator.of(ctx).pop();
+                  },
+                  onCancel: () => Navigator.of(ctx).pop(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Sheet drag handle ──────────────────────────────────────────────────────
+
+class _SheetHandle extends StatelessWidget {
+  const _SheetHandle();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Container(
+        width: 36,
+        height: 4,
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(2),
         ),
       ),
     );

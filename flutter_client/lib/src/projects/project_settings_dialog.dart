@@ -320,6 +320,16 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                 label: const Text('Add option'),
                 onPressed: _addOption,
               ),
+
+              const Divider(height: 32),
+
+              Text(
+                '© ${DateTime.now().year} ViewTripWeb · v0.19.0',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
             ],
           ),
         ),
