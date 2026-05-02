@@ -239,12 +239,13 @@ class _AppScreenState extends State<AppScreen> {
     }
   }
 
-  void _showTagFilterSheet(BuildContext context, ProjectNotifier notifier,
+  void _showFilterSheet(BuildContext context, ProjectNotifier notifier,
       {required bool readOnly}) {
     showModalBottomSheet<void>(
       context: context,
       useRootNavigator: true,
-      builder: (_) => TagFilterSheet(notifier: notifier, readOnly: readOnly),
+      isScrollControlled: true,
+      builder: (_) => FilterSheet(notifier: notifier, readOnly: readOnly),
     );
   }
 
@@ -378,23 +379,23 @@ class _AppScreenState extends State<AppScreen> {
             ),
           ),
 
-          // Tag filter — always visible
+          // Filter — always visible
           Consumer<ProjectNotifier>(
             builder: (_, n, __) {
-              final active = n.tagFilter.isNotEmpty;
+              final active = n.hasActiveFilter;
               return IconButton(
                 icon: Badge(
                   isLabelVisible: active,
-                  label: Text('${n.tagFilter.length}'),
+                  label: Text('${n.activeFilterCount}'),
                   child: Icon(
-                    Icons.label_outline,
+                    Icons.tune,
                     color: active ? Theme.of(context).colorScheme.primary : null,
                   ),
                 ),
-                tooltip: 'Filter by tag',
-                onPressed: n.availableTags.isEmpty
+                tooltip: 'Filter',
+                onPressed: !n.hasFilterableContent
                     ? null
-                    : () => _showTagFilterSheet(context, n, readOnly: false),
+                    : () => _showFilterSheet(context, n, readOnly: false),
               );
             },
           ),

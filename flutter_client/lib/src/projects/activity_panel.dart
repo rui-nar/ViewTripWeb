@@ -106,12 +106,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
   List<Object> _displayList = [];
   bool _initialCollapseApplied = false;
 
-  // Filtered display list cache — rebuilt only when base list, tag filter,
+  // Filtered display list cache — rebuilt only when base list, filter state,
   // or memories-only toggle actually changes.
-  List<Object>? _cachedBaseList;     // which _displayList the cache was built from
+  List<Object>? _cachedBaseList;
   List<Object>? _cachedFilteredList;
-  Set<String>? _lastTagFilter;
-  bool? _lastMemoriesOnly;
+  Set<String>?  _lastSelectedDays;
+  bool?         _lastHasFilter;
+  bool?         _lastMemoriesOnly;
 
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
@@ -417,19 +418,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return last;
   }
 
-  List<Object> _applyTagFilter(
-    List<Object> list,
-    Set<String> filter,
-    Map<String, Map<String, dynamic>> dayMeta,
-  ) {
-    if (filter.isEmpty) return list;
+  List<Object> _applyDayFilter(List<Object> list, Set<String> allowed) {
     final result = <Object>[];
     bool include = false;
     for (final entry in list) {
       if (entry is _DayHeader) {
-        final rawTags = dayMeta[entry.dateKey]?['tags'];
-        final tags = rawTags is List ? rawTags.cast<String>().toSet() : const <String>{};
-        include = tags.any((t) => filter.contains(t));
+        include = allowed.contains(entry.dateKey);
         if (include) result.add(entry);
       } else if (include) {
         result.add(entry);
@@ -575,20 +569,21 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 )
               : Builder(builder: (context) {
                   _rebuildDisplayList(items, notifier.tripStart);
-                  final tagFilter = notifier.tagFilter;
+                  final hasFilter    = notifier.hasActiveFilter;
+                  final selectedDays = notifier.selectedDays;
                   // Recompute filtered list only when inputs actually change.
                   if (!identical(_displayList, _cachedBaseList) ||
-                      _lastTagFilter != tagFilter ||
+                      _lastHasFilter != hasFilter ||
+                      !identical(_lastSelectedDays, selectedDays) ||
                       _lastMemoriesOnly != _memoriesOnly) {
                     var dl = _displayList;
-                    if (tagFilter.isNotEmpty) {
-                      dl = _applyTagFilter(dl, tagFilter, notifier.dayMeta);
-                    }
+                    if (hasFilter) dl = _applyDayFilter(dl, selectedDays);
                     if (_memoriesOnly) dl = _applyMemoriesFilter(dl);
-                    _cachedBaseList = _displayList;
+                    _cachedBaseList     = _displayList;
                     _cachedFilteredList = dl;
-                    _lastTagFilter = Set.unmodifiable(tagFilter);
-                    _lastMemoriesOnly = _memoriesOnly;
+                    _lastHasFilter      = hasFilter;
+                    _lastSelectedDays   = selectedDays;
+                    _lastMemoriesOnly   = _memoriesOnly;
                   }
                   final displayList = _cachedFilteredList!;
                   return ReorderableListView.builder(
@@ -1256,13 +1251,22 @@ class _BulkTagDialogState extends State<_BulkTagDialog> {
   }
 }
 
-// ── Tag filter sheet ─────────────────────────────────────────────────────────
+// ── Filter sheet ─────────────────────────────────────────────────────────────
 
-class TagFilterSheet extends StatelessWidget {
+const _transportLabels = {
+  'flight': 'Flight',
+  'train':  'Train',
+  'bus':    'Bus',
+  'boat':   'Boat',
+};
+
+String _capitalize(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+
+class FilterSheet extends StatelessWidget {
   final ProjectNotifier notifier;
   final bool readOnly;
 
-  const TagFilterSheet({super.key, required this.notifier, required this.readOnly});
+  const FilterSheet({super.key, required this.notifier, required this.readOnly});
 
   @override
   Widget build(BuildContext context) {
@@ -1270,58 +1274,114 @@ class TagFilterSheet extends StatelessWidget {
       listenable: notifier,
       builder: (context, _) {
         final theme = Theme.of(context);
-        final tags = notifier.availableTags;
-        final active = notifier.tagFilter;
+        final tags       = notifier.availableTags;
+        final sleeping   = notifier.availableSleepingModes;
+        final actTypes   = notifier.availableActivityTypes;
+        final transport  = notifier.availableTransportationMeans;
+        final hasAny     = notifier.hasActiveFilter;
 
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+              16, 16, 16, 32 + MediaQuery.of(context).viewInsets.bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // ── Header ───────────────────────────────────────────────────
               Row(
                 children: [
-                  Text('Filter by tag', style: theme.textTheme.titleMedium),
+                  Text('Filter', style: theme.textTheme.titleMedium),
                   const Spacer(),
-                  if (active.isNotEmpty)
+                  if (hasAny)
                     TextButton(
                       onPressed: () {
-                        notifier.setTagFilter({});
+                        notifier.clearAllFilters();
                         Navigator.of(context).pop();
                       },
-                      child: const Text('Clear'),
+                      child: const Text('Clear all'),
                     ),
                 ],
               ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  FilterChip(
-                    label: const Text('All days'),
-                    selected: active.isEmpty,
-                    onSelected: (_) {
-                      notifier.setTagFilter({});
-                      Navigator.of(context).pop();
-                    },
-                  ),
-                  for (final tag in tags)
-                    FilterChip(
-                      label: Text(tag),
-                      selected: active.contains(tag),
-                      onSelected: (on) {
-                        final next = Set<String>.of(active);
-                        if (on) { next.add(tag); } else { next.remove(tag); }
-                        notifier.setTagFilter(next);
-                      },
-                    ),
-                ],
-              ),
+
+              // ── Tags ──────────────────────────────────────────────────────
+              if (tags.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text('Tags', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                _chips(
+                  options:  tags,
+                  selected: notifier.tagFilter,
+                  label:    (t) => t,
+                  onToggle: (next) => notifier.setFilters(tags: next),
+                ),
+              ],
+
+              // ── Sleeping mode ─────────────────────────────────────────────
+              if (sleeping.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text('Sleeping mode', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                _chips(
+                  options:  sleeping,
+                  selected: notifier.sleepingFilter,
+                  label:    (s) => s,
+                  onToggle: (next) => notifier.setFilters(sleeping: next),
+                ),
+              ],
+
+              // ── Activity type ─────────────────────────────────────────────
+              if (actTypes.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text('Activity type', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                _chips(
+                  options:  actTypes,
+                  selected: notifier.activityTypeFilter,
+                  label:    _capitalize,
+                  onToggle: (next) => notifier.setFilters(activityTypes: next),
+                ),
+              ],
+
+              // ── Transportation ────────────────────────────────────────────
+              if (transport.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text('Transportation', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                _chips(
+                  options:  transport,
+                  selected: notifier.transportFilter,
+                  label:    (t) => _transportLabels[t] ?? _capitalize(t),
+                  onToggle: (next) => notifier.setFilters(transport: next),
+                ),
+              ],
             ],
           ),
         );
       },
     );
   }
+
+  Widget _chips({
+    required List<String> options,
+    required Set<String> selected,
+    required String Function(String) label,
+    required void Function(Set<String>) onToggle,
+  }) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: options.map((opt) => FilterChip(
+        label: Text(label(opt)),
+        selected: selected.contains(opt),
+        onSelected: readOnly ? null : (on) {
+          final next = Set<String>.of(selected);
+          if (on) { next.add(opt); } else { next.remove(opt); }
+          onToggle(next);
+        },
+      )).toList(),
+    );
+  }
 }
+
+// Keep old name as alias so shared_project_screen.dart doesn't break.
+typedef TagFilterSheet = FilterSheet;
