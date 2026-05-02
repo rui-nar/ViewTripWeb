@@ -2,7 +2,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../api/client.dart';
 import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
 
@@ -218,19 +217,13 @@ class _MemoryDialogState extends State<MemoryDialog> {
       }
 
       if (mounted) Navigator.of(context).pop();
-    } on ApiException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed: ${e.body}')),
-        );
-      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   String _photoThumbUrl(String memoryId, String uuid) =>
-      '${api.baseUrl}/api/memories/$memoryId/photos/$uuid/thumb';
+      '${widget.notifier.apiBaseUrl}/api/memories/$memoryId/photos/$uuid/thumb';
 
   @override
   Widget build(BuildContext context) {
@@ -395,8 +388,8 @@ class _MemoryDialogState extends State<MemoryDialog> {
                                 width: 80,
                                 height: 80,
                                 fit: BoxFit.cover,
-                                headers: api.tokenForUpload != null
-                                    ? {'Authorization': 'Bearer ${api.tokenForUpload}'}
+                                headers: widget.notifier.apiToken != null
+                                    ? {'Authorization': 'Bearer ${widget.notifier.apiToken}'}
                                     : {},
                               ),
                             ),
