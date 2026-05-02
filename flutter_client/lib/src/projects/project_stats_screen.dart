@@ -58,7 +58,8 @@ const _sleepingPalette = [
   Color(0xFFF97316), // orange
 ];
 
-Color _sleepingColor(int index) => _sleepingPalette[index % _sleepingPalette.length];
+Color _sleepingColor(int index, {bool noData = false}) =>
+    noData ? const Color(0xFF9E9E9E) : _sleepingPalette[index % _sleepingPalette.length];
 
 // ── Mode colours ──────────────────────────────────────────────────────────────
 
@@ -543,11 +544,12 @@ class _StatsBody extends StatelessWidget {
                     final idx = pair.$1;
                     final entry = pair.$2;
                     final count = (entry.value as num).toInt();
+                    final isNoData = entry.key == 'No data';
                     final pct = totalSleepingNights > 0
                         ? count / totalSleepingNights * 100
                         : 0.0;
                     return PieChartSectionData(
-                      color: _sleepingColor(idx),
+                      color: _sleepingColor(idx, noData: isNoData),
                       value: count.toDouble(),
                       title: '${pct.toStringAsFixed(0)}%',
                       radius: 72,
@@ -569,6 +571,7 @@ class _StatsBody extends StatelessWidget {
                 final idx = pair.$1;
                 final entry = pair.$2;
                 final count = (entry.value as num).toInt();
+                final isNoData = entry.key == 'No data';
                 return Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -576,7 +579,8 @@ class _StatsBody extends StatelessWidget {
                       width: 12,
                       height: 12,
                       decoration: BoxDecoration(
-                          color: _sleepingColor(idx), shape: BoxShape.circle),
+                          color: _sleepingColor(idx, noData: isNoData),
+                          shape: BoxShape.circle),
                     ),
                     const SizedBox(width: 4),
                     Text('${entry.key}  ·  ${count}n'),

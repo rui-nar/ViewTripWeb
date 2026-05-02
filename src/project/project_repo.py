@@ -859,8 +859,8 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
     for date_key, meta in project.day_meta.items():
         if allowed_dates is not None and date_key not in allowed_dates:
             continue
-        if meta.sleeping:
-            sleeping_counts[meta.sleeping] += 1
+        label = meta.sleeping if meta.sleeping else "No data"
+        sleeping_counts[label] += 1
 
     # ── Distance + counts by segment type ───────────────────────────────────
     seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}

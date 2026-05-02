@@ -79,11 +79,18 @@ class ProjectNotifier extends ChangeNotifier {
 
   List<String> get availableSleepingModes {
     final s = <String>{};
+    bool hasNoData = false;
     for (final m in dayMeta.values) {
       final v = m['sleeping'] as String?;
-      if (v != null && v.isNotEmpty) s.add(v);
+      if (v != null && v.isNotEmpty) {
+        s.add(v);
+      } else {
+        hasNoData = true;
+      }
     }
-    return s.toList()..sort();
+    final result = s.toList()..sort();
+    if (hasNoData) result.add('No data');
+    return result;
   }
 
   List<String> get availableActivityTypes {
@@ -158,7 +165,8 @@ class ProjectNotifier extends ChangeNotifier {
       }
       if (_sleepingFilter.isNotEmpty) {
         final s = dayMeta[dk]?['sleeping'] as String?;
-        if (s == null || !_sleepingFilter.contains(s)) continue;
+        final label = (s == null || s.isEmpty) ? 'No data' : s;
+        if (!_sleepingFilter.contains(label)) continue;
       }
       if (_activityTypeFilter.isNotEmpty) {
         final types = actByDay[dk] ?? const {};
