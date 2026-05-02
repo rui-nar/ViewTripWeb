@@ -320,6 +320,7 @@ class DayMetaUpdateRequest(BaseModel):
 def update_day_meta(
     name: str,
     body: DayMetaUpdateRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """Replace day metadata (and optionally sleeping options) for a project."""
@@ -339,6 +340,7 @@ def update_day_meta(
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
