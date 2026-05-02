@@ -59,3 +59,9 @@ deploy.ps1
 dev.bat
 dev_client.bat
 dev.ps1
+graphify-out/.graphify_analysis.json
+graphify-out/.graphify_ast.json
+graphify-out/.graphify_detect.json
+graphify-out/.graphify_extract.json
+graphify-out/GRAPH_REPORT.md
+graphify-out/graph.html
