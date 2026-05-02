@@ -17,6 +17,13 @@ DEFAULT_SLEEPING_OPTIONS = [
     "Pension/Guesthouse", "Hotel", "Apartment",
 ]
 
+DEFAULT_SLEEPING_GROUPS: Dict[str, str] = {
+    'Camping': 'Outdoors', 'Bivouac': 'Outdoors', 'Shelter': 'Outdoors',
+    'Hotel': 'Indoors', 'Pension/Guesthouse': 'Indoors',
+    'Apartment': 'Indoors', 'Warmshower': 'Indoors',
+    'Friend': 'Other', 'Transportation': 'Other',
+}
+
 DifficultyLevel = Literal["easy", "normal", "hard", "super_hard"]
 WeatherCondition = Literal["hot", "clear", "cloudy", "some_rain", "heavy_rain"]
 
@@ -81,8 +88,9 @@ class Project:
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date
     # Day metadata keyed by "YYYY-MM-DD"
     day_meta: Dict[str, DayMeta] = field(default_factory=dict)
-    # Project-specific list of sleeping options
+    # Project-specific list of sleeping options and their group assignments
     sleeping_options: List[str] = field(default_factory=lambda: list(DEFAULT_SLEEPING_OPTIONS))
+    sleeping_option_groups: Dict[str, str] = field(default_factory=dict)  # name → "Outdoors"|"Indoors"|"Other"
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)

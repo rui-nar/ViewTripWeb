@@ -417,7 +417,10 @@ class _AppScreenState extends State<AppScreen> {
               tooltip: 'Statistics',
               onPressed: () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-                extra: context.read<ProjectNotifier>().availableTags,
+                extra: {
+                  'tags': context.read<ProjectNotifier>().availableTags,
+                  'groups': context.read<ProjectNotifier>().sleepingOptionGroups,
+                },
               ),
             ),
             IconButton(
@@ -513,7 +516,10 @@ class _AppScreenState extends State<AppScreen> {
               tooltip: 'Statistics',
               onPressed: () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-                extra: context.read<ProjectNotifier>().availableTags,
+                extra: {
+                  'tags': context.read<ProjectNotifier>().availableTags,
+                  'groups': context.read<ProjectNotifier>().sleepingOptionGroups,
+                },
               ),
             ),
             IconButton(

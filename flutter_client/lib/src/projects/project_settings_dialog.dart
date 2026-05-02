@@ -18,6 +18,9 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   bool _saving = false;
 
   late List<TextEditingController> _optCtrls;
+  late List<String> _optGroups; // parallel to _optCtrls: "Outdoors"|"Indoors"|"Other"
+
+  static const _groups = ['Outdoors', 'Indoors', 'Other'];
 
   // Track style
   late Color _trackColor;
@@ -50,6 +53,9 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     _optCtrls = widget.notifier.sleepingOptions
         .map((opt) => TextEditingController(text: opt))
         .toList();
+    _optGroups = widget.notifier.sleepingOptions
+        .map((opt) => widget.notifier.sleepingOptionGroups[opt] ?? 'Other')
+        .toList();
     _trackColor = widget.notifier.trackColor;
     _trackWidth = widget.notifier.trackWidth;
     _alternating = widget.notifier.alternatingTrackColors;
@@ -62,11 +68,17 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   }
 
   void _addOption() {
-    setState(() => _optCtrls.add(TextEditingController()));
+    setState(() {
+      _optCtrls.add(TextEditingController());
+      _optGroups.add('Other');
+    });
   }
 
   void _removeOption(int i) {
-    setState(() => _optCtrls.removeAt(i).dispose());
+    setState(() {
+      _optCtrls.removeAt(i).dispose();
+      _optGroups.removeAt(i);
+    });
   }
 
   Future<void> _save() async {
@@ -74,11 +86,16 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     await widget.notifier.setTripStart(
       _tripStart == null ? null : _toIso(_tripStart!),
     );
-    final updatedOpts = _optCtrls
-        .map((c) => c.text.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    await widget.notifier.updateSleepingOptions(updatedOpts);
+    final updatedOpts = <String>[];
+    final updatedGroups = <String, String>{};
+    for (int i = 0; i < _optCtrls.length; i++) {
+      final name = _optCtrls[i].text.trim();
+      if (name.isNotEmpty) {
+        updatedOpts.add(name);
+        updatedGroups[name] = _optGroups[i];
+      }
+    }
+    await widget.notifier.updateSleepingOptions(updatedOpts, groups: updatedGroups);
     widget.notifier.setTrackStyle(
       color: _trackColor,
       width: _trackWidth,
@@ -306,6 +323,17 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                                 vertical: 6, horizontal: 4),
                           ),
                         ),
+                      ),
+                      DropdownButton<String>(
+                        value: _optGroups[i],
+                        isDense: true,
+                        underline: const SizedBox.shrink(),
+                        style: theme.textTheme.bodySmall,
+                        items: _groups.map((g) => DropdownMenuItem(
+                          value: g,
+                          child: Text(g),
+                        )).toList(),
+                        onChanged: (v) => setState(() => _optGroups[i] = v!),
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete_outline, size: 16),

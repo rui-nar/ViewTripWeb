@@ -46,7 +46,7 @@ from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
 from src.models.activity import Activity
 from src.models.great_circle import great_circle_points
-from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
+from src.models.project import ConnectingSegment, DEFAULT_SLEEPING_GROUPS, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_stats
 
@@ -314,6 +314,7 @@ def update_project(
 class DayMetaUpdateRequest(BaseModel):
     day_meta: Dict[str, Dict[str, Any]]
     sleeping_options: Optional[List[str]] = None
+    sleeping_option_groups: Optional[Dict[str, str]] = None  # name → "Outdoors"|"Indoors"|"Other"
 
 
 @router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT)
@@ -336,7 +337,11 @@ def update_day_meta(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         row.day_meta_json = json.dumps(body.day_meta)
         if body.sleeping_options:  # ignore empty list — never wipe sleeping options
-            row.sleeping_options_json = json.dumps(body.sleeping_options)
+            groups = body.sleeping_option_groups or {}
+            row.sleeping_options_json = json.dumps([
+                {"name": n, "group": groups.get(n, DEFAULT_SLEEPING_GROUPS.get(n, 'Other'))}
+                for n in body.sleeping_options
+            ])
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()

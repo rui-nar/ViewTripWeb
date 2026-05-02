@@ -31,6 +31,7 @@ from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
     DayMeta,
+    DEFAULT_SLEEPING_GROUPS,
     DEFAULT_SLEEPING_OPTIONS,
     Project,
     ProjectFilterState,
@@ -113,7 +114,10 @@ class ProjectRepo:
         row = DBProject(
             user_info_id=user_info_id,
             name=name,
-            sleeping_options_json=json.dumps(DEFAULT_SLEEPING_OPTIONS),
+            sleeping_options_json=json.dumps([
+                {"name": n, "group": DEFAULT_SLEEPING_GROUPS.get(n, 'Other')}
+                for n in DEFAULT_SLEEPING_OPTIONS
+            ]),
             low_res_geo_json=_compute_low_res_geo(empty_project),
         )
         sess.add(row)
@@ -149,9 +153,11 @@ class ProjectRepo:
                  "tags": dm.tags}
             for dk, dm in project.day_meta.items()
         })
-        row.sleeping_options_json = json.dumps(
-            project.sleeping_options if project.sleeping_options else DEFAULT_SLEEPING_OPTIONS
-        )
+        opts = project.sleeping_options if project.sleeping_options else DEFAULT_SLEEPING_OPTIONS
+        row.sleeping_options_json = json.dumps([
+            {"name": n, "group": project.sleeping_option_groups.get(n, DEFAULT_SLEEPING_GROUPS.get(n, 'Other'))}
+            for n in opts
+        ])
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
 
@@ -485,7 +491,16 @@ class ProjectRepo:
             for dk, v in raw_dm.items()
         }
         raw_opts = json.loads(getattr(row, 'sleeping_options_json', None) or "[]")
-        sleeping_options = raw_opts if isinstance(raw_opts, list) and raw_opts else list(DEFAULT_SLEEPING_OPTIONS)
+        sleeping_options: list = []
+        sleeping_option_groups: dict = {}
+        for item in (raw_opts if isinstance(raw_opts, list) and raw_opts else DEFAULT_SLEEPING_OPTIONS):
+            if isinstance(item, str):
+                sleeping_options.append(item)
+                sleeping_option_groups[item] = DEFAULT_SLEEPING_GROUPS.get(item, 'Other')
+            else:
+                name = item['name']
+                sleeping_options.append(name)
+                sleeping_option_groups[name] = item.get('group', DEFAULT_SLEEPING_GROUPS.get(name, 'Other'))
 
         project = Project(
             name=row.name,
@@ -497,6 +512,7 @@ class ProjectRepo:
             memories=memories,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
+            sleeping_option_groups=sleeping_option_groups,
         )
         project.rebuild_map()
         return project
@@ -894,5 +910,9 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
             "bus":    seg_dist["bus"],
         },
         "sleeping_counts": dict(sleeping_counts),
+        "sleeping_option_groups": {
+            n: project.sleeping_option_groups.get(n, DEFAULT_SLEEPING_GROUPS.get(n, 'Other'))
+            for n in project.sleeping_options
+        },
         "tag_options": tag_options,
     }

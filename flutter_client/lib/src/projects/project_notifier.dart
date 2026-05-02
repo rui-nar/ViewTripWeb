@@ -48,6 +48,9 @@ class ProjectNotifier extends ChangeNotifier {
   /// Project-specific list of sleeping type options.
   List<String> sleepingOptions = [];
 
+  /// Group assignment for each sleeping option: name → "Outdoors"|"Indoors"|"Other".
+  Map<String, String> sleepingOptionGroups = {};
+
   // ── Filter state ─────────────────────────────────────────────────────────
   Set<String> _tagFilter          = {};
   Set<String> _sleepingFilter     = {};
@@ -197,6 +200,13 @@ class ProjectNotifier extends ChangeNotifier {
     'Camping', 'Bivouac', 'Shelter', 'Pension/Guesthouse', 'Hotel', 'Apartment',
   ];
 
+  static const _defaultSleepingGroups = {
+    'Camping': 'Outdoors', 'Bivouac': 'Outdoors', 'Shelter': 'Outdoors',
+    'Hotel': 'Indoors', 'Pension/Guesthouse': 'Indoors',
+    'Apartment': 'Indoors', 'Warmshower': 'Indoors',
+    'Friend': 'Other', 'Transportation': 'Other',
+  };
+
   void selectActivity(dynamic id) {
     selectedActivityId =
         selectedActivityId?.toString() == id?.toString() ? null : id;
@@ -298,6 +308,10 @@ class ProjectNotifier extends ChangeNotifier {
       final rawOpts = details['sleeping_options'];
       final optList = rawOpts is List ? List<String>.from(rawOpts) : <String>[];
       sleepingOptions = optList.isNotEmpty ? optList : List<String>.from(_defaultSleepingOptions);
+      final rawGroups = details['sleeping_option_groups'];
+      sleepingOptionGroups = rawGroups is Map
+          ? Map<String, String>.from(rawGroups.cast<String, String>())
+          : { for (final n in sleepingOptions) n: _defaultSleepingGroups[n] ?? 'Other' };
       geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
@@ -1012,11 +1026,13 @@ class ProjectNotifier extends ChangeNotifier {
   Future<void> saveDayMeta({
     required Map<String, Map<String, dynamic>> newDayMeta,
     List<String>? newSleepingOptions,
+    Map<String, String>? newSleepingOptionGroups,
   }) async {
     final name = projectName;
     if (name == null) return;
     dayMeta = newDayMeta;
     if (newSleepingOptions != null) sleepingOptions = newSleepingOptions;
+    if (newSleepingOptionGroups != null) sleepingOptionGroups = newSleepingOptionGroups;
     notifyListeners();
     try {
       await api.put(
@@ -1024,6 +1040,7 @@ class ProjectNotifier extends ChangeNotifier {
         {
           'day_meta': newDayMeta,
           if (newSleepingOptions != null) 'sleeping_options': newSleepingOptions,
+          if (newSleepingOptionGroups != null) 'sleeping_option_groups': newSleepingOptionGroups,
         },
       );
     } on Exception catch (e) {
@@ -1032,8 +1049,15 @@ class ProjectNotifier extends ChangeNotifier {
     }
   }
 
-  Future<void> updateSleepingOptions(List<String> opts) =>
-      saveDayMeta(newDayMeta: dayMeta, newSleepingOptions: opts);
+  Future<void> updateSleepingOptions(
+    List<String> opts, {
+    Map<String, String>? groups,
+  }) =>
+      saveDayMeta(
+        newDayMeta: dayMeta,
+        newSleepingOptions: opts,
+        newSleepingOptionGroups: groups,
+      );
 
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).

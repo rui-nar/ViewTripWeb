@@ -45,21 +45,20 @@ String _fmtDate(String? isoDate) {
 String _capitalize(String s) =>
     s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 
-// ── Sleeping colours (cycling palette) ────────────────────────────────────────
+// ── Sleeping group colours ─────────────────────────────────────────────────────
 
-const _sleepingPalette = [
-  Color(0xFF6366F1), // indigo
-  Color(0xFF10B981), // emerald
-  Color(0xFFF59E0B), // amber
-  Color(0xFFEF4444), // red
-  Color(0xFF3B82F6), // blue
-  Color(0xFFEC4899), // pink
-  Color(0xFF14B8A6), // teal
-  Color(0xFFF97316), // orange
-];
+const _groupColors = {
+  'Outdoors': Color(0xFF22C55E),
+  'Indoors':  Color(0xFF3B82F6),
+  'Other':    Color(0xFFA855F7),
+  'No data':  Color(0xFF9E9E9E),
+};
 
-Color _sleepingColor(int index, {bool noData = false}) =>
-    noData ? const Color(0xFF9E9E9E) : _sleepingPalette[index % _sleepingPalette.length];
+Color _outerModeColor(String group, int idxInGroup) {
+  final base = _groupColors[group] ?? const Color(0xFF9E9E9E);
+  final hsl = HSLColor.fromColor(base);
+  return hsl.withLightness((hsl.lightness + 0.12 * idxInGroup).clamp(0.0, 0.88)).toColor();
+}
 
 // ── Mode colours ──────────────────────────────────────────────────────────────
 
@@ -160,11 +159,13 @@ class _CountRow extends StatelessWidget {
 class ProjectStatsScreen extends StatefulWidget {
   final String projectName;
   final List<String> availableTags;
+  final Map<String, String> sleepingOptionGroups;
 
   const ProjectStatsScreen({
     super.key,
     required this.projectName,
     this.availableTags = const [],
+    this.sleepingOptionGroups = const {},
   });
 
   @override
@@ -261,7 +262,11 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
                 }
 
                 final s = snap.data!;
-                return _StatsBody(stats: s, projectName: widget.projectName);
+                return _StatsBody(
+                  stats: s,
+                  projectName: widget.projectName,
+                  sleepingOptionGroups: widget.sleepingOptionGroups,
+                );
               },
             ),
           ),
@@ -276,8 +281,13 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
 class _StatsBody extends StatelessWidget {
   final Map<String, dynamic> stats;
   final String projectName;
+  final Map<String, String> sleepingOptionGroups;
 
-  const _StatsBody({required this.stats, required this.projectName});
+  const _StatsBody({
+    required this.stats,
+    required this.projectName,
+    this.sleepingOptionGroups = const {},
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -531,63 +541,166 @@ class _StatsBody extends StatelessWidget {
             ),
           ],
 
-          // ── Sleeping pie chart ─────────────────────────────────────────
+          // ── Sleeping nested donut ──────────────────────────────────────
           if (sleepingEntries.isNotEmpty) ...[
             _SectionHeader('Nights by sleeping mode'),
-            SizedBox(
-              height: 240,
-              child: PieChart(
-                PieChartData(
-                  sectionsSpace: 2,
-                  centerSpaceRadius: 48,
-                  sections: sleepingEntries.indexed.map((pair) {
-                    final idx = pair.$1;
-                    final entry = pair.$2;
-                    final count = (entry.value as num).toInt();
-                    final isNoData = entry.key == 'No data';
-                    final pct = totalSleepingNights > 0
-                        ? count / totalSleepingNights * 100
-                        : 0.0;
-                    return PieChartSectionData(
-                      color: _sleepingColor(idx, noData: isNoData),
-                      value: count.toDouble(),
-                      title: '${pct.toStringAsFixed(0)}%',
-                      radius: 72,
-                      titleStyle: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+            Builder(builder: (context) {
+              const groupOrder = ['Outdoors', 'Indoors', 'Other', 'No data'];
+
+              // Inner ring: group → total count
+              final groupCounts = <String, int>{};
+              for (final e in sleepingEntries) {
+                final g = e.key == 'No data'
+                    ? 'No data'
+                    : (sleepingOptionGroups[e.key] ?? 'Other');
+                groupCounts[g] = (groupCounts[g] ?? 0) + (e.value as num).toInt();
+              }
+
+              // Outer ring: ordered by group, then by count desc within group
+              final orderedOuter = <(String, MapEntry<String, dynamic>)>[];
+              for (final g in groupOrder) {
+                final members = sleepingEntries
+                    .where((e) => (e.key == 'No data'
+                            ? 'No data'
+                            : (sleepingOptionGroups[e.key] ?? 'Other')) == g)
+                    .toList()
+                  ..sort((a, b) => (b.value as num).compareTo(a.value as num));
+                for (final m in members) { orderedOuter.add((g, m)); }
+              }
+
+              // Pre-compute local index within each group for colour shading
+              final counters = <String, int>{};
+              final localIdxList = orderedOuter.map((o) {
+                final idx = counters[o.$1] ?? 0;
+                counters[o.$1] = idx + 1;
+                return idx;
+              }).toList();
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    height: 260,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        // Outer ring — individual modes
+                        PieChart(PieChartData(
+                          centerSpaceRadius: 70,
+                          sectionsSpace: 1,
+                          sections: orderedOuter.indexed.map((pair) {
+                            final globalIdx = pair.$1;
+                            final group = pair.$2.$1;
+                            final entry = pair.$2.$2;
+                            final count = (entry.value as num).toInt();
+                            final pct = totalSleepingNights > 0
+                                ? count / totalSleepingNights * 100
+                                : 0.0;
+                            return PieChartSectionData(
+                              color: _outerModeColor(group, localIdxList[globalIdx]),
+                              value: count.toDouble(),
+                              title: pct >= 5 ? '${pct.toStringAsFixed(0)}%' : '',
+                              radius: 46,
+                              titleStyle: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            );
+                          }).toList(),
+                        )),
+                        // Inner ring — groups
+                        PieChart(PieChartData(
+                          centerSpaceRadius: 32,
+                          sectionsSpace: 2,
+                          sections: groupOrder
+                              .where((g) => groupCounts.containsKey(g))
+                              .map((g) {
+                            final count = groupCounts[g]!;
+                            final pct = totalSleepingNights > 0
+                                ? count / totalSleepingNights * 100
+                                : 0.0;
+                            return PieChartSectionData(
+                              color: _groupColors[g] ?? const Color(0xFF9E9E9E),
+                              value: count.toDouble(),
+                              title: pct >= 8 ? g : '',
+                              radius: 36,
+                              titleStyle: const TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            );
+                          }).toList(),
+                        )),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Two-level legend
+                  ...groupOrder
+                      .where((g) => groupCounts.containsKey(g))
+                      .map((g) {
+                    final groupCount = groupCounts[g]!;
+                    final members = orderedOuter
+                        .where((o) => o.$1 == g)
+                        .toList();
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(children: [
+                            Container(
+                              width: 12, height: 12,
+                              decoration: BoxDecoration(
+                                color: _groupColors[g] ?? const Color(0xFF9E9E9E),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '$g  $groupCount',
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                          ]),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 18, top: 2),
+                            child: Wrap(
+                              spacing: 10,
+                              runSpacing: 2,
+                              children: members.indexed.map((mp) {
+                                final localIdx = mp.$1;
+                                final entry = mp.$2.$2;
+                                final count = (entry.value as num).toInt();
+                                return Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      width: 8, height: 8,
+                                      decoration: BoxDecoration(
+                                        color: _outerModeColor(g, localIdx),
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${entry.key}  $count',
+                                      style: Theme.of(context).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
                       ),
                     );
-                  }).toList(),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              children: sleepingEntries.indexed.map((pair) {
-                final idx = pair.$1;
-                final entry = pair.$2;
-                final count = (entry.value as num).toInt();
-                final isNoData = entry.key == 'No data';
-                return Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 12,
-                      height: 12,
-                      decoration: BoxDecoration(
-                          color: _sleepingColor(idx, noData: isNoData),
-                          shape: BoxShape.circle),
-                    ),
-                    const SizedBox(width: 4),
-                    Text('${entry.key}  ·  ${count}n'),
-                  ],
-                );
-              }).toList(),
-            ),
+                  }),
+                ],
+              );
+            }),
           ],
 
           const SizedBox(height: 24),

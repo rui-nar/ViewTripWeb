@@ -109,10 +109,15 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
+          final extra = state.extra as Map<String, dynamic>? ?? {};
           final availableTags =
-              (state.extra as List<String>?) ?? const [];
+              (extra['tags'] as List?)?.cast<String>() ?? const <String>[];
+          final sleepingOptionGroups =
+              (extra['groups'] as Map?)?.cast<String, String>() ?? const <String, String>{};
           return ProjectStatsScreen(
-              projectName: projectName, availableTags: availableTags);
+              projectName: projectName,
+              availableTags: availableTags,
+              sleepingOptionGroups: sleepingOptionGroups);
         },
       ),
       GoRoute(
