@@ -44,3 +44,4 @@ jobs:
           tags: |
             ghcr.io/rui-nar/viewtripweb:latest
             ghcr.io/rui-nar/viewtripweb:${{ github.sha }}
+            ghcr.io/rui-nar/viewtripweb:${{ github.ref_name }}
