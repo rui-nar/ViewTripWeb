@@ -3,9 +3,6 @@ name: Build and publish Docker image
 on:
   label:
     types: [created, edited]
-  push:
-    branches:
-      - main
       
 jobs:
   build-and-push:
