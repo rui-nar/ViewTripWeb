@@ -2,8 +2,7 @@ name: Build and publish Docker image
 
 on:
   label:
-    types:
-      - created
+    types: [created, edited]
   push:
     branches:
       - main
