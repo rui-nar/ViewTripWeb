@@ -15,6 +15,7 @@ class ProjectSettingsDialog extends StatefulWidget {
 
 class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   DateTime? _tripStart;
+  DateTime? _tripEnd;
   bool _saving = false;
 
   late List<TextEditingController> _optCtrls;
@@ -53,6 +54,8 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     super.initState();
     final ts = widget.notifier.tripStart;
     if (ts != null) _tripStart = DateTime.tryParse(ts);
+    final te = widget.notifier.tripEnd;
+    if (te != null) _tripEnd = DateTime.tryParse(te);
     _optCtrls = widget.notifier.sleepingOptions
         .map((opt) => TextEditingController(text: opt))
         .toList();
@@ -108,9 +111,49 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
+
+    final tripEndStr = _tripEnd == null ? null : _toIso(_tripEnd!);
+    if (tripEndStr != null) {
+      final orphaned = widget.notifier.dayMeta.keys
+          .where((k) => k.compareTo(tripEndStr) > 0)
+          .toList();
+      if (orphaned.isNotEmpty) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Remove future days?'),
+            content: Text(
+              '${orphaned.length} day${orphaned.length == 1 ? '' : 's'} after '
+              '${_fmtDate(_tripEnd!)} will be deleted.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true) {
+          setState(() => _saving = false);
+          return;
+        }
+        final filtered = Map<String, Map<String, dynamic>>.from(
+            widget.notifier.dayMeta)
+          ..removeWhere((k, _) => k.compareTo(tripEndStr) > 0);
+        await widget.notifier.saveDayMeta(newDayMeta: filtered);
+      }
+    }
+
     await widget.notifier.setTripStart(
       _tripStart == null ? null : _toIso(_tripStart!),
     );
+    await widget.notifier.setTripEnd(tripEndStr);
     final updatedOpts = <String>[];
     final updatedGroups = <String, String>{};
     for (int i = 0; i < _optCtrls.length; i++) {
@@ -225,6 +268,62 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                           visualDensity: VisualDensity.compact,
                           tooltip: 'Clear override',
                           onPressed: () => setState(() => _tripStart = null),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const Divider(height: 24),
+
+              // ── Trip end ──────────────────────────────────────────────
+              Text('Trip end', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 4),
+              Text(
+                'While unset (or set to today or later), empty day entries are '
+                'automatically created up to today when the project is opened.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    useRootNavigator: true,
+                    initialDate: _tripEnd ?? DateTime.now(),
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime(2100),
+                  );
+                  if (picked != null) setState(() => _tripEnd = picked);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.event_available, size: 18,
+                          color: theme.colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _tripEnd == null
+                              ? 'Trip still ongoing'
+                              : _fmtDate(_tripEnd!),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: _tripEnd == null
+                                ? theme.colorScheme.onSurfaceVariant
+                                : null,
+                          ),
+                        ),
+                      ),
+                      if (_tripEnd != null)
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Clear end date',
+                          onPressed: () => setState(() => _tripEnd = null),
                         ),
                     ],
                   ),

@@ -39,6 +39,7 @@ class ProjectIO:
             "version": project.version,
             "name": project.name,
             "trip_start": project.trip_start,
+            "trip_end": project.trip_end,
             "filter_state": {
                 "start_date": project.filter_state.start_date,
                 "end_date": project.filter_state.end_date,
@@ -85,6 +86,7 @@ class ProjectIO:
             "version": project.version,
             "name": project.name,
             "trip_start": project.trip_start,
+            "trip_end": project.trip_end,
             "filter_state": {
                 "start_date": project.filter_state.start_date,
                 "end_date": project.filter_state.end_date,

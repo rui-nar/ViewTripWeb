@@ -272,6 +272,7 @@ def get_project_stats(
 class ProjectUpdateRequest(BaseModel):
     new_name: Optional[str] = None
     trip_start: Optional[str] = None  # "YYYY-MM-DD" or None to clear
+    trip_end: Optional[str] = None    # "YYYY-MM-DD" or None to clear
 
 
 @router.put("/{name}")
@@ -303,6 +304,10 @@ def update_project(
         # Update trip_start if key is present in body (None = clear)
         if 'trip_start' in body.model_fields_set:
             row.trip_start = body.trip_start or None
+
+        # Update trip_end if key is present in body (None = clear)
+        if 'trip_end' in body.model_fields_set:
+            row.trip_end = body.trip_end or None
 
         sess.add(row)
         sess.commit()

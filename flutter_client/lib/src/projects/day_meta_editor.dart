@@ -307,6 +307,7 @@ class _DayMetaSheetWrapperState extends State<_DayMetaSheetWrapper> {
                     initialMeta: widget.notifier.dayMeta[_currentDateKey] ?? {},
                     sleepingOptions: widget.notifier.sleepingOptions,
                     availableTags: widget.notifier.availableTags,
+                    counters: widget.notifier.counters,
                     onSaveOnly: (meta) => _persist(widget.notifier, _currentDateKey, meta),
                     onSave: (meta) {
                       _persist(widget.notifier, _currentDateKey, meta);
@@ -659,23 +660,10 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                     },
                   ),
                 ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: 64,
-                  child: TextField(
-                    controller: _counterMods[i].amountCtrl,
-                    keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true, signed: true),
-                    textAlign: TextAlign.right,
-                    style: theme.textTheme.bodyMedium,
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                      contentPadding:
-                          EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    ),
-                    onChanged: (_) => setState(() => _dirty = true),
-                  ),
+                const SizedBox(width: 4),
+                _CounterStepper(
+                  controller: _counterMods[i].amountCtrl,
+                  onChanged: () => setState(() => _dirty = true),
                 ),
                 IconButton(
                   icon: const Icon(Icons.close, size: 16),
@@ -699,7 +687,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
 
         const SizedBox(height: 20),
 
-        // ── Actions ─────────────────────────────────────────────────────
+        // ── Actions ──────────────────────────────────────────────────────
         Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
@@ -728,6 +716,63 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
               child: Text(widget.onSaveOnly != null ? 'Save & Close' : 'Save'),
             ),
           ],
+        ),
+      ],
+    );
+  }
+}
+
+// ── Counter stepper ────────────────────────────────────────────────────────
+
+class _CounterStepper extends StatelessWidget {
+  final TextEditingController controller;
+  final VoidCallback onChanged;
+
+  const _CounterStepper({required this.controller, required this.onChanged});
+
+  void _step(double delta) {
+    final cur = double.tryParse(controller.text) ?? 1.0;
+    final next = cur + delta;
+    controller.text = next == next.truncateToDouble()
+        ? next.toInt().toString()
+        : next.toString();
+    onChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.remove, size: 16),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          onPressed: () => _step(-1),
+        ),
+        SizedBox(
+          width: 48,
+          child: TextField(
+            controller: controller,
+            keyboardType: const TextInputType.numberWithOptions(
+                decimal: true, signed: true),
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyMedium,
+            decoration: const InputDecoration(
+              isDense: true,
+              border: OutlineInputBorder(),
+              contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+            ),
+            onChanged: (_) => onChanged(),
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.add, size: 16),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          onPressed: () => _step(1),
         ),
       ],
     );

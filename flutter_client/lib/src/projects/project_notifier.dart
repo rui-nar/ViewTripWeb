@@ -43,6 +43,18 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
   /// User-defined trip start date override ("YYYY-MM-DD"); null = infer from activities.
   String? tripStart;
 
+  /// User-defined trip end date ("YYYY-MM-DD"); null = trip still ongoing.
+  String? tripEnd;
+
+  /// True if the trip is still active (no tripEnd set, or tripEnd is today or later).
+  bool get _tripIsActive {
+    if (tripEnd == null) return true;
+    final end = DateTime.tryParse(tripEnd!);
+    if (end == null) return true;
+    final now = DateTime.now();
+    return !end.isBefore(DateTime(now.year, now.month, now.day));
+  }
+
   /// Day metadata keyed by "YYYY-MM-DD".
   @override Map<String, Map<String, dynamic>> dayMeta = {};
 
@@ -164,6 +176,7 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
       final details = results[0];
       projectName = details['name'] as String? ?? name;
       tripStart = details['trip_start'] as String?;
+      tripEnd = details['trip_end'] as String?;
       final rawActivities = details['activities'];
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()
@@ -199,6 +212,8 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
 
     // Phase 2: fetch full-res geo in background; replace features progressively
     _loadFullGeoProgressively(name);
+    // Auto-fill empty day entries up to today while the trip is active
+    _autoFillDaysToToday();
   }
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
@@ -368,6 +383,7 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
     selectedDay = null;
     resetFilters();
     tripStart = null;
+    tripEnd = null;
     dayMeta = {};
     sleepingOptions = [];
     previewArcNotifier.value = null;
@@ -455,6 +471,23 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
       await api.put(
         '/api/projects/${Uri.encodeComponent(name)}',
         {'trip_start': dateStr},
+      );
+      await _silentReloadDetailsOnly(name);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> setTripEnd(String? dateStr) async {
+    final name = projectName;
+    if (name == null) return;
+    tripEnd = dateStr;
+    notifyListeners();
+    try {
+      await api.put(
+        '/api/projects/${Uri.encodeComponent(name)}',
+        {'trip_end': dateStr},
       );
       await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
@@ -939,6 +972,49 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
   Future<void> updateCounters(List<Map<String, dynamic>> newCounters) =>
       saveDayMeta(newDayMeta: dayMeta, newCounters: newCounters);
 
+  /// Silently fills empty dayMeta entries from the earliest known date up to
+  /// today, but only while the trip is active (no tripEnd or tripEnd >= today).
+  Future<void> _autoFillDaysToToday() async {
+    if (!_tripIsActive) return;
+
+    final now = DateTime.now();
+    final todayDate = DateTime(now.year, now.month, now.day);
+
+    String? earliest = tripStart;
+    if (dayMeta.isNotEmpty) {
+      final minKey = (dayMeta.keys.toList()..sort()).first;
+      if (earliest == null || minKey.compareTo(earliest) < 0) earliest = minKey;
+    }
+    for (final a in activities) {
+      final d = a['start_date_local'] as String?;
+      if (d != null && d.length >= 10) {
+        final dk = d.substring(0, 10);
+        if (earliest == null || dk.compareTo(earliest) < 0) earliest = dk;
+      }
+    }
+    if (earliest == null) return;
+
+    final startDate = DateTime.tryParse(earliest);
+    if (startDate == null || startDate.isAfter(todayDate)) return;
+
+    final updated = Map<String, Map<String, dynamic>>.from(dayMeta);
+    bool changed = false;
+    DateTime cursor = DateTime(startDate.year, startDate.month, startDate.day);
+    while (!cursor.isAfter(todayDate)) {
+      final key =
+          '${cursor.year.toString().padLeft(4, '0')}-'
+          '${cursor.month.toString().padLeft(2, '0')}-'
+          '${cursor.day.toString().padLeft(2, '0')}';
+      if (!updated.containsKey(key)) {
+        updated[key] = {};
+        changed = true;
+      }
+      cursor = cursor.add(const Duration(days: 1));
+    }
+    if (!changed) return;
+    await saveDayMeta(newDayMeta: updated);
+  }
+
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(String name) async {
@@ -976,6 +1052,7 @@ class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
   void _applyDetails(dynamic details, String name) {
     projectName = details['name'] as String? ?? name;
     tripStart   = details['trip_start'] as String?;
+    tripEnd     = details['trip_end']   as String?;
     final rawActivities = details['activities'];
     activities = rawActivities is List
         ? rawActivities.cast<Map<String, dynamic>>()

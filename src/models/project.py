@@ -93,6 +93,7 @@ class Project:
     items: List[ProjectItem] = field(default_factory=list)
     filter_state: ProjectFilterState = field(default_factory=ProjectFilterState)
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date
+    trip_end: Optional[str] = None    # ISO "YYYY-MM-DD" — when set and in the past, auto-fill stops
     # Day metadata keyed by "YYYY-MM-DD"
     day_meta: Dict[str, DayMeta] = field(default_factory=dict)
     # Project-specific list of sleeping options and their group assignments
