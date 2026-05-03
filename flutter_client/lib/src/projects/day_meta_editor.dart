@@ -168,6 +168,7 @@ class _DayMetaDialogWrapperState extends State<_DayMetaDialogWrapper> {
               initialMeta: widget.notifier.dayMeta[_currentDateKey] ?? {},
               sleepingOptions: widget.notifier.sleepingOptions,
               availableTags: widget.notifier.availableTags,
+              counters: widget.notifier.counters,
               onSaveOnly: (meta) => _persist(widget.notifier, _currentDateKey, meta),
               onSave: (meta) {
                 _persist(widget.notifier, _currentDateKey, meta);
@@ -367,6 +368,7 @@ class DayMetaEditor extends StatefulWidget {
   final Map<String, dynamic> initialMeta;
   final List<String> sleepingOptions;
   final List<String> availableTags;
+  final List<Map<String, dynamic>> counters;
   final void Function(Map<String, dynamic> meta) onSave;
   final void Function(Map<String, dynamic> meta)? onSaveOnly;
   final VoidCallback? onCancel;
@@ -377,6 +379,7 @@ class DayMetaEditor extends StatefulWidget {
     required this.initialMeta,
     required this.sleepingOptions,
     this.availableTags = const [],
+    this.counters = const [],
     required this.onSave,
     this.onSaveOnly,
     this.onCancel,
@@ -393,6 +396,8 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
   late TextEditingController _journalCtrl;
   late List<String> _tags;
   final TextEditingController _tagInputCtrl = TextEditingController();
+  // counter name → amount (TextEditingController for the amount field)
+  late List<({String name, TextEditingController amountCtrl})> _counterMods;
   bool _dirty = false;
 
   @override
@@ -420,6 +425,14 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _journalCtrl = TextEditingController(text: m['journal'] as String? ?? '');
     final rawTags = m['tags'];
     _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
+    final rawC = m['counters'];
+    _counterMods = rawC is Map
+        ? rawC.entries.map((e) => (
+            name: e.key as String,
+            amountCtrl: TextEditingController(
+                text: (e.value as num).toDouble().toString()),
+          )).toList()
+        : [];
   }
 
   void _applyMetaNoJournal(Map<String, dynamic> m) {
@@ -428,13 +441,39 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _weather    = m['weather']    as String?;
     final rawTags = m['tags'];
     _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
+    for (final mod in _counterMods) { mod.amountCtrl.dispose(); }
+    final rawC = m['counters'];
+    _counterMods = rawC is Map
+        ? rawC.entries.map((e) => (
+            name: e.key as String,
+            amountCtrl: TextEditingController(
+                text: (e.value as num).toDouble().toString()),
+          )).toList()
+        : [];
   }
 
   @override
   void dispose() {
     _journalCtrl.dispose();
     _tagInputCtrl.dispose();
+    for (final mod in _counterMods) { mod.amountCtrl.dispose(); }
     super.dispose();
+  }
+
+  Set<String> get _usedCounterNames => _counterMods.map((m) => m.name).toSet();
+
+  void _addCounterMod(String name) {
+    setState(() {
+      _counterMods.add((name: name, amountCtrl: TextEditingController(text: '1')));
+      _dirty = true;
+    });
+  }
+
+  void _removeCounterMod(int i) {
+    setState(() {
+      _counterMods.removeAt(i).amountCtrl.dispose();
+      _dirty = true;
+    });
   }
 
   void _addTag(String tag) {
@@ -455,6 +494,12 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     final j = _journalCtrl.text.trim();
     if (j.isNotEmpty) result['journal'] = j;
     if (_tags.isNotEmpty) result['tags'] = List<String>.from(_tags);
+    if (_counterMods.isNotEmpty) {
+      result['counters'] = {
+        for (final m in _counterMods)
+          m.name: double.tryParse(m.amountCtrl.text) ?? 1.0,
+      };
+    }
     return result;
   }
 
@@ -583,6 +628,75 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             ),
           ],
         ),
+        // ── Counters ──────────────────────────────────────────────────���─
+        if (widget.counters.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text('Counters', style: labelStyle),
+          const SizedBox(height: 6),
+          for (int i = 0; i < _counterMods.length; i++)
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButton<String>(
+                    value: _counterMods[i].name,
+                    isDense: true,
+                    isExpanded: true,
+                    underline: const SizedBox.shrink(),
+                    items: widget.counters
+                        .map((c) => c['name'] as String)
+                        .where((n) =>
+                            n == _counterMods[i].name ||
+                            !_usedCounterNames.contains(n))
+                        .map((n) => DropdownMenuItem(value: n, child: Text(n)))
+                        .toList(),
+                    onChanged: (n) {
+                      if (n == null) return;
+                      setState(() {
+                        final old = _counterMods[i];
+                        _counterMods[i] = (name: n, amountCtrl: old.amountCtrl);
+                        _dirty = true;
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 64,
+                  child: TextField(
+                    controller: _counterMods[i].amountCtrl,
+                    keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true, signed: true),
+                    textAlign: TextAlign.right,
+                    style: theme.textTheme.bodyMedium,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    ),
+                    onChanged: (_) => setState(() => _dirty = true),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, size: 16),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _removeCounterMod(i),
+                ),
+              ],
+            ),
+          if (_usedCounterNames.length < widget.counters.length)
+            TextButton.icon(
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Add counter'),
+              onPressed: () {
+                final unused = widget.counters
+                    .map((c) => c['name'] as String)
+                    .firstWhere((n) => !_usedCounterNames.contains(n));
+                _addCounterMod(unused);
+              },
+            ),
+        ],
+
         const SizedBox(height: 20),
 
         // ── Actions ─────────────────────────────────────────────────────

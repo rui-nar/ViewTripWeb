@@ -315,6 +315,7 @@ class DayMetaUpdateRequest(BaseModel):
     day_meta: Dict[str, Dict[str, Any]]
     sleeping_options: Optional[List[str]] = None
     sleeping_option_groups: Optional[Dict[str, str]] = None  # name → "Outdoors"|"Indoors"|"Other"
+    counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
 @router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT)
@@ -341,6 +342,11 @@ def update_day_meta(
             row.sleeping_options_json = json.dumps([
                 {"name": n, "group": groups.get(n, DEFAULT_SLEEPING_GROUPS.get(n, 'Other'))}
                 for n in body.sleeping_options
+            ])
+        if body.counters is not None:
+            row.counters_json = json.dumps([
+                {"name": c["name"], "start": float(c.get("start", 0))}
+                for c in body.counters
             ])
         row.updated_at = time.time()
         sess.add(row)

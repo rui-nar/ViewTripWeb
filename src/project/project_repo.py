@@ -30,6 +30,7 @@ from src.models.activity import Activity
 from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
+    Counter,
     DayMeta,
     DEFAULT_SLEEPING_GROUPS,
     DEFAULT_SLEEPING_OPTIONS,
@@ -150,13 +151,16 @@ class ProjectRepo:
         row.day_meta_json = json.dumps({
             dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
                  "weather": dm.weather, "journal": dm.journal,
-                 "tags": dm.tags}
+                 "tags": dm.tags, "counters": dm.counters}
             for dk, dm in project.day_meta.items()
         })
         opts = project.sleeping_options if project.sleeping_options else DEFAULT_SLEEPING_OPTIONS
         row.sleeping_options_json = json.dumps([
             {"name": n, "group": project.sleeping_option_groups.get(n, DEFAULT_SLEEPING_GROUPS.get(n, 'Other'))}
             for n in opts
+        ])
+        row.counters_json = json.dumps([
+            {"name": c.name, "start": c.start} for c in project.counters
         ])
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
@@ -487,6 +491,7 @@ class ProjectRepo:
                 weather=v.get("weather"),
                 journal=v.get("journal"),
                 tags=v.get("tags") or [],
+                counters={k: float(cv) for k, cv in (v.get("counters") or {}).items()},
             )
             for dk, v in raw_dm.items()
         }
@@ -502,6 +507,12 @@ class ProjectRepo:
                 sleeping_options.append(name)
                 sleeping_option_groups[name] = item.get('group', DEFAULT_SLEEPING_GROUPS.get(name, 'Other'))
 
+        raw_counters = json.loads(getattr(row, 'counters_json', None) or "[]")
+        counters = [
+            Counter(name=c['name'], start=float(c.get('start', 0)))
+            for c in raw_counters if isinstance(c, dict)
+        ]
+
         project = Project(
             name=row.name,
             version=row.version,
@@ -513,6 +524,7 @@ class ProjectRepo:
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
+            counters=counters,
         )
         project.rebuild_map()
         return project
@@ -787,8 +799,29 @@ def _compute_low_res_geo(project: Project) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Module-level stats helper (outside the class so it can be tested standalone)
+# Module-level stats helpers (outside the class so they can be tested standalone)
 # ---------------------------------------------------------------------------
+
+def _compute_counter_stats(
+    project: Project, allowed_dates: Optional[set] = None
+) -> List[Dict[str, Any]]:
+    result = []
+    for ctr in project.counters:
+        deltas = {
+            dk: dm.counters[ctr.name]
+            for dk, dm in project.day_meta.items()
+            if ctr.name in dm.counters
+        }
+        if allowed_dates is not None:
+            deltas = {dk: v for dk, v in deltas.items() if dk in allowed_dates}
+        cumulative = ctr.start
+        series = []
+        for dk in sorted(deltas):
+            cumulative += deltas[dk]
+            series.append({"date": dk, "value": cumulative})
+        result.append({"name": ctr.name, "start": ctr.start, "total": cumulative, "series": series})
+    return result
+
 
 def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> Dict[str, Any]:
     """Compute all project statistics from an in-memory Project.
@@ -915,4 +948,5 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
             for n in project.sleeping_options
         },
         "tag_options": tag_options,
+        "counters": _compute_counter_stats(project, allowed_dates),
     }

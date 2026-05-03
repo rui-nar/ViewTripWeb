@@ -40,6 +40,8 @@ class DBProject(sqlmodel.SQLModel, table=True):
     day_meta_json: Optional[str] = sqlmodel.Field(default="{}")
     # Ordered list of sleeping option strings (project-configurable)
     sleeping_options_json: Optional[str] = sqlmodel.Field(default="[]")
+    # Project-defined counters: [{name, start}]
+    counters_json: Optional[str] = sqlmodel.Field(default="[]")
 
 
 class DBActivity(sqlmodel.SQLModel, table=True):

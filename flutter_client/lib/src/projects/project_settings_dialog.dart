@@ -22,6 +22,9 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
   static const _groups = ['Outdoors', 'Indoors', 'Other'];
 
+  late List<TextEditingController> _counterNameCtrls;
+  late List<TextEditingController> _counterStartCtrls;
+
   // Track style
   late Color _trackColor;
   late double _trackWidth;
@@ -59,12 +62,34 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     _trackColor = widget.notifier.trackColor;
     _trackWidth = widget.notifier.trackWidth;
     _alternating = widget.notifier.alternatingTrackColors;
+    _counterNameCtrls = widget.notifier.counters
+        .map((c) => TextEditingController(text: c['name'] as String? ?? ''))
+        .toList();
+    _counterStartCtrls = widget.notifier.counters
+        .map((c) => TextEditingController(text: (c['start'] ?? 0).toString()))
+        .toList();
   }
 
   @override
   void dispose() {
     for (final c in _optCtrls) { c.dispose(); }
+    for (final c in _counterNameCtrls) { c.dispose(); }
+    for (final c in _counterStartCtrls) { c.dispose(); }
     super.dispose();
+  }
+
+  void _addCounter() {
+    setState(() {
+      _counterNameCtrls.add(TextEditingController());
+      _counterStartCtrls.add(TextEditingController(text: '0'));
+    });
+  }
+
+  void _removeCounter(int i) {
+    setState(() {
+      _counterNameCtrls.removeAt(i).dispose();
+      _counterStartCtrls.removeAt(i).dispose();
+    });
   }
 
   void _addOption() {
@@ -96,6 +121,13 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       }
     }
     await widget.notifier.updateSleepingOptions(updatedOpts, groups: updatedGroups);
+    final updatedCounters = <Map<String, dynamic>>[];
+    for (int i = 0; i < _counterNameCtrls.length; i++) {
+      final name = _counterNameCtrls[i].text.trim();
+      final start = double.tryParse(_counterStartCtrls[i].text) ?? 0.0;
+      if (name.isNotEmpty) updatedCounters.add({'name': name, 'start': start});
+    }
+    await widget.notifier.updateCounters(updatedCounters);
     widget.notifier.setTrackStyle(
       color: _trackColor,
       width: _trackWidth,
@@ -349,6 +381,71 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                 icon: const Icon(Icons.add, size: 16),
                 label: const Text('Add option'),
                 onPressed: _addOption,
+              ),
+
+              const Divider(height: 24),
+
+              // ── Counters ──────────────────────────────────────────────
+              Text('Counters', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 4),
+              Text(
+                'Track numeric values across the trip.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 180),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _counterNameCtrls.length,
+                  itemBuilder: (_, i) => Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _counterNameCtrls[i],
+                          style: theme.textTheme.bodyMedium,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            hintText: 'Counter name',
+                            contentPadding: EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 4),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 72,
+                        child: TextField(
+                          controller: _counterStartCtrls[i],
+                          style: theme.textTheme.bodyMedium,
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true, signed: true),
+                          textAlign: TextAlign.right,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            border: InputBorder.none,
+                            hintText: '0',
+                            contentPadding: EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 4),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 16),
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Remove',
+                        onPressed: () => _removeCounter(i),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Add counter'),
+                onPressed: _addCounter,
               ),
 
               const Divider(height: 32),

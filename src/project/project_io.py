@@ -99,10 +99,13 @@ class ProjectIO:
                         "weather": dm.weather, "journal": dm.journal,
                     }.items() if v is not None},
                     **({"tags": dm.tags} if dm.tags else {}),
+                    **({"counters": dm.counters} if dm.counters else {}),
                 }
                 for dk, dm in project.day_meta.items()
             },
             "sleeping_options": project.sleeping_options,
+            "sleeping_option_groups": project.sleeping_option_groups,
+            "counters": [{"name": c.name, "start": c.start} for c in project.counters],
         }
 
     @staticmethod

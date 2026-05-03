@@ -51,6 +51,9 @@ class ProjectNotifier extends ChangeNotifier {
   /// Group assignment for each sleeping option: name → "Outdoors"|"Indoors"|"Other".
   Map<String, String> sleepingOptionGroups = {};
 
+  /// Project-defined counters: [{name: String, start: double}].
+  List<Map<String, dynamic>> counters = [];
+
   // ── Filter state ─────────────────────────────────────────────────────────
   Set<String> _tagFilter          = {};
   Set<String> _sleepingFilter     = {};
@@ -312,6 +315,10 @@ class ProjectNotifier extends ChangeNotifier {
       sleepingOptionGroups = rawGroups is Map
           ? Map<String, String>.from(rawGroups.cast<String, String>())
           : { for (final n in sleepingOptions) n: _defaultSleepingGroups[n] ?? 'Other' };
+      final rawCounters = details['counters'];
+      counters = rawCounters is List
+          ? rawCounters.map((c) => Map<String, dynamic>.from(c as Map)).toList()
+          : [];
       geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
@@ -1027,12 +1034,14 @@ class ProjectNotifier extends ChangeNotifier {
     required Map<String, Map<String, dynamic>> newDayMeta,
     List<String>? newSleepingOptions,
     Map<String, String>? newSleepingOptionGroups,
+    List<Map<String, dynamic>>? newCounters,
   }) async {
     final name = projectName;
     if (name == null) return;
     dayMeta = newDayMeta;
     if (newSleepingOptions != null) sleepingOptions = newSleepingOptions;
     if (newSleepingOptionGroups != null) sleepingOptionGroups = newSleepingOptionGroups;
+    if (newCounters != null) counters = newCounters;
     notifyListeners();
     try {
       await api.put(
@@ -1041,6 +1050,7 @@ class ProjectNotifier extends ChangeNotifier {
           'day_meta': newDayMeta,
           if (newSleepingOptions != null) 'sleeping_options': newSleepingOptions,
           if (newSleepingOptionGroups != null) 'sleeping_option_groups': newSleepingOptionGroups,
+          if (newCounters != null) 'counters': newCounters,
         },
       );
     } on Exception catch (e) {
@@ -1058,6 +1068,9 @@ class ProjectNotifier extends ChangeNotifier {
         newSleepingOptions: opts,
         newSleepingOptionGroups: groups,
       );
+
+  Future<void> updateCounters(List<Map<String, dynamic>> newCounters) =>
+      saveDayMeta(newDayMeta: dayMeta, newCounters: newCounters);
 
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).

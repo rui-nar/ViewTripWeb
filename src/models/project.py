@@ -29,6 +29,12 @@ WeatherCondition = Literal["hot", "clear", "cloudy", "some_rain", "heavy_rain"]
 
 
 @dataclass
+class Counter:
+    name: str
+    start: float = 0.0
+
+
+@dataclass
 class DayMeta:
     """User-authored metadata for a single trip day."""
     difficulty: Optional[DifficultyLevel] = None
@@ -36,6 +42,7 @@ class DayMeta:
     weather: Optional[WeatherCondition] = None
     journal: Optional[str] = None
     tags: List[str] = field(default_factory=list)
+    counters: Dict[str, float] = field(default_factory=dict)  # counter name → delta
 
 
 @dataclass
@@ -91,6 +98,8 @@ class Project:
     # Project-specific list of sleeping options and their group assignments
     sleeping_options: List[str] = field(default_factory=lambda: list(DEFAULT_SLEEPING_OPTIONS))
     sleeping_option_groups: Dict[str, str] = field(default_factory=dict)  # name → "Outdoors"|"Indoors"|"Other"
+    # Project-defined counters
+    counters: List[Counter] = field(default_factory=list)
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)
