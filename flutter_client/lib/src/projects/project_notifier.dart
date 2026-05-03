@@ -10,40 +10,41 @@ import 'package:latlong2/latlong.dart';
 
 import '../api/client.dart';
 import '../map/polyline_decoder.dart';
+import 'project_filter_mixin.dart';
 import 'project_service.dart';
 
-class ProjectNotifier extends ChangeNotifier {
+class ProjectNotifier extends ChangeNotifier with ProjectFilterMixin {
   final ProjectService _service;
 
   ProjectNotifier(this._service);
 
   String? projectName;
-  List<Map<String, dynamic>> activities = [];
-  List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
+  @override List<Map<String, dynamic>> activities = [];
+  @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
   Map<String, dynamic>? geo;
   bool isLoading = false;
   String? error;
 
   /// The activity currently highlighted on the map. Null = no selection.
-  dynamic selectedActivityId;
+  @override dynamic selectedActivityId;
 
   /// The connecting segment currently highlighted on the map. Null = no selection.
-  dynamic selectedSegmentId;
+  @override dynamic selectedSegmentId;
 
   /// The memory currently highlighted on the map/panel. Null = no selection.
-  dynamic selectedMemoryId;
+  @override dynamic selectedMemoryId;
 
   /// The day currently selected in the activity panel ("YYYY-MM-DD" or null).
-  String? selectedDay;
+  @override String? selectedDay;
 
   /// Days selected in multi-select mode. Empty = no multi-day filter.
-  Set<String> selectedDays = {};
+  @override Set<String> selectedDays = {};
 
   /// User-defined trip start date override ("YYYY-MM-DD"); null = infer from activities.
   String? tripStart;
 
   /// Day metadata keyed by "YYYY-MM-DD".
-  Map<String, Map<String, dynamic>> dayMeta = {};
+  @override Map<String, Map<String, dynamic>> dayMeta = {};
 
   /// Project-specific list of sleeping type options.
   List<String> sleepingOptions = [];
@@ -53,139 +54,6 @@ class ProjectNotifier extends ChangeNotifier {
 
   /// Project-defined counters: [{name: String, start: double}].
   List<Map<String, dynamic>> counters = [];
-
-  // ── Filter state ─────────────────────────────────────────────────────────
-  Set<String> _tagFilter          = {};
-  Set<String> _sleepingFilter     = {};
-  Set<String> _activityTypeFilter = {};
-  Set<String> _transportFilter    = {};
-
-  Set<String> get tagFilter          => Set.unmodifiable(_tagFilter);
-  Set<String> get sleepingFilter     => Set.unmodifiable(_sleepingFilter);
-  Set<String> get activityTypeFilter => Set.unmodifiable(_activityTypeFilter);
-  Set<String> get transportFilter    => Set.unmodifiable(_transportFilter);
-
-  int  get activeFilterCount => _tagFilter.length + _sleepingFilter.length
-                              + _activityTypeFilter.length + _transportFilter.length;
-  bool get hasActiveFilter     => activeFilterCount > 0;
-  bool get hasFilterableContent =>
-      availableTags.isNotEmpty || availableSleepingModes.isNotEmpty ||
-      availableActivityTypes.isNotEmpty || availableTransportationMeans.isNotEmpty;
-
-  // ── Available filter options (computed from loaded data) ──────────────────
-
-  List<String> get availableTags {
-    final s = <String>{};
-    for (final m in dayMeta.values) {
-      final t = m['tags'];
-      if (t is List) s.addAll(t.cast<String>());
-    }
-    return s.toList()..sort();
-  }
-
-  List<String> get availableSleepingModes {
-    final s = <String>{};
-    bool hasNoData = false;
-    for (final m in dayMeta.values) {
-      final v = m['sleeping'] as String?;
-      if (v != null && v.isNotEmpty) {
-        s.add(v);
-      } else {
-        hasNoData = true;
-      }
-    }
-    final result = s.toList()..sort();
-    if (hasNoData) result.add('No data');
-    return result;
-  }
-
-  List<String> get availableActivityTypes {
-    final s = <String>{};
-    for (final a in activities) {
-      final t = (a['type'] as String? ?? '').toLowerCase();
-      if (t.isNotEmpty) s.add(t);
-    }
-    return s.toList()..sort();
-  }
-
-  List<String> get availableTransportationMeans {
-    final s = <String>{};
-    for (final item in items) {
-      if (item['item_type'] != 'segment') continue;
-      final t = (item['segment'] as Map?)?['segment_type'] as String?;
-      if (t != null && t.isNotEmpty) s.add(t);
-    }
-    return s.toList()..sort();
-  }
-
-  // ── Filter mutators ───────────────────────────────────────────────────────
-
-  void setTagFilter(Set<String> tags) => setFilters(tags: tags);
-
-  void clearAllFilters() =>
-      setFilters(tags: {}, sleeping: {}, activityTypes: {}, transport: {});
-
-  void setFilters({
-    Set<String>? tags,
-    Set<String>? sleeping,
-    Set<String>? activityTypes,
-    Set<String>? transport,
-  }) {
-    if (tags          != null) _tagFilter          = Set.of(tags);
-    if (sleeping      != null) _sleepingFilter      = Set.of(sleeping);
-    if (activityTypes != null) _activityTypeFilter  = Set.of(activityTypes);
-    if (transport     != null) _transportFilter     = Set.of(transport);
-    _recomputeSelectedDays();
-    selectedDay = null;
-    selectedActivityId = null;
-    selectedSegmentId = null;
-    selectedMemoryId = null;
-    notifyListeners();
-  }
-
-  void _recomputeSelectedDays() {
-    if (!hasActiveFilter) { selectedDays = {}; return; }
-
-    final actByDay = <String, Set<String>>{};
-    for (final a in activities) {
-      final d = (a['start_date_local'] as String?)?.substring(0, 10);
-      final t = (a['type'] as String? ?? '').toLowerCase();
-      if (d != null && t.isNotEmpty) (actByDay[d] ??= {}).add(t);
-    }
-
-    final trByDay = <String, Set<String>>{};
-    for (final item in items) {
-      if (item['item_type'] != 'segment') continue;
-      final seg = item['segment'] as Map?;
-      final d   = seg?['date'] as String?;
-      final t   = seg?['segment_type'] as String?;
-      if (d != null && t != null) (trByDay[d] ??= {}).add(t);
-    }
-
-    final matching = <String>{};
-    for (final dk in dayMeta.keys) {
-      if (_tagFilter.isNotEmpty) {
-        final rawTags = dayMeta[dk]?['tags'];
-        final tags = rawTags is List ? rawTags.cast<String>().toSet() : const <String>{};
-        if (!tags.any(_tagFilter.contains)) continue;
-      }
-      if (_sleepingFilter.isNotEmpty) {
-        final s = dayMeta[dk]?['sleeping'] as String?;
-        final label = (s == null || s.isEmpty) ? 'No data' : s;
-        if (!_sleepingFilter.contains(label)) continue;
-      }
-      if (_activityTypeFilter.isNotEmpty) {
-        final types = actByDay[dk] ?? const {};
-        if (!types.any(_activityTypeFilter.contains)) continue;
-      }
-      if (_transportFilter.isNotEmpty) {
-        final types = trByDay[dk] ?? const {};
-        if (!types.any(_transportFilter.contains)) continue;
-      }
-      matching.add(dk);
-    }
-    selectedDays = matching;
-  }
 
   // ── Track style (UI-only, not persisted to server) ───────────────────────
   Color trackColor = const Color(0xFFF97316);
@@ -498,8 +366,7 @@ class ProjectNotifier extends ChangeNotifier {
     selectedSegmentId = null;
     selectedMemoryId = null;
     selectedDay = null;
-    selectedDays = {};
-    _tagFilter = {};
+    resetFilters();
     tripStart = null;
     dayMeta = {};
     sleepingOptions = [];
