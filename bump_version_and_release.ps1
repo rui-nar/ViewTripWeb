@@ -27,7 +27,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PUBSPEC = Join-Path $PSScriptRoot "flutter_client\pubspec.yaml"
+$PUBSPEC  = Join-Path $PSScriptRoot "flutter_client\pubspec.yaml"
+$SETTINGS = Join-Path $PSScriptRoot "flutter_client\lib\src\projects\project_settings_dialog.dart"
 
 function Die([string]$msg) {
     Write-Host ""
@@ -90,25 +91,31 @@ Step "Updating pubspec.yaml to $newVersion"
 $updated = $pubspecContent -replace "(?m)^(version:\s*)$([regex]::Escape($oldVersion))", "`${1}$newVersion"
 Set-Content -Path $PUBSPEC -Value $updated -NoNewline
 
-# ── 5. Commit ─────────────────────────────────────────────────────────────────
+# ── 5. Update _kAppVersion in project_settings_dialog.dart ───────────────────
+Step "Updating _kAppVersion in project_settings_dialog.dart to $major.$newMinor.0"
+$dialogContent = Get-Content $SETTINGS -Raw
+$updatedDialog = $dialogContent -replace "(?m)^(const _kAppVersion = ')[^']+(';)", "`${1}$major.$newMinor.0`${2}"
+Set-Content -Path $SETTINGS -Value $updatedDialog -NoNewline
+
+# ── 6. Commit ──────────────────────────────────────────��──────────────────────
 Step "Committing version bump"
-git add $PUBSPEC
+git add $PUBSPEC $SETTINGS
 git commit -m "chore: bump version to $newTag"
 if ($LASTEXITCODE -ne 0) { Die "git commit failed." }
 
-# ── 6. Push commit ────────────────────────────────────────────────────────────
+# ── 7. Push commit ────────────────────────────────────────────────────────────
 Step "Pushing commit to origin"
 git push origin HEAD
 if ($LASTEXITCODE -ne 0) { Die "git push failed." }
 
-# ── 7. Create and push annotated tag ─────────────────────────────────────────
+# ── 8. Create and push annotated tag ─────────────────────────────────────────
 Step "Tagging $newTag"
 git tag -a $newTag -m "Release $newTag"
 if ($LASTEXITCODE -ne 0) { Die "git tag failed." }
 git push origin $newTag
 if ($LASTEXITCODE -ne 0) { Die "git push tag failed." }
 
-# ── 8. Create GitHub release ──────────────────────────────────────────────────
+# ── 9. Create GitHub release ──────────────────────────────────────────────────
 Step "Creating GitHub release $newTag"
 gh release create $newTag `
     --title "ViewTripWeb $newTag" `
