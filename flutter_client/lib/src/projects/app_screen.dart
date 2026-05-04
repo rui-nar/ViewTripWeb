@@ -195,50 +195,6 @@ class _AppScreenState extends State<AppScreen> {
     }
   }
 
-  Future<void> _showRenameDialog(BuildContext context) async {
-    final notifier = context.read<ProjectNotifier>();
-    final ctrl = TextEditingController(text: notifier.projectName ?? '');
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename project'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Project name',
-            border: OutlineInputBorder(),
-          ),
-          onSubmitted: (_) => Navigator.of(ctx).pop(),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Rename'),
-          ),
-        ],
-      ),
-    );
-    final newName = ctrl.text.trim();
-    ctrl.dispose();
-    if (newName.isEmpty || newName == notifier.projectName) return;
-    final result = await notifier.renameProject(newName);
-    if (!context.mounted) return;
-    if (result != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Renamed to "$result"')),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(notifier.error ?? 'Rename failed')),
-      );
-    }
-  }
-
   void _showFilterSheet(BuildContext context, ProjectNotifier notifier,
       {required bool readOnly}) {
     showModalBottomSheet<void>(
@@ -323,22 +279,9 @@ class _AppScreenState extends State<AppScreen> {
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Text(
-                title.isEmpty ? 'ViewTripWeb' : title,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.edit_outlined, size: 18),
-              tooltip: 'Rename project',
-              visualDensity: VisualDensity.compact,
-              onPressed: () => _showRenameDialog(context),
-            ),
-          ],
+        title: Text(
+          title.isEmpty ? 'ViewTripWeb' : title,
+          overflow: TextOverflow.ellipsis,
         ),
         actions: [
           // Hamburger — narrow only

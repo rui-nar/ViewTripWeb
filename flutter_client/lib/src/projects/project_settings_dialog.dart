@@ -14,6 +14,7 @@ class ProjectSettingsDialog extends StatefulWidget {
 }
 
 class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
+  late TextEditingController _nameCtrl;
   DateTime? _tripStart;
   DateTime? _tripEnd;
   bool _saving = false;
@@ -52,6 +53,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   @override
   void initState() {
     super.initState();
+    _nameCtrl = TextEditingController(text: widget.notifier.projectName ?? '');
     final ts = widget.notifier.tripStart;
     if (ts != null) _tripStart = DateTime.tryParse(ts);
     final te = widget.notifier.tripEnd;
@@ -75,6 +77,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
   @override
   void dispose() {
+    _nameCtrl.dispose();
     for (final c in _optCtrls) { c.dispose(); }
     for (final c in _counterNameCtrls) { c.dispose(); }
     for (final c in _counterStartCtrls) { c.dispose(); }
@@ -150,6 +153,11 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       }
     }
 
+    final newName = _nameCtrl.text.trim();
+    if (newName.isNotEmpty && newName != widget.notifier.projectName) {
+      await widget.notifier.renameProject(newName);
+    }
+
     await widget.notifier.setTripStart(
       _tripStart == null ? null : _toIso(_tripStart!),
     );
@@ -220,6 +228,22 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // ── Project name ──────────────────────────────────────────
+              Text('Project name', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _nameCtrl,
+                style: theme.textTheme.bodyMedium,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                  contentPadding:
+                      EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+
+              const Divider(height: 24),
+
               // ── Trip start ────────────────────────────────────────────
               Text('Trip start', style: theme.textTheme.labelMedium),
               const SizedBox(height: 4),

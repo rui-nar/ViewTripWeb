@@ -10,7 +10,6 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
-import '../auth/auth_notifier.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -59,11 +58,6 @@ class _ViewBodyState extends State<_ViewBody> {
   void dispose() {
     _mapController.dispose();
     super.dispose();
-  }
-
-  Future<void> _logout() async {
-    await context.read<AuthNotifier>().logout();
-    if (mounted) context.go('/login');
   }
 
   @override
@@ -153,9 +147,9 @@ class _ViewBodyState extends State<_ViewBody> {
             onPressed: () => context.push('/settings'),
           ),
           IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: _logout,
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Back to projects',
+            onPressed: () => context.go('/projects'),
           ),
           const SizedBox(width: 4),
         ],
