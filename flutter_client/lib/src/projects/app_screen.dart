@@ -273,6 +273,7 @@ class _AppScreenState extends State<AppScreen> {
     final title = context.select<ProjectNotifier, String>(
       (n) => n.projectName ?? widget.projectName,
     );
+    final isLoading = context.select<ProjectNotifier, bool>((n) => n.isLoading);
 
     final isNarrow = MediaQuery.sizeOf(context).width < 720;
 
@@ -358,7 +359,7 @@ class _AppScreenState extends State<AppScreen> {
             IconButton(
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
-              onPressed: () => context.push(
+              onPressed: isLoading ? null : () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
                 extra: {
                   'tags': context.read<ProjectNotifier>().availableTags,
@@ -410,11 +411,13 @@ class _AppScreenState extends State<AppScreen> {
                     title: Text('Share'),
                   ),
                 ),
-                const PopupMenuItem(
+                PopupMenuItem(
                   value: 2,
+                  enabled: !isLoading,
                   child: ListTile(
-                    leading: Icon(Icons.tune),
-                    title: Text('Project settings'),
+                    leading: const Icon(Icons.tune),
+                    title: const Text('Project settings'),
+                    enabled: !isLoading,
                   ),
                 ),
                 const PopupMenuItem(
@@ -457,7 +460,7 @@ class _AppScreenState extends State<AppScreen> {
             IconButton(
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
-              onPressed: () => context.push(
+              onPressed: isLoading ? null : () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
                 extra: {
                   'tags': context.read<ProjectNotifier>().availableTags,
@@ -468,7 +471,7 @@ class _AppScreenState extends State<AppScreen> {
             IconButton(
               icon: const Icon(Icons.tune),
               tooltip: 'Project settings',
-              onPressed: () => showDialog<void>(
+              onPressed: isLoading ? null : () => showDialog<void>(
                 context: context,
                 useRootNavigator: true,
                 builder: (_) => ProjectSettingsDialog(

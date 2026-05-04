@@ -65,6 +65,7 @@ class _ViewBodyState extends State<_ViewBody> {
     final title = context.select<ProjectNotifier, String>(
       (n) => n.projectName ?? widget.projectName,
     );
+    final isLoading = context.select<ProjectNotifier, bool>((n) => n.isLoading);
 
     return Scaffold(
       appBar: AppBar(
@@ -136,7 +137,7 @@ class _ViewBodyState extends State<_ViewBody> {
           IconButton(
             icon: const Icon(Icons.bar_chart_outlined),
             tooltip: 'Statistics',
-            onPressed: () => context.push(
+            onPressed: isLoading ? null : () => context.push(
               '/stats?project=${Uri.encodeComponent(widget.projectName)}',
               extra: context.read<ProjectNotifier>().availableTags,
             ),
