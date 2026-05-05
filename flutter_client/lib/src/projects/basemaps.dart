@@ -23,11 +23,15 @@ const kMapboxManageUrl =
 
 /// Mapbox satellite-streets vector style — satellite imagery + vector labels.
 /// Used in view / share mode (vector tile path via VectorTileLayer).
-const kMapboxViewStyleUri = 'mapbox://styles/mapbox/satellite-streets-v12';
+/// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
+const kMapboxViewStyleUri =
+    'mapbox://styles/mapbox/satellite-streets-v12?access_token={key}';
 
 /// Mapbox outdoors vector style — terrain + streets for manage mode.
 /// Used in manage mode (vector tile path via VectorTileLayer).
-const kMapboxManageStyleUri = 'mapbox://styles/mapbox/outdoors-v12';
+/// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
+const kMapboxManageStyleUri =
+    'mapbox://styles/mapbox/outdoors-v12?access_token={key}';
 
 // ── Esri (legacy, kept for fallback via BASEMAP_PROVIDER=ESRI) ─────────────────
 
