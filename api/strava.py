@@ -96,12 +96,25 @@ def _invalidate_cache(user_info_id: int) -> None:
             sess.commit()
 
 
-def _fetch_all_strava(client: StravaAPI) -> List[Dict[str, Any]]:
-    """Paginate through all Strava activities and return the raw list."""
+def _fetch_all_strava(
+    client: StravaAPI,
+    after: Optional[int] = None,
+    before: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Paginate through Strava activities and return the raw list.
+
+    Pass ``after``/``before`` (Unix timestamps) to restrict to a date range;
+    omit both to fetch the full history.
+    """
     all_raw: List[Dict[str, Any]] = []
     page = 1
     while True:
-        batch = client.get_activities(per_page=200, page=page)
+        params: Dict[str, Any] = {"per_page": 200, "page": page}
+        if after is not None:
+            params["after"] = after
+        if before is not None:
+            params["before"] = before
+        batch = client.get_activities(**params)
         if not isinstance(batch, list) or not batch:
             break
         all_raw.extend(batch)
@@ -285,7 +298,24 @@ def strava_activities(
         }
     """
     user_info_id = int(current_user["sub"])
-    user_id = current_user["sub"]
+
+    # Convert date strings to Unix epoch for the Strava API
+    after_epoch: Optional[int] = None
+    before_epoch: Optional[int] = None
+    if start_date:
+        try:
+            sd = date.fromisoformat(start_date)
+            after_epoch = int(datetime(sd.year, sd.month, sd.day, tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            ed = date.fromisoformat(end_date)
+            before_epoch = int(datetime(ed.year, ed.month, ed.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            pass
+
+    use_date_api = after_epoch is not None or before_epoch is not None
 
     cached = False
     with get_session() as sess:
@@ -298,20 +328,27 @@ def strava_activities(
                 detail="Strava not connected",
             )
 
-        # Try to serve from cache
         raw_list: Optional[List[Dict[str, Any]]] = None
-        if not refresh:
-            cache = _load_cache(user_info_id)
-            if cache is not None:
-                raw_list = cache["activities"]
-                cached = True
 
-        # Cache miss or forced refresh — fetch everything from Strava
-        if raw_list is None:
+        if use_date_api:
+            # Date-bounded fetch: bypass the "all activities" cache and pass
+            # epochs directly to the Strava API so only the relevant range
+            # is transferred.  Result is NOT written back to the cache.
             client = _strava_client_for_token(token_row)
-            raw_list = _fetch_all_strava(client)
-            _save_cache(user_info_id, raw_list)
+            raw_list = _fetch_all_strava(client, after=after_epoch, before=before_epoch)
             _save_refreshed_token(sess, token_row, client)
+        else:
+            # No date bounds: use/update the per-user "all activities" cache.
+            if not refresh:
+                cache_data = _load_cache(user_info_id)
+                if cache_data is not None:
+                    raw_list = cache_data["activities"]
+                    cached = True
+            if raw_list is None:
+                client = _strava_client_for_token(token_row)
+                raw_list = _fetch_all_strava(client)
+                _save_cache(user_info_id, raw_list)
+                _save_refreshed_token(sess, token_row, client)
 
     # Parse raw dicts → Activity objects
     activities: List[Activity] = []
@@ -319,22 +356,6 @@ def strava_activities(
         try:
             activities.append(Activity.from_strava_api(raw))
         except Exception:
-            pass
-
-    # Apply date filters
-    if start_date:
-        try:
-            sd = date.fromisoformat(start_date)
-            cutoff = datetime(sd.year, sd.month, sd.day, tzinfo=timezone.utc)
-            activities = [a for a in activities if a.start_date >= cutoff]
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            ed = date.fromisoformat(end_date)
-            cutoff = datetime(ed.year, ed.month, ed.day, 23, 59, 59, tzinfo=timezone.utc)
-            activities = [a for a in activities if a.start_date <= cutoff]
-        except ValueError:
             pass
 
     # Apply type filter

@@ -15,14 +15,58 @@ class StravaImportScreen extends StatefulWidget {
 }
 
 class _StravaImportScreenState extends State<StravaImportScreen> {
+  // True once the user has triggered at least one search.
+  bool _hasSearched = false;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context
-          .read<StravaImportNotifier>()
-          .load(projectName: widget.projectName);
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initDates());
+  }
+
+  /// Pre-fill date range from project settings + existing activities.
+  ///
+  /// Priority: tripStart/tripEnd > min/max of existing activity dates > null.
+  /// If no reference exists at all (brand-new project, no dates set), both
+  /// dates stay null so the user can fetch everything.
+  void _initDates() {
+    final pn = context.read<ProjectNotifier>();
+    final notifier = context.read<StravaImportNotifier>();
+
+    DateTime? start;
+    DateTime? end;
+
+    // Start: prefer tripStart, else min of existing activity dates.
+    if (pn.tripStart != null) {
+      start = DateTime.tryParse(pn.tripStart!);
+    }
+    if (start == null) {
+      for (final a in pn.activities) {
+        final raw = (a['start_date_local'] as String?)?.split('T').first;
+        if (raw != null) {
+          final dt = DateTime.tryParse(raw);
+          if (dt != null && (start == null || dt.isBefore(start))) {
+            start = dt;
+          }
+        }
+      }
+    }
+
+    // End: prefer tripEnd, else today when there is a start reference.
+    if (pn.tripEnd != null) {
+      end = DateTime.tryParse(pn.tripEnd!);
+    }
+    if (end == null && start != null) {
+      final now = DateTime.now();
+      end = DateTime(now.year, now.month, now.day);
+    }
+
+    notifier.setDateRange(start, end);
+  }
+
+  Future<void> _search(StravaImportNotifier notifier) async {
+    setState(() => _hasSearched = true);
+    await notifier.load(projectName: widget.projectName);
   }
 
   Future<void> _pickDateRange(StravaImportNotifier notifier) async {
@@ -39,7 +83,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     );
     if (picked != null) {
       notifier.setDateRange(picked.start, picked.end);
-      notifier.load(projectName: widget.projectName);
     }
   }
 
@@ -105,9 +148,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
       ),
       body: Column(
         children: [
-          // ── Filter bar ───────────────────────────────────────────────────
-          // Consumer scoped here: rebuilds on load/filter changes only, NOT
-          // on checkbox toggles (those only change selectedIds + newCount).
+          // ── Filter / search bar ──────────────────────────────────────────
           Consumer<StravaImportNotifier>(
             builder: (ctx, notifier, _) => Container(
               color: theme.colorScheme.surfaceContainerHighest,
@@ -127,18 +168,27 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                       ),
                       if (notifier.startDate != null ||
                           notifier.endDate != null) ...[
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 4),
                         IconButton(
                           icon: const Icon(Icons.close, size: 18),
                           tooltip: 'Clear date filter',
-                          onPressed: () {
-                            notifier.setDateRange(null, null);
-                            notifier.load(projectName: widget.projectName);
-                          },
+                          visualDensity: VisualDensity.compact,
+                          onPressed: notifier.isLoading
+                              ? null
+                              : () => notifier.setDateRange(null, null),
                         ),
                       ],
+                      const SizedBox(width: 8),
+                      FilledButton.tonal(
+                        onPressed: notifier.isLoading
+                            ? null
+                            : () => _search(notifier),
+                        child: const Text('Search'),
+                      ),
                       const Spacer(),
-                      if (notifier.lastResultCached && !notifier.isLoading)
+                      if (notifier.lastResultCached &&
+                          !notifier.isLoading &&
+                          _hasSearched)
                         Tooltip(
                           message:
                               'Showing cached results. Tap Refresh↺ to re-fetch from Strava.',
@@ -150,16 +200,20 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                                     .withValues(alpha: 0.4)),
                           ),
                         ),
-                      TextButton.icon(
-                        icon: const Icon(Icons.refresh, size: 18),
-                        label: const Text('Refresh'),
-                        onPressed: notifier.isLoading
-                            ? null
-                            : () => notifier.load(
-                                  projectName: widget.projectName,
-                                  refresh: true,
-                                ),
-                      ),
+                      if (_hasSearched)
+                        TextButton.icon(
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text('Refresh'),
+                          onPressed: notifier.isLoading
+                              ? null
+                              : () {
+                                  setState(() => _hasSearched = true);
+                                  notifier.load(
+                                    projectName: widget.projectName,
+                                    refresh: true,
+                                  );
+                                },
+                        ),
                     ],
                   ),
                   if (notifier.allTypes.isNotEmpty)
@@ -185,8 +239,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
           ),
 
           // ── Selection count row ──────────────────────────────────────────
-          // Selector on (selectedLen, activitiesLen, totalCount) — rebuilds
-          // on checkbox taps and load, but NOT on filter chip taps alone.
           Selector<StravaImportNotifier, (int, int, int)>(
             selector: (_, n) =>
                 (n.selectedIds.length, n.activities.length, n.totalCount),
@@ -220,9 +272,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
           ),
 
           // ── Activity list body ───────────────────────────────────────────
-          // Consumer for structural changes (isLoading, error, activities).
-          // Individual tiles use their own Selector for selection state so
-          // only the tapped tile rebuilds on each checkbox tap.
           Expanded(
             child: Consumer<StravaImportNotifier>(
               builder: (ctx, notifier, _) {
@@ -274,6 +323,31 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                     ),
                   );
                 }
+                // Not yet searched — prompt the user.
+                if (!_hasSearched) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.manage_search,
+                              size: 48,
+                              color: theme.colorScheme.onSurface
+                                  .withValues(alpha: 0.3)),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Set a date range above and tap Search',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.5)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
                 if (notifier.activities.isEmpty) {
                   return Center(
                     child: Text('No activities found.',
@@ -281,7 +355,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                   );
                 }
                 return ListView.builder(
-                  // +1 for the Load more / spinner / footer row
                   itemCount: notifier.activities.length + 1,
                   itemBuilder: (context, i) {
                     if (i == notifier.activities.length) {
@@ -323,8 +396,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
       ),
 
       // ── Bottom bar ────────────────────────────────────────────────────────
-      // Selector on (newCount, isLoading) — rebuilds only when those change,
-      // NOT on every checkbox tap that doesn't change the count.
       bottomNavigationBar: Selector<StravaImportNotifier, (int, bool)>(
         selector: (_, n) => (n.newCount, n.isLoading),
         builder: (ctx, state, __) {
@@ -356,8 +427,6 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
 }
 
 // ── _ActivityTile ─────────────────────────────────────────────────────────────
-// Uses Selector<bool> scoped to selectedIds.contains(id) so only THIS tile
-// rebuilds when its selection state changes, not the whole list.
 
 class _ActivityTile extends StatefulWidget {
   final Map<String, dynamic> activity;
