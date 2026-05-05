@@ -8,18 +8,26 @@ const _kProvider =
 const kUseMapbox = _kProvider == 'MAPBOX';
 
 // ── Mapbox ─────────────────────────────────────────────────────────────────────
-const _kMapboxToken = String.fromEnvironment('MAPBOX_TOKEN');
+const kMapboxToken = String.fromEnvironment('MAPBOX_TOKEN');
 
 /// Mapbox satellite-streets — satellite imagery + labels in one layer.
-/// Used in view / share / export mode.
+/// Used in view / share / export mode (raster tile path).
 const kMapboxViewUrl =
     'https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}'
-    '?access_token=$_kMapboxToken';
+    '?access_token=$kMapboxToken';
 
-/// Mapbox streets — labelled street/terrain map for manage mode.
+/// Mapbox outdoors — labelled street/terrain map for manage mode (raster tile path).
 const kMapboxManageUrl =
     'https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/tiles/256/{z}/{x}/{y}'
-    '?access_token=$_kMapboxToken';
+    '?access_token=$kMapboxToken';
+
+/// Mapbox satellite-streets vector style — satellite imagery + vector labels.
+/// Used in view / share mode (vector tile path via VectorTileLayer).
+const kMapboxViewStyleUri = 'mapbox://styles/mapbox/satellite-streets-v12';
+
+/// Mapbox outdoors vector style — terrain + streets for manage mode.
+/// Used in manage mode (vector tile path via VectorTileLayer).
+const kMapboxManageStyleUri = 'mapbox://styles/mapbox/outdoors-v12';
 
 // ── Esri (legacy, kept for fallback via BASEMAP_PROVIDER=ESRI) ─────────────────
 
@@ -46,16 +54,13 @@ const kCartoDblLabelsUrl =
     'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}@2x.png';
 const kCartoDblLabelsSubdomains = ['a', 'b', 'c', 'd'];
 
-// ── Resolved URLs (consumed by all screens) ────────────────────────────────────
+// ── Resolved raster URLs (consumed by all screens) ────────────────────────────
 
 const kActiveViewBasemapUrl =
     kUseMapbox ? kMapboxViewUrl : kViewBasemapUrl;
 
-/// Labels overlay stacked on top of the satellite basemap.
-/// Mapbox mode: CartoDB light_only_labels (countries, capitals, no streets).
-/// Esri mode: Esri World Boundaries and Places.
+/// Labels overlay stacked on top of the satellite basemap (raster path only).
 const String kActiveViewLabelsUrl = kViewLabelsUrl;
-///    kUseMapbox ? kCartoDblLabelsUrl : kViewLabelsUrl;
 
 const List<String> kActiveViewLabelsSubdomains =
     kUseMapbox ? kCartoDblLabelsSubdomains : [];
@@ -65,3 +70,15 @@ const kActiveManageBasemapUrl =
 
 const List<String> kActiveManageSubdomains =
     kUseMapbox ? [] : kManageBasemapSubdomains;
+
+// ── Resolved vector style URIs (null when ESRI provider is selected) ──────────
+
+/// Mapbox vector style URI for view / share mode.
+/// Null when using the ESRI raster fallback.
+const String? kActiveViewStyleUri =
+    kUseMapbox ? kMapboxViewStyleUri : null;
+
+/// Mapbox vector style URI for manage mode.
+/// Null when using the ESRI raster fallback.
+const String? kActiveManageStyleUri =
+    kUseMapbox ? kMapboxManageStyleUri : null;

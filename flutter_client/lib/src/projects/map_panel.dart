@@ -3,6 +3,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:vector_map_tiles/vector_map_tiles.dart';
 
 import 'activity_panel.dart';
 import 'basemaps.dart';
@@ -16,6 +17,9 @@ class MapPanel extends StatefulWidget {
   final String basemapUrl;
   final List<String> basemapSubdomains;
   final String? labelsUrl;
+  /// Mapbox vector style URI (e.g. `mapbox://styles/mapbox/satellite-streets-v12`).
+  /// When set and non-null, a VectorTileLayer replaces the raster TileLayer.
+  final String? basemapStyleUri;
 
   const MapPanel({
     super.key,
@@ -24,6 +28,7 @@ class MapPanel extends StatefulWidget {
     required this.basemapUrl,
     this.basemapSubdomains = const [],
     this.labelsUrl,
+    this.basemapStyleUri,
   });
 
   @override
@@ -42,14 +47,21 @@ class _MapPanelState extends State<MapPanel> {
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
-  late final NetworkTileProvider _tileProvider;
+  NetworkTileProvider? _tileProvider;
+  Style? _vectorStyle;
 
   static const _sentinel = Object(); // distinct from null
 
   @override
   void initState() {
     super.initState();
-    _tileProvider = NetworkTileProvider();
+    if (widget.basemapStyleUri != null) {
+      StyleReader(uri: widget.basemapStyleUri!, apiKey: kMapboxToken)
+          .read()
+          .then((s) { if (mounted) setState(() => _vectorStyle = s); });
+    } else {
+      _tileProvider = NetworkTileProvider();
+    }
   }
 
   static Color _alternateColor(Color base) {
@@ -308,30 +320,38 @@ class _MapPanelState extends State<MapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            TileLayer(
-              urlTemplate: widget.basemapUrl,
-              subdomains: widget.basemapSubdomains,
-              userAgentPackageName: 'com.viewtrip.client',
-              tileProvider: _tileProvider,
-              maxNativeZoom: 22,
-              retinaMode: RetinaMode.isHighDensity(context),
-            ),
-            if (widget.labelsUrl != null)
-              ColorFiltered(
-                colorFilter: ColorFilter.matrix(<double>[
-                  1, 0, 0, 0, 0,
-                  0, 1, 0, 0, 0,
-                  0, 0, 1, 0, 0,
-                  0, 0, 0, 0.5, 0,
-                ]),
-                child: TileLayer(
-                  urlTemplate: widget.labelsUrl!,
-                  subdomains: kActiveViewLabelsSubdomains,
-                  userAgentPackageName: 'com.viewtrip.client',
-                  tileProvider: _tileProvider,
-                  maxNativeZoom: 22,
-                ),
+            if (_vectorStyle != null)
+              VectorTileLayer(
+                tileProviders: _vectorStyle!.providers,
+                theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
+              )
+            else if (_tileProvider != null) ...[
+              TileLayer(
+                urlTemplate: widget.basemapUrl,
+                subdomains: widget.basemapSubdomains,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider!,
+                maxNativeZoom: 22,
+                retinaMode: RetinaMode.isHighDensity(context),
               ),
+              if (widget.labelsUrl != null)
+                ColorFiltered(
+                  colorFilter: ColorFilter.matrix(<double>[
+                    1, 0, 0, 0, 0,
+                    0, 1, 0, 0, 0,
+                    0, 0, 1, 0, 0,
+                    0, 0, 0, 0.5, 0,
+                  ]),
+                  child: TileLayer(
+                    urlTemplate: widget.labelsUrl!,
+                    subdomains: kActiveViewLabelsSubdomains,
+                    userAgentPackageName: 'com.viewtrip.client',
+                    tileProvider: _tileProvider!,
+                    maxNativeZoom: 22,
+                  ),
+                ),
+            ],
             if (polylines.isNotEmpty)
               PolylineLayer(
                 polylines: polylines,
@@ -398,6 +418,8 @@ class ManageMapPanel extends StatefulWidget {
   final String basemapUrl;
   final List<String> basemapSubdomains;
   final ValueNotifier<bool> fittedNotifier;
+  /// Mapbox vector style URI. When set, a VectorTileLayer replaces the raster TileLayer.
+  final String? basemapStyleUri;
 
   const ManageMapPanel({
     super.key,
@@ -407,6 +429,7 @@ class ManageMapPanel extends StatefulWidget {
     required this.fittedNotifier,
     this.autoZoom = false,
     this.basemapSubdomains = const [],
+    this.basemapStyleUri,
   });
 
   @override
@@ -414,7 +437,8 @@ class ManageMapPanel extends StatefulWidget {
 }
 
 class ManageMapPanelState extends State<ManageMapPanel> {
-  late final NetworkTileProvider _tileProvider;
+  NetworkTileProvider? _tileProvider;
+  Style? _vectorStyle;
 
   // Polyline + marker cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
@@ -571,7 +595,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   @override
   void initState() {
     super.initState();
-    _tileProvider = NetworkTileProvider();
+    if (widget.basemapStyleUri != null) {
+      StyleReader(uri: widget.basemapStyleUri!, apiKey: kMapboxToken)
+          .read()
+          .then((s) { if (mounted) setState(() => _vectorStyle = s); });
+    } else {
+      _tileProvider = NetworkTileProvider();
+    }
     // Initialise "last" selection state from the current notifier values so that
     // a spurious selectionChanged2=true (which resets the fit flag) is never
     // triggered when this state is (re)created while a fit has already happened.
@@ -915,13 +945,20 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            TileLayer(
-              urlTemplate: widget.basemapUrl,
-              subdomains: widget.basemapSubdomains,
-              userAgentPackageName: 'com.viewtrip.client',
-              tileProvider: _tileProvider,
-              maxNativeZoom: 22,
-            ),
+            if (_vectorStyle != null)
+              VectorTileLayer(
+                tileProviders: _vectorStyle!.providers,
+                theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
+              )
+            else if (_tileProvider != null)
+              TileLayer(
+                urlTemplate: widget.basemapUrl,
+                subdomains: widget.basemapSubdomains,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider!,
+                maxNativeZoom: 22,
+              ),
             if (_cachedPolylines.isNotEmpty)
               PolylineLayer(
                 polylines: _cachedPolylines,

@@ -217,6 +217,7 @@ class _ViewLayout extends StatelessWidget {
       mapController: mapController,
       basemapUrl: kActiveViewBasemapUrl,
       labelsUrl: kActiveViewLabelsUrl,
+      basemapStyleUri: kActiveViewStyleUri,
     );
 
     return Column(
