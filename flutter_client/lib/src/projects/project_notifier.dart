@@ -638,7 +638,9 @@ class ProjectNotifier extends ChangeNotifier
         if (earliest == null || dk.compareTo(earliest) < 0) earliest = dk;
       }
     }
-    if (earliest == null) return;
+    earliest ??= '${todayDate.year.toString().padLeft(4, '0')}-'
+                 '${todayDate.month.toString().padLeft(2, '0')}-'
+                 '${todayDate.day.toString().padLeft(2, '0')}';
 
     final startDate = DateTime.tryParse(earliest);
     if (startDate == null || startDate.isAfter(todayDate)) return;
