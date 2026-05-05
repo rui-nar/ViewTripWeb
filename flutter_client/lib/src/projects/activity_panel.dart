@@ -698,11 +698,16 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 }),
                               ),
                               Expanded(
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Flexible(
-                                      child: Text(
+                                child: () {
+                                  final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
+                                  final tags = rawTags is List
+                                      ? rawTags.cast<String>()
+                                      : <String>[];
+                                  return Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
                                         'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
                                         overflow: TextOverflow.ellipsis,
                                         style: theme.textTheme.labelMedium?.copyWith(
@@ -712,41 +717,39 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                           fontWeight: FontWeight.w600,
                                         ),
                                       ),
-                                    ),
-                                    ...() {
-                                      final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
-                                      final tags = rawTags is List
-                                          ? rawTags.cast<String>()
-                                          : <String>[];
-                                      return [
-                                        for (final tag in tags)
-                                          Padding(
-                                            padding: const EdgeInsets.only(left: 4),
-                                            child: Container(
-                                              padding: const EdgeInsets.symmetric(
-                                                  horizontal: 4, vertical: 1),
-                                              decoration: BoxDecoration(
-                                                color: theme.colorScheme
-                                                    .secondaryContainer,
-                                                borderRadius:
-                                                    BorderRadius.circular(4),
-                                              ),
-                                              child: Text(
-                                                tag,
-                                                style: theme.textTheme.labelSmall
-                                                    ?.copyWith(
-                                                  fontSize: 9,
-                                                  height: 1.1,
-                                                  color: theme.colorScheme
-                                                      .onSecondaryContainer,
+                                      if (tags.isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 2),
+                                          child: Wrap(
+                                            spacing: 3,
+                                            children: [
+                                              for (final tag in tags)
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(
+                                                      horizontal: 4, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: theme.colorScheme
+                                                        .secondaryContainer,
+                                                    borderRadius:
+                                                        BorderRadius.circular(4),
+                                                  ),
+                                                  child: Text(
+                                                    tag,
+                                                    style: theme.textTheme.labelSmall
+                                                        ?.copyWith(
+                                                      fontSize: 8,
+                                                      height: 1.1,
+                                                      color: theme.colorScheme
+                                                          .onSecondaryContainer,
+                                                    ),
+                                                  ),
                                                 ),
-                                              ),
-                                            ),
+                                            ],
                                           ),
-                                      ];
-                                    }(),
-                                  ],
-                                ),
+                                        ),
+                                    ],
+                                  );
+                                }(),
                               ),
                               if (isWide)
                                 IconButton(
