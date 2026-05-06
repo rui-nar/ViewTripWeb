@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
-import 'package:vector_tile_renderer/vector_tile_renderer.dart' show Logger;
 
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
@@ -64,13 +63,9 @@ class _MapPanelState extends State<MapPanel> {
         try {
           final s = await StyleReader(
                   uri: widget.basemapStyleUri!,
-                  apiKey: kMapboxToken,
-                  logger: const Logger.console())
+                  apiKey: kMapboxToken)
               .read();
           if (!mounted) return;
-          debugPrint('[MapPanel] style loaded — '
-              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
-              'tileSources: ${s.theme.tileSources.toList()}');
           setState(() => _vectorStyle = s);
         } catch (e) {
           debugPrint('[MapPanel] StyleReader error: $e');
@@ -620,13 +615,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         try {
           final s = await StyleReader(
                   uri: widget.basemapStyleUri!,
-                  apiKey: kMapboxToken,
-                  logger: const Logger.console())
+                  apiKey: kMapboxToken)
               .read();
           if (!mounted) return;
-          debugPrint('[ManageMapPanel] style loaded — '
-              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
-              'tileSources: ${s.theme.tileSources.toList()}');
           setState(() => _vectorStyle = s);
         } catch (e) {
           debugPrint('[ManageMapPanel] StyleReader error: $e');
