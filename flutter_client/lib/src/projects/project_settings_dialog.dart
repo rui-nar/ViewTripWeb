@@ -158,10 +158,10 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       await widget.notifier.renameProject(newName);
     }
 
-    await widget.notifier.setTripStart(
+    await widget.notifier.setTripDates(
       _tripStart == null ? null : _toIso(_tripStart!),
+      tripEndStr,
     );
-    await widget.notifier.setTripEnd(tripEndStr);
     final updatedOpts = <String>[];
     final updatedGroups = <String, String>{};
     for (int i = 0; i < _optCtrls.length; i++) {
@@ -171,14 +171,18 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
         updatedGroups[name] = _optGroups[i];
       }
     }
-    await widget.notifier.updateSleepingOptions(updatedOpts, groups: updatedGroups);
     final updatedCounters = <Map<String, dynamic>>[];
     for (int i = 0; i < _counterNameCtrls.length; i++) {
       final name = _counterNameCtrls[i].text.trim();
       final start = double.tryParse(_counterStartCtrls[i].text) ?? 0.0;
       if (name.isNotEmpty) updatedCounters.add({'name': name, 'start': start});
     }
-    await widget.notifier.updateCounters(updatedCounters);
+    await widget.notifier.saveDayMeta(
+      newDayMeta: widget.notifier.dayMeta,
+      newSleepingOptions: updatedOpts,
+      newSleepingOptionGroups: updatedGroups,
+      newCounters: updatedCounters,
+    );
     widget.notifier.setTrackStyle(
       color: _trackColor,
       width: _trackWidth,

@@ -462,32 +462,19 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> setTripStart(String? dateStr) async {
+  /// Saves trip_start and trip_end in a single PUT + one reload.
+  /// No-ops if neither value changed.
+  Future<void> setTripDates(String? startStr, String? endStr) async {
     final name = projectName;
     if (name == null) return;
-    tripStart = dateStr;
+    if (tripStart == startStr && tripEnd == endStr) return;
+    tripStart = startStr;
+    tripEnd = endStr;
     notifyListeners();
     try {
       await api.put(
         '/api/projects/${Uri.encodeComponent(name)}',
-        {'trip_start': dateStr},
-      );
-      await _silentReloadDetailsOnly(name);
-    } on Exception catch (e) {
-      error = _msg(e);
-      notifyListeners();
-    }
-  }
-
-  Future<void> setTripEnd(String? dateStr) async {
-    final name = projectName;
-    if (name == null) return;
-    tripEnd = dateStr;
-    notifyListeners();
-    try {
-      await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}',
-        {'trip_end': dateStr},
+        {'trip_start': startStr, 'trip_end': endStr},
       );
       await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
@@ -604,18 +591,6 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> updateSleepingOptions(
-    List<String> opts, {
-    Map<String, String>? groups,
-  }) =>
-      saveDayMeta(
-        newDayMeta: dayMeta,
-        newSleepingOptions: opts,
-        newSleepingOptionGroups: groups,
-      );
-
-  Future<void> updateCounters(List<Map<String, dynamic>> newCounters) =>
-      saveDayMeta(newDayMeta: dayMeta, newCounters: newCounters);
 
   /// Silently fills empty dayMeta entries from the earliest known date up to
   /// today, but only while the trip is active (no tripEnd or tripEnd >= today).
