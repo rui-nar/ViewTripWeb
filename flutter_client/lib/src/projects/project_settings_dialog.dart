@@ -158,10 +158,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       await widget.notifier.renameProject(newName);
     }
 
-    await widget.notifier.setTripDates(
-      _tripStart == null ? null : _toIso(_tripStart!),
-      tripEndStr,
-    );
+    // Build sleeping options and counters before closing.
     final updatedOpts = <String>[];
     final updatedGroups = <String, String>{};
     for (int i = 0; i < _optCtrls.length; i++) {
@@ -177,7 +174,14 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       final start = double.tryParse(_counterStartCtrls[i].text) ?? 0.0;
       if (name.isNotEmpty) updatedCounters.add({'name': name, 'start': start});
     }
-    await widget.notifier.saveDayMeta(
+
+    // Fire-and-forget: both are optimistically applied before their PUT lands.
+    // setTripDates is independent of saveDayMeta (different fields, no reload).
+    widget.notifier.setTripDates(
+      _tripStart == null ? null : _toIso(_tripStart!),
+      tripEndStr,
+    );
+    widget.notifier.saveDayMeta(
       newDayMeta: widget.notifier.dayMeta,
       newSleepingOptions: updatedOpts,
       newSleepingOptionGroups: updatedGroups,

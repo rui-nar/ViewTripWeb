@@ -462,8 +462,9 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  /// Saves trip_start and trip_end in a single PUT + one reload.
-  /// No-ops if neither value changed.
+  /// Saves trip_start and trip_end in a single PUT. No-ops if neither changed.
+  /// Optimistic update is applied immediately; no reload needed since the
+  /// server only writes these two fields and returns them unchanged.
   Future<void> setTripDates(String? startStr, String? endStr) async {
     final name = projectName;
     if (name == null) return;
@@ -476,7 +477,6 @@ class ProjectNotifier extends ChangeNotifier
         '/api/projects/${Uri.encodeComponent(name)}',
         {'trip_start': startStr, 'trip_end': endStr},
       );
-      await _silentReloadDetailsOnly(name);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
