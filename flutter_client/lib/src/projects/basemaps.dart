@@ -24,9 +24,9 @@ const kMapboxManageUrl =
 /// Mapbox satellite-streets vector style — satellite imagery + vector labels.
 /// Used in view / share mode (vector tile path via VectorTileLayer).
 /// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
-const kMapboxViewStyleUri =
-    'mapbox://styles/mapbox/satellite-streets-v12?access_token={key}';
-
+//const kMapboxViewStyleUri =
+//    'mapbox://styles/mapbox/satellite-streets-v12?access_token={key}';
+const kMapboxViewStyleUri = 'mapbox://styles/port82/cmot5rk5l007301sfe4g2fyqz?access_token={key}';
 /// Mapbox outdoors vector style — terrain + streets for manage mode.
 /// Used in manage mode (vector tile path via VectorTileLayer).
 /// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
