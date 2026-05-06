@@ -130,11 +130,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void _rebuildDisplayList(
     List<Map<String, dynamic>> items,
     String? tripStartOverride,
+    Map<String, Map<String, dynamic>> dayMeta,
   ) {
-    if (identical(items, _lastItems) && tripStartOverride == _lastTripStart) return;
+    if (identical(items, _lastItems) &&
+        tripStartOverride == _lastTripStart &&
+        identical(dayMeta, _lastDayMeta)) { return; }
     _lastItems = items;
     _lastTripStart = tripStartOverride;
-    _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
+    _lastDayMeta = dayMeta;
+    _displayList = _buildDisplayList(items, _activityById, tripStartOverride, dayMeta);
     // Collapse all days on first load only; never reset after that.
     // Only apply once we have actual day headers (items may be empty on initState).
     if (!_initialCollapseApplied && _displayList.any((o) => o is _DayHeader)) {
@@ -145,7 +149,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
       // Rebuild now that _collapsedDays is populated — _buildDisplayList filters
       // children using _collapsedDays, so the first call above produced an
       // uncollapsed list.
-      _displayList = _buildDisplayList(items, _activityById, tripStartOverride);
+      _displayList = _buildDisplayList(items, _activityById, tripStartOverride, dayMeta);
     }
   }
 
@@ -217,13 +221,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
   }
 
   String? _lastTripStart;
+  Map<String, Map<String, dynamic>>? _lastDayMeta;
 
   List<Object> _buildDisplayList(
     List<Map<String, dynamic>> items,
     Map<dynamic, Map<String, dynamic>> activityById,
     String? tripStartOverride,
+    Map<String, Map<String, dynamic>> dayMeta,
   ) {
-    if (items.isEmpty) return [];
+    if (items.isEmpty && dayMeta.isEmpty) return [];
 
     // Assign each item a date ("YYYY-MM-DD"), propagating forward.
     final itemDates = <String?>[];
@@ -243,8 +249,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
       itemDates.add(d);
     }
 
-    // Determine trip start: use override if set, else earliest date in items.
-    final allDates = itemDates.whereType<String>().toSet().toList()..sort();
+    // Determine trip start: use override if set, else earliest date in items/dayMeta.
+    final allDates = {
+      ...itemDates.whereType<String>(),
+      ...dayMeta.keys,
+    }.toList()..sort();
     if (allDates.isEmpty) {
       return [for (int i = 0; i < items.length; i++) _PanelItem(i, items[i], null)];
     }
@@ -292,14 +301,14 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void initState() {
     super.initState();
     _refreshActivityById(widget.notifier.activities);
-    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart);
+    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
   }
 
   @override
   void didUpdateWidget(ActivityPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     _refreshActivityById(widget.notifier.activities);
-    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart);
+    _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
   }
 
   @override
@@ -568,7 +577,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   ),
                 )
               : Builder(builder: (context) {
-                  _rebuildDisplayList(items, notifier.tripStart);
+                  _rebuildDisplayList(items, notifier.tripStart, notifier.dayMeta);
                   final hasFilter    = notifier.hasActiveFilter;
                   final selectedDays = notifier.selectedDays;
                   // Recompute filtered list only when inputs actually change.
