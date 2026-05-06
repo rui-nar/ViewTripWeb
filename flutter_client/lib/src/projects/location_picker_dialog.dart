@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../map/geo_point.dart';
 import '../map/great_circle.dart';
 
 typedef LatLonResult = ({double lat, double lon});
@@ -24,7 +25,7 @@ class LocationPickerDialog extends StatefulWidget {
   final Map<String, dynamic>? geo;
 
   /// When set, the picker updates the live segment arc preview on the main map.
-  final ValueNotifier<List<LatLng>?>? previewArcNotifier;
+  final ValueNotifier<List<GeoPoint>?>? previewArcNotifier;
 
   /// Coordinates of the *other* endpoint — used to draw the preview arc.
   final double? otherLat;

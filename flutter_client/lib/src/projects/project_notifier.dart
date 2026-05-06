@@ -4,9 +4,8 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
-import 'package:latlong2/latlong.dart';
-
 import '../api/client.dart';
+import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import 'project_filter_mixin.dart';
 import 'project_memory_crud_mixin.dart';
@@ -289,26 +288,26 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Live arc preview while a SegmentDialog or LocationPickerDialog is open.
   /// Callers write directly to `.value` — updates don't trigger notifyListeners().
-  final ValueNotifier<List<LatLng>?> previewArcNotifier = ValueNotifier(null);
+  final ValueNotifier<List<GeoPoint>?> previewArcNotifier = ValueNotifier(null);
 
   /// Map cursor driven by the elevation chart touch position.
   /// Uses a ValueNotifier so only the marker layer rebuilds on cursor moves.
-  final ValueNotifier<LatLng?> elevationCursorNotifier = ValueNotifier(null);
+  final ValueNotifier<GeoPoint?> elevationCursorNotifier = ValueNotifier(null);
 
   /// Elevation chart cursor driven by a map tap.
   /// Holds the cumulative distance (km) of the nearest track point.
   final ValueNotifier<double?> mapCursorDistNotifier = ValueNotifier(null);
 
   /// Full distance-indexed track for all activities — used by the map panel
-  /// to map a tapped LatLng back to a distance on the elevation chart.
-  List<(double, LatLng)> _fullTrack = const [];
-  List<(double, LatLng)> get fullTrack => _fullTrack;
+  /// to map a tapped GeoPoint back to a distance on the elevation chart.
+  List<(double, GeoPoint)> _fullTrack = const [];
+  List<(double, GeoPoint)> get fullTrack => _fullTrack;
 
   /// Per-activity distance-indexed tracks (0-based distances) — used by
   /// ElevationChart to map chart x-position to a map position.
   /// Keys are activity_id as String.
-  Map<String, List<(double, LatLng)>> get perActivityTracks => _perActivityTracks;
-  Map<String, List<(double, LatLng)>> _perActivityTracks = const {};
+  Map<String, List<(double, GeoPoint)>> get perActivityTracks => _perActivityTracks;
+  Map<String, List<(double, GeoPoint)>> _perActivityTracks = const {};
 
   void _buildFullTrack() {
     // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
@@ -327,8 +326,8 @@ class ProjectNotifier extends ChangeNotifier
       }
     }
 
-    final combined = <(double, LatLng)>[];
-    final perAct = <String, List<(double, LatLng)>>{};
+    final combined = <(double, GeoPoint)>[];
+    final perAct = <String, List<(double, GeoPoint)>>{};
     double offsetKm = 0;
     for (final a in activities) {
       final profile = a['elevation_profile'];
@@ -339,25 +338,25 @@ class ProjectNotifier extends ChangeNotifier
       final elevTotalKm = (last is List && last.isNotEmpty)
           ? (last[0] as num).toDouble()
           : 0.0;
-      final actTrack = <(double, LatLng)>[];
+      final actTrack = <(double, GeoPoint)>[];
       if (coords != null && coords.isNotEmpty) {
         if (coords.length >= profile.length) {
-          // Fast path: create LatLng only for the points we actually use.
+          // Fast path: build GeoPoint only for the points we actually use.
           for (int i = 0; i < profile.length; i++) {
             final pt = profile[i];
             final c = coords[i];
             if (pt is! List || pt.length < 2 || c is! List || c.length < 2) continue;
             actTrack.add((
               (pt[0] as num).toDouble(),
-              LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()),
+              (lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()),
             ));
           }
         } else {
           // Haversine fallback: coords fewer than profile samples.
-          final pts = <LatLng>[];
+          final pts = <GeoPoint>[];
           for (final c in coords) {
             if (c is List && c.length >= 2) {
-              pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+              pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
             }
           }
           actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));

@@ -4,11 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
+import 'package:vector_tile_renderer/vector_tile_renderer.dart' show Logger;
 
+import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'memory_detail_modal.dart';
 import 'project_notifier.dart';
+LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
+
 // ── MapPanel ──────────────────────────────────────────────────────────────────
 
 class MapPanel extends StatefulWidget {
@@ -56,9 +60,22 @@ class _MapPanelState extends State<MapPanel> {
   void initState() {
     super.initState();
     if (widget.basemapStyleUri != null) {
-      StyleReader(uri: widget.basemapStyleUri!, apiKey: kMapboxToken)
-          .read()
-          .then((s) { if (mounted) setState(() => _vectorStyle = s); });
+      () async {
+        try {
+          final s = await StyleReader(
+                  uri: widget.basemapStyleUri!,
+                  apiKey: kMapboxToken,
+                  logger: const Logger.console())
+              .read();
+          if (!mounted) return;
+          debugPrint('[MapPanel] style loaded — '
+              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
+              'tileSources: ${s.theme.tileSources.toList()}');
+          setState(() => _vectorStyle = s);
+        } catch (e) {
+          debugPrint('[MapPanel] StyleReader error: $e');
+        }
+      }();
     } else {
       _tileProvider = NetworkTileProvider();
     }
@@ -252,8 +269,8 @@ class _MapPanelState extends State<MapPanel> {
     int nearest = 0;
     double minDist = double.infinity;
     for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.latitude  - latlng.latitude;
-      final dLon = track[i].$2.longitude - latlng.longitude;
+      final dLat = track[i].$2.lat - latlng.latitude;
+      final dLon = track[i].$2.lon - latlng.longitude;
       final d = dLat * dLat + dLon * dLon;
       if (d < minDist) { minDist = d; nearest = i; }
     }
@@ -325,6 +342,9 @@ class _MapPanelState extends State<MapPanel> {
                 tileProviders: _vectorStyle!.providers,
                 theme: _vectorStyle!.theme,
                 sprites: _vectorStyle!.sprites,
+                tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
               )
             else if (_tileProvider != null) ...[
               TileLayer(
@@ -362,14 +382,14 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
-            ValueListenableBuilder<List<LatLng>?>(
+            ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
                 if (arc == null) return const SizedBox.shrink();
                 return PolylineLayer(
                   polylines: [
                     Polyline(
-                      points: arc,
+                      points: arc.map(_ll).toList(),
                       color: const Color(0xCC6366F1),
                       strokeWidth: 2.5,
                     ),
@@ -378,14 +398,14 @@ class _MapPanelState extends State<MapPanel> {
               },
             ),
             // Elevation cursor — driven by chart hover/tap and by map taps.
-            ValueListenableBuilder<LatLng?>(
+            ValueListenableBuilder<GeoPoint?>(
               valueListenable: notifier.elevationCursorNotifier,
               builder: (_, cursor, __) {
                 if (cursor == null) return const SizedBox.shrink();
                 return MarkerLayer(
                   markers: [
                     Marker(
-                      point: cursor,
+                      point: _ll(cursor),
                       width: 16,
                       height: 16,
                       child: Container(
@@ -596,9 +616,22 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   void initState() {
     super.initState();
     if (widget.basemapStyleUri != null) {
-      StyleReader(uri: widget.basemapStyleUri!, apiKey: kMapboxToken)
-          .read()
-          .then((s) { if (mounted) setState(() => _vectorStyle = s); });
+      () async {
+        try {
+          final s = await StyleReader(
+                  uri: widget.basemapStyleUri!,
+                  apiKey: kMapboxToken,
+                  logger: const Logger.console())
+              .read();
+          if (!mounted) return;
+          debugPrint('[ManageMapPanel] style loaded — '
+              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
+              'tileSources: ${s.theme.tileSources.toList()}');
+          setState(() => _vectorStyle = s);
+        } catch (e) {
+          debugPrint('[ManageMapPanel] StyleReader error: $e');
+        }
+      }();
     } else {
       _tileProvider = NetworkTileProvider();
     }
@@ -645,8 +678,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     int nearest = 0;
     double minDist = double.infinity;
     for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.latitude  - latlng.latitude;
-      final dLon = track[i].$2.longitude - latlng.longitude;
+      final dLat = track[i].$2.lat - latlng.latitude;
+      final dLon = track[i].$2.lon - latlng.longitude;
       final d = dLat * dLat + dLon * dLon;
       if (d < minDist) { minDist = d; nearest = i; }
     }
@@ -950,6 +983,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 tileProviders: _vectorStyle!.providers,
                 theme: _vectorStyle!.theme,
                 sprites: _vectorStyle!.sprites,
+                tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
               )
             else if (_tileProvider != null)
               TileLayer(
@@ -968,14 +1004,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
-            ValueListenableBuilder<List<LatLng>?>(
+            ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
                 if (arc == null) return const SizedBox.shrink();
                 return PolylineLayer(
                   polylines: [
                     Polyline(
-                      points: arc,
+                      points: arc.map(_ll).toList(),
                       color: const Color(0xCC6366F1),
                       strokeWidth: 2.5,
                     ),
@@ -983,14 +1019,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 );
               },
             ),
-            ValueListenableBuilder<LatLng?>(
+            ValueListenableBuilder<GeoPoint?>(
               valueListenable: notifier.elevationCursorNotifier,
               builder: (_, cursor, __) {
                 if (cursor == null) return const SizedBox.shrink();
                 return MarkerLayer(
                   markers: [
                     Marker(
-                      point: cursor,
+                      point: _ll(cursor),
                       width: 16,
                       height: 16,
                       child: Container(
