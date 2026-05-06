@@ -1,8 +1,9 @@
-// ignore_for_file: avoid_web_libraries_in_flutter
 library;
 
-import 'dart:html' as html;
+import 'dart:js_interop';
 import 'dart:ui' as ui;
+
+import 'package:web/web.dart' as web;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -30,7 +31,7 @@ class ImageExportOptions {
 class ImageExportDialog extends StatefulWidget {
   final String projectName;
   final void Function(ImageExportOptions) onExport;
-  const ImageExportDialog({required this.projectName, required this.onExport});
+  const ImageExportDialog({super.key, required this.projectName, required this.onExport});
   @override
   State<ImageExportDialog> createState() => _ImageExportDialogState();
 }
@@ -303,12 +304,16 @@ Future<void> performOffscreenExport({
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
     if (byteData == null) return;
     final bytes = byteData.buffer.asUint8List();
-    final blob = html.Blob([bytes], 'image/png');
-    final url  = html.Url.createObjectUrlFromBlob(blob);
-    html.AnchorElement(href: url)
-      ..setAttribute('download', '$projectName.png')
+    final blob = web.Blob(
+      [bytes.toJS as JSAny].toJS,
+      web.BlobPropertyBag(type: 'image/png'),
+    );
+    final url = web.URL.createObjectURL(blob);
+    (web.document.createElement('a') as web.HTMLAnchorElement)
+      ..href = url
+      ..download = '$projectName.png'
       ..click();
-    html.Url.revokeObjectUrl(url);
+    web.URL.revokeObjectURL(url);
 
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(const SnackBar(

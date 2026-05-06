@@ -1053,6 +1053,7 @@ class MobileActivityPanelOverlay extends StatelessWidget {
   final double height;
 
   const MobileActivityPanelOverlay({
+    super.key,
     required this.notifier,
     required this.mapController,
     required this.height,
