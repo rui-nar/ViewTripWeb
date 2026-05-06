@@ -526,6 +526,7 @@ class _AppScreenState extends State<AppScreen> {
                           basemapUrl: kActiveManageBasemapUrl,
                           basemapSubdomains: kActiveManageSubdomains,
                           fittedNotifier: _mapFitted,
+                          basemapStyleUri: kActiveManageStyleUri,
                         ),
                       ),
                       Positioned(
@@ -594,6 +595,7 @@ class _AppScreenState extends State<AppScreen> {
                     basemapUrl: kActiveManageBasemapUrl,
                     basemapSubdomains: kActiveManageSubdomains,
                     fittedNotifier: _mapFitted,
+                    basemapStyleUri: kActiveManageStyleUri,
                   ),
                 ),
 

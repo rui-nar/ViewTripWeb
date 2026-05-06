@@ -3,11 +3,11 @@ library;
 
 import 'dart:math' as math;
 
-import 'package:latlong2/latlong.dart';
+import 'geo_point.dart';
 
-/// Decode a Google-encoded polyline string to a list of [LatLng] points.
-List<LatLng> decodePolyline(String encoded) {
-  final result = <LatLng>[];
+/// Decode a Google-encoded polyline string to a list of [GeoPoint] values.
+List<GeoPoint> decodePolyline(String encoded) {
+  final result = <GeoPoint>[];
   int index = 0, lat = 0, lng = 0;
   while (index < encoded.length) {
     int b, shift = 0, r = 0;
@@ -25,7 +25,7 @@ List<LatLng> decodePolyline(String encoded) {
       shift += 5;
     } while (b >= 0x20);
     lng += (r & 1) != 0 ? ~(r >> 1) : (r >> 1);
-    result.add(LatLng(lat / 1e5, lng / 1e5));
+    result.add((lat: lat / 1e5, lon: lng / 1e5));
   }
   return result;
 }
@@ -38,13 +38,13 @@ List<LatLng> decodePolyline(String encoded) {
 /// [elevTotalKm], keeping the track aligned with the elevation chart's x-axis.
 ///
 /// [offsetKm] is added to every distance (used to chain multiple activities).
-List<(double, LatLng)> buildTrackFromPolyline(
-  List<LatLng> points, {
+List<(double, GeoPoint)> buildTrackFromPolyline(
+  List<GeoPoint> points, {
   double elevTotalKm = 0,
   double offsetKm = 0,
 }) {
   if (points.isEmpty) return const [];
-  final track = <(double, LatLng)>[];
+  final track = <(double, GeoPoint)>[];
   double cumDist = 0;
   track.add((0, points.first));
   for (int i = 1; i < points.length; i++) {
@@ -58,25 +58,25 @@ List<(double, LatLng)> buildTrackFromPolyline(
   ];
 }
 
-double _haversineKm(LatLng a, LatLng b) {
+double _haversineKm(GeoPoint a, GeoPoint b) {
   const r = 6371.0;
-  final dLat = (b.latitude - a.latitude) * (math.pi / 180);
-  final dLon = (b.longitude - a.longitude) * (math.pi / 180);
+  final dLat = (b.lat - a.lat) * (math.pi / 180);
+  final dLon = (b.lon - a.lon) * (math.pi / 180);
   final sinDLat = math.sin(dLat / 2);
   final sinDLon = math.sin(dLon / 2);
   final h = (sinDLat * sinDLat +
-          math.cos(a.latitude * math.pi / 180) *
-              math.cos(b.latitude * math.pi / 180) *
+          math.cos(a.lat * math.pi / 180) *
+              math.cos(b.lat * math.pi / 180) *
               sinDLon * sinDLon)
       .clamp(0.0, 1.0);
   return 2 * r * math.asin(math.sqrt(h));
 }
 
-/// Interpolate a [LatLng] from a distance-indexed track at [distKm].
+/// Interpolate a [GeoPoint] from a distance-indexed track at [distKm].
 ///
-/// [track] is a list of `(cumulativeDistanceKm, LatLng)` records sorted by
+/// [track] is a list of `(cumulativeDistanceKm, GeoPoint)` records sorted by
 /// distance, as built by [ElevationChart._compute].
-LatLng? latLonAtDistance(List<(double, LatLng)> track, double distKm) {
+GeoPoint? latLonAtDistance(List<(double, GeoPoint)> track, double distKm) {
   if (track.isEmpty) return null;
   if (distKm <= track.first.$1) return track.first.$2;
   if (distKm >= track.last.$1) return track.last.$2;
@@ -90,8 +90,8 @@ LatLng? latLonAtDistance(List<(double, LatLng)> track, double distKm) {
   final t = (distKm - track[lo].$1) / span;
   final a = track[lo].$2;
   final b = track[hi].$2;
-  return LatLng(
-    a.latitude  + t * (b.latitude  - a.latitude),
-    a.longitude + t * (b.longitude - a.longitude),
+  return (
+    lat: a.lat + t * (b.lat - a.lat),
+    lon: a.lon + t * (b.lon - a.lon),
   );
 }

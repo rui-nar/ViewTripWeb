@@ -7,9 +7,9 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:web/web.dart' as web;
 
-import '../api/client.dart';
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
+import 'settings_service.dart';
 import 'theme_notifier.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -20,6 +20,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  final _service = SettingsService();
+
   // ── Strava state ──────────────────────────────────────────────────────────
   bool _stravaConnected = false;
   bool _stravaLoading = false;
@@ -65,7 +67,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadProfile() async {
     try {
-      final data = await api.get('/api/auth/me') as Map<String, dynamic>;
+      final data = await _service.getProfile();
       if (mounted) {
         setState(() {
           _displayNameCtrl.text = data['display_name'] as String? ?? '';
@@ -82,23 +84,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _profileSaving = true);
     final auth = context.read<AuthNotifier>();
     try {
-      final data = await api.put('/api/auth/me', {'display_name': name})
-          as Map<String, dynamic>;
-      // Refresh the stored JWT so AuthNotifier reflects the new name.
-      final token = data['access_token'] as String?;
-      if (token != null) {
-        await AuthService().persistToken(token);
-        auth.updateUser(data['user'] as Map<String, dynamic>? ?? {});
+      final result = await _service.updateProfile(name);
+      if (result.token != null) {
+        await AuthService().persistToken(result.token!);
+        auth.updateUser(result.user);
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Profile saved')),
         );
       }
-    } on ApiException catch (e) {
+    } on Exception catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed: ${e.body}')),
+          SnackBar(content: Text('Save failed: ${e.toString().replaceFirst('Exception: ', '')}')),
         );
       }
     } finally {
@@ -119,10 +118,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     setState(() => _pwChanging = true);
     try {
-      await api.post('/api/auth/change-password', {
-        'current_password': current,
-        'new_password': next,
-      });
+      await _service.changePassword(current: current, next: next);
       _currentPwCtrl.clear();
       _newPwCtrl.clear();
       _confirmPwCtrl.clear();
@@ -131,10 +127,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SnackBar(content: Text('Password changed')),
         );
       }
-    } on ApiException catch (e) {
+    } on Exception catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_extractDetail(e.body))),
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
         );
       }
     } finally {
@@ -171,13 +167,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final auth = context.read<AuthNotifier>();
     final router = GoRouter.of(context);
     try {
-      await api.delete('/api/auth/me');
+      await _service.deleteAccount();
       await auth.logout();
       router.go('/login');
-    } on ApiException catch (e) {
+    } on Exception catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Delete failed: ${e.body}')),
+          SnackBar(content: Text('Delete failed: ${e.toString().replaceFirst('Exception: ', '')}')),
         );
       }
     }
@@ -189,8 +185,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     setState(() => _stravaLoading = true);
     try {
-      final data = await api.get('/api/strava/status') as Map<String, dynamic>;
-      if (mounted) setState(() => _stravaConnected = data['connected'] == true);
+      final connected = await _service.getStravaStatus();
+      if (mounted) setState(() => _stravaConnected = connected);
     } catch (_) {
       // status not critical
     } finally {
@@ -200,9 +196,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _connectStrava() async {
     try {
-      final data =
-          await api.get('/api/strava/connect') as Map<String, dynamic>;
-      final urlStr = data['url'] as String;
+      final urlStr = await _service.getStravaConnectUrl();
 
       if (kIsWeb) {
         // Remove any stale listener from a previous attempt.
@@ -269,16 +263,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _disconnectStrava() async {
     try {
-      await api.delete('/api/strava/disconnect');
+      await _service.disconnectStrava();
       if (mounted) setState(() => _stravaConnected = false);
     } catch (_) {}
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  String _extractDetail(String body) {
-    final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(body);
-    return m?.group(1) ?? body;
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────

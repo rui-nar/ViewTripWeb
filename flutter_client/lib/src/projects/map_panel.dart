@@ -3,11 +3,16 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:vector_map_tiles/vector_map_tiles.dart';
+import 'package:vector_tile_renderer/vector_tile_renderer.dart' show Logger;
 
+import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'memory_detail_modal.dart';
 import 'project_notifier.dart';
+LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
+
 // ── MapPanel ──────────────────────────────────────────────────────────────────
 
 class MapPanel extends StatefulWidget {
@@ -16,6 +21,9 @@ class MapPanel extends StatefulWidget {
   final String basemapUrl;
   final List<String> basemapSubdomains;
   final String? labelsUrl;
+  /// Mapbox vector style URI (e.g. `mapbox://styles/mapbox/satellite-streets-v12`).
+  /// When set and non-null, a VectorTileLayer replaces the raster TileLayer.
+  final String? basemapStyleUri;
 
   const MapPanel({
     super.key,
@@ -24,6 +32,7 @@ class MapPanel extends StatefulWidget {
     required this.basemapUrl,
     this.basemapSubdomains = const [],
     this.labelsUrl,
+    this.basemapStyleUri,
   });
 
   @override
@@ -42,14 +51,34 @@ class _MapPanelState extends State<MapPanel> {
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
-  late final NetworkTileProvider _tileProvider;
+  NetworkTileProvider? _tileProvider;
+  Style? _vectorStyle;
 
   static const _sentinel = Object(); // distinct from null
 
   @override
   void initState() {
     super.initState();
-    _tileProvider = NetworkTileProvider();
+    if (widget.basemapStyleUri != null) {
+      () async {
+        try {
+          final s = await StyleReader(
+                  uri: widget.basemapStyleUri!,
+                  apiKey: kMapboxToken,
+                  logger: const Logger.console())
+              .read();
+          if (!mounted) return;
+          debugPrint('[MapPanel] style loaded — '
+              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
+              'tileSources: ${s.theme.tileSources.toList()}');
+          setState(() => _vectorStyle = s);
+        } catch (e) {
+          debugPrint('[MapPanel] StyleReader error: $e');
+        }
+      }();
+    } else {
+      _tileProvider = NetworkTileProvider();
+    }
   }
 
   static Color _alternateColor(Color base) {
@@ -240,8 +269,8 @@ class _MapPanelState extends State<MapPanel> {
     int nearest = 0;
     double minDist = double.infinity;
     for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.latitude  - latlng.latitude;
-      final dLon = track[i].$2.longitude - latlng.longitude;
+      final dLat = track[i].$2.lat - latlng.latitude;
+      final dLon = track[i].$2.lon - latlng.longitude;
       final d = dLat * dLat + dLon * dLon;
       if (d < minDist) { minDist = d; nearest = i; }
     }
@@ -308,30 +337,41 @@ class _MapPanelState extends State<MapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            TileLayer(
-              urlTemplate: widget.basemapUrl,
-              subdomains: widget.basemapSubdomains,
-              userAgentPackageName: 'com.viewtrip.client',
-              tileProvider: _tileProvider,
-              maxNativeZoom: 22,
-              retinaMode: RetinaMode.isHighDensity(context),
-            ),
-            if (widget.labelsUrl != null)
-              ColorFiltered(
-                colorFilter: ColorFilter.matrix(<double>[
-                  1, 0, 0, 0, 0,
-                  0, 1, 0, 0, 0,
-                  0, 0, 1, 0, 0,
-                  0, 0, 0, 0.5, 0,
-                ]),
-                child: TileLayer(
-                  urlTemplate: widget.labelsUrl!,
-                  subdomains: kActiveViewLabelsSubdomains,
-                  userAgentPackageName: 'com.viewtrip.client',
-                  tileProvider: _tileProvider,
-                  maxNativeZoom: 22,
-                ),
+            if (_vectorStyle != null)
+              VectorTileLayer(
+                tileProviders: _vectorStyle!.providers,
+                theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
+                tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
+              )
+            else if (_tileProvider != null) ...[
+              TileLayer(
+                urlTemplate: widget.basemapUrl,
+                subdomains: widget.basemapSubdomains,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider!,
+                maxNativeZoom: 22,
+                retinaMode: RetinaMode.isHighDensity(context),
               ),
+              if (widget.labelsUrl != null)
+                ColorFiltered(
+                  colorFilter: ColorFilter.matrix(<double>[
+                    1, 0, 0, 0, 0,
+                    0, 1, 0, 0, 0,
+                    0, 0, 1, 0, 0,
+                    0, 0, 0, 0.5, 0,
+                  ]),
+                  child: TileLayer(
+                    urlTemplate: widget.labelsUrl!,
+                    subdomains: kActiveViewLabelsSubdomains,
+                    userAgentPackageName: 'com.viewtrip.client',
+                    tileProvider: _tileProvider!,
+                    maxNativeZoom: 22,
+                  ),
+                ),
+            ],
             if (polylines.isNotEmpty)
               PolylineLayer(
                 polylines: polylines,
@@ -342,14 +382,14 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
-            ValueListenableBuilder<List<LatLng>?>(
+            ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
                 if (arc == null) return const SizedBox.shrink();
                 return PolylineLayer(
                   polylines: [
                     Polyline(
-                      points: arc,
+                      points: arc.map(_ll).toList(),
                       color: const Color(0xCC6366F1),
                       strokeWidth: 2.5,
                     ),
@@ -358,14 +398,14 @@ class _MapPanelState extends State<MapPanel> {
               },
             ),
             // Elevation cursor — driven by chart hover/tap and by map taps.
-            ValueListenableBuilder<LatLng?>(
+            ValueListenableBuilder<GeoPoint?>(
               valueListenable: notifier.elevationCursorNotifier,
               builder: (_, cursor, __) {
                 if (cursor == null) return const SizedBox.shrink();
                 return MarkerLayer(
                   markers: [
                     Marker(
-                      point: cursor,
+                      point: _ll(cursor),
                       width: 16,
                       height: 16,
                       child: Container(
@@ -398,6 +438,8 @@ class ManageMapPanel extends StatefulWidget {
   final String basemapUrl;
   final List<String> basemapSubdomains;
   final ValueNotifier<bool> fittedNotifier;
+  /// Mapbox vector style URI. When set, a VectorTileLayer replaces the raster TileLayer.
+  final String? basemapStyleUri;
 
   const ManageMapPanel({
     super.key,
@@ -407,6 +449,7 @@ class ManageMapPanel extends StatefulWidget {
     required this.fittedNotifier,
     this.autoZoom = false,
     this.basemapSubdomains = const [],
+    this.basemapStyleUri,
   });
 
   @override
@@ -414,7 +457,8 @@ class ManageMapPanel extends StatefulWidget {
 }
 
 class ManageMapPanelState extends State<ManageMapPanel> {
-  late final NetworkTileProvider _tileProvider;
+  NetworkTileProvider? _tileProvider;
+  Style? _vectorStyle;
 
   // Polyline + marker cache — only rebuilt when geo or selection changes.
   Map<String, dynamic>? _lastGeo;
@@ -571,7 +615,26 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   @override
   void initState() {
     super.initState();
-    _tileProvider = NetworkTileProvider();
+    if (widget.basemapStyleUri != null) {
+      () async {
+        try {
+          final s = await StyleReader(
+                  uri: widget.basemapStyleUri!,
+                  apiKey: kMapboxToken,
+                  logger: const Logger.console())
+              .read();
+          if (!mounted) return;
+          debugPrint('[ManageMapPanel] style loaded — '
+              'providers: ${s.providers.tileProviderBySource.keys.toList()} '
+              'tileSources: ${s.theme.tileSources.toList()}');
+          setState(() => _vectorStyle = s);
+        } catch (e) {
+          debugPrint('[ManageMapPanel] StyleReader error: $e');
+        }
+      }();
+    } else {
+      _tileProvider = NetworkTileProvider();
+    }
     // Initialise "last" selection state from the current notifier values so that
     // a spurious selectionChanged2=true (which resets the fit flag) is never
     // triggered when this state is (re)created while a fit has already happened.
@@ -615,8 +678,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     int nearest = 0;
     double minDist = double.infinity;
     for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.latitude  - latlng.latitude;
-      final dLon = track[i].$2.longitude - latlng.longitude;
+      final dLat = track[i].$2.lat - latlng.latitude;
+      final dLon = track[i].$2.lon - latlng.longitude;
       final d = dLat * dLat + dLon * dLon;
       if (d < minDist) { minDist = d; nearest = i; }
     }
@@ -915,13 +978,23 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             onTap: (_, latlng) => _onMapTap(latlng),
           ),
           children: [
-            TileLayer(
-              urlTemplate: widget.basemapUrl,
-              subdomains: widget.basemapSubdomains,
-              userAgentPackageName: 'com.viewtrip.client',
-              tileProvider: _tileProvider,
-              maxNativeZoom: 22,
-            ),
+            if (_vectorStyle != null)
+              VectorTileLayer(
+                tileProviders: _vectorStyle!.providers,
+                theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
+                tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
+              )
+            else if (_tileProvider != null)
+              TileLayer(
+                urlTemplate: widget.basemapUrl,
+                subdomains: widget.basemapSubdomains,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: _tileProvider!,
+                maxNativeZoom: 22,
+              ),
             if (_cachedPolylines.isNotEmpty)
               PolylineLayer(
                 polylines: _cachedPolylines,
@@ -931,14 +1004,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
-            ValueListenableBuilder<List<LatLng>?>(
+            ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
                 if (arc == null) return const SizedBox.shrink();
                 return PolylineLayer(
                   polylines: [
                     Polyline(
-                      points: arc,
+                      points: arc.map(_ll).toList(),
                       color: const Color(0xCC6366F1),
                       strokeWidth: 2.5,
                     ),
@@ -946,14 +1019,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 );
               },
             ),
-            ValueListenableBuilder<LatLng?>(
+            ValueListenableBuilder<GeoPoint?>(
               valueListenable: notifier.elevationCursorNotifier,
               builder: (_, cursor, __) {
                 if (cursor == null) return const SizedBox.shrink();
                 return MarkerLayer(
                   markers: [
                     Marker(
-                      point: cursor,
+                      point: _ll(cursor),
                       width: 16,
                       height: 16,
                       child: Container(

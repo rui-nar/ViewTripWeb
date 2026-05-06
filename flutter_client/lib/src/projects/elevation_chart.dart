@@ -2,8 +2,7 @@ library;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
-import 'package:latlong2/latlong.dart';
-
+import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 
 class ElevationChart extends StatefulWidget {
@@ -12,7 +11,7 @@ class ElevationChart extends StatefulWidget {
 
   /// Called with the map position under the chart cursor, or null when the
   /// user lifts / exits. Drives the elevation cursor marker on the map.
-  final void Function(LatLng?)? onCursorChanged;
+  final void Function(GeoPoint?)? onCursorChanged;
 
   /// Driven by map taps — shows a vertical line at this distance (km).
   final ValueNotifier<double?>? mapCursorNotifier;
@@ -21,7 +20,7 @@ class ElevationChart extends StatefulWidget {
   /// Built by ProjectNotifier from GeoJSON so Flutter never needs to decode
   /// the polyline.  Pass fullTrack when no activity is selected, or the
   /// per-activity track (0-based distances) when one is selected.
-  final List<(double, LatLng)> track;
+  final List<(double, GeoPoint)> track;
 
   const ElevationChart({
     super.key,
