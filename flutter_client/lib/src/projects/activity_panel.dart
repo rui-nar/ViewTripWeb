@@ -86,6 +86,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
   List<Map<String, dynamic>>? _lastActivities;
   Map<dynamic, Map<String, dynamic>> _activityById = {};
 
+  // Tracks the last selectedActivityId we reacted to, so we only auto-expand
+  // and scroll when a new selection arrives (e.g. from a map tap).
+  String? _prevSelectedActivityIdStr;
+
   // Day grouping state
   Set<int> _collapsedDays = {};
   String? _selectedDay; // "YYYY-MM-DD"
@@ -300,15 +304,101 @@ class _ActivityPanelState extends State<ActivityPanel> {
   @override
   void initState() {
     super.initState();
+    _prevSelectedActivityIdStr = widget.notifier.selectedActivityId?.toString();
+    widget.notifier.addListener(_onNotifierChanged);
     _refreshActivityById(widget.notifier.activities);
     _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
   }
 
   @override
+  void dispose() {
+    widget.notifier.removeListener(_onNotifierChanged);
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(ActivityPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.notifier != widget.notifier) {
+      oldWidget.notifier.removeListener(_onNotifierChanged);
+      widget.notifier.addListener(_onNotifierChanged);
+      _prevSelectedActivityIdStr = widget.notifier.selectedActivityId?.toString();
+    }
     _refreshActivityById(widget.notifier.activities);
     _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
+  }
+
+  void _onNotifierChanged() {
+    final id = widget.notifier.selectedActivityId?.toString();
+    if (id == _prevSelectedActivityIdStr) return;
+    _prevSelectedActivityIdStr = id;
+    if (id != null) _expandAndScrollToActivity(id);
+  }
+
+  void _expandAndScrollToActivity(String activityIdStr) {
+    // Find which dateKey this activity belongs to.
+    String? targetDateKey;
+    if (_lastItems != null) {
+      for (final item in _lastItems!) {
+        if (item['item_type'] != 'activity') continue;
+        if (item['activity_id']?.toString() != activityIdStr) continue;
+        final a = _activityById[item['activity_id']];
+        final ds = a?['start_date_local'] as String?;
+        targetDateKey = ds?.split('T').first;
+        break;
+      }
+    }
+
+    // Find which dayNumber this dateKey maps to.
+    int? targetDayNumber;
+    if (targetDateKey != null) {
+      for (final e in _displayList) {
+        if (e is _DayHeader && e.dateKey == targetDateKey) {
+          targetDayNumber = e.dayNumber;
+          break;
+        }
+      }
+    }
+
+    // Expand the day if it's collapsed.
+    if (targetDayNumber != null && _collapsedDays.contains(targetDayNumber)) {
+      setState(() {
+        _collapsedDays.remove(targetDayNumber);
+        _lastItems = null; // force display list rebuild next frame
+      });
+    }
+
+    // Scroll after the frame renders so the list is fully laid out.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollToActivity(activityIdStr);
+    });
+  }
+
+  void _scrollToActivity(String activityIdStr) {
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+
+    // Walk the display list to estimate the pixel offset of the target item.
+    // Headers are ~44px tall; two-line ListTile items are ~72px.
+    const double headerHeight = 44.0;
+    const double itemHeight = 72.0;
+    double offset = 0;
+    for (final e in _displayList) {
+      if (e is _DayHeader) {
+        offset += headerHeight;
+      } else if (e is _PanelItem) {
+        if (e.item['item_type'] == 'activity' &&
+            e.item['activity_id']?.toString() == activityIdStr) {
+          sc.animateTo(
+            (offset - 80).clamp(0.0, sc.position.maxScrollExtent),
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOut,
+          );
+          return;
+        }
+        offset += itemHeight;
+      }
+    }
   }
 
   @override

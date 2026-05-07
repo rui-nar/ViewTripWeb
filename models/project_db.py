@@ -46,6 +46,18 @@ class DBProject(sqlmodel.SQLModel, table=True):
     counters_json: Optional[str] = sqlmodel.Field(default="[]")
 
 
+class DBProjectSyncMeta(sqlmodel.SQLModel, table=True):
+    """Per-project auto-sync configuration and last-synced timestamps."""
+
+    __tablename__ = "projectsyncmeta"
+
+    project_id: int = sqlmodel.Field(primary_key=True, foreign_key="project.id")
+    linked_ps_trip_id: Optional[int] = sqlmodel.Field(default=None)
+    auto_sync_enabled: bool = sqlmodel.Field(default=True)
+    last_strava_sync_at: Optional[float] = sqlmodel.Field(default=None)
+    last_ps_sync_at: Optional[float] = sqlmodel.Field(default=None)
+
+
 class DBActivity(sqlmodel.SQLModel, table=True):
     """Strava activity row — shared across all projects that reference it.
 

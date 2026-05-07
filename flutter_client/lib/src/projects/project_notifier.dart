@@ -67,6 +67,15 @@ class ProjectNotifier extends ChangeNotifier
   /// Project-defined counters: [{name: String, start: double}].
   List<Map<String, dynamic>> counters = [];
 
+  // ── Auto-sync state ──────────────────────────────────────────────────────
+  bool autoSyncEnabled = true;
+  int? linkedPsTripId;
+  double? lastStravaSyncAt;
+  double? lastPsSyncAt;
+
+  /// Non-null when background check found new items; cleared by markSynced().
+  ({List<Map<String, dynamic>> strava, List<Map<String, dynamic>> polarsteps})? pendingSync;
+
   // ── Track style (UI-only, not persisted to server) ───────────────────────
   Color trackColor = const Color(0xFFF97316);
   double trackWidth = 2.5;
@@ -164,6 +173,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedMemoryId = null;
     selectedDay = null;
     selectedDays = {};
+    pendingSync = null;
     notifyListeners();
 
     try {
@@ -203,6 +213,7 @@ class ProjectNotifier extends ChangeNotifier
       geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
+      await _loadSyncMeta(name);
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
@@ -214,6 +225,10 @@ class ProjectNotifier extends ChangeNotifier
     _loadFullGeoProgressively(name);
     // Auto-fill empty day entries up to today while the trip is active
     _autoFillDaysToToday();
+    // Background sync check — fires only for active trips with auto-sync on
+    if (_tripIsActive && autoSyncEnabled) {
+      _backgroundSyncCheck(name);
+    }
   }
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
@@ -421,6 +436,83 @@ class ProjectNotifier extends ChangeNotifier
 
   String get apiBaseUrl => api.baseUrl;
   String? get apiToken => api.tokenForUpload;
+
+  // ── Auto-sync ─────────────────────────────────────────────────────────────
+
+  Future<void> _loadSyncMeta(String name) async {
+    try {
+      final data = await api.get(
+        '/api/projects/${Uri.encodeComponent(name)}/sync-meta',
+      ) as Map<String, dynamic>;
+      autoSyncEnabled = data['auto_sync_enabled'] as bool? ?? true;
+      linkedPsTripId = data['linked_ps_trip_id'] as int?;
+      lastStravaSyncAt = (data['last_strava_sync_at'] as num?)?.toDouble();
+      lastPsSyncAt = (data['last_ps_sync_at'] as num?)?.toDouble();
+    } catch (_) {
+      // Non-fatal — use defaults
+    }
+  }
+
+  Future<void> _backgroundSyncCheck(String name) async {
+    try {
+      final data = await api.get(
+        '/api/projects/${Uri.encodeComponent(name)}/sync/check',
+      ) as Map<String, dynamic>;
+      final strava = (data['strava'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      final ps = (data['polarsteps'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      if ((strava.isNotEmpty || ps.isNotEmpty) && projectName == name) {
+        pendingSync = (strava: strava, polarsteps: ps);
+        notifyListeners();
+      }
+    } catch (_) {
+      // Non-fatal — sync check failure is silent
+    }
+  }
+
+  Future<void> saveSyncMeta({bool? autoSyncEnabled, int? linkedPsTripId, bool clearLinkedTrip = false}) async {
+    final name = projectName;
+    if (name == null) return;
+    if (autoSyncEnabled != null) this.autoSyncEnabled = autoSyncEnabled;
+    if (clearLinkedTrip) {
+      this.linkedPsTripId = null;
+    } else if (linkedPsTripId != null) {
+      this.linkedPsTripId = linkedPsTripId;
+    }
+    notifyListeners();
+    try {
+      final body = <String, dynamic>{
+        if (autoSyncEnabled != null) 'auto_sync_enabled': autoSyncEnabled,
+      };
+      if (clearLinkedTrip) {
+        body['linked_ps_trip_id'] = null;
+      } else if (linkedPsTripId != null) {
+        body['linked_ps_trip_id'] = linkedPsTripId;
+      }
+      await api.put('/api/projects/${Uri.encodeComponent(name)}/sync-meta', body);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> markSynced() async {
+    final name = projectName;
+    if (name == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    lastStravaSyncAt = now;
+    lastPsSyncAt = now;
+    pendingSync = null;
+    notifyListeners();
+    try {
+      await api.put(
+        '/api/projects/${Uri.encodeComponent(name)}/sync-meta',
+        {'last_strava_sync_at': now, 'last_ps_sync_at': now},
+      );
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
 
   // ── Share ──────────────────────────────────────────────────────────────────
 

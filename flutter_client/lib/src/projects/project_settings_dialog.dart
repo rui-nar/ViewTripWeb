@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../api/client.dart';
 import 'project_notifier.dart';
 
 const _kAppVersion = '0.27.0';
@@ -27,6 +28,12 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   late List<TextEditingController> _counterNameCtrls;
   late List<TextEditingController> _counterStartCtrls;
 
+  // Auto-sync / integrations
+  bool _autoSync = true;
+  int? _linkedPsTripId;
+  List<Map<String, dynamic>> _psTrips = [];
+  bool _psTripsLoading = false;
+
   // Track style
   late Color _trackColor;
   late double _trackWidth;
@@ -53,6 +60,7 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPsTrips());
     _nameCtrl = TextEditingController(text: widget.notifier.projectName ?? '');
     final ts = widget.notifier.tripStart;
     if (ts != null) _tripStart = DateTime.tryParse(ts);
@@ -64,6 +72,8 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
     _optGroups = widget.notifier.sleepingOptions
         .map((opt) => widget.notifier.sleepingOptionGroups[opt] ?? 'Other')
         .toList();
+    _autoSync = widget.notifier.autoSyncEnabled;
+    _linkedPsTripId = widget.notifier.linkedPsTripId;
     _trackColor = widget.notifier.trackColor;
     _trackWidth = widget.notifier.trackWidth;
     _alternating = widget.notifier.alternatingTrackColors;
@@ -110,6 +120,19 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       _optCtrls.removeAt(i).dispose();
       _optGroups.removeAt(i);
     });
+  }
+
+  Future<void> _loadPsTrips() async {
+    if (!mounted) return;
+    setState(() => _psTripsLoading = true);
+    try {
+      final raw = await api.get('/api/polarsteps/trips') as List<dynamic>;
+      if (mounted) setState(() => _psTrips = raw.cast<Map<String, dynamic>>());
+    } catch (_) {
+      // PS not connected or unavailable — hide dropdown silently
+    } finally {
+      if (mounted) setState(() => _psTripsLoading = false);
+    }
   }
 
   Future<void> _save() async {
@@ -191,6 +214,11 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       color: _trackColor,
       width: _trackWidth,
       alternating: _alternating,
+    );
+    widget.notifier.saveSyncMeta(
+      autoSyncEnabled: _autoSync,
+      linkedPsTripId: _linkedPsTripId,
+      clearLinkedTrip: _linkedPsTripId == null,
     );
     if (mounted) Navigator.of(context).pop();
   }
@@ -361,6 +389,52 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                   ),
                 ),
               ),
+
+              const Divider(height: 24),
+
+              // ── Integrations ──────────────────────────────────────────
+              Text('Integrations', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 4),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Auto-sync on project open'),
+                subtitle: const Text(
+                  'Check for new Strava activities and Polarsteps steps when opening this project.',
+                ),
+                value: _autoSync,
+                onChanged: (v) => setState(() => _autoSync = v),
+              ),
+              if (_psTripsLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 4),
+                  child: LinearProgressIndicator(),
+                )
+              else if (_psTrips.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text('Linked Polarsteps trip',
+                    style: theme.textTheme.bodySmall),
+                const SizedBox(height: 4),
+                DropdownButton<int?>(
+                  isExpanded: true,
+                  value: _psTrips.any((t) => t['id'] == _linkedPsTripId)
+                      ? _linkedPsTripId
+                      : null,
+                  items: [
+                    const DropdownMenuItem<int?>(
+                      value: null,
+                      child: Text('None'),
+                    ),
+                    ..._psTrips.map((t) => DropdownMenuItem<int?>(
+                          value: t['id'] as int?,
+                          child: Text(
+                            t['name'] as String? ?? 'Trip ${t['id']}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        )),
+                  ],
+                  onChanged: (v) => setState(() => _linkedPsTripId = v),
+                ),
+              ],
 
               const Divider(height: 24),
 

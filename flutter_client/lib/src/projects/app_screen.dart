@@ -18,6 +18,8 @@ import 'activity_panel.dart';
 import 'map_panel.dart';
 import 'image_export.dart';
 import 'project_settings_dialog.dart';
+import 'sync_import_notifier.dart';
+import 'sync_import_dialog.dart';
 
 // ── AppScreen ─────────────────────────────────────────────────────────────────
 
@@ -193,6 +195,27 @@ class _AppScreenState extends State<AppScreen> {
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
+  }
+
+  void _openSyncDialog(BuildContext context) {
+    final notifier = context.read<ProjectNotifier>();
+    final pending = notifier.pendingSync;
+    if (pending == null) return;
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => ChangeNotifierProvider(
+        create: (_) => SyncImportNotifier(
+          stravaActivities: pending.strava,
+          psSteps: pending.polarsteps,
+        ),
+        child: SyncImportDialog(projectName: widget.projectName),
+      ),
+    ).then((_) {
+      if (!mounted) return;
+      notifier.markSynced();
+      notifier.load(widget.projectName);
+    });
   }
 
   void _showFilterSheet(BuildContext context, ProjectNotifier notifier,
@@ -505,7 +528,38 @@ class _AppScreenState extends State<AppScreen> {
           ],
         ],
       ),
-      body: LayoutBuilder(
+      body: Column(
+        children: [
+          // ── Auto-sync banner ───────────────────────────────────────────
+          Selector<ProjectNotifier, bool>(
+            selector: (_, n) => n.pendingSync != null,
+            builder: (context, hasSync, __) {
+              if (!hasSync) return const SizedBox.shrink();
+              final n = context.read<ProjectNotifier>();
+              final strava = n.pendingSync!.strava.length;
+              final ps = n.pendingSync!.polarsteps.length;
+              final parts = [
+                if (strava > 0) '$strava Strava ${strava == 1 ? 'activity' : 'activities'}',
+                if (ps > 0) '$ps Polarsteps ${ps == 1 ? 'step' : 'steps'}',
+              ];
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: Text('New: ${parts.join(' and ')}'),
+                leading: const Icon(Icons.sync, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: () => context.read<ProjectNotifier>().markSynced(),
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: () => _openSyncDialog(context),
+                    child: const Text('Import'),
+                  ),
+                ],
+              );
+            },
+          ),
+          Expanded(child: LayoutBuilder(
         builder: (context, constraints) {
           // Auto-close the panel when switching to wide layout.
           if (constraints.maxWidth >= 720 && _panelOpen) {
@@ -673,6 +727,8 @@ class _AppScreenState extends State<AppScreen> {
             );
           }
         },
+      )),
+        ],
       ),
     );
   }

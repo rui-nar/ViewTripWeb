@@ -40,8 +40,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
-from models.project_db import DBProject
-from models.user import StravaToken
+from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta
+from models.user import PolarstepsToken, StravaToken
+from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
 from src.models.activity import Activity
@@ -371,6 +372,167 @@ def update_day_meta(
         sess.add(row)
         sess.commit()
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+
+
+# ── Sync-meta (auto-sync config per project) ─────────────────────────────────
+
+def _get_sync_meta(sess, project_id: int) -> DBProjectSyncMeta:
+    """Return the sync-meta row for a project, creating a default if absent."""
+    row = sess.get(DBProjectSyncMeta, project_id)
+    if row is None:
+        row = DBProjectSyncMeta(project_id=project_id)
+    return row
+
+
+def _get_project_row(sess, user_info_id: int, name: str) -> DBProject:
+    row = sess.exec(
+        select(DBProject).where(
+            DBProject.user_info_id == user_info_id,
+            DBProject.name == name,
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return row
+
+
+@router.get("/{name}/sync-meta")
+def get_sync_meta(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        proj = _get_project_row(sess, user_info_id, name)
+        meta = _get_sync_meta(sess, proj.id)
+    return {
+        "auto_sync_enabled": meta.auto_sync_enabled,
+        "linked_ps_trip_id": meta.linked_ps_trip_id,
+        "last_strava_sync_at": meta.last_strava_sync_at,
+        "last_ps_sync_at": meta.last_ps_sync_at,
+    }
+
+
+class SyncMetaUpdateRequest(BaseModel):
+    auto_sync_enabled: Optional[bool] = None
+    linked_ps_trip_id: Optional[int] = None
+    last_strava_sync_at: Optional[float] = None
+    last_ps_sync_at: Optional[float] = None
+
+
+@router.put("/{name}/sync-meta")
+def update_sync_meta(
+    name: str,
+    body: SyncMetaUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        proj = _get_project_row(sess, user_info_id, name)
+        meta = _get_sync_meta(sess, proj.id)
+        if meta.project_id != proj.id:
+            meta.project_id = proj.id
+        if body.auto_sync_enabled is not None:
+            meta.auto_sync_enabled = body.auto_sync_enabled
+        if 'linked_ps_trip_id' in body.model_fields_set:
+            meta.linked_ps_trip_id = body.linked_ps_trip_id
+        if body.last_strava_sync_at is not None:
+            meta.last_strava_sync_at = body.last_strava_sync_at
+        if body.last_ps_sync_at is not None:
+            meta.last_ps_sync_at = body.last_ps_sync_at
+        sess.add(meta)
+        sess.commit()
+    return {
+        "auto_sync_enabled": meta.auto_sync_enabled,
+        "linked_ps_trip_id": meta.linked_ps_trip_id,
+        "last_strava_sync_at": meta.last_strava_sync_at,
+        "last_ps_sync_at": meta.last_ps_sync_at,
+    }
+
+
+@router.get("/{name}/sync/check")
+def sync_check(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    """Return new Strava activities and Polarsteps steps not yet in this project."""
+    user_info_id = int(current_user["sub"])
+
+    with get_session() as sess:
+        proj = _get_project_row(sess, user_info_id, name)
+        meta = _get_sync_meta(sess, proj.id)
+
+        if not meta.auto_sync_enabled:
+            return {"strava": [], "polarsteps": []}
+
+        # ── Strava ────────────────────────────────────────────────────────────
+        strava_results: List[Dict[str, Any]] = []
+        strava_token = sess.exec(
+            select(StravaToken).where(StravaToken.user_info_id == user_info_id)
+        ).first()
+
+        if strava_token and strava_token.access_token:
+            from api.strava import _load_cache, _strava_client_for_token, _fetch_all_strava, _save_cache, _save_refreshed_token
+
+            raw_list: Optional[List[Dict[str, Any]]] = None
+            cache_data = _load_cache(user_info_id)
+            if cache_data is not None:
+                raw_list = cache_data["activities"]
+            else:
+                try:
+                    client = _strava_client_for_token(strava_token)
+                    raw_list = _fetch_all_strava(client)
+                    _save_cache(user_info_id, raw_list)
+                    _save_refreshed_token(sess, strava_token, client)
+                except Exception:
+                    raw_list = []
+
+            if raw_list:
+                # Parse + filter by last_strava_sync_at
+                cutoff = meta.last_strava_sync_at or 0.0
+                # Get IDs already in project
+                item_rows = sess.exec(
+                    select(DBProjectItem).where(
+                        DBProjectItem.project_id == proj.id,
+                        DBProjectItem.item_type == "activity",
+                    )
+                ).all()
+                in_project_ids = {r.activity_id for r in item_rows if r.activity_id is not None}
+
+                for raw in raw_list:
+                    try:
+                        act = Activity.from_strava_api(raw)
+                        if act.id in in_project_ids:
+                            continue
+                        act_ts = act.start_date.timestamp() if act.start_date else 0.0
+                        if act_ts <= cutoff:
+                            continue
+                        d = act.to_strava_dict()
+                        d["in_project"] = False
+                        strava_results.append(d)
+                    except Exception:
+                        pass
+
+        # ── Polarsteps ────────────────────────────────────────────────────────
+        ps_results: List[Dict[str, Any]] = []
+        ps_token = sess.exec(
+            select(PolarstepsToken).where(PolarstepsToken.user_info_id == user_info_id)
+        ).first()
+
+        if ps_token and meta.linked_ps_trip_id:
+            try:
+                ps_client = PolarstepsClient(ps_token.remember_token)
+                raw_steps = ps_client.get_trip_steps(meta.linked_ps_trip_id)
+                cutoff = meta.last_ps_sync_at or 0.0
+                for raw_step in raw_steps:
+                    step_ts = float(raw_step.get("creation_time") or 0)
+                    if step_ts <= cutoff:
+                        continue
+                    ps_results.append(format_step(raw_step))
+            except Exception:
+                pass  # PS errors are non-fatal
+
+    return {"strava": strava_results, "polarsteps": ps_results}
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
