@@ -739,6 +739,40 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   }
 
   void _onMapTap(LatLng latlng) {
+    // ── Activity hit-test ────────────────────────────────────────────────────
+    final geo = widget.notifier.geo;
+    if (geo != null) {
+      final zoom = widget.mapController.camera.zoom;
+      final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
+      final threshold = pow(15.0 * pixelDeg, 2).toDouble();
+      double minHit = threshold;
+      dynamic hitId;
+
+      final features = geo['features'];
+      if (features is List) {
+        for (final f in features) {
+          if (f is! Map) continue;
+          final props = f['properties'] as Map? ?? {};
+          if (props['type'] != 'activity') continue;
+          final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+          if (coords is! List) continue;
+          for (final c in coords) {
+            if (c is! List || c.length < 2) continue;
+            final dLat = (c[1] as num).toDouble() - latlng.latitude;
+            final dLon = (c[0] as num).toDouble() - latlng.longitude;
+            final d = dLat * dLat + dLon * dLon;
+            if (d < minHit) { minHit = d; hitId = props['activity_id']; }
+          }
+        }
+      }
+
+      if (hitId != null) {
+        widget.notifier.selectActivity(hitId);
+        return;
+      }
+    }
+
+    // ── Elevation cursor ─────────────────────────────────────────────────────
     final track = widget.notifier.fullTrack;
     if (track.isEmpty) return;
     int nearest = 0;

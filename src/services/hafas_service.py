@@ -17,7 +17,7 @@ import requests
 # transport.rest mirrors for supported providers
 _ENDPOINTS: dict[str, str] = {
     "db":  "https://v6.db.transport.rest",
-    "obb": "https://v6.oebb.transport.rest",
+    "obb": "https://oebb.macistry.com/api",
 }
 
 _TIMEOUT = 12  # seconds per request

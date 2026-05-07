@@ -37,6 +37,7 @@ class _AppScreenState extends State<AppScreen> {
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   final ValueNotifier<bool> _mapFitted = ValueNotifier(false);
+  final ScrollController _activityScrollController = ScrollController();
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
@@ -53,6 +54,7 @@ class _AppScreenState extends State<AppScreen> {
   void dispose() {
     _mapController.dispose();
     _mapFitted.dispose();
+    _activityScrollController.dispose();
     super.dispose();
   }
 
@@ -577,6 +579,7 @@ class _AppScreenState extends State<AppScreen> {
                     builder: (_, n, __) => ActivityPanel(
                       notifier: n,
                       mapController: _mapController,
+                      scrollController: _activityScrollController,
                     ),
                   ),
                 ),

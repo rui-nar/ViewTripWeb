@@ -60,11 +60,11 @@ def _enrich_uic(stop: dict) -> dict:
     return stop
 
 
-def _find_uic_near(lat: float, lon: float, radius_m: int = 1000) -> Optional[str]:
-    """Query Overpass for the nearest railway station node to (lat, lon) and return its uic_ref."""
+def _find_uic_near(lat: float, lon: float, radius_m: int = 1500) -> Optional[str]:
+    """Query Overpass for the nearest railway stop node to (lat, lon) and return its uic_ref."""
     query = f"""
 [out:json][timeout:15];
-node["railway"="station"]["uic_ref"](around:{radius_m},{lat},{lon});
+node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
 out body;
 """
     try:
@@ -110,6 +110,7 @@ node["uic_ref"="{uic2}"]->.b;
 (
   rel["route"="train"](bn.a)(bn.b);
   rel["route"="railway"](bn.a)(bn.b);
+  rel["route"="light_rail"](bn.a)(bn.b);
 )->.r;
 .r out geom;
 """
