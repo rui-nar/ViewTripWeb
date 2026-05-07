@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:provider/provider.dart';
 
-import '../api/client.dart';
+import '../api/client.dart' show api;
 import '../projects/basemaps.dart';
 import '../projects/elevation_chart.dart';
 import '../projects/map_panel.dart';
@@ -129,12 +129,17 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
               : LayoutBuilder(
                   builder: (context, constraints) {
                     final wide = constraints.maxWidth >= 720;
+                    final origin = api.baseUrl.isEmpty
+                        ? Uri.base.origin
+                        : api.baseUrl;
                     final mapPanel = MapPanel(
                       notifier: pn,
                       mapController: _mapController,
                       basemapUrl: kActiveViewBasemapUrl,
                       labelsUrl: kActiveViewLabelsUrl,
                       basemapStyleUri: kActiveViewStyleUri,
+                      trackTileUrlTemplate:
+                          '$origin/api/share/${widget.token}/tiles/{z}/{x}/{y}.png',
                     );
                     final activityList = _ReadOnlyActivityList(notifier: pn);
                     final selectedId = notifier.selectedActivityId;

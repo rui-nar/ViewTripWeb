@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from api.auth import router as auth_router
 from api.geo import router as geo_router
 from api.memories import router as memories_router
+from api.polarsteps import router as polarsteps_router
 from api.projects import router as projects_router
 from api.share import router as share_router
 from api.strava import router as strava_router
@@ -29,6 +30,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(geo_router)
 app.include_router(memories_router)
+app.include_router(polarsteps_router)
 app.include_router(projects_router)
 app.include_router(share_router)
 app.include_router(strava_router)

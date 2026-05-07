@@ -355,7 +355,7 @@ class _AppScreenState extends State<AppScreen> {
           ),
 
           if (isNarrow) ...[
-            // ── Narrow: stats + strava visible; rest in overflow ──────────
+            // ── Narrow: stats + strava + polarsteps visible; rest in overflow ──
             IconButton(
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
@@ -372,6 +372,12 @@ class _AppScreenState extends State<AppScreen> {
               tooltip: 'Import activities from Strava',
               onPressed: () => context.push(
                   '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.explore_outlined),
+              tooltip: 'Import steps from Polarsteps',
+              onPressed: () => context.push(
+                  '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}'),
             ),
             PopupMenuButton<int>(
               icon: const Icon(Icons.more_vert),
@@ -451,6 +457,12 @@ class _AppScreenState extends State<AppScreen> {
               tooltip: 'Import activities from Strava',
               onPressed: () => context.push(
                   '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.explore_outlined),
+              tooltip: 'Import steps from Polarsteps',
+              onPressed: () => context.push(
+                  '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}'),
             ),
             IconButton(
               icon: const Icon(Icons.share_outlined),

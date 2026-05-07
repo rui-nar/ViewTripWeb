@@ -1,8 +1,9 @@
 """Public share endpoints — no authentication required.
 
 Routes:
-    GET /api/share/{token}      — project details for a shared link
-    GET /api/share/{token}/geo  — GeoJSON for a shared project
+    GET /api/share/{token}                      — project details for a shared link
+    GET /api/share/{token}/geo                  — GeoJSON for a shared project
+    GET /api/share/{token}/tiles/{z}/{x}/{y}.png — raster track tile (cached)
 """
 from __future__ import annotations
 
@@ -11,11 +12,13 @@ from typing import Any, Dict, List
 import polyline as polyline_lib
 from models.db import get_session
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import Response
 from sqlmodel import select
 
 from models.project_db import DBProject
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
+from src.tile_renderer import get_or_create_tile
 
 router = APIRouter(prefix="/api/share", tags=["share"])
 
@@ -49,11 +52,8 @@ def shared_project(token: str):
     return _repo.to_dict(project)
 
 
-@router.get("/{token}/geo")
-def shared_project_geo(token: str):
-    """Return GeoJSON FeatureCollection for a shared project."""
-    project = _get_project_by_token(token)
-
+def _build_features(project) -> List[Dict[str, Any]]:
+    """Build GeoJSON-style feature dicts for all activities and segments."""
     features: List[Dict[str, Any]] = []
 
     for item in project.items:
@@ -106,4 +106,34 @@ def shared_project_geo(token: str):
                 },
             })
 
-    return {"type": "FeatureCollection", "features": features}
+    return features
+
+
+@router.get("/{token}/geo")
+def shared_project_geo(token: str):
+    """Return GeoJSON FeatureCollection for a shared project."""
+    project = _get_project_by_token(token)
+    return {"type": "FeatureCollection", "features": _build_features(project)}
+
+
+@router.get("/{token}/tiles/{z}/{x}/{y}.png")
+def shared_project_tile(token: str, z: int, x: int, y: int):
+    """Return a cached raster tile PNG for the shared project's track layer.
+
+    Tiles are generated lazily on first request and cached on disk.
+    The cache is invalidated automatically when the project is modified.
+    Zoom levels above 15 are rejected to prevent unbounded cache growth.
+    """
+    if not (0 <= z <= 15):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Zoom level must be between 0 and 15",
+        )
+    project = _get_project_by_token(token)
+    features = _build_features(project)
+    png = get_or_create_tile(token, features, z, x, y)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

@@ -27,6 +27,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _stravaLoading = false;
   JSFunction? _stravaMessageHandler;
 
+  // ── Polarsteps state ──────────────────────────────────────────────────────
+  bool _polarstepsConnected = false;
+  String? _polarstepsUsername;
+  bool _polarstepsLoading = false;
+  bool _polarstepsConnecting = false;
+  final _polarstepsTokenCtrl = TextEditingController();
+
   // ── Account state ─────────────────────────────────────────────────────────
   final _displayNameCtrl = TextEditingController();
   String _email = '';
@@ -46,6 +53,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStravaStatus();
+      _loadPolarstepsStatus();
       _loadProfile();
     });
   }
@@ -60,6 +68,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _currentPwCtrl.dispose();
     _newPwCtrl.dispose();
     _confirmPwCtrl.dispose();
+    _polarstepsTokenCtrl.dispose();
     super.dispose();
   }
 
@@ -265,6 +274,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       await _service.disconnectStrava();
       if (mounted) setState(() => _stravaConnected = false);
+    } catch (_) {}
+  }
+
+  // ── Polarsteps ────────────────────────────────────────────────────────────
+
+  Future<void> _loadPolarstepsStatus() async {
+    if (!mounted) return;
+    setState(() => _polarstepsLoading = true);
+    try {
+      final data = await _service.getPolarstepsStatus();
+      if (mounted) {
+        setState(() {
+          _polarstepsConnected = data['connected'] == true;
+          _polarstepsUsername = data['username'] as String?;
+        });
+      }
+    } catch (_) {
+      // status not critical
+    } finally {
+      if (mounted) setState(() => _polarstepsLoading = false);
+    }
+  }
+
+  Future<void> _connectPolarsteps() async {
+    final token = _polarstepsTokenCtrl.text.trim();
+    if (token.isEmpty) return;
+    setState(() => _polarstepsConnecting = true);
+    try {
+      final data = await _service.connectPolarsteps(token);
+      if (mounted) {
+        setState(() {
+          _polarstepsConnected = true;
+          _polarstepsUsername = data['username'] as String?;
+          _polarstepsTokenCtrl.clear();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Polarsteps connected!')),
+        );
+      }
+    } on Exception catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _polarstepsConnecting = false);
+    }
+  }
+
+  Future<void> _disconnectPolarsteps() async {
+    try {
+      await _service.disconnectPolarsteps();
+      if (mounted) {
+        setState(() {
+          _polarstepsConnected = false;
+          _polarstepsUsername = null;
+        });
+      }
     } catch (_) {}
   }
 
@@ -493,10 +561,81 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SectionCard(
                   title: 'Polarsteps',
                   icon: Icons.explore_outlined,
-                  child: Text(
-                    'Polarsteps integration coming soon.',
-                    style: theme.textTheme.bodySmall,
-                  ),
+                  child: _polarstepsLoading
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_polarstepsConnected) ...[
+                              Row(
+                                children: [
+                                  Icon(Icons.check_circle,
+                                      color: theme.colorScheme.primary,
+                                      size: 18),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _polarstepsUsername != null
+                                          ? 'Connected as @$_polarstepsUsername'
+                                          : 'Connected',
+                                      style: theme.textTheme.bodyMedium,
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: _disconnectPolarsteps,
+                                    child: const Text('Disconnect'),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Open a project and use the Import button in the toolbar to import Polarsteps memories.',
+                                style: theme.textTheme.bodySmall,
+                              ),
+                            ] else ...[
+                              Text(
+                                'Connect your Polarsteps account to import steps as memories.',
+                                style: theme.textTheme.bodySmall,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'In your browser: DevTools → Application → Cookies → polarsteps.com → copy the remember_token value.',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: _polarstepsTokenCtrl,
+                                decoration: const InputDecoration(
+                                  labelText: 'remember_token',
+                                  hintText: 'Paste cookie value here…',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                obscureText: true,
+                              ),
+                              const SizedBox(height: 12),
+                              FilledButton(
+                                onPressed: _polarstepsConnecting
+                                    ? null
+                                    : _connectPolarsteps,
+                                child: _polarstepsConnecting
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white),
+                                      )
+                                    : const Text('Connect Polarsteps'),
+                              ),
+                            ],
+                          ],
+                        ),
                 ),
 
                 const SizedBox(height: 16),

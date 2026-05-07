@@ -54,6 +54,16 @@ class SettingsService {
 
   Future<void> disconnectStrava() async => api.delete('/api/strava/disconnect');
 
+  Future<Map<String, dynamic>> getPolarstepsStatus() async =>
+      await api.get('/api/polarsteps/status') as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> connectPolarsteps(String token) async =>
+      await api.post('/api/polarsteps/connect', {'remember_token': token})
+          as Map<String, dynamic>;
+
+  Future<void> disconnectPolarsteps() async =>
+      api.delete('/api/polarsteps/disconnect');
+
   static String _detail(String body) {
     final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(body);
     return m?.group(1) ?? body;

@@ -51,3 +51,15 @@ class StravaToken(sqlmodel.SQLModel, table=True):
     access_token: str = sqlmodel.Field(default="")
     refresh_token: str = sqlmodel.Field(default="")
     expires_at: float = sqlmodel.Field(default=0.0)
+
+
+class PolarstepsToken(sqlmodel.SQLModel, table=True):
+    """Stores per-user Polarsteps remember_token (unofficial API cookie)."""
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    user_info_id: int = sqlmodel.Field(
+        foreign_key="userinfo.id", unique=True, index=True
+    )
+    remember_token: str = sqlmodel.Field(default="")
+    polarsteps_user_id: int = sqlmodel.Field(default=0)
+    polarsteps_username: str = sqlmodel.Field(default="")

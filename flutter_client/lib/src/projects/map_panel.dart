@@ -24,6 +24,11 @@ class MapPanel extends StatefulWidget {
   /// When set and non-null, a VectorTileLayer replaces the raster TileLayer.
   final String? basemapStyleUri;
 
+  /// When set, a raster TileLayer is added for the track base layer and
+  /// the PolylineLayer is filtered to the selected item only (for highlights).
+  /// Template variables `{z}`, `{x}`, `{y}` are filled in by flutter_map.
+  final String? trackTileUrlTemplate;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -32,6 +37,7 @@ class MapPanel extends StatefulWidget {
     this.basemapSubdomains = const [],
     this.labelsUrl,
     this.basemapStyleUri,
+    this.trackTileUrlTemplate,
   });
 
   @override
@@ -84,6 +90,23 @@ class _MapPanelState extends State<MapPanel> {
         .toColor();
   }
 
+  List<LatLng> _allPointsFromGeo(Map<String, dynamic> geo) {
+    final features = geo['features'];
+    if (features is! List) return [];
+    final pts = <LatLng>[];
+    for (final f in features) {
+      if (f is! Map) continue;
+      final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is! List) continue;
+      for (final c in coords) {
+        if (c is List && c.length >= 2) {
+          pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+        }
+      }
+    }
+    return pts;
+  }
+
   List<Polyline> _buildPolylines(
     Map<String, dynamic> geo,
     dynamic selectedActivityId,
@@ -91,8 +114,9 @@ class _MapPanelState extends State<MapPanel> {
     Color trackColor,
     double trackWidth,
     bool alternating,
-    List<Map<String, dynamic>> items,
-  ) {
+    List<Map<String, dynamic>> items, {
+    bool selectedOnly = false,
+  }) {
     final features = geo['features'];
     if (features is! List) return [];
 
@@ -130,6 +154,9 @@ class _MapPanelState extends State<MapPanel> {
           actId == selectedActivityId.toString();
       final isSelSeg = selectedSegmentId != null &&
           props['segment_id']?.toString() == selectedSegmentId.toString();
+
+      // When tile layer handles the base rendering, only draw the selected item.
+      if (selectedOnly && !isSelAct && !isSelSeg) continue;
       final isOdd = alternating && actId != null && (actIdx[actId] ?? 0).isOdd;
 
       final Color color;
@@ -295,11 +322,14 @@ class _MapPanelState extends State<MapPanel> {
       _lastTrackColor = trackColor;
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
+      final tilesActive = widget.trackTileUrlTemplate != null;
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
-              alternating, notifier.items)
+              alternating, notifier.items, selectedOnly: tilesActive)
           : [];
-      _cachedAllPoints = _allPoints(_cachedPolylines);
+      _cachedAllPoints = tilesActive && geo != null
+          ? _allPointsFromGeo(geo)
+          : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
@@ -367,6 +397,13 @@ class _MapPanelState extends State<MapPanel> {
                   ),
                 ),
             ],
+            if (widget.trackTileUrlTemplate != null)
+              TileLayer(
+                urlTemplate: widget.trackTileUrlTemplate!,
+                userAgentPackageName: 'com.viewtrip.client',
+                tileProvider: NetworkTileProvider(),
+                maxNativeZoom: 15,
+              ),
             if (polylines.isNotEmpty)
               PolylineLayer(
                 polylines: polylines,

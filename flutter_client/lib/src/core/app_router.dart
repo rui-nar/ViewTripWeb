@@ -15,6 +15,8 @@ import '../projects/app_screen.dart';
 import '../projects/view_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
+import '../projects/polarsteps_import_screen.dart';
+import '../projects/polarsteps_import_notifier.dart';
 import '../projects/project_stats_screen.dart';
 import '../settings/settings_screen.dart';
 import '../shared/shared_project_screen.dart';
@@ -101,6 +103,17 @@ GoRouter buildRouter(BuildContext context) {
           return ChangeNotifierProvider(
             create: (_) => StravaImportNotifier(),
             child: StravaImportScreen(projectName: projectName),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/polarsteps-import',
+        builder: (context, state) {
+          final projectName =
+              state.uri.queryParameters['project'] ?? '';
+          return ChangeNotifierProvider(
+            create: (_) => PolarstepsImportNotifier(),
+            child: PolarstepsImportScreen(projectName: projectName),
           );
         },
       ),
