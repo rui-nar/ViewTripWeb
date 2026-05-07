@@ -159,7 +159,7 @@ class _MemoryDialogState extends State<MemoryDialog> {
 
         // Delete removed photos first
         for (final uuid in _photosToDelete) {
-          await widget.notifier.deleteMemoryPhoto(memId, uuid);
+          await widget.notifier.deleteMemoryPhoto(memId, uuid, reload: false);
         }
 
         await widget.notifier.updateMemory(

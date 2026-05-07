@@ -161,11 +161,15 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     }
   }
 
-  Future<void> deleteMemoryPhoto(String memoryId, String photoUuid) async {
+  Future<void> deleteMemoryPhoto(
+    String memoryId,
+    String photoUuid, {
+    bool reload = true,
+  }) async {
     final projectName = this.projectName;
     try {
       await api.delete('/api/memories/$memoryId/photos/$photoUuid');
-      if (projectName != null) await reloadDetailsOnly(projectName);
+      if (reload && projectName != null) await reloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
