@@ -81,7 +81,7 @@ class ProjectsNotifier extends ChangeNotifier {
   Future<({List<int> bytes, String defaultName})?> pickProjectFile() async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['gettracks'],
+      allowedExtensions: ['viewtrip', 'gettracks'],
       withData: true,
     );
     if (result == null || result.files.isEmpty) return null;
@@ -89,9 +89,11 @@ class ProjectsNotifier extends ChangeNotifier {
     final bytes = picked.bytes;
     if (bytes == null) return null;
     final rawName = picked.name;
-    final defaultName = rawName.endsWith('.gettracks')
-        ? rawName.substring(0, rawName.length - '.gettracks'.length)
-        : rawName;
+    final defaultName = rawName.endsWith('.viewtrip')
+        ? rawName.substring(0, rawName.length - '.viewtrip'.length)
+        : rawName.endsWith('.gettracks')
+            ? rawName.substring(0, rawName.length - '.gettracks'.length)
+            : rawName;
     return (bytes: bytes as List<int>, defaultName: defaultName);
   }
 
@@ -106,7 +108,7 @@ class ProjectsNotifier extends ChangeNotifier {
     notifyListeners();
     try {
       final data =
-          await _uploadBytes(bytes: bytes, filename: '$name.gettracks');
+          await _uploadBytes(bytes: bytes, filename: '$name.viewtrip');
       await load();
       return data['name'] as String?;
     } on Exception catch (e) {

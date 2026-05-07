@@ -1,1 +1,1 @@
-"""Custom exceptions for GetTracks."""
+"""Custom exceptions for ViewTrip."""

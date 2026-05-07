@@ -1,1 +1,1 @@
-"""Utilities and helper functions for GetTracks."""
+"""Utilities and helper functions for ViewTrip."""

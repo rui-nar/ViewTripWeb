@@ -4,7 +4,7 @@
 from PIL import Image, ImageDraw
 
 def create_app_icon(size=(512, 512)):
-    """Create an improved GetTracks app icon with merging tracks."""
+    """Create the ViewTrip app icon."""
     # Create image with Strava orange background
     img = Image.new('RGBA', size, (252, 76, 2, 255))  # #FC4C02
     draw = ImageDraw.Draw(img)

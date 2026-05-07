@@ -76,7 +76,7 @@ class ProjectRepo:
     ) -> Optional[Project]:
         """Load a project from DB.
 
-        If no DB row exists and *legacy_path* points to a ``.gettracks`` file,
+        If no DB row exists and *legacy_path* points to a ``.viewtrip`` or ``.gettracks`` file,
         the file is ingested into the DB first (lazy migration).
         Returns ``None`` if neither DB row nor legacy file exists.
         """
@@ -89,7 +89,7 @@ class ProjectRepo:
 
         if row is None:
             if legacy_path and os.path.isfile(legacy_path):
-                self.ingest_gettracks(sess, user_info_id, legacy_path)
+                self.ingest_project(sess, user_info_id, legacy_path)
                 # Re-fetch after ingest
                 row = sess.exec(
                     select(DBProject).where(
@@ -329,10 +329,10 @@ class ProjectRepo:
     # Legacy migration
     # ------------------------------------------------------------------
 
-    def ingest_gettracks(
+    def ingest_project(
         self, sess: Session, user_info_id: int, path: str
     ) -> None:
-        """Parse a ``.gettracks`` file and write it into the DB.
+        """Parse a ``.viewtrip`` (or legacy ``.gettracks``) file and write it into the DB.
 
         The DB project name is derived from the **filename** (minus extension)
         so it stays consistent with the URL slug the API has always used.
@@ -340,12 +340,13 @@ class ProjectRepo:
         Idempotent: if the project already exists in the DB, the call is a
         no-op.  Activity rows are upserted so enriched data is never overwritten.
 
-        After a successful ingest the file is renamed to ``*.gettracks.migrated``
+        After a successful ingest the file is renamed to ``*.migrated``
         so repeated calls are O(1) rather than re-reading the file each time.
         """
         # Use the filename-derived name as the DB key (matches the legacy URL slug)
         basename = os.path.basename(path)
-        db_name = basename[: -len(ProjectIO.EXTENSION)] if basename.endswith(ProjectIO.EXTENSION) else basename
+        ext = ProjectIO.EXTENSION if basename.endswith(ProjectIO.EXTENSION) else ProjectIO.LEGACY_EXTENSION
+        db_name = basename[: -len(ext)] if basename.endswith((ProjectIO.EXTENSION, ProjectIO.LEGACY_EXTENSION)) else basename
 
         project = ProjectIO.load(path)
 
@@ -731,7 +732,7 @@ class ProjectRepo:
 
     @staticmethod
     def _mark_migrated(path: str) -> None:
-        """Rename a .gettracks file to .gettracks.migrated to prevent re-ingestion."""
+        """Rename a project file to *.migrated to prevent re-ingestion."""
         try:
             os.rename(path, path + ".migrated")
         except OSError:

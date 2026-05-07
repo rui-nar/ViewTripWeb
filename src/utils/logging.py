@@ -1,4 +1,4 @@
-"""Logging utilities for GetTracks."""
+"""Logging utilities for ViewTrip."""
 
 import logging
 import logging.handlers

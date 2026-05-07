@@ -1,1 +1,1 @@
-"""Configuration management for GetTracks."""
+"""Configuration management for ViewTrip."""

@@ -45,7 +45,7 @@ class GPXProcessor:
             options = ExportOptions()
 
         gpx = gpxpy.gpx.GPX()
-        gpx.creator = "GetTracks"
+        gpx.creator = "ViewTrip"
 
         sorted_tracks = sorted(tracks, key=lambda t: t.start_time)
 
@@ -113,7 +113,7 @@ class GPXProcessor:
             options = ExportOptions()
 
         gpx = gpxpy.gpx.GPX()
-        gpx.creator = "GetTracks"
+        gpx.creator = "ViewTrip"
 
         track_map: Dict[int, Track] = {t.activity_id: t for t in tracks}
 

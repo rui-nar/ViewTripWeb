@@ -323,7 +323,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Import a .gettracks file exported from the GetTracks desktop app.',
+                          'Import a .viewtrip project file.',
                           style: theme.textTheme.bodySmall,
                         ),
                         const SizedBox(height: 16),
@@ -354,7 +354,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                           icon: const Icon(Icons.upload_rounded),
                           label: Text(notifier.isLoading
                               ? 'Importing…'
-                              : 'Choose .gettracks file'),
+                              : 'Choose .viewtrip file'),
                         ),
                       ],
                     ),

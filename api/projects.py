@@ -5,10 +5,10 @@ Routes:
     POST   /api/projects/                       — create new project
     GET    /api/projects/{name}                 — get project data (GeoJSON + metadata)
     DELETE /api/projects/{name}                 — delete a project
-    POST   /api/projects/import                 — upload a .gettracks file
+    POST   /api/projects/import                 — upload a .viewtrip file
     GET    /api/projects/{name}/export          — download project as GPX file
-    GET    /api/projects/{name}/export-gettracks — download project as .gettracks JSON
-    GET    /api/projects/{name}/export-zip      — download ZIP (gettracks + photos)
+    GET    /api/projects/{name}/export-viewtrip — download project as .viewtrip JSON
+    GET    /api/projects/{name}/export-zip      — download ZIP (.viewtrip + photos)
     POST   /api/projects/{name}/activities      — add activities to project
     DELETE /api/projects/{name}/items/{index}   — remove item at index
     PUT    /api/projects/{name}/items/reorder   — move item from/to index
@@ -555,11 +555,16 @@ async def import_project(
     user_info_id = int(current_user["sub"])
     user_id = current_user["sub"]
 
-    fname = os.path.basename(file.filename or "imported.gettracks")
-    if not fname.endswith(ProjectIO.EXTENSION):
-        fname += ProjectIO.EXTENSION
+    raw_fname = os.path.basename(file.filename or "imported.viewtrip")
+    # Accept both .viewtrip (new) and .gettracks (legacy) on upload
+    if raw_fname.endswith(ProjectIO.LEGACY_EXTENSION):
+        fname = raw_fname[: -len(ProjectIO.LEGACY_EXTENSION)] + ProjectIO.EXTENSION
+    elif raw_fname.endswith(ProjectIO.EXTENSION):
+        fname = raw_fname
+    else:
+        fname = raw_fname + ProjectIO.EXTENSION
 
-    # Write to a temp location so ingest_gettracks can read it
+    # Write to a temp location so ingest_project can read it
     pdir = _projects_dir(user_id)
     tmp_path = os.path.join(pdir, fname)
     contents = await file.read()
@@ -568,7 +573,7 @@ async def import_project(
 
     name = fname[: -len(ProjectIO.EXTENSION)]
     with get_session() as sess:
-        _repo.ingest_gettracks(sess, user_info_id, tmp_path)
+        _repo.ingest_project(sess, user_info_id, tmp_path)
 
     return {"name": name, "filename": fname}
 
@@ -702,14 +707,14 @@ def export_project_gpx(
     )
 
 
-# ── .gettracks export ─────────────────────────────────────────────────────────
+# ── .viewtrip export ──────────────────────────────────────────────────────────
 
-@router.get("/{name}/export-gettracks")
-def export_project_gettracks(
+@router.get("/{name}/export-viewtrip")
+def export_project_viewtrip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Download the project as a .gettracks JSON file (no embedded photos)."""
+    """Download the project as a .viewtrip JSON file (no embedded photos)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project = _repo.get_project(
@@ -727,18 +732,18 @@ def export_project_gettracks(
     return StreamingResponse(
         io.BytesIO(json_bytes),
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{safe}.gettracks"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe}.viewtrip"'},
     )
 
 
-# ── ZIP export (gettracks + photos) ───────────────────────────────────────────
+# ── ZIP export (.viewtrip + photos) ───────────────────────────────────────────
 
 @router.get("/{name}/export-zip")
 def export_project_zip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Download a ZIP containing the .gettracks file and all memory photos."""
+    """Download a ZIP containing the .viewtrip file and all memory photos."""
     user_info_id = int(current_user["sub"])
     user_id = current_user["sub"]
     with get_session() as sess:
@@ -772,13 +777,13 @@ def export_project_zip(
         "items": items_serialised,
         "activities": [a.to_strava_dict() for a in project.activities],
     }
-    gettracks_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    viewtrip_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
 
     zip_buffer = io.BytesIO()
     safe = _SAFE_NAME.sub("_", project.name)
     memories_base = Path(_DATA_DIR) / "users" / user_id / "memories"
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{safe}.gettracks", gettracks_bytes)
+        zf.writestr(f"{safe}.viewtrip", viewtrip_bytes)
         for item in project.items:
             if item.item_type != "memory" or item.memory is None or item.memory.id is None:
                 continue

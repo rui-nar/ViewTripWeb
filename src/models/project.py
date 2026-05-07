@@ -87,7 +87,7 @@ class ProjectFilterState:
 
 @dataclass
 class Project:
-    """In-memory representation of a .gettracks file."""
+    """In-memory representation of a .viewtrip project file."""
     name: str
     version: int = 1
     items: List[ProjectItem] = field(default_factory=list)

@@ -84,7 +84,7 @@ class TestGPXProcessorMerge:
 
     def test_creator_set(self):
         gpx = GPXProcessor.merge([_make_track()])
-        assert gpx.creator == "GetTracks"
+        assert gpx.creator == "ViewTrip"
 
 
 # ---------------------------------------------------------------------------

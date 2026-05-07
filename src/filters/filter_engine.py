@@ -1,4 +1,4 @@
-"""Activity filtering logic for GetTracks."""
+"""Activity filtering logic for ViewTrip."""
 
 from dataclasses import dataclass
 from datetime import date

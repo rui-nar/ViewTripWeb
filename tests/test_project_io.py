@@ -172,7 +172,7 @@ class TestProjectIOHelpers:
 
 class TestProjectIORoundTrip:
     def test_save_and_load(self, simple_project, tmp_path):
-        path = str(tmp_path / "test.gettracks")
+        path = str(tmp_path / "test.viewtrip")
         ProjectIO.save(simple_project, path)
         assert os.path.exists(path)
 
@@ -182,7 +182,7 @@ class TestProjectIORoundTrip:
         assert len(loaded.items) == 3
 
     def test_items_preserved(self, simple_project, tmp_path):
-        path = str(tmp_path / "test.gettracks")
+        path = str(tmp_path / "test.viewtrip")
         ProjectIO.save(simple_project, path)
         loaded = ProjectIO.load(path)
 
@@ -194,7 +194,7 @@ class TestProjectIORoundTrip:
         assert loaded.items[2].activity_id == 222
 
     def test_filter_state_preserved(self, simple_project, tmp_path):
-        path = str(tmp_path / "test.gettracks")
+        path = str(tmp_path / "test.viewtrip")
         ProjectIO.save(simple_project, path)
         loaded = ProjectIO.load(path)
 
@@ -203,7 +203,7 @@ class TestProjectIORoundTrip:
         assert loaded.filter_state.activity_types == ["Run", "Ride"]
 
     def test_segment_coordinates_preserved(self, simple_project, tmp_path):
-        path = str(tmp_path / "test.gettracks")
+        path = str(tmp_path / "test.viewtrip")
         ProjectIO.save(simple_project, path)
         loaded = ProjectIO.load(path)
 
@@ -215,7 +215,7 @@ class TestProjectIORoundTrip:
 
     def test_empty_project_round_trip(self, tmp_path):
         p = Project(name="Empty")
-        path = str(tmp_path / "empty.gettracks")
+        path = str(tmp_path / "empty.viewtrip")
         ProjectIO.save(p, path)
         loaded = ProjectIO.load(path)
         assert loaded.name == "Empty"
@@ -224,7 +224,7 @@ class TestProjectIORoundTrip:
 
     def test_file_is_valid_json(self, simple_project, tmp_path):
         import json
-        path = str(tmp_path / "test.gettracks")
+        path = str(tmp_path / "test.viewtrip")
         ProjectIO.save(simple_project, path)
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -241,7 +241,7 @@ class TestProjectIORoundTrip:
             end=SegmentEndpoint(47.38, 8.54),
         )
         p.items.append(ProjectItem(item_type="segment", segment=seg))
-        path = str(tmp_path / "unicode.gettracks")
+        path = str(tmp_path / "unicode.viewtrip")
         ProjectIO.save(p, path)
         loaded = ProjectIO.load(path)
         assert loaded.name == "München → Paris 🚂"

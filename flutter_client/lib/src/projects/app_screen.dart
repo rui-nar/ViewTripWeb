@@ -119,10 +119,10 @@ class _AppScreenState extends State<AppScreen> {
             ),
           ),
           SimpleDialogOption(
-            onPressed: () => Navigator.of(ctx).pop('gettracks'),
+            onPressed: () => Navigator.of(ctx).pop('viewtrip'),
             child: const ListTile(
               leading: Icon(Icons.article_outlined),
-              title: Text('.gettracks file'),
+              title: Text('.viewtrip file'),
               subtitle: Text('Full project data, no photo files'),
             ),
           ),
@@ -132,7 +132,7 @@ class _AppScreenState extends State<AppScreen> {
               child: const ListTile(
                 leading: Icon(Icons.archive_outlined),
                 title: Text('ZIP archive'),
-                subtitle: Text('.gettracks + all memory photos'),
+                subtitle: Text('.viewtrip + all memory photos'),
               ),
             ),
           SimpleDialogOption(
@@ -157,9 +157,9 @@ class _AppScreenState extends State<AppScreen> {
     if (choice == null || !mounted) return;
     if (choice == 'gpx') {
       await _downloadFile('/api/projects/$enc/export', '$name.gpx');
-    } else if (choice == 'gettracks') {
+    } else if (choice == 'viewtrip') {
       await _downloadFile(
-          '/api/projects/$enc/export-gettracks', '$name.gettracks');
+          '/api/projects/$enc/export-viewtrip', '$name.viewtrip');
     } else if (choice == 'zip') {
       await _downloadFile('/api/projects/$enc/export-zip', '$name.zip');
     } else if (choice == 'image') {

@@ -1,4 +1,4 @@
-"""Serialize / deserialize a Project to/from a .gettracks JSON file."""
+"""Serialize / deserialize a Project to/from a .viewtrip JSON file."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ from src.models.project import (
 
 
 class ProjectIO:
-    """Load and save .gettracks project files."""
+    """Load and save .viewtrip project files."""
 
-    EXTENSION = ".gettracks"
+    EXTENSION = ".viewtrip"
+    LEGACY_EXTENSION = ".gettracks"
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,7 +113,7 @@ class ProjectIO:
 
     @staticmethod
     def load(path: str) -> Project:
-        """Deserialise a .gettracks file and return a :class:`Project`."""
+        """Deserialise a .viewtrip (or legacy .gettracks) file and return a :class:`Project`."""
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
 
