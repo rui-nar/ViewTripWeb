@@ -208,17 +208,24 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     return result;
   }
 
-  Future<void> deleteSegment(String segId) async {
-    final name = projectName;
-    if (name == null) return;
+  /// Immediately remove a segment from the local list and map — no server call.
+  /// Call this in Dismissible.onDismissed so the widget is gone before the
+  /// SnackBar rebuild fires; the server delete follows after the undo window.
+  void removeSegmentLocally(String segId) {
     items.removeWhere((item) =>
         item['item_type'] == 'segment' &&
         item['segment']?['id']?.toString() == segId);
+    removeSegmentFromGeo(segId);
     notifyListeners();
+  }
+
+  Future<void> deleteSegment(String segId) async {
+    final name = projectName;
+    if (name == null) return;
+    removeSegmentLocally(segId);
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');
-      removeSegmentFromGeo(segId);
       await reloadDetailsOnly(name);
     } on Exception catch (e) {
       error = errorMessage(e);

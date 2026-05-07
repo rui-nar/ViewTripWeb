@@ -446,9 +446,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
     required ProjectNotifier notifier,
     required String label,
     required Future<void> Function() onConfirm,
+    VoidCallback? onOptimistic,
   }) {
+    // Remove the item from the list immediately so the dismissed Dismissible
+    // widget is gone before the SnackBar triggers a Scaffold rebuild.
+    onOptimistic?.call();
     final messenger = ScaffoldMessenger.of(context);
-    messenger.clearSnackBars();
     final controller = messenger.showSnackBar(SnackBar(
       content: Text(label),
       duration: const Duration(seconds: 5),
@@ -1088,6 +1091,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             context: context,
                             notifier: notifier,
                             label: 'Removed "$label"',
+                            onOptimistic: () =>
+                                notifier.removeSegmentLocally(segId),
                             onConfirm: () => notifier.deleteSegment(segId),
                           ),
                           background: Container(
