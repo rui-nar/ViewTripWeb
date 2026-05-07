@@ -16,6 +16,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ──────────
   String? get projectName;
   List<Map<String, dynamic>> get items;
+  set items(List<Map<String, dynamic>> v);
   Map<String, dynamic>? get geo;
   set geo(Map<String, dynamic>? v);
   String? get error;
@@ -212,12 +213,15 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   }
 
   /// Immediately remove a segment from the local list and map — no server call.
-  /// Call this in Dismissible.onDismissed so the widget is gone before the
-  /// SnackBar rebuild fires; the server delete follows after the undo window.
+  /// Replaces `items` with a new list so the identity check in
+  /// _rebuildDisplayList detects the change and removes the dismissed widget
+  /// from the tree before the SnackBar fires.
   void removeSegmentLocally(String segId) {
-    items.removeWhere((item) =>
-        item['item_type'] == 'segment' &&
-        item['segment']?['id']?.toString() == segId);
+    items = items
+        .where((item) =>
+            !(item['item_type'] == 'segment' &&
+              item['segment']?['id']?.toString() == segId))
+        .toList();
     removeSegmentFromGeo(segId);
     notifyListeners();
   }
@@ -225,7 +229,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   Future<void> deleteSegment(String segId) async {
     final name = projectName;
     if (name == null) return;
-    removeSegmentLocally(segId);
+    // removeSegmentLocally already called via onOptimistic before the undo window
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');

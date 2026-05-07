@@ -1003,7 +1003,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 const SizedBox(width: 8),
                                 Flexible(
                                   child: Text(name,
-                                      style: theme.textTheme.labelMedium),
+                                      style: theme.textTheme.bodyMedium),
                                 ),
                               ]),
                               subtitle: Text(
