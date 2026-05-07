@@ -256,18 +256,22 @@ class ProjectNotifier extends ChangeNotifier
           .reversed
           .toList();
 
-      var currentFeatures = List<dynamic>.from(geo!['features'] as List? ?? []);
-
+      // Read geo fresh on every iteration so concurrent CRUD patches (e.g. a
+      // segment deletion mid-load) are never overwritten by the snapshot we
+      // took at the start of this function.
       const batchSize = 3;
       int batchCount = 0;
       for (final actId in actIds) {
         if (projectName != name) return;
         final full = fullFeatures[actId];
         if (full == null) continue;
-        final idx = currentFeatures.indexWhere(
+        final snapshot = geo;
+        if (snapshot == null) continue;
+        final features = List<dynamic>.from(snapshot['features'] as List? ?? []);
+        final idx = features.indexWhere(
             (f) => (f as Map)['properties']?['activity_id']?.toString() == actId);
-        if (idx >= 0) currentFeatures[idx] = full;
-        geo = {'type': 'FeatureCollection', 'features': List.from(currentFeatures)};
+        if (idx >= 0) features[idx] = full;
+        geo = {'type': 'FeatureCollection', 'features': features};
         batchCount++;
         if (batchCount % batchSize == 0) {
           notifyListeners();
@@ -276,8 +280,24 @@ class ProjectNotifier extends ChangeNotifier
       }
 
       if (projectName != name) return;
-      // Final sync: replace full geo (picks up any segment differences too)
-      geo = fullGeo;
+      // Final pass: ensure every activity feature is at full resolution.
+      // Only activity features are replaced — segment features stay as-is in
+      // the current geo so any concurrent add/update/delete is preserved.
+      final latestGeo = geo;
+      if (latestGeo != null) {
+        final features = List<dynamic>.from(latestGeo['features'] as List? ?? []);
+        for (int i = 0; i < features.length; i++) {
+          final actId =
+              (features[i] as Map)['properties']?['activity_id']?.toString();
+          if (actId != null) {
+            final fullFeature = fullFeatures[actId];
+            if (fullFeature != null) features[i] = fullFeature;
+          }
+        }
+        geo = {'type': 'FeatureCollection', 'features': features};
+      } else {
+        geo = fullGeo;
+      }
       _buildFullTrack();
       notifyListeners();
     } on Exception catch (e) {
