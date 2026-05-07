@@ -488,8 +488,16 @@ def sync_check(
                     raw_list = []
 
             if raw_list:
-                # Parse + filter by last_strava_sync_at
+                # Parse + filter by last_strava_sync_at and trip date range
                 cutoff = meta.last_strava_sync_at or 0.0
+                trip_start_date = (
+                    datetime.strptime(proj.trip_start, "%Y-%m-%d").date()
+                    if proj.trip_start else None
+                )
+                trip_end_date = (
+                    datetime.strptime(proj.trip_end, "%Y-%m-%d").date()
+                    if proj.trip_end else None
+                )
                 # Get IDs already in project
                 item_rows = sess.exec(
                     select(DBProjectItem).where(
@@ -506,6 +514,13 @@ def sync_check(
                             continue
                         act_ts = act.start_date.timestamp() if act.start_date else 0.0
                         if act_ts <= cutoff:
+                            continue
+                        act_date = act.start_date.date() if act.start_date else None
+                        if act_date is None:
+                            continue
+                        if trip_start_date and act_date < trip_start_date:
+                            continue
+                        if trip_end_date and act_date > trip_end_date:
                             continue
                         d = act.to_strava_dict()
                         d["in_project"] = False

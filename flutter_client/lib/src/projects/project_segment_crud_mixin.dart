@@ -182,19 +182,11 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           .whereType<List<num>>()
           .map((pt) => [pt[0].toDouble(), pt[1].toDouble()])
           .toList();
-      final feature = {
-        'type': 'Feature',
-        'geometry': {'type': 'LineString', 'coordinates': coords},
-        'properties': {
-          'type': 'segment',
-          'segment_id': segId,
-          'route_mode': 'rail',
-        },
-      };
-      upsertSegmentInGeo(segId, feature);
+      String? segmentType;
       for (final item in items) {
         if (item['item_type'] == 'segment' &&
             item['segment']?['id']?.toString() == segId) {
+          segmentType = item['segment']?['segment_type'] as String?;
           final seg = Map<String, dynamic>.from(item['segment'] as Map);
           seg['route_mode'] = 'rail';
           if (trainNumber != null) seg['train_number'] = trainNumber;
@@ -203,6 +195,17 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           break;
         }
       }
+      final feature = {
+        'type': 'Feature',
+        'geometry': {'type': 'LineString', 'coordinates': coords},
+        'properties': {
+          'type': 'segment',
+          'segment_id': segId,
+          'route_mode': 'rail',
+          if (segmentType != null) 'segment_type': segmentType,
+        },
+      };
+      upsertSegmentInGeo(segId, feature);
       notifyListeners();
     }
     return result;
