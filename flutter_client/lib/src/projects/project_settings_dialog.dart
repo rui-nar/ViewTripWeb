@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../api/client.dart';
 import 'project_notifier.dart';
 
-const _kAppVersion = '0.28.0';
+const _kAppVersion = '0.28.2';
 
 class ProjectSettingsDialog extends StatefulWidget {
   final ProjectNotifier notifier;
