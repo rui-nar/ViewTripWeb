@@ -14,9 +14,15 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import re
 from typing import Optional
 
 import requests
+
+# ÖBB and some HAFAS providers return compound location IDs like
+# "A=1@O=Linz Hbf@X=14280@Y=48290@U=81@L=8100013@…"
+# Extract the numeric station code from the @L= field.
+_HAFAS_L_RE = re.compile(r'@L=(\d+)@')
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _TIMEOUT_QUERY = 30   # seconds for the Overpass QL timeout directive
@@ -51,17 +57,32 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
 
 
 def _enrich_uic(stop: dict) -> dict:
-    """Return stop dict with uic filled in from OSM if missing."""
-    if stop.get("uic"):
+    """Return stop with a valid numeric uic_ref, snapping lat/lon to the OSM station if needed."""
+    raw = stop.get("uic", "")
+
+    # Already a bare numeric UIC — nothing to do.
+    if raw and raw.isdigit():
         return stop
-    uic = _find_uic_near(stop["lat"], stop["lon"])
-    if uic:
-        return {**stop, "uic": uic}
-    return stop
+
+    # HAFAS compound ID (e.g. ÖBB "A=1@O=...@L=8100013@...") — extract the code.
+    if raw and "@" in raw:
+        m = _HAFAS_L_RE.search(raw)
+        if m:
+            return {**stop, "uic": m.group(1)}
+
+    # Missing or unrecognised format — look up the nearest OSM station and also
+    # snap lat/lon to that station so the Dijkstra starts on the actual mainline.
+    station = _find_station_near(stop["lat"], stop["lon"])
+    if station:
+        return {**stop, "uic": station["uic"], "lat": station["lat"], "lon": station["lon"]}
+    return {**stop, "uic": ""}
 
 
-def _find_uic_near(lat: float, lon: float, radius_m: int = 1500) -> Optional[str]:
-    """Query Overpass for the nearest railway stop node to (lat, lon) and return its uic_ref."""
+def _find_station_near(lat: float, lon: float, radius_m: int = 2000) -> Optional[dict]:
+    """
+    Nearest OSM railway station within radius_m metres.
+    Returns {lat, lon, uic} or None.
+    """
     query = f"""
 [out:json][timeout:15];
 node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
@@ -72,15 +93,22 @@ out body;
         elements = data.get("elements", [])
         if not elements:
             return None
-        # Sort by distance to requested point and return the closest station's UIC
         nearest = min(
             elements,
             key=lambda e: (e.get("lat", 0) - lat) ** 2 + (e.get("lon", 0) - lon) ** 2,
         )
-        return nearest.get("tags", {}).get("uic_ref")
+        uic = nearest.get("tags", {}).get("uic_ref")
+        if not uic:
+            return None
+        return {"lat": nearest["lat"], "lon": nearest["lon"], "uic": uic}
     except OverpassError:
-        pass
-    return None
+        return None
+
+
+def _find_uic_near(lat: float, lon: float, radius_m: int = 2000) -> Optional[str]:
+    """Return the uic_ref of the nearest OSM railway station, or None."""
+    result = _find_station_near(lat, lon, radius_m)
+    return result["uic"] if result else None
 
 
 # ---------------------------------------------------------------------------
