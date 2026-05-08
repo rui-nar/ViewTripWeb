@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import 'polarsteps_import_notifier.dart';
+import 'project_notifier.dart';
 
 class PolarstepsImportScreen extends StatefulWidget {
   final String projectName;
@@ -29,6 +30,9 @@ class _PolarstepsImportScreenState
     final added = await notifier.importSelected(widget.projectName);
     if (!mounted) return;
     if (added > 0) {
+      // Reload the project so the newly-added memories appear immediately
+      // in the activity panel and on the map when we pop back to AppScreen.
+      context.read<ProjectNotifier>().load(widget.projectName);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$added ${added == 1 ? 'memory' : 'memories'} added')),
       );

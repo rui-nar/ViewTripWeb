@@ -536,11 +536,16 @@ def sync_check(
 
         if ps_token and meta.linked_ps_trip_id:
             try:
+                from datetime import datetime as _dt
                 ps_client = PolarstepsClient(ps_token.remember_token)
                 raw_steps = ps_client.get_trip_steps(meta.linked_ps_trip_id)
                 cutoff = meta.last_ps_sync_at or 0.0
                 for raw_step in raw_steps:
-                    step_ts = float(raw_step.get("creation_time") or 0)
+                    ct = raw_step.get("creation_time")
+                    try:
+                        step_ts = _dt.fromisoformat(ct).timestamp() if isinstance(ct, str) else float(ct or 0)
+                    except (ValueError, TypeError):
+                        step_ts = 0.0
                     if step_ts <= cutoff:
                         continue
                     ps_results.append(format_step(raw_step))
