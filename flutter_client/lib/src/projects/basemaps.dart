@@ -10,10 +10,12 @@ const kUseMapbox = _kProvider == 'MAPBOX';
 // ── Mapbox ─────────────────────────────────────────────────────────────────────
 const kMapboxToken = String.fromEnvironment('MAPBOX_TOKEN');
 
-/// Mapbox satellite-streets — satellite imagery + labels in one layer.
-/// Used in view / share / export mode (raster tile path).
+/// Mapbox Styles API raster tiles for the custom satellite style.
+/// Used in view / share mode. Labels are baked into the style tiles, so no
+/// separate labels overlay is needed (see kActiveViewLabelsOverlayUrl).
+/// RetinaMode in TileLayer fetches zoom+1 tiles on high-DPI screens → sharp.
 const kMapboxViewUrl =
-    'https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/256/{z}/{x}/{y}'
+    'https://api.mapbox.com/styles/v1/port82/cmot5rk5l007301sfe4g2fyqz/tiles/256/{z}/{x}/{y}'
     '?access_token=$kMapboxToken';
 
 /// Mapbox outdoors — labelled street/terrain map for manage mode (raster tile path).
@@ -66,6 +68,11 @@ const kActiveViewBasemapUrl =
 /// Labels overlay stacked on top of the satellite basemap (raster path only).
 const String kActiveViewLabelsUrl = kViewLabelsUrl;
 
+/// Labels overlay for the VIEW map raster path.
+/// Null when Mapbox is selected: the Mapbox Styles API tiles already bake
+/// labels into the rendered PNG — a separate overlay would double them.
+const String? kActiveViewLabelsOverlayUrl = kUseMapbox ? null : kViewLabelsUrl;
+
 const List<String> kActiveViewLabelsSubdomains =
     kUseMapbox ? kCartoDblLabelsSubdomains : [];
 
@@ -78,9 +85,11 @@ const List<String> kActiveManageSubdomains =
 // ── Resolved vector style URIs (null when ESRI provider is selected) ──────────
 
 /// Mapbox vector style URI for view / share mode.
-/// Null when using the ESRI raster fallback.
-const String? kActiveViewStyleUri =
-    kUseMapbox ? kMapboxViewStyleUri : null;
+/// Intentionally null: the satellite view uses the Mapbox Styles API raster
+/// tile endpoint (kMapboxViewUrl) with RetinaMode instead of VectorTileLayer.
+/// VectorTileLayer hardcodes 256 px tiles with no override → blurry on HiDPI.
+/// Raster TileLayer + RetinaMode.isHighDensity requests zoom+1 tiles → sharp.
+const String? kActiveViewStyleUri = null;
 
 /// Mapbox vector style URI for manage mode.
 /// Null when using the ESRI raster fallback.

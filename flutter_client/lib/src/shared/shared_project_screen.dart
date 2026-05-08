@@ -136,7 +136,7 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
                       notifier: pn,
                       mapController: _mapController,
                       basemapUrl: kActiveViewBasemapUrl,
-                      labelsUrl: kActiveViewLabelsUrl,
+                      labelsUrl: kActiveViewLabelsOverlayUrl,
                       basemapStyleUri: kActiveViewStyleUri,
                       trackTileUrlTemplate:
                           '$origin/api/share/${widget.token}/tiles/{z}/{x}/{y}.png',

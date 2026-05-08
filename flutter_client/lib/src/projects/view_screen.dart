@@ -216,7 +216,7 @@ class _ViewLayout extends StatelessWidget {
       notifier: notifier,
       mapController: mapController,
       basemapUrl: kActiveViewBasemapUrl,
-      labelsUrl: kActiveViewLabelsUrl,
+      labelsUrl: kActiveViewLabelsOverlayUrl,
       basemapStyleUri: kActiveViewStyleUri,
     );
 

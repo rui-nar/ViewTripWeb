@@ -193,18 +193,21 @@ Future<void> performOffscreenExport({
                             flags: InteractiveFlag.none),
                       ),
                       children: [
+                        // Esri satellite — no auth token required, reliably
+                        // loadable via NetworkTileProvider in offscreen context.
+                        // The main map may use Mapbox vector tiles but those
+                        // don't capture correctly via toImage().
                         TileLayer(
-                          urlTemplate: kActiveViewBasemapUrl,
+                          urlTemplate: kViewBasemapUrl,
                           userAgentPackageName: 'com.viewtrip.client',
                           tileProvider: NetworkTileProvider(),
-                          maxNativeZoom: 22,
+                          maxNativeZoom: 19,
                         ),
                         TileLayer(
-                          urlTemplate: kActiveViewLabelsUrl,
-                          subdomains: kActiveViewLabelsSubdomains,
+                          urlTemplate: kViewLabelsUrl,
                           userAgentPackageName: 'com.viewtrip.client',
                           tileProvider: NetworkTileProvider(),
-                          maxNativeZoom: 22,
+                          maxNativeZoom: 19,
                         ),
                         if (polylines.isNotEmpty)
                           PolylineLayer(
