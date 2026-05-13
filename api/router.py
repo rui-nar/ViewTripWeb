@@ -1,5 +1,6 @@
 """Combines all REST API sub-routers into a single FastAPI app."""
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +13,22 @@ from api.polarsteps import router as polarsteps_router
 from api.projects import router as projects_router
 from api.share import router as share_router
 from api.strava import router as strava_router
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+    alembic_command.upgrade(cfg, "head")
+    yield
+
 
 app = FastAPI(
     title="ViewTrip API",
     description="REST API consumed by Flutter and other native clients.",
     version="0.12.1",
+    lifespan=lifespan,
 )
 
 # Allow Flutter dev clients (and web) to call the API

@@ -21,8 +21,11 @@ import sqlmodel  # noqa: F401
 from models.user import LocalUser, StravaToken, UserInfo  # noqa: F401
 from models.project_db import (  # noqa: F401
     DBActivity,
+    DBMemory,
     DBProject,
     DBProjectItem,
+    DBProjectSyncMeta,
+    DBShareVisit,
     DBStravaCache,
 )
 
