@@ -40,8 +40,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
-from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta
-from models.user import PolarstepsToken, StravaToken
+from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta, DBShareVisit
+from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
@@ -1262,3 +1262,135 @@ def revoke_share_link(
         row.share_token = None
         sess.add(row)
         sess.commit()
+
+
+@router.get("/{name}/share-info")
+def get_share_info(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return both share tokens for the project (null when not yet created)."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        return {
+            "share_token": row.share_token,
+            "share_token_no_memories": row.share_token_no_memories,
+        }
+
+
+@router.post("/{name}/share/no-memories")
+def create_share_link_no_memories(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Create (idempotent) a share token that strips memory items."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if not row.share_token_no_memories:
+            row.share_token_no_memories = str(uuid.uuid4())
+            sess.add(row)
+            sess.commit()
+        return {"share_token_no_memories": row.share_token_no_memories}
+
+
+@router.delete("/{name}/share/no-memories", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_share_link_no_memories(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Revoke the no-memories share token."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row.share_token_no_memories = None
+        sess.add(row)
+        sess.commit()
+
+
+@router.get("/{name}/share/visitors")
+def get_share_visitors(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return visitor stats for both share link types.
+
+    Response shape:
+      {
+        full: { anonymous_count: N, registered: [{display_name, email, last_seen_at}] },
+        no_memories: { anonymous_count: N, registered: [...] }
+      }
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_id = row.id
+
+        visits = sess.exec(
+            select(DBShareVisit).where(DBShareVisit.project_id == project_id)
+        ).all()
+
+    result: Dict[str, Any] = {
+        "full": {"anonymous_count": 0, "registered": []},
+        "no_memories": {"anonymous_count": 0, "registered": []},
+    }
+
+    registered_ids: Dict[str, List[int]] = {"full": [], "no_memories": []}
+    last_seen: Dict[str, Dict[int, float]] = {"full": {}, "no_memories": {}}
+
+    for v in visits:
+        bucket = v.token_type if v.token_type in result else "full"
+        if v.visitor_type == "anonymous":
+            result[bucket]["anonymous_count"] += 1
+        else:
+            if v.user_info_id is not None:
+                registered_ids[bucket].append(v.user_info_id)
+                last_seen[bucket][v.user_info_id] = v.last_seen_at
+
+    with get_session() as sess:
+        for bucket in ("full", "no_memories"):
+            ids = registered_ids[bucket]
+            if not ids:
+                continue
+            users = sess.exec(
+                select(UserInfo).where(UserInfo.id.in_(ids))
+            ).all()
+            result[bucket]["registered"] = [
+                {
+                    "display_name": u.display_name,
+                    "email": u.email,
+                    "last_seen_at": last_seen[bucket].get(u.id, 0.0),
+                }
+                for u in users
+            ]
+
+    return result

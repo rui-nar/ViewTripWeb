@@ -28,8 +28,10 @@ class DBProject(sqlmodel.SQLModel, table=True):
     filter_state_json: str = sqlmodel.Field(default="{}")
     created_at: float = sqlmodel.Field(default_factory=time.time)
     updated_at: float = sqlmodel.Field(default_factory=time.time)
-    # UUID token granting read-only public access to this project; None = not shared
+    # UUID token granting read-only public access (with memories); None = not shared
     share_token: Optional[str] = sqlmodel.Field(default=None, index=True)
+    # UUID token granting read-only public access WITHOUT memory items; None = not shared
+    share_token_no_memories: Optional[str] = sqlmodel.Field(default=None, index=True)
     # User-defined trip start date override ("YYYY-MM-DD"); None = infer from activities
     trip_start: Optional[str] = sqlmodel.Field(default=None)
     # User-defined trip end date ("YYYY-MM-DD"); None = trip still ongoing
@@ -167,6 +169,30 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     memory_id: Optional[int] = sqlmodel.Field(
         default=None, foreign_key="memory.id"
     )
+
+
+class DBShareVisit(sqlmodel.SQLModel, table=True):
+    """One visitor record for a shared-project link.
+
+    Keyed on (project_id, token_type, anonymous_id) for anonymous visitors and
+    (project_id, token_type, user_info_id) for registered ones.  Re-visiting
+    updates last_seen_at rather than creating a new row.
+    """
+
+    __tablename__ = "sharevisit"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    token_type: str                          # "full" | "no_memories"
+    visitor_type: str                        # "anonymous" | "registered"
+    # Set for anonymous visitors (localStorage UUID from the client)
+    anonymous_id: Optional[str] = sqlmodel.Field(default=None, index=True)
+    # Set for registered visitors
+    user_info_id: Optional[int] = sqlmodel.Field(
+        default=None, foreign_key="userinfo.id"
+    )
+    first_seen_at: float = sqlmodel.Field(default_factory=time.time)
+    last_seen_at: float = sqlmodel.Field(default_factory=time.time)
 
 
 class DBStravaCache(sqlmodel.SQLModel, table=True):

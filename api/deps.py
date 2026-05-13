@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import datetime
-from typing import Annotated
+from typing import Annotated, Optional
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -56,6 +56,7 @@ def decode_token(token: str) -> dict:
 
 
 _bearer = HTTPBearer()
+_optional_bearer = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
@@ -63,3 +64,20 @@ def get_current_user(
 ) -> dict:
     """FastAPI dependency — validates JWT and returns the decoded payload."""
     return decode_token(credentials.credentials)
+
+
+def get_optional_current_user(
+    credentials: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(_optional_bearer)
+    ],
+) -> Optional[dict]:
+    """FastAPI dependency — returns the decoded JWT payload if a valid Bearer
+    token is present, or None if no token was supplied.  Never raises 401.
+    Used on public endpoints that want to behave differently for logged-in users.
+    """
+    if credentials is None:
+        return None
+    try:
+        return decode_token(credentials.credentials)
+    except HTTPException:
+        return None

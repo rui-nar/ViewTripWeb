@@ -4,18 +4,23 @@ Routes:
     GET /api/share/{token}                      — project details for a shared link
     GET /api/share/{token}/geo                  — GeoJSON for a shared project
     GET /api/share/{token}/tiles/{z}/{x}/{y}.png — raster track tile (cached)
+
+Both the full-project token and the no-memories token are accepted by every
+endpoint.  Visit events are recorded in DBShareVisit for the project owner.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import time
+from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
 from models.db import get_session
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlmodel import select
 
-from models.project_db import DBProject
+from api.deps import get_optional_current_user
+from models.project_db import DBProject, DBShareVisit
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
 from src.tile_renderer import get_or_create_tile
@@ -25,31 +30,115 @@ router = APIRouter(prefix="/api/share", tags=["share"])
 _repo = ProjectRepo()
 
 
-def _get_project_by_token(token: str):
-    """Look up a project by share_token; raise 404 if not found."""
+def _get_project_and_type(token: str):
+    """Look up a project by either share token; return (project, token_type).
+
+    token_type is "full" when matched by share_token, "no_memories" when
+    matched by share_token_no_memories.  Raises 404 if neither matches.
+    """
     with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(DBProject.share_token == token)
         ).first()
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Shared project not found",
-            )
+        if row is not None:
+            token_type = "full"
+        else:
+            row = sess.exec(
+                select(DBProject).where(
+                    DBProject.share_token_no_memories == token
+                )
+            ).first()
+            if row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Shared project not found",
+                )
+            token_type = "no_memories"
         project = _repo.get_project_by_id(sess, row.id)
+        project_id = row.id
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shared project not found",
         )
-    return project
+    return project, token_type, project_id
+
+
+def _record_visit(
+    project_id: int,
+    token_type: str,
+    aid: Optional[str],
+    current_user: Optional[dict],
+) -> None:
+    """Upsert a visit record.  Errors are swallowed so they never affect the response."""
+    try:
+        now = time.time()
+        with get_session() as sess:
+            if current_user is not None:
+                user_info_id = int(current_user["sub"])
+                existing = sess.exec(
+                    select(DBShareVisit).where(
+                        DBShareVisit.project_id == project_id,
+                        DBShareVisit.token_type == token_type,
+                        DBShareVisit.user_info_id == user_info_id,
+                    )
+                ).first()
+                if existing:
+                    existing.last_seen_at = now
+                    sess.add(existing)
+                else:
+                    sess.add(DBShareVisit(
+                        project_id=project_id,
+                        token_type=token_type,
+                        visitor_type="registered",
+                        user_info_id=user_info_id,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    ))
+            elif aid:
+                existing = sess.exec(
+                    select(DBShareVisit).where(
+                        DBShareVisit.project_id == project_id,
+                        DBShareVisit.token_type == token_type,
+                        DBShareVisit.anonymous_id == aid,
+                    )
+                ).first()
+                if existing:
+                    existing.last_seen_at = now
+                    sess.add(existing)
+                else:
+                    sess.add(DBShareVisit(
+                        project_id=project_id,
+                        token_type=token_type,
+                        visitor_type="anonymous",
+                        anonymous_id=aid,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    ))
+            sess.commit()
+    except Exception:
+        pass
 
 
 @router.get("/{token}")
-def shared_project(token: str):
-    """Return project details (same shape as GET /api/projects/{name})."""
-    project = _get_project_by_token(token)
-    return _repo.to_dict(project)
+def shared_project(
+    token: str,
+    aid: Optional[str] = Query(default=None),
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    """Return project details (same shape as GET /api/projects/{name}).
+
+    Memory items are stripped from the response when the no-memories token is used.
+    """
+    project, token_type, project_id = _get_project_and_type(token)
+    _record_visit(project_id, token_type, aid, current_user)
+    result = _repo.to_dict(project)
+    if token_type == "no_memories":
+        result["items"] = [
+            item for item in (result.get("items") or [])
+            if item.get("item_type") != "memory"
+        ]
+    return result
 
 
 def _build_features(project) -> List[Dict[str, Any]]:
@@ -110,9 +199,14 @@ def _build_features(project) -> List[Dict[str, Any]]:
 
 
 @router.get("/{token}/geo")
-def shared_project_geo(token: str):
+def shared_project_geo(
+    token: str,
+    aid: Optional[str] = Query(default=None),
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
     """Return GeoJSON FeatureCollection for a shared project."""
-    project = _get_project_by_token(token)
+    project, token_type, project_id = _get_project_and_type(token)
+    _record_visit(project_id, token_type, aid, current_user)
     return {"type": "FeatureCollection", "features": _build_features(project)}
 
 
@@ -129,7 +223,7 @@ def shared_project_tile(token: str, z: int, x: int, y: int):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Zoom level must be between 0 and 15",
         )
-    project = _get_project_by_token(token)
+    project, _token_type, _project_id = _get_project_and_type(token)
     features = _build_features(project)
     png = get_or_create_tile(token, features, z, x, y)
     return Response(
