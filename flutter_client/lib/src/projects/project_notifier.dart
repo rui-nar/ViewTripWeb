@@ -743,7 +743,9 @@ class ProjectNotifier extends ChangeNotifier
         updated[key] = {};
         changed = true;
       }
-      cursor = cursor.add(const Duration(days: 1));
+      // Advance by date arithmetic, not by 24 h, so DST spring-forwards
+      // don't leave cursor at 01:00 and cause today to be skipped.
+      cursor = DateTime(cursor.year, cursor.month, cursor.day + 1);
     }
     if (!changed) return;
     await saveDayMeta(newDayMeta: updated);
