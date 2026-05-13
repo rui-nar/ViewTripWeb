@@ -62,3 +62,4 @@ dev.ps1
 # Graphify knowledge graph outputs
 graphify-out/
 .graphify_*
+_viewtripweb.db_
