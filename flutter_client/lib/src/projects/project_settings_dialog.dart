@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../api/client.dart';
 import 'project_notifier.dart';
@@ -34,6 +35,10 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   List<Map<String, dynamic>> _psTrips = [];
   bool _psTripsLoading = false;
 
+  // Sharing
+  bool _visitorsLoading = false;
+  Map<String, dynamic>? _visitors;
+
   // Track style
   late Color _trackColor;
   late double _trackWidth;
@@ -60,7 +65,10 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPsTrips());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadVisitors();
+      _loadPsTrips();
+    });
     _nameCtrl = TextEditingController(text: widget.notifier.projectName ?? '');
     final ts = widget.notifier.tripStart;
     if (ts != null) _tripStart = DateTime.tryParse(ts);
@@ -120,6 +128,19 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
       _optCtrls.removeAt(i).dispose();
       _optGroups.removeAt(i);
     });
+  }
+
+  Future<void> _loadVisitors() async {
+    if (!mounted) return;
+    setState(() => _visitorsLoading = true);
+    try {
+      final data = await widget.notifier.getShareVisitors();
+      if (mounted) setState(() => _visitors = data);
+    } catch (_) {
+      // Non-fatal
+    } finally {
+      if (mounted) setState(() => _visitorsLoading = false);
+    }
   }
 
   Future<void> _loadPsTrips() async {
@@ -438,6 +459,52 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
 
               const Divider(height: 24),
 
+              // ── Sharing ───────────────────────────────────────────────
+              Text('Sharing', style: theme.textTheme.labelMedium),
+              const SizedBox(height: 12),
+              _ShareLinkCard(
+                label: 'Full project',
+                token: widget.notifier.shareToken,
+                onCreateLink: () async {
+                  await widget.notifier.createShareToken();
+                  setState(() {});
+                  _loadVisitors();
+                },
+                onRevoke: () async {
+                  await widget.notifier.revokeShareToken();
+                  setState(() {});
+                  _loadVisitors();
+                },
+              ),
+              const SizedBox(height: 8),
+              _ShareLinkCard(
+                label: 'Without memories',
+                token: widget.notifier.shareTokenNoMemories,
+                onCreateLink: () async {
+                  await widget.notifier.createShareTokenNoMemories();
+                  setState(() {});
+                  _loadVisitors();
+                },
+                onRevoke: () async {
+                  await widget.notifier.revokeShareTokenNoMemories();
+                  setState(() {});
+                  _loadVisitors();
+                },
+              ),
+              if (_visitorsLoading) ...[
+                const SizedBox(height: 12),
+                const Center(
+                    child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))),
+              ] else if (_visitors != null) ...[
+                const SizedBox(height: 16),
+                _VisitorStats(visitors: _visitors!),
+              ],
+
+              const Divider(height: 24),
+
               // ── Track style ───────────────────────────────────────────
               Text('Track style', style: theme.textTheme.labelMedium),
               const SizedBox(height: 12),
@@ -680,6 +747,171 @@ class _ProjectSettingsDialogState extends State<ProjectSettingsDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2))
               : const Text('Save'),
         ),
+      ],
+    );
+  }
+}
+
+// ── Share link card ───────────────────────────────────────────────────────────
+
+class _ShareLinkCard extends StatelessWidget {
+  final String label;
+  final String? token;
+  final VoidCallback onCreateLink;
+  final VoidCallback onRevoke;
+
+  const _ShareLinkCard({
+    required this.label,
+    required this.token,
+    required this.onCreateLink,
+    required this.onRevoke,
+  });
+
+  String _shareUrl(String t) {
+    final origin = api.baseUrl.isEmpty ? Uri.base.origin : api.baseUrl;
+    return '$origin/share/$t';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: theme.textTheme.labelSmall),
+          const SizedBox(height: 6),
+          if (token == null)
+            OutlinedButton(
+              onPressed: onCreateLink,
+              child: const Text('Create link'),
+            )
+          else ...[
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _shareUrl(token!),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy, size: 16),
+                  tooltip: 'Copy link',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => Clipboard.setData(
+                      ClipboardData(text: _shareUrl(token!))),
+                ),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: theme.colorScheme.error,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: onRevoke,
+                  child: const Text('Revoke'),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ── Visitor stats ─────────────────────────────────────────────────────────────
+
+class _VisitorStats extends StatelessWidget {
+  final Map<String, dynamic> visitors;
+  const _VisitorStats({required this.visitors});
+
+  static String _relativeTime(double? unixSecs) {
+    if (unixSecs == null || unixSecs == 0) return 'never';
+    final dt = DateTime.fromMillisecondsSinceEpoch((unixSecs * 1000).toInt());
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes} min ago';
+    if (diff.inDays < 1) return '${diff.inHours} h ago';
+    if (diff.inDays < 7) return '${diff.inDays} day${diff.inDays == 1 ? '' : 's'} ago';
+    final weeks = (diff.inDays / 7).floor();
+    return '$weeks week${weeks == 1 ? '' : 's'} ago';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    Widget bucket(String bucketKey, String bucketLabel) {
+      final data = visitors[bucketKey] as Map<String, dynamic>? ?? {};
+      final anonCount = data['anonymous_count'] as int? ?? 0;
+      final registered = (data['registered'] as List? ?? [])
+          .cast<Map<String, dynamic>>();
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(bucketLabel, style: theme.textTheme.labelSmall),
+          const SizedBox(height: 4),
+          Text(
+            'Anonymous: $anonCount unique visitor${anonCount == 1 ? '' : 's'}',
+            style: theme.textTheme.bodySmall,
+          ),
+          if (registered.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            ...registered.map((r) {
+              final name = r['display_name'] as String? ?? '';
+              final email = r['email'] as String? ?? '';
+              final lastSeen = (r['last_seen_at'] as num?)?.toDouble();
+              return Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 12,
+                      child: Text(
+                        name.isNotEmpty ? name[0].toUpperCase() : '?',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        name.isNotEmpty ? name : email,
+                        style: theme.textTheme.bodySmall,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      _relativeTime(lastSeen),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        bucket('full', 'Full project visitors'),
+        const SizedBox(height: 12),
+        bucket('no_memories', 'Without memories visitors'),
       ],
     );
   }

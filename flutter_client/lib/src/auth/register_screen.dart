@@ -36,6 +36,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   // ── Handler ───────────────────────────────────────────────────────────────────
 
+  String? get _returnTo =>
+      GoRouterState.of(context).uri.queryParameters['return_to'];
+
+  void _navigateAfterRegister() {
+    final ret = _returnTo;
+    context.go(ret != null && ret.isNotEmpty ? ret : '/projects');
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
     final auth = context.read<AuthNotifier>();
@@ -48,7 +56,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
 
     if (!mounted) return;
-    if (auth.user != null) context.go('/projects');
+    if (auth.user != null) _navigateAfterRegister();
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────────
@@ -248,7 +256,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           Text('Already have an account?',
                               style: theme.textTheme.bodySmall),
                           TextButton(
-                            onPressed: () => context.go('/login'),
+                            onPressed: () {
+                              final ret = _returnTo;
+                              if (ret != null && ret.isNotEmpty) {
+                                context.go('/login?return_to=${Uri.encodeComponent(ret)}');
+                              } else {
+                                context.go('/login');
+                              }
+                            },
                             child: const Text('Sign In'),
                           ),
                         ],

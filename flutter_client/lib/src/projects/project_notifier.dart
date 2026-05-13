@@ -67,6 +67,10 @@ class ProjectNotifier extends ChangeNotifier
   /// Project-defined counters: [{name: String, start: double}].
   List<Map<String, dynamic>> counters = [];
 
+  // ── Share tokens ─────────────────────────────────────────────────────────
+  String? shareToken;
+  String? shareTokenNoMemories;
+
   // ── Auto-sync state ──────────────────────────────────────────────────────
   bool autoSyncEnabled = true;
   int? linkedPsTripId;
@@ -213,7 +217,8 @@ class ProjectNotifier extends ChangeNotifier
       geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
-      await _loadSyncMeta(name);
+      _autoFillDaysToToday();  // fill missing dates in-memory before first render
+      await Future.wait([_loadSyncMeta(name), _loadShareInfo(name)]);
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
@@ -223,8 +228,6 @@ class ProjectNotifier extends ChangeNotifier
 
     // Phase 2: fetch full-res geo in background; replace features progressively
     _loadFullGeoProgressively(name);
-    // Auto-fill empty day entries up to today while the trip is active
-    _autoFillDaysToToday();
     // Background sync check — fires only for active trips with auto-sync on
     if (_tripIsActive && autoSyncEnabled) {
       _backgroundSyncCheck(name);
@@ -473,6 +476,18 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  Future<void> _loadShareInfo(String name) async {
+    try {
+      final data = await api.get(
+        '/api/projects/${Uri.encodeComponent(name)}/share-info',
+      ) as Map<String, dynamic>;
+      shareToken = data['share_token'] as String?;
+      shareTokenNoMemories = data['share_token_no_memories'] as String?;
+    } catch (_) {
+      // Non-fatal — use defaults
+    }
+  }
+
   Future<void> _backgroundSyncCheck(String name) async {
     try {
       final data = await api.get(
@@ -536,9 +551,7 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Share ──────────────────────────────────────────────────────────────────
 
-  /// Creates (or retrieves) the public share token for this project.
-  /// Throws [Exception] with a user-readable message on API error.
-  Future<String> createShareToken() async {
+  Future<void> createShareToken() async {
     final name = projectName;
     if (name == null) throw Exception('No project open');
     try {
@@ -546,19 +559,60 @@ class ProjectNotifier extends ChangeNotifier
         '/api/projects/${Uri.encodeComponent(name)}/share',
         {},
       ) as Map<String, dynamic>;
-      return result['share_token'] as String? ?? '';
+      shareToken = result['share_token'] as String?;
+      notifyListeners();
     } on ApiException catch (e) {
       throw Exception(e.body);
     }
   }
 
-  /// Revokes the public share token for this project.
-  /// Throws [Exception] with a user-readable message on API error.
   Future<void> revokeShareToken() async {
     final name = projectName;
     if (name == null) return;
     try {
       await api.delete('/api/projects/${Uri.encodeComponent(name)}/share');
+      shareToken = null;
+      notifyListeners();
+    } on ApiException catch (e) {
+      throw Exception(e.body);
+    }
+  }
+
+  Future<void> createShareTokenNoMemories() async {
+    final name = projectName;
+    if (name == null) throw Exception('No project open');
+    try {
+      final result = await api.post(
+        '/api/projects/${Uri.encodeComponent(name)}/share/no-memories',
+        {},
+      ) as Map<String, dynamic>;
+      shareTokenNoMemories = result['share_token_no_memories'] as String?;
+      notifyListeners();
+    } on ApiException catch (e) {
+      throw Exception(e.body);
+    }
+  }
+
+  Future<void> revokeShareTokenNoMemories() async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      await api.delete(
+          '/api/projects/${Uri.encodeComponent(name)}/share/no-memories');
+      shareTokenNoMemories = null;
+      notifyListeners();
+    } on ApiException catch (e) {
+      throw Exception(e.body);
+    }
+  }
+
+  Future<Map<String, dynamic>> getShareVisitors() async {
+    final name = projectName;
+    if (name == null) return {};
+    try {
+      return await api.get(
+        '/api/projects/${Uri.encodeComponent(name)}/share/visitors',
+      ) as Map<String, dynamic>;
     } on ApiException catch (e) {
       throw Exception(e.body);
     }
@@ -704,9 +758,10 @@ class ProjectNotifier extends ChangeNotifier
   }
 
 
-  /// Silently fills empty dayMeta entries from the earliest known date up to
-  /// today, but only while the trip is active (no tripEnd or tripEnd >= today).
-  Future<void> _autoFillDaysToToday() async {
+  /// Fills missing dayMeta entries from the earliest known date up to today,
+  /// in memory only — does NOT write to the backend.  Real data is only
+  /// persisted when the user edits a day or saves project settings.
+  void _autoFillDaysToToday() {
     if (!_tripIsActive) return;
 
     final now = DateTime.now();
@@ -748,7 +803,7 @@ class ProjectNotifier extends ChangeNotifier
       cursor = DateTime(cursor.year, cursor.month, cursor.day + 1);
     }
     if (!changed) return;
-    await saveDayMeta(newDayMeta: updated);
+    dayMeta = updated;
   }
 
   /// Full reload: details + geo. Use when a mutation can change map geometry
@@ -761,6 +816,7 @@ class ProjectNotifier extends ChangeNotifier
       ]);
       final details = results[0];
       _applyDetails(details, name);
+      _autoFillDaysToToday();
       geo = results[1];
       _updateStats();
       _buildFullTrack();
@@ -777,6 +833,7 @@ class ProjectNotifier extends ChangeNotifier
     try {
       final details = await _service.getDetails(name);
       _applyDetails(details, name);
+      _autoFillDaysToToday();
       _updateStats();
     } on Exception catch (e) {
       error = _msg(e);

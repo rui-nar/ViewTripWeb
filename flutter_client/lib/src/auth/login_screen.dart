@@ -65,6 +65,14 @@ class _LoginScreenState extends State<LoginScreen> {
     _showError('Google sign-in failed: $error');
   }
 
+  String? get _returnTo =>
+      GoRouterState.of(context).uri.queryParameters['return_to'];
+
+  void _navigateAfterLogin() {
+    final ret = _returnTo;
+    context.go(ret != null && ret.isNotEmpty ? ret : '/projects');
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
     final auth = context.read<AuthNotifier>();
@@ -73,7 +81,7 @@ class _LoginScreenState extends State<LoginScreen> {
       _passwordCtrl.text,
     );
     if (!mounted) return;
-    if (auth.user != null) context.go('/projects');
+    if (auth.user != null) _navigateAfterLogin();
   }
 
   /// Called when Google Sign-In produces an account — works for both
@@ -90,7 +98,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final auth = context.read<AuthNotifier>();
       await auth.loginWithGoogle(idToken);
       if (!mounted) return;
-      if (auth.user != null) context.go('/projects');
+      if (auth.user != null) _navigateAfterLogin();
     } catch (e) {
       _showError('Google sign-in failed: $e');
     }
@@ -236,7 +244,14 @@ class _LoginScreenState extends State<LoginScreen> {
                           Text("Don't have an account?",
                               style: theme.textTheme.bodySmall),
                           TextButton(
-                            onPressed: () => context.go('/register'),
+                            onPressed: () {
+                              final ret = _returnTo;
+                              if (ret != null && ret.isNotEmpty) {
+                                context.go('/register?return_to=${Uri.encodeComponent(ret)}');
+                              } else {
+                                context.go('/register');
+                              }
+                            },
                             child: const Text('Register'),
                           ),
                         ],

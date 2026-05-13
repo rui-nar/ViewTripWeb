@@ -235,9 +235,10 @@ class _AppScreenState extends State<AppScreen> {
     // Capture before any await so the messenger is available inside the dialog.
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final token = await notifier.createShareToken();
+      await notifier.createShareToken();
       if (!mounted) return;
 
+      final token = notifier.shareToken ?? '';
       final shareUrl = '${Uri.base.origin}/share/$token';
 
       await showDialog<void>(

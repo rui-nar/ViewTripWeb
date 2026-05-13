@@ -3,57 +3,96 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
+import '../auth/auth_notifier.dart';
 import '../projects/basemaps.dart';
 import '../projects/elevation_chart.dart';
 import '../projects/map_panel.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
+import 'anonymous_id.dart';
 
-// ── Shared service — calls /api/share/{token} with no auth ───────────────────
+// ── Shared service — calls /api/share/{token}, appends ?aid= when provided ───
 
 class _SharedProjectService extends ProjectService {
   final String token;
-  _SharedProjectService(this.token);
+  final String? anonymousId;
+
+  _SharedProjectService(this.token, {this.anonymousId});
+
+  String get _aidParam =>
+      anonymousId != null ? '?aid=${Uri.encodeComponent(anonymousId!)}' : '';
 
   @override
   Future<Map<String, dynamic>> getDetails(String _) async {
-    final data = await api.get('/api/share/$token');
+    final data = await api.get('/api/share/$token$_aidParam');
     return data as Map<String, dynamic>;
   }
 
   @override
   Future<Map<String, dynamic>> getGeo(String _) async {
-    final data = await api.get('/api/share/$token/geo');
+    final data = await api.get('/api/share/$token/geo$_aidParam');
     return data as Map<String, dynamic>;
   }
 }
 
-// ── Shared notifier — extends ProjectNotifier so existing widgets reuse it ───
+// ── Shared notifier ───────────────────────────────────────────────────────────
 
 class SharedProjectNotifier extends ProjectNotifier {
   final String token;
 
-  SharedProjectNotifier(this.token)
-      : super(_SharedProjectService(token));
+  SharedProjectNotifier(this.token, {String? anonymousId})
+      : super(_SharedProjectService(token, anonymousId: anonymousId));
 
-  /// Load the shared project. Passes token as name (service ignores the arg).
   Future<void> loadShared() => load(token);
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-class SharedProjectScreen extends StatelessWidget {
+class SharedProjectScreen extends StatefulWidget {
   final String token;
   const SharedProjectScreen({super.key, required this.token});
 
   @override
+  State<SharedProjectScreen> createState() => _SharedProjectScreenState();
+}
+
+class _SharedProjectScreenState extends State<SharedProjectScreen> {
+  SharedProjectNotifier? _notifier;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    final anonId = await getOrCreateAnonId();
+    if (!mounted) return;
+    final notifier = SharedProjectNotifier(widget.token, anonymousId: anonId)
+      ..loadShared();
+    setState(() => _notifier = notifier);
+  }
+
+  @override
+  void dispose() {
+    _notifier?.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => SharedProjectNotifier(token)..loadShared(),
-      child: _SharedProjectView(token: token),
+    if (_notifier == null) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return ChangeNotifierProvider.value(
+      value: _notifier!,
+      child: _SharedProjectView(token: widget.token),
     );
   }
 }
@@ -78,9 +117,10 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
   @override
   Widget build(BuildContext context) {
     final notifier = context.watch<SharedProjectNotifier>();
-    // Present the notifier as ProjectNotifier so MapPanel / ElevationChart work.
     final pn = notifier as ProjectNotifier;
     final theme = Theme.of(context);
+    final authUser = context.watch<AuthNotifier>().user;
+    final isAnonymous = authUser == null;
 
     return Scaffold(
       appBar: AppBar(
@@ -94,8 +134,7 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
           child: Container(
             color: theme.colorScheme.secondaryContainer,
             width: double.infinity,
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Row(
               children: [
                 Icon(Icons.lock_outlined,
@@ -113,79 +152,146 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
           ),
         ),
       ),
-      body: notifier.isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : notifier.error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      notifier.error!,
-                      style: TextStyle(color: theme.colorScheme.error),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                )
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    final wide = constraints.maxWidth >= 720;
-                    final origin = api.baseUrl.isEmpty
-                        ? Uri.base.origin
-                        : api.baseUrl;
-                    final mapPanel = MapPanel(
-                      notifier: pn,
-                      mapController: _mapController,
-                      basemapUrl: kActiveViewBasemapUrl,
-                      labelsUrl: kActiveViewLabelsOverlayUrl,
-                      basemapStyleUri: kActiveViewStyleUri,
-                      trackTileUrlTemplate:
-                          '$origin/api/share/${widget.token}/tiles/{z}/{x}/{y}.png',
-                    );
-                    final activityList = _ReadOnlyActivityList(notifier: pn);
-                    final selectedId = notifier.selectedActivityId;
-                    final elevChart = ElevationChart(
-                      activities: notifier.activities,
-                      selectedActivityId: selectedId,
-                      track: selectedId == null
-                          ? notifier.fullTrack
-                          : notifier.perActivityTracks[selectedId.toString()] ?? notifier.fullTrack,
-                      onCursorChanged: (pos) =>
-                          notifier.elevationCursorNotifier.value = pos,
-                      mapCursorNotifier: notifier.mapCursorDistNotifier,
-                    );
+      body: Column(
+        children: [
+          if (isAnonymous) _AnonBanner(token: widget.token),
+          Expanded(
+            child: notifier.isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : notifier.error != null
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            notifier.error!,
+                            style:
+                                TextStyle(color: theme.colorScheme.error),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      )
+                    : LayoutBuilder(
+                        builder: (context, constraints) {
+                          final wide = constraints.maxWidth >= 720;
+                          final origin = api.baseUrl.isEmpty
+                              ? Uri.base.origin
+                              : api.baseUrl;
+                          final mapPanel = MapPanel(
+                            notifier: pn,
+                            mapController: _mapController,
+                            basemapUrl: kActiveViewBasemapUrl,
+                            labelsUrl: kActiveViewLabelsOverlayUrl,
+                            basemapStyleUri: kActiveViewStyleUri,
+                            trackTileUrlTemplate:
+                                '$origin/api/share/${widget.token}/tiles/{z}/{x}/{y}.png',
+                          );
+                          final activityList =
+                              _ReadOnlyActivityList(notifier: pn);
+                          final selectedId = notifier.selectedActivityId;
+                          final elevChart = ElevationChart(
+                            activities: notifier.activities,
+                            selectedActivityId: selectedId,
+                            track: selectedId == null
+                                ? notifier.fullTrack
+                                : notifier.perActivityTracks[
+                                        selectedId.toString()] ??
+                                    notifier.fullTrack,
+                            onCursorChanged: (pos) =>
+                                notifier.elevationCursorNotifier.value = pos,
+                            mapCursorNotifier:
+                                notifier.mapCursorDistNotifier,
+                          );
 
-                    if (wide) {
-                      return Row(
-                        children: [
-                          SizedBox(width: 260, child: activityList),
-                          Expanded(
-                            child: Column(
+                          if (wide) {
+                            return Row(
+                              children: [
+                                SizedBox(
+                                    width: 260, child: activityList),
+                                Expanded(
+                                  child: Column(
+                                    children: [
+                                      Expanded(child: mapPanel),
+                                      elevChart,
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          } else {
+                            return Column(
                               children: [
                                 Expanded(child: mapPanel),
-                                elevChart,
+                                SizedBox(
+                                  height: constraints.maxHeight * 0.4,
+                                  child: Column(
+                                    children: [
+                                      Expanded(child: activityList),
+                                      elevChart,
+                                    ],
+                                  ),
+                                ),
                               ],
-                            ),
-                          ),
-                        ],
-                      );
-                    } else {
-                      return Column(
-                        children: [
-                          Expanded(child: mapPanel),
-                          SizedBox(
-                            height: constraints.maxHeight * 0.4,
-                            child: Column(
-                              children: [
-                                Expanded(child: activityList),
-                                elevChart,
-                              ],
-                            ),
-                          ),
-                        ],
-                      );
-                    }
-                  },
+                            );
+                          }
+                        },
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Anonymous visitor banner ──────────────────────────────────────────────────
+
+class _AnonBanner extends StatelessWidget {
+  final String token;
+  const _AnonBanner({required this.token});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Icon(Icons.person_outline,
+                size: 18, color: theme.colorScheme.onTertiaryContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Browsing as a guest — sign in to be recognised.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onTertiaryContainer,
                 ),
+              ),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.onTertiaryContainer,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: () =>
+                  context.go('/login?return_to=/share/$token'),
+              child: const Text('Sign in'),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.onTertiaryContainer,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: () =>
+                  context.go('/register?return_to=/share/$token'),
+              child: const Text('Register'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -234,8 +340,7 @@ class _ReadOnlyActivityList extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: theme.textTheme.bodyMedium),
-          subtitle: Text('$distKm km',
-              style: theme.textTheme.bodySmall),
+          subtitle: Text('$distKm km', style: theme.textTheme.bodySmall),
           onTap: () => notifier.selectActivity(id),
         );
       },
