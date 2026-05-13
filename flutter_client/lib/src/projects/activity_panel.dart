@@ -92,6 +92,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
   // Day grouping state
   Set<int> _collapsedDays = {};
+  bool _sortDescending = true;
   String? _selectedDay; // "YYYY-MM-DD"
 
   // Multi-select state
@@ -267,8 +268,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
     // shorten a "day" to 23 hours and cause an off-by-one.
     final tripStartDate = DateTime.utc(ts.year, ts.month, ts.day);
 
-    // Sort unique date keys ascending, then build display list in that order.
-    final sortedDates = allDates.toList(); // already sorted ascending
+    final sortedDates = _sortDescending
+        ? (allDates.toList()..sort((a, b) => b.compareTo(a)))
+        : allDates.toList(); // ascending — already sorted
 
     // Build a map from dateKey → list of (originalIndex, item) pairs.
     final byDate = <String, List<(int, Map<String, dynamic>)>>{};
@@ -638,6 +640,20 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   visualDensity: VisualDensity.compact,
                   onPressed: () => setState(() {
                     _collapsedDays = {};
+                    _lastItems = null;
+                  }),
+                ),
+                IconButton(
+                  icon: Icon(
+                    _sortDescending
+                        ? Icons.arrow_downward
+                        : Icons.arrow_upward,
+                    size: 20,
+                  ),
+                  tooltip: _sortDescending ? 'Oldest first' : 'Newest first',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => setState(() {
+                    _sortDescending = !_sortDescending;
                     _lastItems = null;
                   }),
                 ),
