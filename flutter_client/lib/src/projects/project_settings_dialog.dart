@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import '../api/client.dart';
 import 'project_notifier.dart';
 
-const _kAppVersion = '0.29.0';
+const _kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
 class ProjectSettingsDialog extends StatefulWidget {
   final ProjectNotifier notifier;
