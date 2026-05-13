@@ -2,7 +2,7 @@ name: viewtrip_client
 description: ViewTripWeb Flutter client — web, Android, iOS.
 publish_to: 'none'
 
-version: 0.28.8+1
+version: 0.29.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
