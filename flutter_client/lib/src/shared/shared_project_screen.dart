@@ -194,17 +194,12 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
                     : LayoutBuilder(
                         builder: (context, constraints) {
                           final wide = constraints.maxWidth >= 720;
-                          final origin = api.baseUrl.isEmpty
-                              ? Uri.base.origin
-                              : api.baseUrl;
                           final mapPanel = MapPanel(
                             notifier: pn,
                             mapController: _mapController,
                             basemapUrl: kActiveViewBasemapUrl,
                             labelsUrl: kActiveViewLabelsOverlayUrl,
                             basemapStyleUri: kActiveViewStyleUri,
-                            trackTileUrlTemplate:
-                                '$origin/api/share/${widget.token}/tiles/{z}/{x}/{y}.png',
                           );
                           final activityList =
                               _ReadOnlyActivityList(notifier: pn);
