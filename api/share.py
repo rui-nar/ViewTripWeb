@@ -21,6 +21,7 @@ from sqlmodel import select
 
 from api.deps import get_optional_current_user
 from models.project_db import DBProject, DBShareVisit
+from models.user import UserInfo
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
 from src.tile_renderer import get_or_create_tile
@@ -31,10 +32,10 @@ _repo = ProjectRepo()
 
 
 def _get_project_and_type(token: str):
-    """Look up a project by either share token; return (project, token_type).
+    """Look up a project by either share token.
 
-    token_type is "full" when matched by share_token, "no_memories" when
-    matched by share_token_no_memories.  Raises 404 if neither matches.
+    Returns (project, token_type, project_id, owner_user_info_id).
+    token_type is "full" or "no_memories".  Raises 404 if neither matches.
     """
     with get_session() as sess:
         row = sess.exec(
@@ -56,12 +57,13 @@ def _get_project_and_type(token: str):
             token_type = "no_memories"
         project = _repo.get_project_by_id(sess, row.id)
         project_id = row.id
+        owner_user_info_id = row.user_info_id
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shared project not found",
         )
-    return project, token_type, project_id
+    return project, token_type, project_id, owner_user_info_id
 
 
 def _record_visit(
@@ -130,7 +132,7 @@ def shared_project(
 
     Memory items are stripped from the response when the no-memories token is used.
     """
-    project, token_type, project_id = _get_project_and_type(token)
+    project, token_type, project_id, owner_uid = _get_project_and_type(token)
     _record_visit(project_id, token_type, aid, current_user)
     result = _repo.to_dict(project)
     if token_type == "no_memories":
@@ -138,6 +140,11 @@ def shared_project(
             item for item in (result.get("items") or [])
             if item.get("item_type") != "memory"
         ]
+    with get_session() as sess:
+        owner = sess.exec(
+            select(UserInfo).where(UserInfo.id == owner_uid)
+        ).first()
+    result["owner_name"] = owner.display_name if owner else ""
     return result
 
 
@@ -205,7 +212,7 @@ def shared_project_geo(
     current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
 ):
     """Return GeoJSON FeatureCollection for a shared project."""
-    project, token_type, project_id = _get_project_and_type(token)
+    project, token_type, project_id, _owner_uid = _get_project_and_type(token)
     _record_visit(project_id, token_type, aid, current_user)
     return {"type": "FeatureCollection", "features": _build_features(project)}
 
@@ -223,7 +230,7 @@ def shared_project_tile(token: str, z: int, x: int, y: int):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Zoom level must be between 0 and 15",
         )
-    project, _token_type, _project_id = _get_project_and_type(token)
+    project, _token_type, _project_id, _owner_uid = _get_project_and_type(token)
     features = _build_features(project)
     png = get_or_create_tile(token, features, z, x, y)
     return Response(

@@ -20,6 +20,7 @@ import 'anonymous_id.dart';
 class _SharedProjectService extends ProjectService {
   final String token;
   final String? anonymousId;
+  String ownerName = '';
 
   _SharedProjectService(this.token, {this.anonymousId});
 
@@ -28,8 +29,9 @@ class _SharedProjectService extends ProjectService {
 
   @override
   Future<Map<String, dynamic>> getDetails(String _) async {
-    final data = await api.get('/api/share/$token$_aidParam');
-    return data as Map<String, dynamic>;
+    final data = await api.get('/api/share/$token$_aidParam') as Map<String, dynamic>;
+    ownerName = (data['owner_name'] as String?) ?? '';
+    return data;
   }
 
   @override
@@ -37,15 +39,27 @@ class _SharedProjectService extends ProjectService {
     final data = await api.get('/api/share/$token/geo$_aidParam');
     return data as Map<String, dynamic>;
   }
+
+  @override
+  Future<Map<String, dynamic>> getLowResGeo(String _) async =>
+      const {'type': 'FeatureCollection', 'features': []};
 }
 
 // ── Shared notifier ───────────────────────────────────────────────────────────
 
 class SharedProjectNotifier extends ProjectNotifier {
   final String token;
+  final _SharedProjectService _sharedSvc;
+  String get ownerName => _sharedSvc.ownerName;
 
-  SharedProjectNotifier(this.token, {String? anonymousId})
-      : super(_SharedProjectService(token, anonymousId: anonymousId));
+  SharedProjectNotifier._internal(this.token, _SharedProjectService svc)
+      : _sharedSvc = svc,
+        super(svc);
+
+  factory SharedProjectNotifier(String token, {String? anonymousId}) {
+    final svc = _SharedProjectService(token, anonymousId: anonymousId);
+    return SharedProjectNotifier._internal(token, svc);
+  }
 
   Future<void> loadShared() => load(token);
 }
@@ -126,7 +140,9 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
       appBar: AppBar(
         title: Text(
           notifier.projectName?.isNotEmpty == true
-              ? notifier.projectName!
+              ? notifier.ownerName.isNotEmpty
+                  ? '${notifier.projectName} — shared by ${notifier.ownerName}'
+                  : notifier.projectName!
               : 'Shared project',
         ),
         bottom: PreferredSize(
