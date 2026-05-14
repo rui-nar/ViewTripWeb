@@ -41,8 +41,10 @@ class _SharedProjectService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String _) async =>
-      const {'type': 'FeatureCollection', 'features': []};
+  Future<Map<String, dynamic>> getLowResGeo(String _) async {
+    final data = await api.get('/api/share/$token/geo/low-res');
+    return data as Map<String, dynamic>;
+  }
 }
 
 // ── Shared notifier ───────────────────────────────────────────────────────────
@@ -276,34 +278,27 @@ class _AnonBanner extends StatelessWidget {
             Icon(Icons.person_outline,
                 size: 18, color: theme.colorScheme.onTertiaryContainer),
             const SizedBox(width: 10),
-            Expanded(
+            Text(
+              'Browsing as a guest — ',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onTertiaryContainer,
+              ),
+            ),
+            InkWell(
+              onTap: () => context.go('/login?return_to=/share/$token'),
               child: Text(
-                'Browsing as a guest — sign in to be recognised.',
+                'login/register',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onTertiaryContainer,
+                  decoration: TextDecoration.underline,
                 ),
               ),
             ),
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: theme.colorScheme.onTertiaryContainer,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8),
-                visualDensity: VisualDensity.compact,
+            Text(
+              ' to enable the full experience',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onTertiaryContainer,
               ),
-              onPressed: () =>
-                  context.go('/login?return_to=/share/$token'),
-              child: const Text('Sign in'),
-            ),
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: theme.colorScheme.onTertiaryContainer,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                visualDensity: VisualDensity.compact,
-              ),
-              onPressed: () =>
-                  context.go('/register?return_to=/share/$token'),
-              child: const Text('Register'),
             ),
           ],
         ),

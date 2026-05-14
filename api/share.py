@@ -205,6 +205,35 @@ def _build_features(project) -> List[Dict[str, Any]]:
     return features
 
 
+@router.get("/{token}/geo/low-res")
+def shared_project_geo_low_res(token: str):
+    """Return straight-line GeoJSON (start→end per activity) for fast initial map render."""
+    project, _token_type, _project_id, _owner_uid = _get_project_and_type(token)
+    features: List[Dict[str, Any]] = []
+    for item in project.items:
+        if item.item_type != "activity":
+            continue
+        activity = project.activity_by_id(item.activity_id)
+        if activity is None:
+            continue
+        if activity.start_latlng and activity.end_latlng:
+            features.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [activity.start_latlng[1], activity.start_latlng[0]],
+                        [activity.end_latlng[1],   activity.end_latlng[0]],
+                    ],
+                },
+                "properties": {
+                    "type": "activity",
+                    "activity_id": activity.id,
+                },
+            })
+    return {"type": "FeatureCollection", "features": features}
+
+
 @router.get("/{token}/geo")
 def shared_project_geo(
     token: str,

@@ -164,8 +164,14 @@ class ProjectNotifier extends ChangeNotifier
   /// Phase 2 (background): fetches full-res GeoJSON and progressively
   /// replaces each activity's straight line with its real GPS trace,
   /// starting from the last activity.
+  // Tracks the name/token passed to the current load() call so Phase 2 can
+  // detect navigation-away without comparing against the mutable projectName
+  // field (which is overwritten with the real project name during Phase 1).
+  String? _loadKey;
+
   Future<void> load(String name) async {
     if (name.isEmpty) return;
+    _loadKey = name;
     projectName = name;
     isLoading = true;
     error = null;
@@ -238,10 +244,10 @@ class ProjectNotifier extends ChangeNotifier
   /// straight-line approximation with its real GPS trace (last activity first).
   Future<void> _loadFullGeoProgressively(String name) async {
     // Guard: abort if the user navigated away before we finish
-    if (projectName != name) return;
+    if (_loadKey != name) return;
     try {
       final fullGeo = await _service.getGeo(name);
-      if (projectName != name) return;
+      if (_loadKey != name) return;
 
       // Index full-res features by activity_id
       final fullFeatures = <String, Map<String, dynamic>>{};
@@ -265,7 +271,7 @@ class ProjectNotifier extends ChangeNotifier
       const batchSize = 3;
       int batchCount = 0;
       for (final actId in actIds) {
-        if (projectName != name) return;
+        if (_loadKey != name) return;
         final full = fullFeatures[actId];
         if (full == null) continue;
         final snapshot = geo;
@@ -282,7 +288,7 @@ class ProjectNotifier extends ChangeNotifier
         }
       }
 
-      if (projectName != name) return;
+      if (_loadKey != name) return;
       // Final pass: ensure every activity feature is at full resolution.
       // Only activity features are replaced — segment features stay as-is in
       // the current geo so any concurrent add/update/delete is preserved.
