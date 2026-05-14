@@ -77,24 +77,36 @@ class ProjectsNotifier extends ChangeNotifier {
   }
 
   /// Step 1 of import: open file picker and return the bytes + suggested name.
-  /// Returns null if the user cancels.
+  /// Returns null if the user cancels or on error (sets [error] on failure).
   Future<({List<int> bytes, String defaultName})?> pickProjectFile() async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['viewtrip', 'gettracks'],
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return null;
-    final picked = result.files.first;
-    final bytes = picked.bytes;
-    if (bytes == null) return null;
-    final rawName = picked.name;
-    final defaultName = rawName.endsWith('.viewtrip')
-        ? rawName.substring(0, rawName.length - '.viewtrip'.length)
-        : rawName.endsWith('.gettracks')
-            ? rawName.substring(0, rawName.length - '.gettracks'.length)
-            : rawName;
-    return (bytes: bytes as List<int>, defaultName: defaultName);
+    _error = null;
+    notifyListeners();
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['viewtrip', 'gettracks'],
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return null;
+      final picked = result.files.first;
+      final bytes = picked.bytes;
+      if (bytes == null) {
+        _error = 'Could not read file data. Try again.';
+        notifyListeners();
+        return null;
+      }
+      final rawName = picked.name;
+      final defaultName = rawName.endsWith('.viewtrip')
+          ? rawName.substring(0, rawName.length - '.viewtrip'.length)
+          : rawName.endsWith('.gettracks')
+              ? rawName.substring(0, rawName.length - '.gettracks'.length)
+              : rawName;
+      return (bytes: bytes as List<int>, defaultName: defaultName);
+    } on Exception catch (e) {
+      _error = _msg(e);
+      notifyListeners();
+      return null;
+    }
   }
 
   /// Step 2 of import: upload [bytes] as project [name].
@@ -144,6 +156,12 @@ class ProjectsNotifier extends ChangeNotifier {
     }
     if (res.body.isEmpty) return {};
     return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  void setError(String msg) {
+    _error = msg;
+    _isLoading = false;
+    notifyListeners();
   }
 
   // ── Error helper ──────────────────────────────────────────────────────────────

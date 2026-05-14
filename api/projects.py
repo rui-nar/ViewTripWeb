@@ -63,9 +63,11 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
 
-def _invalidate_share_tiles(user_info_id: int, project_name: str) -> None:
-    """Delete cached raster tiles for a project's share link (if one exists)."""
-    from src.tile_renderer import invalidate_tile_cache
+def _refresh_share_tiles(user_info_id: int, project_name: str) -> None:
+    """Re-render raster tiles for any active share token(s) after a project mutation."""
+    from api.share import _build_features
+    from src.tile_renderer import refresh_tile_cache
+
     with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(
@@ -73,8 +75,20 @@ def _invalidate_share_tiles(user_info_id: int, project_name: str) -> None:
                 DBProject.name == project_name,
             )
         ).first()
-    if row and row.share_token:
-        invalidate_tile_cache(row.share_token)
+    if row is None:
+        return
+    tokens = [t for t in (row.share_token, row.share_token_no_memories) if t]
+    if not tokens:
+        return
+
+    with get_session() as sess:
+        project = _repo.get_project_by_id(sess, row.id)
+    if project is None:
+        return
+    features = _build_features(project)
+
+    for token in tokens:
+        refresh_tile_cache(token, lambda f=features: f)
 
 
 def _projects_dir(user_id: str) -> str:
@@ -871,7 +885,7 @@ def add_activities(
         )
 
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
 
     return {
         "added": added,
@@ -979,7 +993,7 @@ def delete_item(
         project.remove_item(index)
         _repo.save_project(sess, user_info_id, project)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
 
 
 class ReorderRequest(BaseModel):
@@ -1005,7 +1019,7 @@ def reorder_items(
         project.move_item(body.from_index, body.to_index)
         _repo.save_project(sess, user_info_id, project)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
     return [ProjectIO._serialise_item(i) for i in project.items]
 
 
@@ -1058,7 +1072,7 @@ def create_segment(
         project.items.insert(insert_at, item)
         _repo.save_project(sess, user_info_id, project)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
     return {"id": seg.id}
 
 
@@ -1099,7 +1113,7 @@ def update_segment(
                     seg.route_mode = "rail"
                 _repo.save_project(sess, user_info_id, project)
                 background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-                background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+                background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
                 return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
@@ -1128,7 +1142,7 @@ def delete_segment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, user_info_id, project)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_invalidate_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
 
 
 # ── Project sharing ────────────────────────────────────────────────────────────
@@ -1259,6 +1273,9 @@ def revoke_share_link(
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if row.share_token:
+            from src.tile_renderer import invalidate_tile_cache
+            invalidate_tile_cache(row.share_token)
         row.share_token = None
         sess.add(row)
         sess.commit()
@@ -1325,6 +1342,9 @@ def revoke_share_link_no_memories(
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if row.share_token_no_memories:
+            from src.tile_renderer import invalidate_tile_cache
+            invalidate_tile_cache(row.share_token_no_memories)
         row.share_token_no_memories = None
         sess.add(row)
         sess.commit()

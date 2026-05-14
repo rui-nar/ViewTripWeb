@@ -331,24 +331,28 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                           onPressed: notifier.isLoading
                               ? null
                               : () async {
-                                  final picked =
-                                      await notifier.pickProjectFile();
-                                  if (picked == null || !context.mounted) {
-                                    return;
-                                  }
-                                  final name = await _askImportName(
-                                      context, picked.defaultName);
-                                  if (name == null || !context.mounted) {
-                                    return;
-                                  }
-                                  final result =
-                                      await notifier.uploadProjectFile(
-                                    bytes: picked.bytes,
-                                    name: name,
-                                  );
-                                  if (result != null && context.mounted) {
-                                    context.go(
-                                        '/app?project=${Uri.encodeComponent(result)}');
+                                  try {
+                                    final picked =
+                                        await notifier.pickProjectFile();
+                                    if (picked == null || !context.mounted) {
+                                      return;
+                                    }
+                                    final name = await _askImportName(
+                                        context, picked.defaultName);
+                                    if (name == null || !context.mounted) {
+                                      return;
+                                    }
+                                    final result =
+                                        await notifier.uploadProjectFile(
+                                      bytes: picked.bytes,
+                                      name: name,
+                                    );
+                                    if (result != null && context.mounted) {
+                                      context.go(
+                                          '/app?project=${Uri.encodeComponent(result)}');
+                                    }
+                                  } on Exception catch (e) {
+                                    notifier.setError(e.toString());
                                   }
                                 },
                           icon: const Icon(Icons.upload_rounded),

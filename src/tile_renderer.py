@@ -3,14 +3,20 @@
 Tiles are rendered with Pillow and cached to disk keyed by share_token.
 The cache directory is `data/tiles/{token}/{z}/{x}/{y}.png`.
 
-On first access, features are computed from the project and stored in an
-in-memory cache.  A background thread pool then pre-renders all tiles for
-zoom levels 0–_PRERENDER_MAX_ZOOM within the features' bounding box so that
-subsequent requests (panning, zooming) are served instantly from disk.
+Lifecycle
+---------
+* On first tile request for a token, features are loaded from the DB (once,
+  via get_or_build_features) and stored in an in-memory cache.  A background
+  thread pool then pre-renders every tile at zoom 0–_PRERENDER_MAX_ZOOM within
+  the features' bounding box so subsequent requests are served from disk.
 
-Callers must invoke `invalidate_tile_cache(token)` whenever the project's
-visual content changes — this clears the disk cache, the feature cache, and
-allows the next access to trigger a fresh pre-render.
+* When the project is modified, callers invoke refresh_tile_cache(token, build_fn).
+  This cancels any queued render job, clears both caches, and immediately
+  schedules a fresh pre-render using build_fn to load the updated features.
+  Rapid consecutive edits only ever run one render (the latest one).
+
+* invalidate_tile_cache(token) is a plain clear with no re-render (used when
+  a share token is revoked).
 """
 from __future__ import annotations
 
@@ -27,8 +33,7 @@ from PIL import Image, ImageDraw
 TILE_SIZE = 256
 _CACHE_ROOT = Path(__file__).parent.parent / "data" / "tiles"
 
-# Pre-render all tiles from zoom 0 up to this level in the background.
-# At zoom 10 a 10°×5° bounding box contains ~1 000 tiles; at zoom 12 ~17 000.
+# Pre-render tiles for zoom 0 up to this level on first access / after edits.
 _PRERENDER_MAX_ZOOM = 10
 
 _TRACK_RGBA = (249, 115, 22, 200)   # orange — matches client 0xFFF97316
@@ -39,12 +44,14 @@ _LINE_WIDTH = 3
 _feature_cache: Dict[str, List[Dict[str, Any]]] = {}
 _feature_cache_lock = threading.Lock()
 
-# ── Background pre-render pool ────────────────────────────────────────────────
+# ── Background pre-render pool + pending-job tracker ─────────────────────────
 _prerender_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="tile-prerender"
 )
-_prerender_submitted: set[str] = set()
-_prerender_lock = threading.Lock()
+# token → the most recently submitted Future; used to cancel queued (not yet
+# running) jobs when the project is edited again before rendering completes.
+_pending_futures: Dict[str, concurrent.futures.Future] = {}
+_pending_lock = threading.Lock()
 
 
 # ── Rendering helpers ─────────────────────────────────────────────────────────
@@ -92,7 +99,7 @@ def _bbox_from_features(
     return min(lons) - pad, min(lats) - pad, max(lons) + pad, max(lats) + pad
 
 
-# ── Pre-render background task ────────────────────────────────────────────────
+# ── Pre-render task ───────────────────────────────────────────────────────────
 
 def _do_prerender(token: str, features: List[Dict[str, Any]]) -> None:
     """Render and cache every tile covering the features' bbox, zoom 0–max."""
@@ -112,13 +119,19 @@ def _do_prerender(token: str, features: List[Dict[str, Any]]) -> None:
                 pass  # best-effort; never crash the background thread
 
 
-def _schedule_prerender(token: str, features: List[Dict[str, Any]]) -> None:
-    """Submit a pre-render job if one hasn't been scheduled for this token yet."""
-    with _prerender_lock:
-        if token in _prerender_submitted:
-            return
-        _prerender_submitted.add(token)
-    _prerender_pool.submit(_do_prerender, token, features)
+def _submit_prerender(token: str, features: List[Dict[str, Any]]) -> None:
+    """Submit a pre-render job, replacing any previously queued (not running) job."""
+    def _job() -> None:
+        _do_prerender(token, features)
+        # Clean up the futures dict once finished so the entry doesn't linger.
+        with _pending_lock:
+            _pending_futures.pop(token, None)
+
+    with _pending_lock:
+        old = _pending_futures.pop(token, None)
+        if old is not None:
+            old.cancel()
+        _pending_futures[token] = _prerender_pool.submit(_job)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -127,11 +140,10 @@ def get_or_build_features(
     token: str,
     build: Callable[[], List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    """Return cached features, or compute them via build() and cache + pre-render.
+    """Return cached features, or compute via build() then cache and pre-render.
 
     build() is called at most once per token across all concurrent requests.
-    After the first computation the background pre-render is scheduled so that
-    tiles at zoom 0–_PRERENDER_MAX_ZOOM are ready before the client asks for them.
+    On the first call a background pre-render is scheduled automatically.
     """
     with _feature_cache_lock:
         if token in _feature_cache:
@@ -139,7 +151,11 @@ def get_or_build_features(
     features = build()
     with _feature_cache_lock:
         _feature_cache[token] = features
-    _schedule_prerender(token, features)
+    # Only schedule if not already rendering (avoids duplicate jobs on cold start).
+    with _pending_lock:
+        already = token in _pending_futures
+    if not already:
+        _submit_prerender(token, features)
     return features
 
 
@@ -166,12 +182,48 @@ def get_or_create_tile(
     return data
 
 
-def invalidate_tile_cache(token: str) -> None:
-    """Delete disk cache, in-memory feature cache, and pre-render state for a token."""
+def refresh_tile_cache(
+    token: str,
+    build: Callable[[], List[Dict[str, Any]]],
+) -> None:
+    """Invalidate all caches and schedule a fresh pre-render via build().
+
+    Call this after any project mutation.  If a render is already queued it is
+    cancelled so only the latest edit's state is ever rendered.  build() is
+    called inside the background thread, so the API response returns immediately.
+    """
     d = _CACHE_ROOT / token
     if d.exists():
         shutil.rmtree(d)
     with _feature_cache_lock:
         _feature_cache.pop(token, None)
-    with _prerender_lock:
-        _prerender_submitted.discard(token)
+
+    def _job() -> None:
+        features = build()
+        with _feature_cache_lock:
+            _feature_cache[token] = features
+        _do_prerender(token, features)
+        with _pending_lock:
+            _pending_futures.pop(token, None)
+
+    with _pending_lock:
+        old = _pending_futures.pop(token, None)
+        if old is not None:
+            old.cancel()
+        _pending_futures[token] = _prerender_pool.submit(_job)
+
+
+def invalidate_tile_cache(token: str) -> None:
+    """Clear disk cache, feature cache, and cancel any pending render (no re-render).
+
+    Use this when a share token is revoked rather than when a project is edited.
+    """
+    d = _CACHE_ROOT / token
+    if d.exists():
+        shutil.rmtree(d)
+    with _feature_cache_lock:
+        _feature_cache.pop(token, None)
+    with _pending_lock:
+        old = _pending_futures.pop(token, None)
+        if old is not None:
+            old.cancel()
