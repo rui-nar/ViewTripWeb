@@ -64,13 +64,34 @@ def _to_pixel(lon: float, lat: float, bounds: mercantile.Bounds) -> Tuple[float,
     return x, y
 
 
+def _annotate_bboxes(features: List[Dict[str, Any]]) -> None:
+    """Add a cached _bbox=(min_lon, min_lat, max_lon, max_lat) to each feature in-place.
+
+    Called once per build so render_tile can skip features that can't intersect a
+    given tile with a 4-comparison check instead of iterating all coordinates.
+    """
+    for feat in features:
+        if "_bbox" in feat:
+            continue
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        if len(coords) >= 2:
+            lons = [float(c[0]) for c in coords]
+            lats = [float(c[1]) for c in coords]
+            feat["_bbox"] = (min(lons), min(lats), max(lons), max(lats))
+
+
 def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes:
     """Render GeoJSON features onto a transparent TILE_SIZE×TILE_SIZE PNG and return bytes."""
     bounds = mercantile.bounds(x, y, z)
     img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
+    tb_w, tb_s, tb_e, tb_n = bounds.west, bounds.south, bounds.east, bounds.north
+
     for feat in features:
+        bbox = feat.get("_bbox")
+        if bbox and (bbox[2] < tb_w or bbox[0] > tb_e or bbox[3] < tb_s or bbox[1] > tb_n):
+            continue
         coords: list = (feat.get("geometry") or {}).get("coordinates") or []
         if len(coords) < 2:
             continue
@@ -171,6 +192,7 @@ def get_or_build_features(
         if token in _feature_cache:
             return _feature_cache[token]
     features = build()
+    _annotate_bboxes(features)
     with _feature_cache_lock:
         _feature_cache[token] = features
     # Only schedule if not already rendering (avoids duplicate jobs on cold start).
@@ -222,6 +244,7 @@ def refresh_tile_cache(
 
     def _job() -> None:
         features = build()
+        _annotate_bboxes(features)
         with _feature_cache_lock:
             _feature_cache[token] = features
         _do_prerender(token, features)
