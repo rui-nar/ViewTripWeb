@@ -91,6 +91,9 @@ def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes
     tw, th = tb_e - tb_w, tb_n - tb_s
     cl_w, cl_e = tb_w - 2 * tw, tb_e + 2 * tw
     cl_s, cl_n = tb_s - 2 * th, tb_n + 2 * th
+    # Decimation threshold: skip coords that move less than one pixel on this tile.
+    px_lon = tw / TILE_SIZE
+    px_lat = th / TILE_SIZE
 
     for feat in features:
         # Fast feature-level reject: entire feature bbox outside tile.
@@ -103,27 +106,36 @@ def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes
         ftype = (feat.get("properties") or {}).get("type", "activity")
         color = _SEG_RGBA if ftype == "segment" else _TRACK_RGBA
 
-        # Clip coordinate list to consecutive runs near the tile, then draw each
-        # run as a separate polyline.  This reduces _to_pixel calls from O(all coords)
-        # to O(coords near tile) — critical at zoom 13-14 where most coordinates of a
-        # long trip are far outside the current tile.
+        # Two-pass optimisation:
+        #  1. Clip: only process consecutive runs of coordinates within ±2 tile-widths
+        #     (critical at high zoom where most coords of a long trip are far outside).
+        #  2. Decimate: within each run skip coords that move less than one pixel
+        #     (critical at low zoom where GPS points are denser than one pixel each).
         run: list = []
+        last_lon = last_lat = None
         prev_near = False
         for i, c in enumerate(coords):
             lon, lat = float(c[0]), float(c[1])
             is_near = cl_w <= lon <= cl_e and cl_s <= lat <= cl_n
             if is_near:
-                if not prev_near and i > 0:
-                    run.append(coords[i - 1])   # include entry context
+                if not prev_near and i > 0:          # entry context (never decimated)
+                    p = coords[i - 1]
+                    run.append(p)
+                    last_lon, last_lat = float(p[0]), float(p[1])
+                if (last_lon is None                  # first point in run
+                        or abs(lon - last_lon) >= px_lon
+                        or abs(lat - last_lat) >= px_lat):
+                    run.append(c)
+                    last_lon, last_lat = lon, lat
+            elif prev_near:                           # exit context (never decimated)
                 run.append(c)
-            elif prev_near:
-                run.append(c)                   # include exit context
                 if len(run) >= 2:
                     draw.line(
                         [_to_pixel(float(p[0]), float(p[1]), bounds) for p in run],
                         fill=color, width=_LINE_WIDTH,
                     )
                 run = []
+                last_lon = last_lat = None
             prev_near = is_near
 
         if len(run) >= 2:
