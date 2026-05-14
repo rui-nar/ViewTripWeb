@@ -87,8 +87,13 @@ def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes
     draw = ImageDraw.Draw(img)
 
     tb_w, tb_s, tb_e, tb_n = bounds.west, bounds.south, bounds.east, bounds.north
+    # Clip window: ±2 tile-widths so line segments entering/leaving the tile are included.
+    tw, th = tb_e - tb_w, tb_n - tb_s
+    cl_w, cl_e = tb_w - 2 * tw, tb_e + 2 * tw
+    cl_s, cl_n = tb_s - 2 * th, tb_n + 2 * th
 
     for feat in features:
+        # Fast feature-level reject: entire feature bbox outside tile.
         bbox = feat.get("_bbox")
         if bbox and (bbox[2] < tb_w or bbox[0] > tb_e or bbox[3] < tb_s or bbox[1] > tb_n):
             continue
@@ -97,8 +102,35 @@ def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes
             continue
         ftype = (feat.get("properties") or {}).get("type", "activity")
         color = _SEG_RGBA if ftype == "segment" else _TRACK_RGBA
-        pixels = [_to_pixel(lon, lat, bounds) for lon, lat in coords]
-        draw.line(pixels, fill=color, width=_LINE_WIDTH)
+
+        # Clip coordinate list to consecutive runs near the tile, then draw each
+        # run as a separate polyline.  This reduces _to_pixel calls from O(all coords)
+        # to O(coords near tile) — critical at zoom 13-14 where most coordinates of a
+        # long trip are far outside the current tile.
+        run: list = []
+        prev_near = False
+        for i, c in enumerate(coords):
+            lon, lat = float(c[0]), float(c[1])
+            is_near = cl_w <= lon <= cl_e and cl_s <= lat <= cl_n
+            if is_near:
+                if not prev_near and i > 0:
+                    run.append(coords[i - 1])   # include entry context
+                run.append(c)
+            elif prev_near:
+                run.append(c)                   # include exit context
+                if len(run) >= 2:
+                    draw.line(
+                        [_to_pixel(float(p[0]), float(p[1]), bounds) for p in run],
+                        fill=color, width=_LINE_WIDTH,
+                    )
+                run = []
+            prev_near = is_near
+
+        if len(run) >= 2:
+            draw.line(
+                [_to_pixel(float(p[0]), float(p[1]), bounds) for p in run],
+                fill=color, width=_LINE_WIDTH,
+            )
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)
