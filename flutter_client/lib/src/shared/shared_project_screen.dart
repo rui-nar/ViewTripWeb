@@ -54,6 +54,9 @@ class SharedProjectNotifier extends ProjectNotifier {
   final _SharedProjectService _sharedSvc;
   String get ownerName => _sharedSvc.ownerName;
 
+  @override
+  bool get loadOwnerExtras => false;
+
   SharedProjectNotifier._internal(this.token, _SharedProjectService svc)
       : _sharedSvc = svc,
         super(svc);

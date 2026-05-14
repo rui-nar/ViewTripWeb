@@ -164,6 +164,10 @@ class ProjectNotifier extends ChangeNotifier
   /// Phase 2 (background): fetches full-res GeoJSON and progressively
   /// replaces each activity's straight line with its real GPS trace,
   /// starting from the last activity.
+  /// Subclasses can return false to skip owner-only authenticated calls
+  /// (sync-meta, share-info, background sync check).
+  bool get loadOwnerExtras => true;
+
   // Tracks the name/token passed to the current load() call so Phase 2 can
   // detect navigation-away without comparing against the mutable projectName
   // field (which is overwritten with the real project name during Phase 1).
@@ -224,7 +228,9 @@ class ProjectNotifier extends ChangeNotifier
       _updateStats();
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
-      await Future.wait([_loadSyncMeta(name), _loadShareInfo(name)]);
+      if (loadOwnerExtras) {
+        await Future.wait([_loadSyncMeta(name), _loadShareInfo(name)]);
+      }
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
@@ -235,7 +241,7 @@ class ProjectNotifier extends ChangeNotifier
     // Phase 2: fetch full-res geo in background; replace features progressively
     _loadFullGeoProgressively(name);
     // Background sync check — fires only for active trips with auto-sync on
-    if (_tripIsActive && autoSyncEnabled) {
+    if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
       _backgroundSyncCheck(name);
     }
   }
