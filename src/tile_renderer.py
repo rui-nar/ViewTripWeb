@@ -7,8 +7,8 @@ Lifecycle
 ---------
 * On first tile request for a token, features are loaded from the DB (once,
   via get_or_build_features) and stored in an in-memory cache.  A background
-  thread pool then pre-renders every tile at zoom 0–_PRERENDER_MAX_ZOOM within
-  the features' bounding box so subsequent requests are served from disk.
+  thread pool then pre-renders every tile at zoom 0–_PRERENDER_MAX_ZOOM that
+  actually intersects a track segment so subsequent requests are served from disk.
 
 * When the project is modified, callers invoke refresh_tile_cache(token, build_fn).
   This cancels any queued render job, clears both caches, and immediately
@@ -30,15 +30,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import mercantile
 from PIL import Image, ImageDraw
 
-TILE_SIZE = 256
+TILE_SIZE = 512
 _CACHE_ROOT = Path(__file__).parent.parent / "data" / "tiles"
 
-# Pre-render tiles for zoom 0 up to this level on first access / after edits.
-_PRERENDER_MAX_ZOOM = 10
+# Pre-render tiles up to this zoom on first access / after edits.
+# Only tiles that intersect track segments are rendered (not the full bbox).
+_PRERENDER_MAX_ZOOM = 14
 
 _TRACK_RGBA = (249, 115, 22, 200)   # orange — matches client 0xFFF97316
 _SEG_RGBA   = (136, 136, 136, 200)  # gray   — matches client 0xFF888888
-_LINE_WIDTH = 3
+_LINE_WIDTH = 6
 
 # ── In-memory feature cache ───────────────────────────────────────────────────
 _feature_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -64,7 +65,7 @@ def _to_pixel(lon: float, lat: float, bounds: mercantile.Bounds) -> Tuple[float,
 
 
 def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes:
-    """Render GeoJSON features onto a transparent 256×256 PNG and return bytes."""
+    """Render GeoJSON features onto a transparent TILE_SIZE×TILE_SIZE PNG and return bytes."""
     bounds = mercantile.bounds(x, y, z)
     img = Image.new("RGBA", (TILE_SIZE, TILE_SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -101,14 +102,35 @@ def _bbox_from_features(
 
 # ── Pre-render task ───────────────────────────────────────────────────────────
 
+def _tiles_for_features(features: List[Dict[str, Any]], z: int) -> set:
+    """Return the set of tiles at zoom z that any feature segment passes through.
+
+    Samples each consecutive coordinate pair at sub-tile density so no
+    intersecting tile is missed without inflating counts via a bbox expansion.
+    """
+    tile_deg = 360.0 / (1 << z)
+    tiles: set = set()
+    for feat in features:
+        coords = (feat.get("geometry") or {}).get("coordinates") or []
+        for i in range(len(coords) - 1):
+            lon1, lat1 = float(coords[i][0]),     float(coords[i][1])
+            lon2, lat2 = float(coords[i + 1][0]), float(coords[i + 1][1])
+            span = max(abs(lon2 - lon1), abs(lat2 - lat1))
+            n = max(2, int(span / tile_deg * 2) + 2)
+            for j in range(n):
+                t = j / (n - 1)
+                lon = max(-180.0, min(180.0, lon1 + t * (lon2 - lon1)))
+                lat = max(-85.051129, min(85.051129, lat1 + t * (lat2 - lat1)))
+                tiles.add(mercantile.tile(lon, lat, z))
+    return tiles
+
+
 def _do_prerender(token: str, features: List[Dict[str, Any]]) -> None:
-    """Render and cache every tile covering the features' bbox, zoom 0–max."""
-    bbox = _bbox_from_features(features)
-    if bbox is None:
+    """Render and cache only tiles that intersect track segments, zoom 0–max."""
+    if not _bbox_from_features(features):
         return
-    west, south, east, north = bbox
     for z in range(_PRERENDER_MAX_ZOOM + 1):
-        for tile in mercantile.tiles(west, south, east, north, zooms=z):
+        for tile in _tiles_for_features(features, z):
             path = _CACHE_ROOT / token / str(tile.z) / str(tile.x) / f"{tile.y}.png"
             if path.exists():
                 continue
