@@ -15,7 +15,8 @@ from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
 from models.db import get_session
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlmodel import select
 
@@ -247,35 +248,36 @@ def shared_project_geo(
 
 
 @router.get("/{token}/tiles/{z}/{x}/{y}.png")
-def shared_project_tile(token: str, z: int, x: int, y: int):
+async def shared_project_tile(request: Request, token: str, z: int, x: int, y: int):
     """Return a cached raster tile PNG for the shared project's track layer.
 
-    Tiles are generated lazily on first request and cached on disk.
-    The cache is invalidated automatically when the project is modified.
-    Zoom levels above 15 are rejected to prevent unbounded cache growth.
+    Zoom 0–10 are pre-rendered in the background on first access so panning
+    and zooming are served instantly from disk.  Zoom 11–15 are rendered on
+    demand but the endpoint checks for client disconnect before starting work,
+    so stale requests from a previous zoom level are discarded immediately.
     """
     if not (0 <= z <= 15):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Zoom level must be between 0 and 15",
         )
-    # Fast path: serve from disk without touching DB or memory
+    # Fast path: already on disk — no DB, no render, no disconnect check needed.
     cached = get_cached_tile(token, z, x, y)
     if cached is not None:
-        return Response(
-            content=cached,
-            media_type="image/png",
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
-    # Load project once; concurrent requests for the same token share the result
-    def _build():
-        project, _tt, _pid, _uid = _get_project_and_type(token)
-        return _build_features(project)
+        return Response(cached, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
-    features = get_or_build_features(token, _build)
-    png = get_or_create_tile(token, features, z, x, y)
-    return Response(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    # If the client already zoomed away, skip the expensive work entirely.
+    if await request.is_disconnected():
+        return Response(b"", status_code=204)
+
+    def _compute() -> bytes:
+        def _build():
+            project, _tt, _pid, _uid = _get_project_and_type(token)
+            return _build_features(project)
+        features = get_or_build_features(token, _build)
+        return get_or_create_tile(token, features, z, x, y)
+
+    png = await run_in_threadpool(_compute)
+    return Response(png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
