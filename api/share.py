@@ -24,7 +24,7 @@ from models.project_db import DBProject, DBShareVisit
 from models.user import UserInfo
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
-from src.tile_renderer import get_or_create_tile
+from src.tile_renderer import get_cached_tile, get_or_create_tile
 
 router = APIRouter(prefix="/api/share", tags=["share"])
 
@@ -258,6 +258,14 @@ def shared_project_tile(token: str, z: int, x: int, y: int):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Zoom level must be between 0 and 15",
+        )
+    # Fast path: serve from disk without loading the project
+    cached = get_cached_tile(token, z, x, y)
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},
         )
     project, _token_type, _project_id, _owner_uid = _get_project_and_type(token)
     features = _build_features(project)

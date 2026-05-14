@@ -51,6 +51,12 @@ def render_tile(features: List[Dict[str, Any]], z: int, x: int, y: int) -> bytes
     return buf.getvalue()
 
 
+def get_cached_tile(token: str, z: int, x: int, y: int) -> bytes | None:
+    """Return cached PNG bytes if the tile exists on disk, otherwise None."""
+    path = _CACHE_ROOT / token / str(z) / str(x) / f"{y}.png"
+    return path.read_bytes() if path.exists() else None
+
+
 def get_or_create_tile(
     token: str,
     features: List[Dict[str, Any]],

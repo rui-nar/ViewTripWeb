@@ -439,7 +439,6 @@ class _MapPanelState extends State<MapPanel> {
               TileLayer(
                 urlTemplate: widget.trackTileUrlTemplate!,
                 userAgentPackageName: 'com.viewtrip.client',
-                tileProvider: NetworkTileProvider(),
                 maxNativeZoom: 15,
               ),
             if (polylines.isNotEmpty)
