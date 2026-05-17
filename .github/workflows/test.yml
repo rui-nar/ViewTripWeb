@@ -21,5 +21,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-web.txt
 
+      - name: Check migrations are in sync with models
+        # Applies every migration to a fresh SQLite database, then asks Alembic
+        # whether autogenerate would produce any further changes.  Exits non-zero
+        # if the SQLModel metadata and the migration head have drifted apart —
+        # i.e. someone added a column without a migration, or vice versa.
+        env:
+          DATABASE_URL: sqlite:///./ci_alembic_check.db
+        run: |
+          alembic upgrade head
+          alembic check
+          rm -f ci_alembic_check.db
+
       - name: Run tests
         run: pytest tests/ --ignore=tests/test_gui.py --ignore=tests/test_gui_launch.py --ignore=tests/test_map_widget.py --ignore=tests/test_export_options_widget.py --ignore=tests/test_filter_widget.py --ignore=tests/test_stats_bar.py --ignore=tests/test_toast.py -v --tb=short
