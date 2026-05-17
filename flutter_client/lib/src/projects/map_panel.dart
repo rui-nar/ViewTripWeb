@@ -240,7 +240,10 @@ class _MapPanelState extends State<MapPanel> {
         child: Container(
           decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
           child: Icon(
-            _iconForSegmentType(props['segment_type'] as String?),
+            _iconForSegmentType(
+              (props['segment_type'] as String?) ??
+              (props['route_mode'] == 'rail' ? 'train' : null),
+            ),
             color: Colors.white,
             size: 13,
           ),
@@ -679,7 +682,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         child: Container(
           decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
           child: Icon(
-            _iconForSegmentType(props['segment_type'] as String?),
+            _iconForSegmentType(
+              (props['segment_type'] as String?) ??
+              (props['route_mode'] == 'rail' ? 'train' : null),
+            ),
             color: Colors.white,
             size: 13,
           ),

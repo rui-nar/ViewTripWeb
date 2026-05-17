@@ -1137,7 +1137,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: Icon(
-                                    _iconForSegmentType(segType),
+                                    _iconForSegmentType(
+                                      segType ?? (seg['route_mode'] == 'rail' ? 'train' : null),
+                                    ),
                                     size: 17,
                                     color: const Color(0xFF64748B),
                                   ),
