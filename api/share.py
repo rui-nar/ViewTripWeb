@@ -245,7 +245,8 @@ def shared_project_geo(
     """Return GeoJSON FeatureCollection for a shared project."""
     project, token_type, project_id, _owner_uid = _get_project_and_type(token)
     _record_visit(project_id, token_type, aid, current_user)
-    return {"type": "FeatureCollection", "features": _build_features(project)}
+    features = get_or_build_features(token, lambda: _build_features(project))
+    return {"type": "FeatureCollection", "features": features}
 
 
 @router.get("/{token}/tiles/{z}/{x}/{y}.png")

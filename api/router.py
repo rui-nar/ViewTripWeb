@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 
 from api.auth import router as auth_router
@@ -33,6 +34,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # Allow Flutter dev clients (and web) to call the API
 app.add_middleware(
     CORSMiddleware,
@@ -52,11 +55,32 @@ app.include_router(strava_router)
 # ── Flutter web SPA — must be registered last so /api/... routes take priority ─
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web_client")
 
+_NO_CACHE = "no-cache"
+_IMMUTABLE = "public, max-age=31536000, immutable"
+_LONG_CACHE = "public, max-age=86400"
+# flutter_service_worker.js and flutter_bootstrap.js must not be cached so
+# browsers always pick up a new build on next visit.
+_NEVER_CACHE = {"flutter_service_worker.js", "flutter_bootstrap.js", "index.html", "manifest.json"}
+
 if os.path.isdir(_web_dir):
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
         """Serve the Flutter web build; fall back to index.html for SPA routing."""
         candidate = os.path.join(_web_dir, full_path)
         if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(os.path.join(_web_dir, "index.html"))
+            resp = FileResponse(candidate)
+            name = os.path.basename(full_path)
+            if name in _NEVER_CACHE:
+                resp.headers["Cache-Control"] = _NO_CACHE
+            elif full_path.startswith("assets/"):
+                # Flutter content-hashes everything under assets/ — safe to cache forever.
+                resp.headers["Cache-Control"] = _IMMUTABLE
+            elif name.endswith((".js", ".wasm")):
+                # main.dart.js / canvaskit.wasm aren't hashed but rarely change mid-session.
+                resp.headers["Cache-Control"] = _LONG_CACHE
+            else:
+                resp.headers["Cache-Control"] = _NO_CACHE
+            return resp
+        resp = FileResponse(os.path.join(_web_dir, "index.html"))
+        resp.headers["Cache-Control"] = _NO_CACHE
+        return resp
