@@ -15,12 +15,14 @@ from api.share import router as share_router
 from api.strava import router as strava_router
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from models.project_db import _check_schema_contract
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
+    _check_schema_contract()
     yield
 
 

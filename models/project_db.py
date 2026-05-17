@@ -48,6 +48,69 @@ class DBProject(sqlmodel.SQLModel, table=True):
     counters_json: Optional[str] = sqlmodel.Field(default="[]")
 
 
+# ---------------------------------------------------------------------------
+# Schema contract registry for DBProject
+# ---------------------------------------------------------------------------
+# Every column on DBProject must appear in exactly one of the two sets below.
+# _PROJECT_SERIALIZED_FIELDS  — columns that _row_to_project() reads into the
+#                               domain Project; must be kept in sync with the
+#                               serialiser in src/project/project_repo.py.
+# _PROJECT_INFRA_FIELDS       — columns that are infrastructure / audit / cache
+#                               and are NOT surfaced in the Project domain model.
+#
+# Adding a new column without updating these sets causes a RuntimeError at
+# startup (via _check_schema_contract) and a failing schema contract test.
+
+_PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
+    "name",
+    "version",
+    "filter_state_json",
+    "trip_start",
+    "trip_end",
+    "day_meta_json",
+    "sleeping_options_json",
+    "counters_json",
+})
+
+_PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({
+    "id",
+    "user_info_id",
+    "created_at",
+    "updated_at",
+    "share_token",
+    "share_token_no_memories",
+    "stats_json",
+    "low_res_geo_json",
+})
+
+
+def _check_schema_contract() -> None:
+    """Raise RuntimeError if DBProject columns diverge from the registry.
+
+    Called from the FastAPI lifespan so drift is caught at startup, not silently
+    at runtime.  Also exercised by tests/test_schema_contract.py.
+    """
+    actual = {col.name for col in DBProject.__table__.columns}
+    known = _PROJECT_SERIALIZED_FIELDS | _PROJECT_INFRA_FIELDS
+
+    unregistered = actual - known
+    if unregistered:
+        raise RuntimeError(
+            f"DBProject column(s) not registered in the schema contract: "
+            f"{sorted(unregistered)}. "
+            "Add each column to _PROJECT_SERIALIZED_FIELDS or _PROJECT_INFRA_FIELDS "
+            "in models/project_db.py and update _row_to_project() accordingly."
+        )
+
+    missing = _PROJECT_SERIALIZED_FIELDS - actual
+    if missing:
+        raise RuntimeError(
+            f"_PROJECT_SERIALIZED_FIELDS references column(s) absent from DBProject: "
+            f"{sorted(missing)}. "
+            "Update the registry to match the current model."
+        )
+
+
 class DBProjectSyncMeta(sqlmodel.SQLModel, table=True):
     """Per-project auto-sync configuration and last-synced timestamps."""
 
