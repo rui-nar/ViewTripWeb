@@ -828,7 +828,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       Text(
                                         'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
                                         overflow: TextOverflow.ellipsis,
-                                        style: theme.textTheme.labelMedium?.copyWith(
+                                        style: theme.textTheme.bodyMedium?.copyWith(
                                           color: isHighlighted
                                               ? theme.colorScheme.primary
                                               : theme.colorScheme.onSurfaceVariant,
