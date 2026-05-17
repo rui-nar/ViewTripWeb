@@ -30,7 +30,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="ViewTrip API",
     description="REST API consumed by Flutter and other native clients.",
-    version="0.14.0",
+    version="0.14.1",
     lifespan=lifespan,
 )
 
