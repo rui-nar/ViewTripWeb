@@ -32,7 +32,9 @@ class _PolarstepsImportScreenState
     if (added > 0) {
       // Reload the project so the newly-added memories appear immediately
       // in the activity panel and on the map when we pop back to AppScreen.
-      context.read<ProjectNotifier>().load(widget.projectName);
+      final projectNotifier = context.read<ProjectNotifier>();
+      projectNotifier.load(widget.projectName);
+      projectNotifier.startPhotoPolling(widget.projectName);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$added ${added == 1 ? 'memory' : 'memories'} added')),
       );

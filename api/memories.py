@@ -18,7 +18,7 @@ import uuid as uuid_lib
 from pathlib import Path
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from models.db import get_session
 from PIL import Image
@@ -274,6 +274,42 @@ def delete_memory(
 
 # ── Photos ────────────────────────────────────────────────────────────────────
 
+def _save_photo_files(user_id: str, memory_id: int, uuid_str: str, raw: bytes) -> None:
+    photo_path = _photo_dir(user_id, memory_id)
+    (photo_path / f"{uuid_str}.jpg").write_bytes(raw)
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
+    img.save(str(photo_path / f"{uuid_str}_thumb.jpg"), "JPEG", quality=85)
+
+
+def _append_photo_to_memory(memory_id: int, uuid_str: str) -> None:
+    with get_session() as sess:
+        mem_row = sess.get(DBMemory, memory_id)
+        if mem_row is None:
+            return
+        photos: List[str] = json.loads(mem_row.photos_json or "[]")
+        photos.append(uuid_str)
+        mem_row.photos_json = json.dumps(photos)
+        sess.add(mem_row)
+        sess.commit()
+
+
+def _download_photo_from_url(memory_id: int, url: str, user_id: str) -> None:
+    import requests as _req
+    try:
+        resp = _req.get(url, timeout=30)
+        resp.raise_for_status()
+    except Exception:
+        return
+    uuid_str = str(uuid_lib.uuid4())
+    _save_photo_files(user_id, memory_id, uuid_str, resp.content)
+    _append_photo_to_memory(memory_id, uuid_str)
+
+
+class PhotoFromUrlIn(BaseModel):
+    url: str
+
+
 @router.post("/{memory_id}/photos", status_code=status.HTTP_201_CREATED)
 async def upload_photo(
     memory_id: int,
@@ -282,29 +318,26 @@ async def upload_photo(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
-        raw = await file.read()
-
-        photo_uuid = str(uuid_lib.uuid4())
-        photo_path = _photo_dir(current_user["sub"], memory_id)
-        full_path = photo_path / f"{photo_uuid}.jpg"
-        thumb_path = photo_path / f"{photo_uuid}_thumb.jpg"
-
-        # Save original
-        full_path.write_bytes(raw)
-
-        # Generate 400×400 thumbnail (cover-style: thumbnail preserves aspect ratio)
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
-        img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
-        img.save(str(thumb_path), "JPEG", quality=85)
-
-        photos: List[str] = json.loads(mem_row.photos_json or "[]")
-        photos.append(photo_uuid)
-        mem_row.photos_json = json.dumps(photos)
-        sess.add(mem_row)
-        sess.commit()
-
+        _get_owned_memory(sess, memory_id, user_info_id)
+    raw = await file.read()
+    photo_uuid = str(uuid_lib.uuid4())
+    _save_photo_files(current_user["sub"], memory_id, photo_uuid, raw)
+    _append_photo_to_memory(memory_id, photo_uuid)
     return {"uuid": photo_uuid}
+
+
+@router.post("/{memory_id}/photos/from-url", status_code=202)
+async def queue_photo_from_url(
+    memory_id: int,
+    body: PhotoFromUrlIn,
+    background_tasks: BackgroundTasks,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, current_user["sub"])
+    return {"queued": True}
 
 
 @router.delete("/{memory_id}/photos/{photo_uuid}", status_code=status.HTTP_204_NO_CONTENT)

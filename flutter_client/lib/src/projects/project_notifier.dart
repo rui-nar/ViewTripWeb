@@ -1,6 +1,8 @@
 /// Notifier for a single open project — loads details + GeoJSON in parallel.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
@@ -173,8 +175,11 @@ class ProjectNotifier extends ChangeNotifier
   // field (which is overwritten with the real project name during Phase 1).
   String? _loadKey;
 
+  Timer? _photoPollingTimer;
+
   Future<void> load(String name) async {
     if (name.isEmpty) return;
+    _stopPhotoPolling();
     _loadKey = name;
     projectName = name;
     isLoading = true;
@@ -672,8 +677,67 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  // ── Photo polling (post-import background download) ──────────────────────
+
+  /// Polls memory photos every 3 s for up to 60 s after a Polarsteps import.
+  /// Updates only the `photos` list inside each memory item so map markers
+  /// refresh without a full reload.
+  void startPhotoPolling(String projectName) {
+    _stopPhotoPolling();
+    var remainingTicks = 20; // 3 s × 20 = 60 s
+    _photoPollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (remainingTicks <= 0 || this.projectName != projectName) {
+        _stopPhotoPolling();
+        return;
+      }
+      remainingTicks--;
+      await _refreshMemoryPhotos(projectName);
+    });
+  }
+
+  void _stopPhotoPolling() {
+    _photoPollingTimer?.cancel();
+    _photoPollingTimer = null;
+  }
+
+  Future<void> _refreshMemoryPhotos(String projectName) async {
+    try {
+      final details = await _service.getDetails(projectName);
+      if (this.projectName != projectName) return;
+      final rawItems = details['items'];
+      if (rawItems is! List) return;
+      final freshItems = rawItems.cast<Map<String, dynamic>>();
+      final freshById = <String, Map<String, dynamic>>{};
+      for (final item in freshItems) {
+        if (item['item_type'] != 'memory') continue;
+        final mem = item['memory'] as Map?;
+        if (mem == null) continue;
+        final id = mem['id']?.toString();
+        if (id != null) freshById[id] = item;
+      }
+      var changed = false;
+      for (int i = 0; i < items.length; i++) {
+        if (items[i]['item_type'] != 'memory') continue;
+        final mem = items[i]['memory'] as Map?;
+        if (mem == null) continue;
+        final id = mem['id']?.toString();
+        if (id == null) continue;
+        final fresh = freshById[id];
+        if (fresh == null) continue;
+        final oldCount = (mem['photos'] as List?)?.length ?? 0;
+        final newCount = ((fresh['memory'] as Map?)?['photos'] as List?)?.length ?? 0;
+        if (newCount != oldCount) {
+          items[i] = fresh;
+          changed = true;
+        }
+      }
+      if (changed) notifyListeners();
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
+    _stopPhotoPolling();
     previewArcNotifier.dispose();
     elevationCursorNotifier.dispose();
     mapCursorDistNotifier.dispose();

@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 
@@ -187,25 +186,6 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   }
 
   Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
-    final token = api.tokenForUpload;
-    if (token == null) return;
-
-    // Download the photo bytes from Polarsteps CDN
-    final photoResp = await http.get(Uri.parse(photoUrl));
-    if (photoResp.statusCode < 200 || photoResp.statusCode >= 300) return;
-
-    final bytes = photoResp.bodyBytes;
-    final filename =
-        Uri.parse(photoUrl).pathSegments.lastOrNull ?? 'photo.jpg';
-
-    // Upload to our API
-    final uploadUri =
-        Uri.parse('${api.baseUrl}/api/memories/$memId/photos');
-    final request = http.MultipartRequest('POST', uploadUri)
-      ..headers['Authorization'] = 'Bearer $token'
-      ..files.add(
-        http.MultipartFile.fromBytes('file', bytes, filename: filename),
-      );
-    await request.send();
+    await api.post('/api/memories/$memId/photos/from-url', {'url': photoUrl});
   }
 }
