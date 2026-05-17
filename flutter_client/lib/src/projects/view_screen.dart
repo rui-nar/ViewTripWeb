@@ -16,6 +16,8 @@ import 'elevation_chart.dart';
 import 'map_panel.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
+import 'sync_import_dialog.dart';
+import 'sync_import_notifier.dart';
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -46,17 +48,32 @@ class _ViewBodyState extends State<_ViewBody> {
   final MapController _mapController = MapController();
   bool _autoZoom = false;
 
+  void _openSyncDialog(BuildContext context) {
+    final notifier = context.read<ProjectNotifier>();
+    final pending = notifier.pendingSync;
+    if (pending == null) return;
+    showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => ChangeNotifierProvider(
+        create: (_) => SyncImportNotifier(
+          stravaActivities: pending.strava,
+          psSteps: pending.polarsteps,
+        ),
+        child: SyncImportDialog(projectName: widget.projectName),
+      ),
+    ).then((_) {
+      if (!mounted) return;
+      notifier.markSynced();
+      notifier.load(widget.projectName);
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ProjectNotifier>().load(widget.projectName);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Checking Strava and Polarsteps in the background…'),
-          duration: Duration(seconds: 5),
-        ),
-      );
     });
   }
 
@@ -164,30 +181,65 @@ class _ViewBodyState extends State<_ViewBody> {
           const SizedBox(width: 4),
         ],
       ),
-      body: Consumer<ProjectNotifier>(
-        builder: (context, notifier, _) {
-          if (notifier.isLoading && notifier.geo == null) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (notifier.error != null && notifier.geo == null) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(
-                  notifier.error!,
-                  style: TextStyle(
-                      color: Theme.of(context).colorScheme.error),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            );
-          }
-          return _ViewLayout(
-            notifier: notifier,
-            mapController: _mapController,
-            autoZoom: _autoZoom,
-          );
-        },
+      body: Column(
+        children: [
+          // ── Auto-sync banner ─────────────────────────────────────────────
+          Selector<ProjectNotifier, bool>(
+            selector: (_, n) => n.pendingSync != null,
+            builder: (context, hasSync, __) {
+              if (!hasSync) return const SizedBox.shrink();
+              final n = context.read<ProjectNotifier>();
+              final strava = n.pendingSync!.strava.length;
+              final ps = n.pendingSync!.polarsteps.length;
+              final parts = [
+                if (strava > 0) '$strava Strava ${strava == 1 ? 'activity' : 'activities'}',
+                if (ps > 0) '$ps Polarsteps ${ps == 1 ? 'step' : 'steps'}',
+              ];
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: Text('New: ${parts.join(' and ')}'),
+                leading: const Icon(Icons.sync, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: () => context.read<ProjectNotifier>().markSynced(),
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: () => _openSyncDialog(context),
+                    child: const Text('Import'),
+                  ),
+                ],
+              );
+            },
+          ),
+          Expanded(
+            child: Consumer<ProjectNotifier>(
+              builder: (context, notifier, _) {
+                if (notifier.isLoading && notifier.geo == null) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (notifier.error != null && notifier.geo == null) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        notifier.error!,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  );
+                }
+                return _ViewLayout(
+                  notifier: notifier,
+                  mapController: _mapController,
+                  autoZoom: _autoZoom,
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
