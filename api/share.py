@@ -1,16 +1,21 @@
 """Public share endpoints — no authentication required.
 
 Routes:
-    GET /api/share/{token}                      — project details for a shared link
-    GET /api/share/{token}/geo                  — GeoJSON for a shared project
-    GET /api/share/{token}/tiles/{z}/{x}/{y}.png — raster track tile (cached)
+    GET /api/share/{token}                                     — project details for a shared link
+    GET /api/share/{token}/geo                                 — GeoJSON for a shared project
+    GET /api/share/{token}/tiles/{z}/{x}/{y}.png               — raster track tile (cached)
+    GET /api/share/{token}/photos/{memory_id}/{uuid}/thumb     — memory photo thumbnail (no auth)
+    GET /api/share/{token}/photos/{memory_id}/{uuid}           — memory photo full-res (no auth)
 
 Both the full-project token and the no-memories token are accepted by every
 endpoint.  Visit events are recorded in DBShareVisit for the project owner.
 """
 from __future__ import annotations
 
+import json
+import os
 import time
+from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
@@ -21,8 +26,10 @@ from fastapi.responses import Response
 from sqlmodel import select
 
 from api.deps import get_optional_current_user
-from models.project_db import DBProject, DBShareVisit
+from models.project_db import DBMemory, DBProject, DBShareVisit
 from models.user import UserInfo
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo
 from src.tile_renderer import get_cached_tile, get_or_build_features, get_or_create_tile
@@ -288,3 +295,48 @@ async def shared_project_tile(request: Request, token: str, z: int, x: int, y: i
     png = await run_in_threadpool(_compute)
     return Response(png, media_type="image/png",
                     headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _shared_photo_path(token: str, memory_id: int, photo_uuid: str, thumb: bool):
+    """Resolve and validate a photo path via share token. Returns (Path, owner_uid) or raises."""
+    project, token_type, _project_id, owner_uid = _get_project_and_type(token)
+    if token_type == "no_memories":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    with get_session() as sess:
+        mem_row = sess.get(DBMemory, memory_id)
+        if mem_row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        proj_row = sess.get(DBProject, mem_row.project_id)
+        if proj_row is None or proj_row.user_info_id != owner_uid:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        photos = json.loads(mem_row.photos_json or "[]")
+        if photo_uuid not in photos:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    base = Path(_DATA_DIR) / "users" / str(owner_uid) / "memories" / str(memory_id)
+    suffix = "_thumb" if thumb else ""
+    return base / f"{photo_uuid}{suffix}.jpg"
+
+
+@router.get("/{token}/photos/{memory_id}/{photo_uuid}/thumb")
+def shared_photo_thumb(token: str, memory_id: int, photo_uuid: str):
+    """Serve a memory photo thumbnail without requiring user authentication."""
+    path = _shared_photo_path(token, memory_id, photo_uuid, thumb=True)
+    if not path.exists():
+        # Fall back to full-res
+        full = path.parent / f"{photo_uuid}.jpg"
+        if full.exists():
+            return FileResponse(str(full), media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=86400"})
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/{token}/photos/{memory_id}/{photo_uuid}")
+def shared_photo_full(token: str, memory_id: int, photo_uuid: str):
+    """Serve a full-resolution memory photo without requiring user authentication."""
+    path = _shared_photo_path(token, memory_id, photo_uuid, thumb=False)
+    if not path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})

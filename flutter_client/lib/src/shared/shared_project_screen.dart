@@ -57,6 +57,17 @@ class SharedProjectNotifier extends ProjectNotifier {
   @override
   bool get loadOwnerExtras => false;
 
+  @override
+  String photoThumbUrl(String memId, String uuid) =>
+      '$apiBaseUrl/api/share/$token/photos/$memId/$uuid/thumb';
+
+  @override
+  String photoFullUrl(String memId, String uuid) =>
+      '$apiBaseUrl/api/share/$token/photos/$memId/$uuid';
+
+  @override
+  Map<String, String> get photoAuthHeaders => const {};
+
   SharedProjectNotifier._internal(this.token, _SharedProjectService svc)
       : _sharedSvc = svc,
         super(svc);

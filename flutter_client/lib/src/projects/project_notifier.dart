@@ -494,6 +494,17 @@ class ProjectNotifier extends ChangeNotifier
   String get apiBaseUrl => api.baseUrl;
   String? get apiToken => api.tokenForUpload;
 
+  String photoThumbUrl(String memId, String uuid) =>
+      '${api.baseUrl}/api/memories/$memId/photos/$uuid/thumb';
+
+  String photoFullUrl(String memId, String uuid) =>
+      '${api.baseUrl}/api/memories/$memId/photos/$uuid';
+
+  Map<String, String> get photoAuthHeaders {
+    final token = api.tokenForUpload;
+    return token != null ? {'Authorization': 'Bearer $token'} : {};
+  }
+
   // ── Auto-sync ─────────────────────────────────────────────────────────────
 
   Future<void> _loadSyncMeta(String name) async {

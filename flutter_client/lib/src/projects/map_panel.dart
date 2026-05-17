@@ -260,11 +260,7 @@ class _MapPanelState extends State<MapPanel> {
     BuildContext context,
   ) {
     final markers = <Marker>[];
-    final token = widget.notifier.apiToken;
-    final authHeaders = token != null
-        ? {'Authorization': 'Bearer $token'}
-        : <String, String>{};
-    final baseUrl = widget.notifier.apiBaseUrl;
+    final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {
       if (item['item_type'] != 'memory') continue;
       final mem = item['memory'] as Map<String, dynamic>?;
@@ -283,7 +279,7 @@ class _MapPanelState extends State<MapPanel> {
               : const Color(0xFFF97316);
       Widget inner;
       if (photos.isNotEmpty) {
-        final thumbUrl = '$baseUrl/api/memories/$memId/photos/${photos.first}/thumb';
+        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
           child: Image.network(
             thumbUrl,
@@ -702,11 +698,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     BuildContext context,
   ) {
     final markers = <Marker>[];
-    final token = widget.notifier.apiToken;
-    final authHeaders = token != null
-        ? {'Authorization': 'Bearer $token'}
-        : <String, String>{};
-    final baseUrl = widget.notifier.apiBaseUrl;
+    final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {
       if (item['item_type'] != 'memory') continue;
       final mem = item['memory'] as Map<String, dynamic>?;
@@ -726,8 +718,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
 
       Widget inner;
       if (photos.isNotEmpty) {
-        final thumbUrl =
-            '$baseUrl/api/memories/$memId/photos/${photos.first}/thumb';
+        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
           child: Image.network(
             thumbUrl,

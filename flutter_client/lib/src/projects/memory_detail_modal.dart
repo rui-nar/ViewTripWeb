@@ -113,18 +113,15 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
 
   String _photoThumbUrl(String uuid) {
     final id = _current['id']?.toString() ?? '';
-    return '${widget.notifier.apiBaseUrl}/api/memories/$id/photos/$uuid/thumb';
+    return widget.notifier.photoThumbUrl(id, uuid);
   }
 
   String _photoFullUrl(String uuid) {
     final id = _current['id']?.toString() ?? '';
-    return '${widget.notifier.apiBaseUrl}/api/memories/$id/photos/$uuid';
+    return widget.notifier.photoFullUrl(id, uuid);
   }
 
-  Map<String, String> get _authHeaders {
-    final token = widget.notifier.apiToken;
-    return token != null ? {'Authorization': 'Bearer $token'} : {};
-  }
+  Map<String, String> get _authHeaders => widget.notifier.photoAuthHeaders;
 
   @override
   Widget build(BuildContext context) {
