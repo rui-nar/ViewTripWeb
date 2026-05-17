@@ -5,6 +5,8 @@ Routes:
 """
 from __future__ import annotations
 
+import gzip as gzip_lib
+import json
 import os
 from threading import Lock
 from typing import Annotated, Any, Dict, List
@@ -13,6 +15,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from models.project_db import DBProject
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -25,8 +28,8 @@ router = APIRouter(prefix="/api/geo", tags=["geo"])
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _repo = ProjectRepo()
 
-# In-memory full-res GeoJSON cache: (user_info_id, project_name) → geojson dict
-_geo_cache: dict[tuple, dict] = {}
+# In-memory full-res GeoJSON cache: (user_info_id, project_name) → gzip-compressed JSON bytes
+_geo_cache: dict[tuple, bytes] = {}
 _geo_cache_lock = Lock()
 
 
@@ -105,9 +108,13 @@ def project_geo(
     user_info_id = int(current_user["sub"])
     cache_key = (user_info_id, name)
     with _geo_cache_lock:
-        cached = _geo_cache.get(cache_key)
-    if cached is not None:
-        return cached
+        cached_bytes = _geo_cache.get(cache_key)
+    if cached_bytes is not None:
+        return Response(
+            content=cached_bytes,
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+        )
 
     with get_session() as sess:
         project = _repo.get_project(
@@ -170,7 +177,12 @@ def project_geo(
                 "route_mode": seg.route_mode,
             }))
 
-    result = {"type": "FeatureCollection", "features": features}
+    json_bytes = json.dumps({"type": "FeatureCollection", "features": features}).encode()
+    gz_bytes = gzip_lib.compress(json_bytes, compresslevel=6)
     with _geo_cache_lock:
-        _geo_cache[cache_key] = result
-    return result
+        _geo_cache[cache_key] = gz_bytes
+    return Response(
+        content=gz_bytes,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "X-Cache": "MISS"},
+    )
