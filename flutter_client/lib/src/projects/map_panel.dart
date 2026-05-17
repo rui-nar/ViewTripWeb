@@ -52,12 +52,15 @@ class _MapPanelState extends State<MapPanel> {
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
+  dynamic _lastSelectedMemId = _sentinel;
+  List<Map<String, dynamic>>? _lastItems;
   Color? _lastTrackColor;
   double? _lastTrackWidth;
   bool? _lastAlternating;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
+  List<Marker> _cachedMemoryMarkers = [];
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
 
@@ -247,6 +250,74 @@ class _MapPanelState extends State<MapPanel> {
     return markers;
   }
 
+  List<Marker> _buildMemoryMarkers(
+    List<Map<String, dynamic>> items,
+    dynamic selectedMemoryId,
+    bool hasSelection,
+    BuildContext context,
+  ) {
+    final markers = <Marker>[];
+    final token = widget.notifier.apiToken;
+    final authHeaders = token != null
+        ? {'Authorization': 'Bearer $token'}
+        : <String, String>{};
+    final baseUrl = widget.notifier.apiBaseUrl;
+    for (final item in items) {
+      if (item['item_type'] != 'memory') continue;
+      final mem = item['memory'] as Map<String, dynamic>?;
+      if (mem == null) continue;
+      final lat = (mem['lat'] as num?)?.toDouble();
+      final lon = (mem['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final memId = mem['id']?.toString() ?? '';
+      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
+      final isSelected = selectedMemoryId?.toString() == memId;
+      final size = isSelected ? 34.0 : 28.0;
+      final bgColor = isSelected
+          ? const Color(0xFFEA580C)
+          : hasSelection
+              ? const Color(0xA0F97316)
+              : const Color(0xFFF97316);
+      Widget inner;
+      if (photos.isNotEmpty) {
+        final thumbUrl = '$baseUrl/api/memories/$memId/photos/${photos.first}/thumb';
+        inner = ClipOval(
+          child: Image.network(
+            thumbUrl,
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            headers: authHeaders,
+            errorBuilder: (_, __, ___) =>
+                Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white),
+          ),
+        );
+      } else {
+        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
+      }
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: size,
+        height: size,
+        child: GestureDetector(
+          onTap: () {
+            widget.notifier.selectMemory(mem['id']);
+            showMemoryDetail(context, widget.notifier, mem, readOnly: true);
+          },
+          child: Container(
+            decoration: BoxDecoration(
+              color: bgColor,
+              shape: BoxShape.circle,
+              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+            ),
+            child: Center(child: inner),
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
   List<LatLng> _allPoints(List<Polyline> polylines) {
     return polylines.expand((p) => p.points).toList();
   }
@@ -346,32 +417,40 @@ class _MapPanelState extends State<MapPanel> {
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
+    final selMemId = notifier.selectedMemoryId;
+    final items = notifier.items;
     final trackColor = notifier.trackColor;
     final trackWidth = notifier.trackWidth;
     final alternating = notifier.alternatingTrackColors;
     final selectionChanged = selActId != _lastSelectedId ||
-        selSegId?.toString() != _lastSelectedSegId?.toString();
+        selSegId?.toString() != _lastSelectedSegId?.toString() ||
+        selMemId?.toString() != _lastSelectedMemId?.toString();
     final styleChanged = trackColor != _lastTrackColor ||
         trackWidth != _lastTrackWidth || alternating != _lastAlternating;
-    if (!identical(geo, _lastGeo) || selectionChanged || styleChanged) {
+    if (!identical(geo, _lastGeo) || selectionChanged || styleChanged ||
+        !identical(items, _lastItems)) {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
+      _lastSelectedMemId = selMemId;
+      _lastItems = items;
       _lastTrackColor = trackColor;
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
       final tilesActive = widget.trackTileUrlTemplate != null;
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
-              alternating, notifier.items, selectedOnly: tilesActive)
+              alternating, items, selectedOnly: tilesActive)
           : [];
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
           : _allPoints(_cachedPolylines);
-      final hasSelection = selActId != null || selSegId != null;
+      final hasSelection = selActId != null || selSegId != null || selMemId != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];
+      _cachedMemoryMarkers =
+          _buildMemoryMarkers(items, selMemId, hasSelection, context);
       // Only re-fit when the selection changes (user picks a different
       // activity/segment). A geo update from progressive track loading
       // should never reset the viewport the user has already panned/zoomed.
@@ -449,6 +528,8 @@ class _MapPanelState extends State<MapPanel> {
               ),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
+            if (_cachedMemoryMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedMemoryMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(

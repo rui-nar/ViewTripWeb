@@ -11,20 +11,22 @@ import 'project_notifier.dart';
 void showMemoryDetail(
   BuildContext context,
   ProjectNotifier notifier,
-  Map<String, dynamic> memory,
-) {
+  Map<String, dynamic> memory, {
+  bool readOnly = false,
+}) {
   showDialog(
     context: context,
     useRootNavigator: true,
-    builder: (_) => _MemoryDetailModal(notifier: notifier, memory: memory),
+    builder: (_) => _MemoryDetailModal(notifier: notifier, memory: memory, readOnly: readOnly),
   );
 }
 
 class _MemoryDetailModal extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> memory;
+  final bool readOnly;
 
-  const _MemoryDetailModal({required this.notifier, required this.memory});
+  const _MemoryDetailModal({required this.notifier, required this.memory, this.readOnly = false});
 
   @override
   State<_MemoryDetailModal> createState() => _MemoryDetailModalState();
@@ -243,19 +245,21 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                       style: theme.textTheme.bodySmall,
                     ),
                   const Spacer(),
-                  TextButton.icon(
-                    icon: const Icon(Icons.edit_outlined, size: 16),
-                    label: const Text('Edit'),
-                    onPressed: _edit,
-                  ),
-                  const SizedBox(width: 4),
-                  TextButton.icon(
-                    icon: Icon(Icons.delete_outline, size: 16,
-                        color: theme.colorScheme.error),
-                    label: Text('Delete',
-                        style: TextStyle(color: theme.colorScheme.error)),
-                    onPressed: _delete,
-                  ),
+                  if (!widget.readOnly) ...[
+                    TextButton.icon(
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      label: const Text('Edit'),
+                      onPressed: _edit,
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton.icon(
+                      icon: Icon(Icons.delete_outline, size: 16,
+                          color: theme.colorScheme.error),
+                      label: Text('Delete',
+                          style: TextStyle(color: theme.colorScheme.error)),
+                      onPressed: _delete,
+                    ),
+                  ],
                 ],
               ),
             ),

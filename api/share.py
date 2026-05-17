@@ -198,6 +198,7 @@ def _build_features(project) -> List[Dict[str, Any]]:
                 "geometry": {"type": "LineString", "coordinates": coords},
                 "properties": {
                     "type": "segment",
+                    "segment_id": seg.id,
                     "segment_type": seg.segment_type,
                     "label": seg.label,
                 },

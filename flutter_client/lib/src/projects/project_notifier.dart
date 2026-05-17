@@ -309,6 +309,17 @@ class ProjectNotifier extends ChangeNotifier
             if (fullFeature != null) features[i] = fullFeature;
           }
         }
+        // Low-res geo never includes non-activity features (segments). Add them
+        // from fullGeo unless a concurrent CRUD operation already added some.
+        final alreadyHasNonAct = features.any(
+            (f) => f is Map && (f['properties'] as Map? ?? {})['activity_id'] == null);
+        if (!alreadyHasNonAct) {
+          for (final f in (fullGeo['features'] as List? ?? [])) {
+            if (f is! Map) continue;
+            if ((f['properties'] as Map? ?? {})['activity_id'] != null) continue;
+            features.add(f);
+          }
+        }
         geo = {'type': 'FeatureCollection', 'features': features};
       } else {
         geo = fullGeo;
