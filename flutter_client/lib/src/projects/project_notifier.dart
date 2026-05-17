@@ -196,13 +196,17 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
 
     try {
-      // Phase 1: details + low-res geo (both fast — no polyline decoding)
-      final results = await Future.wait([
-        _service.getDetails(name),
-        _service.getLowResGeo(name),
-      ]);
+      // Fire both simultaneously — low-res resolves at ~2.2s, details at ~17s.
+      // Awaiting low-res first lets the map render before the panel is ready.
+      final detailsFuture = _service.getDetails(name);
+      final lowResFuture = _service.getLowResGeo(name);
 
-      final details = results[0];
+      geo = await lowResFuture;
+      if (_loadKey == name) notifyListeners(); // map visible at ~2.2s
+
+      final details = await detailsFuture;
+      if (_loadKey != name) return;
+
       projectName = details['name'] as String? ?? name;
       tripStart = details['trip_start'] as String?;
       tripEnd = details['trip_end'] as String?;
@@ -229,7 +233,6 @@ class ProjectNotifier extends ChangeNotifier
       counters = rawCounters is List
           ? rawCounters.map((c) => Map<String, dynamic>.from(c as Map)).toList()
           : [];
-      geo = results[1];   // low-res — map renders immediately
       _updateStats();
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
@@ -245,9 +248,12 @@ class ProjectNotifier extends ChangeNotifier
 
     // Phase 2: fetch full-res geo in background; replace features progressively
     _loadFullGeoProgressively(name);
-    // Background sync check — fires only for active trips with auto-sync on
+    // Background sync check — fires only for active trips with auto-sync on.
+    // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
-      _backgroundSyncCheck(name);
+      Future.delayed(const Duration(seconds: 5), () {
+        if (_loadKey == name) _backgroundSyncCheck(name);
+      });
     }
   }
 

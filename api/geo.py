@@ -6,6 +6,7 @@ Routes:
 from __future__ import annotations
 
 import os
+from threading import Lock
 from typing import Annotated, Any, Dict, List
 
 import polyline as polyline_lib
@@ -23,6 +24,16 @@ router = APIRouter(prefix="/api/geo", tags=["geo"])
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _repo = ProjectRepo()
+
+# In-memory full-res GeoJSON cache: (user_info_id, project_name) → geojson dict
+_geo_cache: dict[tuple, dict] = {}
+_geo_cache_lock = Lock()
+
+
+def bust_geo_cache(user_info_id: int, project_name: str) -> None:
+    """Invalidate the full-res GeoJSON cache entry for this project."""
+    with _geo_cache_lock:
+        _geo_cache.pop((user_info_id, project_name), None)
 
 
 def _legacy_path(user_id: str, name: str) -> str:
@@ -92,6 +103,12 @@ def project_geo(
     GeoJSON coordinates are [longitude, latitude] as per the spec.
     """
     user_info_id = int(current_user["sub"])
+    cache_key = (user_info_id, name)
+    with _geo_cache_lock:
+        cached = _geo_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
@@ -153,4 +170,7 @@ def project_geo(
                 "route_mode": seg.route_mode,
             }))
 
-    return {"type": "FeatureCollection", "features": features}
+    result = {"type": "FeatureCollection", "features": features}
+    with _geo_cache_lock:
+        _geo_cache[cache_key] = result
+    return result

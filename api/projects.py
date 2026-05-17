@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.deps import get_current_user
+from api.geo import bust_geo_cache
 from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta, DBShareVisit
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
@@ -959,6 +960,7 @@ def refresh_activity(
     # 3. Overwrite the DB row (all columns, including enrichment)
     with get_session() as sess:
         _repo.force_update_activity(sess, user_info_id, act)
+        bust_geo_cache(user_info_id, name)
         # Return the updated project so the client can refresh its state
         project = _repo.get_project(
             sess, user_info_id, name,
@@ -992,6 +994,7 @@ def delete_item(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Index out of range")
         project.remove_item(index)
         _repo.save_project(sess, user_info_id, project)
+    bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
 
@@ -1071,6 +1074,7 @@ def create_segment(
             insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
         project.items.insert(insert_at, item)
         _repo.save_project(sess, user_info_id, project)
+    bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
     return {"id": seg.id}
@@ -1112,6 +1116,7 @@ def update_segment(
                 elif body.route_mode == "rail":
                     seg.route_mode = "rail"
                 _repo.save_project(sess, user_info_id, project)
+                bust_geo_cache(user_info_id, name)
                 background_tasks.add_task(_refresh_stats_background, user_info_id, name)
                 background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
                 return
@@ -1141,6 +1146,7 @@ def delete_segment(
         if len(project.items) == original_len:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, user_info_id, project)
+    bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
 
@@ -1253,6 +1259,7 @@ def resolve_segment_route(
         if body.hafas_provider:
             seg.hafas_provider = body.hafas_provider
         _repo.save_project(sess, user_info_id, project)
+    bust_geo_cache(user_info_id, name)
 
     return {"polyline": polyline, "stop_count": len(stops)}
 

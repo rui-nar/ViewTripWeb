@@ -24,6 +24,7 @@ from sqlmodel import select
 from models.db import get_session
 
 from api.deps import get_current_user
+from api.geo import bust_geo_cache
 from models.project_db import DBProject, DBProjectItem, DBStravaCache
 from models.user import StravaToken, UserInfo
 from src.api.strava_client import StravaAPI
@@ -474,4 +475,6 @@ def strava_sync(
         # Persist refreshed token if StravaAPI auto-renewed it
         _save_refreshed_token(sess, token_row, client)
 
+    if added > 0:
+        bust_geo_cache(user_info_id, name)
     return {"added": added, "total": len(project.activities)}
