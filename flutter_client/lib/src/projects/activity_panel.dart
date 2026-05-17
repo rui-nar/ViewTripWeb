@@ -408,7 +408,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     super.didChangeDependencies();
     final theme = Theme.of(context);
     _segmentTitleStyle =
-        theme.textTheme.bodyMedium?.copyWith(fontStyle: FontStyle.italic);
+        theme.textTheme.labelMedium?.copyWith(fontStyle: FontStyle.italic);
   }
 
 
@@ -828,7 +828,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       Text(
                                         'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
                                         overflow: TextOverflow.ellipsis,
-                                        style: theme.textTheme.bodyMedium?.copyWith(
+                                        style: theme.textTheme.labelMedium?.copyWith(
                                           color: isHighlighted
                                               ? theme.colorScheme.primary
                                               : theme.colorScheme.onSurfaceVariant,
@@ -1019,7 +1019,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 const SizedBox(width: 8),
                                 Flexible(
                                   child: Text(name,
-                                      style: theme.textTheme.bodyMedium),
+                                      style: theme.textTheme.labelMedium),
                                 ),
                               ]),
                               subtitle: Text(
@@ -1072,7 +1072,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               const SizedBox(width: 8),
                               Flexible(
                                   child: Text(label,
-                                      style: theme.textTheme.bodyMedium)),
+                                      style: theme.textTheme.labelMedium)),
                             ]),
                             subtitle: memDesc != null && memDesc.isNotEmpty
                                 ? Text(memDesc,
