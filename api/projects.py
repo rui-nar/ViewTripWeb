@@ -66,7 +66,7 @@ _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
 def _refresh_share_tiles(user_info_id: int, project_name: str) -> None:
     """Re-render raster tiles for any active share token(s) after a project mutation."""
-    from api.share import _build_features
+    from api.share import _build_features, invalidate_share_cache
     from src.tile_renderer import refresh_tile_cache
 
     with get_session() as sess:
@@ -81,6 +81,9 @@ def _refresh_share_tiles(user_info_id: int, project_name: str) -> None:
     tokens = [t for t in (row.share_token, row.share_token_no_memories) if t]
     if not tokens:
         return
+
+    for token in tokens:
+        invalidate_share_cache(token)
 
     with get_session() as sess:
         project = _repo.get_project_by_id(sess, row.id)
@@ -1282,7 +1285,9 @@ def revoke_share_link(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if row.share_token:
             from src.tile_renderer import invalidate_tile_cache
+            from api.share import invalidate_share_cache
             invalidate_tile_cache(row.share_token)
+            invalidate_share_cache(row.share_token)
         row.share_token = None
         sess.add(row)
         sess.commit()
@@ -1351,7 +1356,9 @@ def revoke_share_link_no_memories(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if row.share_token_no_memories:
             from src.tile_renderer import invalidate_tile_cache
+            from api.share import invalidate_share_cache
             invalidate_tile_cache(row.share_token_no_memories)
+            invalidate_share_cache(row.share_token_no_memories)
         row.share_token_no_memories = None
         sess.add(row)
         sess.commit()

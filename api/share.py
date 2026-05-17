@@ -15,8 +15,49 @@ from __future__ import annotations
 import json
 import os
 import time
+import threading
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
+
+
+class _TTLCache:
+    """Minimal thread-safe in-process TTL cache — no external dependencies."""
+
+    def __init__(self, ttl: float = 60.0) -> None:
+        self._ttl = ttl
+        self._data: dict = {}
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        with self._lock:
+            entry = self._data.get(key)
+        if entry is None:
+            return None
+        value, exp = entry
+        if time.monotonic() > exp:
+            with self._lock:
+                self._data.pop(key, None)
+            return None
+        return value
+
+    def set(self, key, value) -> None:
+        with self._lock:
+            self._data[key] = (value, time.monotonic() + self._ttl)
+
+    def delete(self, key) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
+
+# Keyed by share token.  TTL is intentionally short so edits propagate quickly.
+_project_cache: _TTLCache = _TTLCache(ttl=60.0)
+_details_cache: _TTLCache = _TTLCache(ttl=60.0)
+
+
+def invalidate_share_cache(token: str) -> None:
+    """Evict all cached entries for *token*. Call after any project mutation."""
+    _project_cache.delete(token)
+    _details_cache.delete(token)
 
 import polyline as polyline_lib
 from models.db import get_session
@@ -44,7 +85,12 @@ def _get_project_and_type(token: str):
 
     Returns (project, token_type, project_id, owner_user_info_id).
     token_type is "full" or "no_memories".  Raises 404 if neither matches.
+    Result is cached for 60 s to avoid repeated DB + repo work on the same token.
     """
+    cached = _project_cache.get(token)
+    if cached is not None:
+        return cached
+
     with get_session() as sess:
         row = sess.exec(
             select(DBProject).where(DBProject.share_token == token)
@@ -71,7 +117,9 @@ def _get_project_and_type(token: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Shared project not found",
         )
-    return project, token_type, project_id, owner_user_info_id
+    result = (project, token_type, project_id, owner_user_info_id)
+    _project_cache.set(token, result)
+    return result
 
 
 def _record_visit(
@@ -142,18 +190,22 @@ def shared_project(
     """
     project, token_type, project_id, owner_uid = _get_project_and_type(token)
     _record_visit(project_id, token_type, aid, current_user)
-    result = _repo.to_dict(project)
-    if token_type == "no_memories":
-        result["items"] = [
-            item for item in (result.get("items") or [])
-            if item.get("item_type") != "memory"
-        ]
-    with get_session() as sess:
-        owner = sess.exec(
-            select(UserInfo).where(UserInfo.id == owner_uid)
-        ).first()
-    result["owner_name"] = owner.display_name if owner else ""
-    return result
+    cached_result = _details_cache.get(token)
+    if cached_result is None:
+        result = _repo.to_dict(project)
+        if token_type == "no_memories":
+            result["items"] = [
+                item for item in (result.get("items") or [])
+                if item.get("item_type") != "memory"
+            ]
+        with get_session() as sess:
+            owner = sess.exec(
+                select(UserInfo).where(UserInfo.id == owner_uid)
+            ).first()
+        result["owner_name"] = owner.display_name if owner else ""
+        _details_cache.set(token, result)
+        cached_result = result
+    return cached_result
 
 
 def _build_features(project) -> List[Dict[str, Any]]:
