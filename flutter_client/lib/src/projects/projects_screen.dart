@@ -93,7 +93,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
     if (notifier.error == null) {
       _nameCtrl.clear();
       final encoded = Uri.encodeComponent(name);
-      context.go('/app?project=$encoded');
+      context.go('/view?project=$encoded');
     }
   }
 
@@ -290,7 +290,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                                         final encoded =
                                             Uri.encodeComponent(name);
                                         context.go(
-                                            '/app?project=$encoded');
+                                            '/view?project=$encoded');
                                       },
                                       style: ElevatedButton.styleFrom(
                                         minimumSize:
@@ -349,7 +349,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                                     );
                                     if (result != null && context.mounted) {
                                       context.go(
-                                          '/app?project=${Uri.encodeComponent(result)}');
+                                          '/view?project=${Uri.encodeComponent(result)}');
                                     }
                                   } on Exception catch (e) {
                                     notifier.setError(e.toString());

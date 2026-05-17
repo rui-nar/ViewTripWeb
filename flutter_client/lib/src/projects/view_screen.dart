@@ -51,6 +51,12 @@ class _ViewBodyState extends State<_ViewBody> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ProjectNotifier>().load(widget.projectName);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Checking Strava and Polarsteps in the background…'),
+          duration: Duration(seconds: 5),
+        ),
+      );
     });
   }
 
