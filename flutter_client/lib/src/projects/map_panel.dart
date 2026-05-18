@@ -61,6 +61,7 @@ class _MapPanelState extends State<MapPanel> {
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
+  bool _showMemories = true;
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
 
@@ -527,7 +528,7 @@ class _MapPanelState extends State<MapPanel> {
               ),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
-            if (_cachedMemoryMarkers.isNotEmpty)
+            if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
@@ -573,6 +574,32 @@ class _MapPanelState extends State<MapPanel> {
         ),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
+        if (_cachedMemoryMarkers.isNotEmpty)
+          Positioned(
+            top: 12,
+            left: 12,
+            child: Material(
+              color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.9),
+              borderRadius: BorderRadius.circular(8),
+              elevation: 2,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => setState(() => _showMemories = !_showMemories),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Icon(
+                    _showMemories
+                        ? Icons.photo_camera
+                        : Icons.photo_camera_outlined,
+                    size: 20,
+                    color: _showMemories
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
