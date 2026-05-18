@@ -53,14 +53,17 @@ class _MapPanelState extends State<MapPanel> {
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
   dynamic _lastSelectedMemId = _sentinel;
+  dynamic _lastSelectedJournalId = _sentinel;
   List<Map<String, dynamic>>? _lastItems;
   Color? _lastTrackColor;
   double? _lastTrackWidth;
   bool? _lastAlternating;
+  bool? _lastShowJournals;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
+  List<Marker> _cachedJournalMarkers = [];
   bool _showMemories = true;
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
@@ -319,6 +322,51 @@ class _MapPanelState extends State<MapPanel> {
     return markers;
   }
 
+  List<Marker> _buildJournalMarkers(
+    List<Map<String, dynamic>> items,
+    dynamic selectedJournalId,
+    bool hasSelection,
+    BuildContext context,
+  ) {
+    if (!widget.notifier.isGeoLoaded) return [];
+    final markers = <Marker>[];
+    for (final item in items) {
+      if (item['item_type'] != 'journal') continue;
+      final j = item['journal'] as Map<String, dynamic>?;
+      if (j == null) continue;
+      final lat = (j['lat'] as num?)?.toDouble();
+      final lon = (j['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final jId = j['id']?.toString() ?? '';
+      final isSelected = selectedJournalId?.toString() == jId;
+      const size = 22.0;
+      final bgColor = isSelected
+          ? const Color(0xFF44AAFF)
+          : hasSelection
+              ? const Color(0xA064748B)
+              : const Color(0xFF64748B);
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: size,
+        height: size,
+        child: GestureDetector(
+          onTap: () => widget.notifier.selectJournal(j['id']),
+          child: Container(
+            decoration: BoxDecoration(
+              color: bgColor,
+              shape: BoxShape.circle,
+              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+            ),
+            child: const Center(
+              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
+            ),
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
   List<LatLng> _allPoints(List<Polyline> polylines) {
     return polylines.expand((p) => p.points).toList();
   }
@@ -419,25 +467,30 @@ class _MapPanelState extends State<MapPanel> {
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
     final selMemId = notifier.selectedMemoryId;
+    final selJournalId = notifier.selectedJournalId;
+    final showJournals = notifier.showJournals;
     final items = notifier.items;
     final trackColor = notifier.trackColor;
     final trackWidth = notifier.trackWidth;
     final alternating = notifier.alternatingTrackColors;
     final selectionChanged = selActId != _lastSelectedId ||
         selSegId?.toString() != _lastSelectedSegId?.toString() ||
-        selMemId?.toString() != _lastSelectedMemId?.toString();
+        selMemId?.toString() != _lastSelectedMemId?.toString() ||
+        selJournalId?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged = trackColor != _lastTrackColor ||
         trackWidth != _lastTrackWidth || alternating != _lastAlternating;
     if (!identical(geo, _lastGeo) || selectionChanged || styleChanged ||
-        !identical(items, _lastItems)) {
+        !identical(items, _lastItems) || showJournals != _lastShowJournals) {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
       _lastSelectedMemId = selMemId;
+      _lastSelectedJournalId = selJournalId;
       _lastItems = items;
       _lastTrackColor = trackColor;
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
+      _lastShowJournals = showJournals;
       final tilesActive = widget.trackTileUrlTemplate != null;
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
@@ -446,12 +499,15 @@ class _MapPanelState extends State<MapPanel> {
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
           : _allPoints(_cachedPolylines);
-      final hasSelection = selActId != null || selSegId != null || selMemId != null;
+      final hasSelection = selActId != null || selSegId != null ||
+          selMemId != null || selJournalId != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
+      _cachedJournalMarkers =
+          _buildJournalMarkers(items, selJournalId, hasSelection, context);
       // Only re-fit when the selection changes (user picks a different
       // activity/segment). A geo update from progressive track loading
       // should never reset the viewport the user has already panned/zoomed.
@@ -531,6 +587,8 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
+            if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedJournalMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -642,10 +700,12 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   String? _lastSelectedDay = '';   // '' = sentinel (distinct from null)
   Set<String> _lastSelectedDays = const {};
   dynamic _lastSelectedMemId = _sentinel;
+  dynamic _lastSelectedJournalId = _sentinel;
   List<Map<String, dynamic>>? _lastItems;
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
+  List<Marker> _cachedJournalMarkers = [];
   bool _showMemories = true;
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
@@ -653,6 +713,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   Color? _lastTrackColor;
   double? _lastTrackWidth;
   bool? _lastAlternating;
+  bool? _lastShowJournals;
 
   static const _sentinel = Object();
 
@@ -780,6 +841,51 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                   : null,
             ),
             child: Center(child: inner),
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
+  List<Marker> _buildJournalMarkers(
+    List<Map<String, dynamic>> items,
+    dynamic selectedJournalId,
+    bool hasSelection,
+    BuildContext context,
+  ) {
+    if (!widget.notifier.isGeoLoaded) return [];
+    final markers = <Marker>[];
+    for (final item in items) {
+      if (item['item_type'] != 'journal') continue;
+      final j = item['journal'] as Map<String, dynamic>?;
+      if (j == null) continue;
+      final lat = (j['lat'] as num?)?.toDouble();
+      final lon = (j['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final jId = j['id']?.toString() ?? '';
+      final isSelected = selectedJournalId?.toString() == jId;
+      const size = 22.0;
+      final bgColor = isSelected
+          ? const Color(0xFF44AAFF)
+          : hasSelection
+              ? const Color(0xA064748B)
+              : const Color(0xFF64748B);
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: size,
+        height: size,
+        child: GestureDetector(
+          onTap: () => widget.notifier.selectJournal(j['id']),
+          child: Container(
+            decoration: BoxDecoration(
+              color: bgColor,
+              shape: BoxShape.circle,
+              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+            ),
+            child: const Center(
+              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
+            ),
           ),
         ),
       ));
@@ -1075,6 +1181,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     final selDay = notifier.selectedDay;
     final selDays = notifier.selectedDays;
     final selMemId = notifier.selectedMemoryId;
+    final selJournalId2 = notifier.selectedJournalId;
+    final showJournals2 = notifier.showJournals;
     final items = notifier.items;
     final trackColor = notifier.trackColor;
     final trackWidth = notifier.trackWidth;
@@ -1083,11 +1191,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         selSegId?.toString() != _lastSelectedSegId?.toString() ||
         selDay != _lastSelectedDay ||
         !setEquals(selDays, _lastSelectedDays) ||
-        selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString();
+        selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString() ||
+        selJournalId2?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged2 = trackColor != _lastTrackColor ||
         trackWidth != _lastTrackWidth || alternating != _lastAlternating;
     if (!identical(geo, _lastGeo) || selectionChanged2 ||
-        !identical(items, _lastItems) || styleChanged2) {
+        !identical(items, _lastItems) || styleChanged2 ||
+        showJournals2 != _lastShowJournals) {
       if (selectionChanged2) widget.fittedNotifier.value = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
@@ -1095,10 +1205,12 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       _lastSelectedDay = selDay;
       _lastSelectedDays = Set.from(selDays);
       _lastSelectedMemId = selMemId;
+      _lastSelectedJournalId = selJournalId2;
       _lastItems = items;
       _lastTrackColor = trackColor;
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
+      _lastShowJournals = showJournals2;
       // Multi-select takes priority over single-day selection.
       final effectiveDays = selDays.isNotEmpty
           ? selDays
@@ -1112,12 +1224,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               items, trackColor, trackWidth, alternating)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
-          effectiveDays.isNotEmpty || selMemId != null;
+          effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
+      _cachedJournalMarkers =
+          _buildJournalMarkers(items, selJournalId2, hasSelection, context);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
@@ -1209,6 +1323,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
+            if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedJournalMarkers),
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {

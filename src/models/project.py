@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Literal, Optional
 
 from src.models.activity import Activity
+from src.models.journal import JournalEntry
 from src.models.memory import Memory
 
 SegmentType = Literal["train", "flight", "boat", "bus"]
@@ -71,10 +72,11 @@ class ConnectingSegment:
 @dataclass
 class ProjectItem:
     """One entry in the project's ordered item list."""
-    item_type: Literal["activity", "segment", "memory"]
+    item_type: Literal["activity", "segment", "memory", "journal"]
     activity_id: Optional[int] = None
     segment: Optional[ConnectingSegment] = None
     memory: Optional[Memory] = None
+    journal: Optional[JournalEntry] = None
 
 
 @dataclass
@@ -104,6 +106,7 @@ class Project:
     # Full Strava data cached here for offline use
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)
+    journal_entries: List[JournalEntry] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised
     _activity_map: Dict[int, Activity] = field(
         default_factory=dict, repr=False, compare=False

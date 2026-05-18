@@ -208,8 +208,24 @@ class DBMemory(sqlmodel.SQLModel, table=True):
     lon: Optional[float] = sqlmodel.Field(default=None)
 
 
+class DBJournalEntry(sqlmodel.SQLModel, table=True):
+    """A private, owner-only journal entry attached to a project and a specific date."""
+
+    __tablename__ = "journalentry"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
+    time: Optional[str] = sqlmodel.Field(default=None)
+    description: Optional[str] = sqlmodel.Field(default=None)
+    photos_json: str = sqlmodel.Field(default="[]")
+    geo_mode: str = sqlmodel.Field(default="start_of_day")
+    lat: Optional[float] = sqlmodel.Field(default=None)
+    lon: Optional[float] = sqlmodel.Field(default=None)
+
+
 class DBProjectItem(sqlmodel.SQLModel, table=True):
-    """One ordered entry in a project — either an activity ref, segment, or memory."""
+    """One ordered entry in a project — either an activity ref, segment, memory, or journal."""
 
     __tablename__ = "projectitem"
 
@@ -231,6 +247,11 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     # Populated when item_type == "memory"
     memory_id: Optional[int] = sqlmodel.Field(
         default=None, foreign_key="memory.id"
+    )
+
+    # Populated when item_type == "journal"
+    journal_id: Optional[int] = sqlmodel.Field(
+        default=None, foreign_key="journalentry.id"
     )
 
 

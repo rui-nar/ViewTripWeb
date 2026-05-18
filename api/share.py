@@ -251,9 +251,14 @@ def shared_project(
     cached_result = _details_cache.get(token)
     if cached_result is None:
         result = _repo.to_dict(project)
+        # Journal entries are always private — strip from all shared views
+        result["items"] = [
+            item for item in (result.get("items") or [])
+            if item.get("item_type") != "journal"
+        ]
         if token_type == "no_memories":
             result["items"] = [
-                item for item in (result.get("items") or [])
+                item for item in result["items"]
                 if item.get("item_type") != "memory"
             ]
         with get_session() as sess:
@@ -287,9 +292,14 @@ def shared_project_meta(
     # elevation_profile=None and summary_polyline=None on all activities,
     # so to_dict() produces the stripped payload without extra work.
     result = _repo.to_dict(project)
+    # Journal entries are always private — strip from all shared views
+    result["items"] = [
+        item for item in (result.get("items") or [])
+        if item.get("item_type") != "journal"
+    ]
     if token_type == "no_memories":
         result["items"] = [
-            item for item in (result.get("items") or [])
+            item for item in result["items"]
             if item.get("item_type") != "memory"
         ]
     with get_session() as sess:
@@ -366,30 +376,58 @@ def _build_features(project) -> List[Dict[str, Any]]:
 
 @router.get("/{token}/geo/low-res")
 def shared_project_geo_low_res(token: str):
-    """Return straight-line GeoJSON (start→end per activity) for fast initial map render."""
+    """Return low-res GeoJSON for fast initial map render.
+
+    Activities: straight lines (start→end, no polyline decoding).
+    Segments: 50-point great-circle arcs (or stored rail polylines) — same as
+    the full-res endpoint.  Both appear immediately so there are no holes
+    in the route during the low-res phase.
+    """
     project, _token_type, _project_id, _owner_uid = _get_project_and_type(token)
     features: List[Dict[str, Any]] = []
     for item in project.items:
-        if item.item_type != "activity":
-            continue
-        activity = project.activity_by_id(item.activity_id)
-        if activity is None:
-            continue
-        if activity.start_latlng and activity.end_latlng:
-            features.append({
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": [
-                        [activity.start_latlng[1], activity.start_latlng[0]],
-                        [activity.end_latlng[1],   activity.end_latlng[0]],
-                    ],
-                },
-                "properties": {
-                    "type": "activity",
-                    "activity_id": activity.id,
-                },
-            })
+        if item.item_type == "activity":
+            activity = project.activity_by_id(item.activity_id)
+            if activity is None:
+                continue
+            if activity.start_latlng and activity.end_latlng:
+                features.append({
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [activity.start_latlng[1], activity.start_latlng[0]],
+                            [activity.end_latlng[1],   activity.end_latlng[0]],
+                        ],
+                    },
+                    "properties": {
+                        "type": "activity",
+                        "activity_id": activity.id,
+                    },
+                })
+        elif item.item_type == "segment" and item.segment is not None:
+            seg = item.segment
+            if seg.route_mode == "rail" and seg.route_polyline:
+                coords = json.loads(seg.route_polyline)
+            else:
+                pts = great_circle_points(
+                    seg.start.lat, seg.start.lon,
+                    seg.end.lat,   seg.end.lon,
+                    n_points=50,
+                )
+                coords = [[lon, lat] for lat, lon in pts]
+            if len(coords) >= 2:
+                features.append({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "properties": {
+                        "type": "segment",
+                        "segment_id": seg.id,
+                        "segment_type": seg.segment_type,
+                        "label": seg.label,
+                        "route_mode": seg.route_mode,
+                    },
+                })
     return {"type": "FeatureCollection", "features": features}
 
 

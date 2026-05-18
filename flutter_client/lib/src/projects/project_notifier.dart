@@ -10,12 +10,13 @@ import '../api/client.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import 'project_filter_mixin.dart';
+import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
 class ProjectNotifier extends ChangeNotifier
-    with ProjectFilterMixin, ProjectMemoryCrudMixin, ProjectSegmentCrudMixin {
+    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
 
   ProjectNotifier(this._service);
@@ -42,6 +43,12 @@ class ProjectNotifier extends ChangeNotifier
 
   /// The memory currently highlighted on the map/panel. Null = no selection.
   @override dynamic selectedMemoryId;
+
+  /// The journal entry currently highlighted on the map/panel. Null = no selection.
+  dynamic selectedJournalId;
+
+  /// Whether journal markers and list items are visible.
+  bool showJournals = true;
 
   /// The day currently selected in the activity panel ("YYYY-MM-DD" or null).
   @override String? selectedDay;
@@ -117,6 +124,7 @@ class ProjectNotifier extends ChangeNotifier
         selectedActivityId?.toString() == id?.toString() ? null : id;
     selectedSegmentId = null;
     selectedMemoryId = null;
+    selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
     notifyListeners();
@@ -127,6 +135,7 @@ class ProjectNotifier extends ChangeNotifier
         selectedSegmentId?.toString() == id?.toString() ? null : id;
     selectedActivityId = null;
     selectedMemoryId = null;
+    selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
     notifyListeners();
@@ -137,8 +146,25 @@ class ProjectNotifier extends ChangeNotifier
         selectedMemoryId?.toString() == id?.toString() ? null : id;
     selectedActivityId = null;
     selectedSegmentId = null;
+    selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
+    notifyListeners();
+  }
+
+  void selectJournal(dynamic id) {
+    selectedJournalId =
+        selectedJournalId?.toString() == id?.toString() ? null : id;
+    selectedActivityId = null;
+    selectedSegmentId = null;
+    selectedMemoryId = null;
+    selectedDay = null;
+    selectedDays = {};
+    notifyListeners();
+  }
+
+  void toggleJournals() {
+    showJournals = !showJournals;
     notifyListeners();
   }
 
@@ -327,8 +353,10 @@ class ProjectNotifier extends ChangeNotifier
             if (fullFeature != null) features[i] = fullFeature;
           }
         }
-        // Low-res geo never includes non-activity features (segments). Add them
-        // from fullGeo unless a concurrent CRUD operation already added some.
+        // Safety net: add any non-activity features (segments) from fullGeo that
+        // are absent from the current geo snapshot — e.g. if a CRUD operation
+        // occurred mid-load.  Low-res already includes segment arcs, so this
+        // block normally does nothing.
         final alreadyHasNonAct = features.any(
             (f) => f is Map && (f['properties'] as Map? ?? {})['activity_id'] == null);
         if (!alreadyHasNonAct) {

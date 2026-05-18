@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
 import 'day_meta_editor.dart';
+import 'journal_dialog.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
@@ -118,6 +119,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
   Set<String>?  _lastSelectedDays;
   bool?         _lastHasFilter;
   bool?         _lastMemoriesOnly;
+  bool?         _lastShowJournals;
 
   // Theme-derived styles cached in didChangeDependencies so copyWith is not
   // called on every build().
@@ -248,6 +250,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         if (d != null) lastDate = d;
       } else if (item['item_type'] == 'memory') {
         d = item['memory']?['date'] as String? ?? lastDate;
+      } else if (item['item_type'] == 'journal') {
+        d = item['journal']?['date'] as String? ?? lastDate;
       } else {
         d = item['segment']?['date'] as String? ?? lastDate;
       }
@@ -514,6 +518,88 @@ class _ActivityPanelState extends State<ActivityPanel> {
     showMemoryDetail(context, widget.notifier, mem);
   }
 
+  void _showAddItemSheet(
+    BuildContext context,
+    ProjectNotifier notifier, {
+    String? initialDate,
+    int? insertAfterIndex,
+  }) {
+    showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Memory'),
+              onTap: () {
+                Navigator.of(context).pop();
+                showDialog<void>(
+                  context: context,
+                  useRootNavigator: true,
+                  builder: (_) => MemoryDialog(
+                    notifier: notifier,
+                    initialDate: initialDate,
+                    insertAfterIndex: insertAfterIndex,
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.book_outlined),
+              title: const Text('Journal entry'),
+              onTap: () {
+                Navigator.of(context).pop();
+                showDialog<void>(
+                  context: context,
+                  useRootNavigator: true,
+                  builder: (_) => JournalDialog(
+                    notifier: notifier,
+                    initialDate: initialDate,
+                    insertAfterIndex: insertAfterIndex,
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.route_outlined),
+              title: const Text('Transportation'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _showSegmentDialog(
+                  context,
+                  notifier,
+                  insertAfterIndex: insertAfterIndex,
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _flyToJournal(Map<String, dynamic> jMap) {
+    widget.notifier.selectJournal(jMap['id']);
+    final lat = (jMap['lat'] as num?)?.toDouble();
+    final lon = (jMap['lon'] as num?)?.toDouble();
+    if (lat != null && lon != null) {
+      final target = LatLng(lat, lon);
+      final mc = widget.mapController;
+      if (mc != null && !mc.camera.visibleBounds.contains(target)) {
+        mc.move(target, mc.camera.zoom.clamp(8.0, 15.0));
+      }
+    }
+  }
+
+  List<Object> _removeJournals(List<Object> list) => [
+    for (final e in list)
+      if (e is _DayHeader || (e is _PanelItem && e.item['item_type'] != 'journal'))
+        e,
+  ];
+
   int? _lastOriginalIndexForDay(String dateKey) {
     int? last;
     for (final e in _displayList) {
@@ -554,6 +640,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
             d = (a?['start_date_local'] as String?)?.split('T').first;
           } else if (item['item_type'] == 'memory') {
             d = item['memory']?['date'] as String?;
+          } else if (item['item_type'] == 'journal') {
+            d = item['journal']?['date'] as String?;
           } else {
             d = item['segment']?['date'] as String?;
           }
@@ -669,6 +757,16 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 visualDensity: VisualDensity.compact,
                 onPressed: () => setState(() => _memoriesOnly = !_memoriesOnly),
               ),
+              IconButton(
+                icon: Icon(
+                  notifier.showJournals ? Icons.book : Icons.book_outlined,
+                  size: 20,
+                  color: notifier.showJournals ? theme.colorScheme.primary : null,
+                ),
+                tooltip: notifier.showJournals ? 'Hide journals' : 'Show journals',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => notifier.toggleJournals(),
+              ),
             ],
           ),
         ),
@@ -693,15 +791,18 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   if (!identical(_displayList, _cachedBaseList) ||
                       _lastHasFilter != hasFilter ||
                       !identical(_lastSelectedDays, selectedDays) ||
-                      _lastMemoriesOnly != _memoriesOnly) {
+                      _lastMemoriesOnly != _memoriesOnly ||
+                      _lastShowJournals != notifier.showJournals) {
                     var dl = _displayList;
                     if (hasFilter) dl = _applyDayFilter(dl, selectedDays);
                     if (_memoriesOnly) dl = _applyMemoriesFilter(dl);
+                    if (!notifier.showJournals) dl = _removeJournals(dl);
                     _cachedBaseList     = _displayList;
                     _cachedFilteredList = dl;
                     _lastHasFilter      = hasFilter;
                     _lastSelectedDays   = selectedDays;
                     _lastMemoriesOnly   = _memoriesOnly;
+                    _lastShowJournals   = notifier.showJournals;
                   }
                   final displayList = _cachedFilteredList!;
                   return ReorderableListView.builder(
@@ -879,19 +980,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ),
                                 ),
                               IconButton(
-                                icon: const Icon(
-                                    Icons.add_photo_alternate_outlined,
-                                    size: 16),
+                                icon: const Icon(Icons.add, size: 16),
                                 visualDensity: VisualDensity.compact,
-                                onPressed: () => showDialog(
-                                  context: context,
-                                  useRootNavigator: true,
-                                  builder: (_) => MemoryDialog(
-                                    notifier: notifier,
-                                    initialDate: h.dateKey,
-                                    insertAfterIndex:
-                                        _lastOriginalIndexForDay(h.dateKey),
-                                  ),
+                                onPressed: () => _showAddItemSheet(
+                                  context, notifier,
+                                  initialDate: h.dateKey,
+                                  insertAfterIndex:
+                                      _lastOriginalIndexForDay(h.dateKey),
                                 ),
                               ),
                             ]),
@@ -1092,6 +1187,64 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             onTap: _multiSelect ? null : () => _flyToMemory(mem),
                           ),
                         );
+                      } else if (item['item_type'] == 'journal') {
+                        final jMap = item['journal'] as Map<String, dynamic>? ?? {};
+                        final jId = jMap['id']?.toString() ?? '';
+                        final jDate = jMap['date'] as String?;
+                        final jTime = jMap['time'] as String?;
+                        final jDesc = jMap['description'] as String?;
+                        final label = jDate != null ? _fmtMemDate(jDate, jTime) : 'Journal';
+                        return Selector<ProjectNotifier, bool>(
+                          key: ValueKey('journal_$jId'),
+                          selector: (_, n) =>
+                              n.selectedJournalId?.toString() == jId,
+                          builder: (_, isSelected, __) => ListTile(
+                            dense: true,
+                            tileColor: isSelected
+                                ? const Color(0xFF64748B).withValues(alpha: 0.15)
+                                : null,
+                            leading: dragHandle,
+                            title: Row(children: [
+                              Container(
+                                width: 24,
+                                height: 24,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF64748B)
+                                      .withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Icon(Icons.book_outlined,
+                                    size: 14,
+                                    color: isSelected
+                                        ? const Color(0xFF44AAFF)
+                                        : const Color(0xFF64748B)),
+                              ),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(label,
+                                    style: theme.textTheme.labelMedium),
+                              ),
+                            ]),
+                            subtitle: jDesc != null && jDesc.isNotEmpty
+                                ? Text(jDesc,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall)
+                                : null,
+                            trailing: IconButton(
+                              icon: const Icon(Icons.edit_outlined, size: 18),
+                              onPressed: () => showDialog(
+                                context: context,
+                                useRootNavigator: true,
+                                builder: (_) => JournalDialog(
+                                    notifier: notifier, editEntry: jMap),
+                              ),
+                            ),
+                            onTap: _multiSelect
+                                ? null
+                                : () => _flyToJournal(jMap),
+                          ),
+                        );
                       } else {
                         // Segment item
                         final seg =
@@ -1204,12 +1357,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
               const SizedBox(width: 8),
               Expanded(
                 child: OutlinedButton.icon(
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 10),
-                  label: const Text('Add memory'),
-                  onPressed: () => showDialog(
-                    context: context,
-                    useRootNavigator: true,
-                    builder: (_) => MemoryDialog(notifier: notifier),
+                  icon: const Icon(Icons.add, size: 10),
+                  label: const Text('Add…'),
+                  onPressed: () => _showAddItemSheet(
+                    context, notifier,
+                    insertAfterIndex:
+                        items.isNotEmpty ? items.length - 1 : null,
                   ),
                 ),
               ),

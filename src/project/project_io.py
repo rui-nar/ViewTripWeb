@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict
 
 from src.models.activity import Activity
+from src.models.journal import JournalEntry
 from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
@@ -185,6 +186,18 @@ class ProjectIO:
                 "lat": mem.lat,
                 "lon": mem.lon,
             }
+        elif item.item_type == "journal" and item.journal is not None:
+            j = item.journal
+            d["journal"] = {
+                "id": j.id,
+                "date": j.date,
+                "time": j.time,
+                "description": j.description,
+                "photos": j.photos,
+                "geo_mode": j.geo_mode,
+                "lat": j.lat,
+                "lon": j.lon,
+            }
         else:
             seg = item.segment
             d["segment"] = {
@@ -227,6 +240,19 @@ class ProjectIO:
                 lon=md.get("lon"),
             )
             return ProjectItem(item_type="memory", memory=mem)
+        if d.get("item_type") == "journal":
+            jd = d.get("journal", {})
+            jentry = JournalEntry(
+                id=jd.get("id"),
+                date=jd.get("date", ""),
+                time=jd.get("time"),
+                description=jd.get("description"),
+                photos=jd.get("photos", []),
+                geo_mode=jd.get("geo_mode", "start_of_day"),
+                lat=jd.get("lat"),
+                lon=jd.get("lon"),
+            )
+            return ProjectItem(item_type="journal", journal=jentry)
         # segment
         sd = d.get("segment", {})
         seg = ConnectingSegment(

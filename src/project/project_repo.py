@@ -26,8 +26,9 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBMemory, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBProject, DBProjectItem
 from src.models.activity import Activity
+from src.models.journal import JournalEntry
 from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
@@ -221,6 +222,13 @@ class ProjectRepo:
         ).all()
         for mem in memories:
             sess.delete(mem)
+
+        # Delete journal entries (photos on disk are left — no user_id available here)
+        journals = sess.exec(
+            select(DBJournalEntry).where(DBJournalEntry.project_id == row.id)
+        ).all()
+        for jentry in journals:
+            sess.delete(jentry)
 
         sess.delete(row)
         sess.commit()
@@ -488,9 +496,16 @@ class ProjectRepo:
         ).all()
         memory_by_id = {mr.id: self._row_to_memory(mr) for mr in memory_rows}
 
+        # Load journal entry rows for this project
+        journal_rows = sess.exec(
+            select(DBJournalEntry).where(DBJournalEntry.project_id == row.id)
+        ).all()
+        journal_by_id = {jr.id: self._row_to_journal(jr) for jr in journal_rows}
+
         items: List[ProjectItem] = []
         activities: List[Activity] = []
         memories: List[Memory] = []
+        journal_entries: List[JournalEntry] = []
         seen_ids: set[int] = set()
 
         for ir in item_rows:
@@ -506,6 +521,11 @@ class ProjectRepo:
                 if mem:
                     items.append(ProjectItem(item_type="memory", memory=mem))
                     memories.append(mem)
+            elif ir.item_type == "journal" and ir.journal_id is not None:
+                jentry = journal_by_id.get(ir.journal_id)
+                if jentry:
+                    items.append(ProjectItem(item_type="journal", journal=jentry))
+                    journal_entries.append(jentry)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
@@ -549,6 +569,7 @@ class ProjectRepo:
             filter_state=filter_state,
             activities=activities,
             memories=memories,
+            journal_entries=journal_entries,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
@@ -581,6 +602,11 @@ class ProjectRepo:
                 memory_id=(
                     item.memory.id
                     if item.item_type == "memory" and item.memory is not None
+                    else None
+                ),
+                journal_id=(
+                    item.journal.id
+                    if item.item_type == "journal" and item.journal is not None
                     else None
                 ),
             )
@@ -657,6 +683,20 @@ class ProjectRepo:
             ),
         )
         sess.add(row)
+
+    @staticmethod
+    def _row_to_journal(row: DBJournalEntry) -> JournalEntry:
+        return JournalEntry(
+            id=row.id,
+            project_id=row.project_id,
+            date=row.date,
+            time=row.time,
+            description=row.description,
+            photos=json.loads(row.photos_json or "[]"),
+            geo_mode=row.geo_mode,
+            lat=row.lat,
+            lon=row.lon,
+        )
 
     @staticmethod
     def _row_to_memory(row: DBMemory) -> Memory:
