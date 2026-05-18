@@ -63,7 +63,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from sqlmodel import select
 
 from api.deps import get_optional_current_user
