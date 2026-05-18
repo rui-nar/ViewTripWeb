@@ -10,6 +10,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../api/client.dart' show api;
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -18,6 +19,77 @@ import 'project_notifier.dart';
 import 'project_service.dart';
 import 'sync_import_dialog.dart';
 import 'sync_import_notifier.dart';
+
+// ── Service — calls /api/projects/{name}/meta first, full details in background
+
+class _ViewProjectService extends ProjectService {
+  final String projectName;
+
+  /// Resolves with the full ~3 MB response (elevation_profile included).
+  /// Assigned by getDetails(); awaited by ViewProjectNotifier.loadView().
+  late Future<Map<String, dynamic>> fullDetailsFuture;
+
+  _ViewProjectService(this.projectName);
+
+  /// Fires GET /meta and GET / in parallel.  Returns meta quickly so
+  /// ProjectNotifier.load() can render the UI; stores the full-details
+  /// future for ViewProjectNotifier.loadView() to await for phase 2.
+  @override
+  Future<Map<String, dynamic>> getDetails(String name) async {
+    fullDetailsFuture = api.get('/api/projects/$name').then(
+      (data) => data as Map<String, dynamic>,
+    );
+    return await api.get('/api/projects/$name/meta') as Map<String, dynamic>;
+  }
+}
+
+// ── Notifier — progressive two-phase load ────────────────────────────────────
+
+class ViewProjectNotifier extends ProjectNotifier {
+  final _ViewProjectService _viewSvc;
+  bool _disposed = false;
+
+  ViewProjectNotifier._internal(_ViewProjectService svc)
+      : _viewSvc = svc,
+        super(svc);
+
+  factory ViewProjectNotifier(String projectName) {
+    final svc = _ViewProjectService(projectName);
+    return ViewProjectNotifier._internal(svc);
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  Future<void> loadView(String projectName) async {
+    isMetaLoaded = false;
+    isElevationLoaded = false;
+
+    // Phase 1: load() calls _viewSvc.getDetails() which returns the
+    // lightweight /meta response in ~1 s.  isLoading goes false after that.
+    await load(projectName);
+    if (_disposed) return;
+    isMetaLoaded = true;
+    notifyListeners(); // project name, map, activity panel visible
+
+    // Phase 2 (background): await the full ~3 MB response for elevation data.
+    try {
+      final fullDetails = await _viewSvc.fullDetailsFuture;
+      if (_disposed || currentLoadKey != projectName) return;
+      final rawActs = fullDetails['activities'];
+      if (rawActs is List) {
+        applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+      }
+      isElevationLoaded = true;
+      notifyListeners(); // elevation chart renders
+    } catch (_) {
+      // Non-fatal — elevation placeholder stays visible
+    }
+  }
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -28,7 +100,7 @@ class ViewScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) => ProjectNotifier(ProjectService()),
+      create: (_) => ViewProjectNotifier(projectName),
       child: _ViewBody(projectName: projectName),
     );
   }
@@ -49,7 +121,7 @@ class _ViewBodyState extends State<_ViewBody> {
   bool _autoZoom = false;
 
   void _openSyncDialog(BuildContext context) {
-    final notifier = context.read<ProjectNotifier>();
+    final notifier = context.read<ViewProjectNotifier>();
     final pending = notifier.pendingSync;
     if (pending == null) return;
     showDialog<void>(
@@ -65,7 +137,7 @@ class _ViewBodyState extends State<_ViewBody> {
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
-      notifier.load(widget.projectName);
+      notifier.loadView(widget.projectName);
     });
   }
 
@@ -73,7 +145,7 @@ class _ViewBodyState extends State<_ViewBody> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ProjectNotifier>().load(widget.projectName);
+      context.read<ViewProjectNotifier>().loadView(widget.projectName);
     });
   }
 
@@ -85,10 +157,10 @@ class _ViewBodyState extends State<_ViewBody> {
 
   @override
   Widget build(BuildContext context) {
-    final title = context.select<ProjectNotifier, String>(
+    final title = context.select<ViewProjectNotifier, String>(
       (n) => n.projectName ?? widget.projectName,
     );
-    final isLoading = context.select<ProjectNotifier, bool>((n) => n.isLoading);
+    final isLoading = context.select<ViewProjectNotifier, bool>((n) => n.isLoading);
 
     return Scaffold(
       appBar: AppBar(
@@ -125,7 +197,7 @@ class _ViewBodyState extends State<_ViewBody> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
           ),
-          Consumer<ProjectNotifier>(
+          Consumer<ViewProjectNotifier>(
             builder: (_, n, __) {
               final active = n.tagFilter.isNotEmpty;
               return IconButton(
@@ -163,8 +235,8 @@ class _ViewBodyState extends State<_ViewBody> {
             onPressed: isLoading ? null : () => context.push(
               '/stats?project=${Uri.encodeComponent(widget.projectName)}',
               extra: {
-                'tags': context.read<ProjectNotifier>().availableTags,
-                'groups': context.read<ProjectNotifier>().sleepingOptionGroups,
+                'tags': context.read<ViewProjectNotifier>().availableTags,
+                'groups': context.read<ViewProjectNotifier>().sleepingOptionGroups,
               },
             ),
           ),
@@ -184,11 +256,11 @@ class _ViewBodyState extends State<_ViewBody> {
       body: Column(
         children: [
           // ── Auto-sync banner ─────────────────────────────────────────────
-          Selector<ProjectNotifier, bool>(
+          Selector<ViewProjectNotifier, bool>(
             selector: (_, n) => n.pendingSync != null,
             builder: (context, hasSync, __) {
               if (!hasSync) return const SizedBox.shrink();
-              final n = context.read<ProjectNotifier>();
+              final n = context.read<ViewProjectNotifier>();
               final strava = n.pendingSync!.strava.length;
               final ps = n.pendingSync!.polarsteps.length;
               final parts = [
@@ -201,7 +273,7 @@ class _ViewBodyState extends State<_ViewBody> {
                 leading: const Icon(Icons.sync, size: 20),
                 actions: [
                   TextButton(
-                    onPressed: () => context.read<ProjectNotifier>().markSynced(),
+                    onPressed: () => context.read<ViewProjectNotifier>().markSynced(),
                     child: const Text('Later'),
                   ),
                   TextButton(
@@ -213,23 +285,23 @@ class _ViewBodyState extends State<_ViewBody> {
             },
           ),
           Expanded(
-            child: Consumer<ProjectNotifier>(
+            child: Consumer<ViewProjectNotifier>(
               builder: (context, notifier, _) {
-                if (notifier.isLoading && notifier.geo == null) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                if (notifier.error != null && notifier.geo == null) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text(
-                        notifier.error!,
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error),
-                        textAlign: TextAlign.center,
+                if (!notifier.isMetaLoaded && notifier.geo == null) {
+                  if (notifier.error != null) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          notifier.error!,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error),
+                          textAlign: TextAlign.center,
+                        ),
                       ),
-                    ),
-                  );
+                    );
+                  }
+                  return const Center(child: CircularProgressIndicator());
                 }
                 return _ViewLayout(
                   notifier: notifier,
@@ -245,10 +317,10 @@ class _ViewBodyState extends State<_ViewBody> {
   }
 }
 
-// ── Layout: map + elevation chart, no activity panel ─────────────────────────
+// ── Layout: map + elevation chart ─────────────────────────────────────────────
 
 class _ViewLayout extends StatelessWidget {
-  final ProjectNotifier notifier;
+  final ViewProjectNotifier notifier;
   final MapController mapController;
   final bool autoZoom;
 
@@ -261,17 +333,19 @@ class _ViewLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selActId = notifier.selectedActivityId;
-    final elevChart = ElevationChart(
-      activities: notifier.activities,
-      selectedActivityId: selActId,
-      onCursorChanged: (pos) =>
-          notifier.elevationCursorNotifier.value = pos,
-      mapCursorNotifier: notifier.mapCursorDistNotifier,
-      track: selActId != null
-          ? notifier.perActivityTracks[selActId.toString()] ??
-              notifier.fullTrack
-          : notifier.fullTrack,
-    );
+    final elevChart = notifier.isElevationLoaded
+        ? ElevationChart(
+            activities: notifier.activities,
+            selectedActivityId: selActId,
+            onCursorChanged: (pos) =>
+                notifier.elevationCursorNotifier.value = pos,
+            mapCursorNotifier: notifier.mapCursorDistNotifier,
+            track: selActId != null
+                ? notifier.perActivityTracks[selActId.toString()] ??
+                    notifier.fullTrack
+                : notifier.fullTrack,
+          )
+        : const ElevationLoadingPlaceholder();
 
     final mapPanel = MapPanel(
       notifier: notifier,

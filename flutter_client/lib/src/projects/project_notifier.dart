@@ -27,6 +27,12 @@ class ProjectNotifier extends ChangeNotifier
   bool isLoading = false;
   @override String? error;
 
+  /// Progressive-loading flags — default true so manage-mode screens that use
+  /// the base load() see no behaviour change.  Set to false at the start of
+  /// loadShared() / loadView() and flipped to true as each phase completes.
+  bool isMetaLoaded = true;
+  bool isElevationLoaded = true;
+
   /// The activity currently highlighted on the map. Null = no selection.
   @override dynamic selectedActivityId;
 
@@ -357,6 +363,25 @@ class ProjectNotifier extends ChangeNotifier
     totalMovingSeconds  = moving;
     totalElevationGainM = elev;
   }
+
+  /// Merges full activity data (with elevation_profile) returned by the
+  /// background full-details request into the already-rendered activity list,
+  /// then rebuilds tracks and notifies listeners.
+  /// Called by SharedProjectNotifier / ViewProjectNotifier after phase 2.
+  @protected
+  void applyFullActivities(List<Map<String, dynamic>> fullActivities) {
+    final byId = {for (final a in fullActivities) a['id']?.toString(): a};
+    activities = [
+      for (final a in activities) byId[a['id']?.toString()] ?? a,
+    ];
+    _updateStats();
+    _buildFullTrack();
+    notifyListeners();
+  }
+
+  /// Guard used by staged-loading subclasses to detect navigation away.
+  @protected
+  String? get currentLoadKey => _loadKey;
 
   /// Live arc preview while a SegmentDialog or LocationPickerDialog is open.
   /// Callers write directly to `.value` — updates don't trigger notifyListeners().

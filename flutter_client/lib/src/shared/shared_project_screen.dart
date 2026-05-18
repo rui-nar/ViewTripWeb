@@ -9,7 +9,7 @@ import 'package:provider/provider.dart';
 import '../api/client.dart' show api;
 import '../auth/auth_notifier.dart';
 import '../projects/basemaps.dart';
-import '../projects/elevation_chart.dart';
+import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingPlaceholder;
 import '../projects/map_panel.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
@@ -22,16 +22,30 @@ class _SharedProjectService extends ProjectService {
   final String? anonymousId;
   String ownerName = '';
 
+  /// Resolves with the full ~3 MB response (elevation_profile included).
+  /// Assigned by getDetails() when both requests are fired; awaited later by
+  /// SharedProjectNotifier.loadShared() for phase 2 elevation update.
+  late Future<Map<String, dynamic>> fullDetailsFuture;
+
   _SharedProjectService(this.token, {this.anonymousId});
 
   String get _aidParam =>
       anonymousId != null ? '?aid=${Uri.encodeComponent(anonymousId!)}' : '';
 
+  /// Fires GET /meta and GET / in parallel.  Returns the lightweight meta
+  /// quickly so ProjectNotifier.load() can render the UI; stores the full
+  /// details future for SharedProjectNotifier.loadShared() to await later.
   @override
   Future<Map<String, dynamic>> getDetails(String _) async {
-    final data = await api.get('/api/share/$token$_aidParam') as Map<String, dynamic>;
-    ownerName = (data['owner_name'] as String?) ?? '';
-    return data;
+    fullDetailsFuture = api.get('/api/share/$token$_aidParam').then((data) {
+      final m = data as Map<String, dynamic>;
+      ownerName = (m['owner_name'] as String?) ?? '';
+      return m;
+    });
+    final meta =
+        await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
+    ownerName = (meta['owner_name'] as String?) ?? '';
+    return meta;
   }
 
   @override
@@ -53,6 +67,7 @@ class SharedProjectNotifier extends ProjectNotifier {
   final String token;
   final _SharedProjectService _sharedSvc;
   String get ownerName => _sharedSvc.ownerName;
+  bool _disposed = false;
 
   @override
   bool get loadOwnerExtras => false;
@@ -77,7 +92,37 @@ class SharedProjectNotifier extends ProjectNotifier {
     return SharedProjectNotifier._internal(token, svc);
   }
 
-  Future<void> loadShared() => load(token);
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  Future<void> loadShared() async {
+    isMetaLoaded = false;
+    isElevationLoaded = false;
+
+    // Phase 1: load() calls _sharedSvc.getDetails() which returns the
+    // lightweight /meta response in ~1 s.  isLoading goes false after that.
+    await load(token);
+    if (_disposed) return;
+    isMetaLoaded = true;
+    notifyListeners(); // project name, activity list, memories now visible
+
+    // Phase 2 (background): await the full ~3 MB response for elevation data.
+    try {
+      final fullDetails = await _sharedSvc.fullDetailsFuture;
+      if (_disposed || currentLoadKey != token) return;
+      final rawActs = fullDetails['activities'];
+      if (rawActs is List) {
+        applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+      }
+      isElevationLoaded = true;
+      notifyListeners(); // elevation chart renders
+    } catch (_) {
+      // Non-fatal — elevation placeholder stays visible
+    }
+  }
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -188,80 +233,78 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
         children: [
           if (isAnonymous) _AnonBanner(token: widget.token),
           Expanded(
-            child: notifier.isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : notifier.error != null
+            child: !notifier.isMetaLoaded
+                ? (notifier.error != null
                     ? Center(
                         child: Padding(
                           padding: const EdgeInsets.all(24),
                           child: Text(
                             notifier.error!,
-                            style:
-                                TextStyle(color: theme.colorScheme.error),
+                            style: TextStyle(color: theme.colorScheme.error),
                             textAlign: TextAlign.center,
                           ),
                         ),
                       )
-                    : LayoutBuilder(
-                        builder: (context, constraints) {
-                          final wide = constraints.maxWidth >= 720;
-                          final mapPanel = MapPanel(
-                            notifier: pn,
-                            mapController: _mapController,
-                            basemapUrl: kActiveViewBasemapUrl,
-                            labelsUrl: kActiveViewLabelsOverlayUrl,
-                            basemapStyleUri: kActiveViewStyleUri,
-                          );
-                          final activityList =
-                              _ReadOnlyActivityList(notifier: pn);
-                          final selectedId = notifier.selectedActivityId;
-                          final elevChart = ElevationChart(
-                            activities: notifier.activities,
-                            selectedActivityId: selectedId,
-                            track: selectedId == null
-                                ? notifier.fullTrack
-                                : notifier.perActivityTracks[
-                                        selectedId.toString()] ??
-                                    notifier.fullTrack,
-                            onCursorChanged: (pos) =>
-                                notifier.elevationCursorNotifier.value = pos,
-                            mapCursorNotifier:
-                                notifier.mapCursorDistNotifier,
-                          );
+                    : const Center(child: CircularProgressIndicator()))
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final wide = constraints.maxWidth >= 720;
+                      final mapPanel = MapPanel(
+                        notifier: pn,
+                        mapController: _mapController,
+                        basemapUrl: kActiveViewBasemapUrl,
+                        labelsUrl: kActiveViewLabelsOverlayUrl,
+                        basemapStyleUri: kActiveViewStyleUri,
+                      );
+                      final activityList = _ReadOnlyActivityList(notifier: pn);
+                      final selectedId = notifier.selectedActivityId;
+                      final elevChart = notifier.isElevationLoaded
+                          ? ElevationChart(
+                              activities: notifier.activities,
+                              selectedActivityId: selectedId,
+                              track: selectedId == null
+                                  ? notifier.fullTrack
+                                  : notifier.perActivityTracks[
+                                          selectedId.toString()] ??
+                                      notifier.fullTrack,
+                              onCursorChanged: (pos) =>
+                                  notifier.elevationCursorNotifier.value = pos,
+                              mapCursorNotifier: notifier.mapCursorDistNotifier,
+                            )
+                          : const ElevationLoadingPlaceholder();
 
-                          if (wide) {
-                            return Row(
-                              children: [
-                                SizedBox(
-                                    width: 260, child: activityList),
-                                Expanded(
-                                  child: Column(
-                                    children: [
-                                      Expanded(child: mapPanel),
-                                      elevChart,
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            );
-                          } else {
-                            return Column(
-                              children: [
-                                Expanded(child: mapPanel),
-                                SizedBox(
-                                  height: constraints.maxHeight * 0.4,
-                                  child: Column(
-                                    children: [
-                                      Expanded(child: activityList),
-                                      elevChart,
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            );
-                          }
-                        },
-                      ),
+                      if (wide) {
+                        return Row(
+                          children: [
+                            SizedBox(width: 260, child: activityList),
+                            Expanded(
+                              child: Column(
+                                children: [
+                                  Expanded(child: mapPanel),
+                                  elevChart,
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                      } else {
+                        return Column(
+                          children: [
+                            Expanded(child: mapPanel),
+                            SizedBox(
+                              height: constraints.maxHeight * 0.4,
+                              child: Column(
+                                children: [
+                                  Expanded(child: activityList),
+                                  elevChart,
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                    },
+                  ),
           ),
         ],
       ),

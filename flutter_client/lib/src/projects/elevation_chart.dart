@@ -257,3 +257,29 @@ class _ElevationChartState extends State<ElevationChart> {
     );
   }
 }
+
+/// Drop-in replacement for [ElevationChart] shown while elevation data is
+/// loading in the background.  Must match ElevationChart's preferred height
+/// so the layout does not jump when the real chart replaces it.
+class ElevationLoadingPlaceholder extends StatelessWidget {
+  const ElevationLoadingPlaceholder({super.key});
+
+  @override
+  Widget build(BuildContext context) => const SizedBox(
+    height: 160,
+    child: Center(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          SizedBox(width: 10),
+          Text('Loading elevation data…'),
+        ],
+      ),
+    ),
+  );
+}

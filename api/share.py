@@ -2,6 +2,7 @@
 
 Routes:
     GET /api/share/{token}                                     — project details for a shared link
+    GET /api/share/{token}/meta                                — lightweight details (no elevation/polylines)
     GET /api/share/{token}/geo                                 — GeoJSON for a shared project
     GET /api/share/{token}/tiles/{z}/{x}/{y}.png               — raster track tile (cached)
     GET /api/share/{token}/photos/{memory_id}/{uuid}/thumb     — memory photo thumbnail (no auth)
@@ -52,12 +53,14 @@ class _TTLCache:
 # Keyed by share token.  TTL is intentionally short so edits propagate quickly.
 _project_cache: _TTLCache = _TTLCache(ttl=60.0)
 _details_cache: _TTLCache = _TTLCache(ttl=60.0)
+_meta_cache: _TTLCache = _TTLCache(ttl=60.0)
 
 
 def invalidate_share_cache(token: str) -> None:
     """Evict all cached entries for *token*. Call after any project mutation."""
     _project_cache.delete(token)
     _details_cache.delete(token)
+    _meta_cache.delete(token)
 
 import polyline as polyline_lib
 from models.db import get_session
@@ -206,6 +209,48 @@ def shared_project(
         _details_cache.set(token, result)
         cached_result = result
     return cached_result
+
+
+@router.get("/{token}/meta")
+def shared_project_meta(
+    token: str,
+    aid: Optional[str] = Query(default=None),
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    """Same shape as GET /{token} but with elevation_profile and map.summary_polyline
+    stripped from each activity (~30-60 KB vs ~3 MB).  Used by the Flutter client for
+    fast initial render before the full payload arrives in the background.
+    """
+    project, token_type, project_id, owner_uid = _get_project_and_type(token)
+    _record_visit(project_id, token_type, aid, current_user)
+
+    cached = _meta_cache.get(token)
+    if cached is not None:
+        return cached
+
+    # Reuse _details_cache if already warm; otherwise build and cache it.
+    full = _details_cache.get(token)
+    if full is None:
+        full = _repo.to_dict(project)
+        if token_type == "no_memories":
+            full["items"] = [
+                item for item in (full.get("items") or [])
+                if item.get("item_type") != "memory"
+            ]
+        with get_session() as sess:
+            owner = sess.exec(
+                select(UserInfo).where(UserInfo.id == owner_uid)
+            ).first()
+        full["owner_name"] = owner.display_name if owner else ""
+        _details_cache.set(token, full)
+
+    result = dict(full)
+    result["activities"] = [
+        {**act, "elevation_profile": None, "map": {"summary_polyline": None}}
+        for act in (full.get("activities") or [])
+    ]
+    _meta_cache.set(token, result)
+    return result
 
 
 def _build_features(project) -> List[Dict[str, Any]]:
