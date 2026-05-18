@@ -262,23 +262,19 @@ def get_project_meta(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """Same shape as GET /{name} but with elevation_profile and map.summary_polyline
-    stripped from each activity (~30-60 KB vs ~3 MB).  Used by the Flutter client for
-    fast initial render before the full payload arrives in the background.
+    absent from each activity.  Uses lightweight loading (deferred heavy columns) so
+    cold-cache response time is under 1 s even on spinning-disk NAS storage.
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
             legacy_path=_legacy_path(current_user["sub"], name),
+            include_heavy=False,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    full = _repo.to_dict(project)
-    full["activities"] = [
-        {**act, "elevation_profile": None, "map": {"summary_polyline": None}}
-        for act in (full.get("activities") or [])
-    ]
-    return full
+    return _repo.to_dict(project)
 
 
 @router.get("/{name}/stats")

@@ -20,6 +20,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from models.db import get_session
+from sqlalchemy.orm import defer as _sa_defer
 from sqlmodel import Session, select
 
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
@@ -73,12 +74,16 @@ class ProjectRepo:
         user_info_id: int,
         name: str,
         legacy_path: Optional[str] = None,
+        include_heavy: bool = True,
     ) -> Optional[Project]:
         """Load a project from DB.
 
         If no DB row exists and *legacy_path* points to a ``.viewtrip`` or ``.gettracks`` file,
         the file is ingested into the DB first (lazy migration).
         Returns ``None`` if neither DB row nor legacy file exists.
+
+        include_heavy=False defers summary_polyline and elevation_profile_json (see
+        _row_to_project for details).  The legacy-ingest path always uses full loading.
         """
         row = sess.exec(
             select(DBProject).where(
@@ -100,7 +105,7 @@ class ProjectRepo:
             if row is None:
                 return None
 
-        return self._row_to_project(sess, row)
+        return self._row_to_project(sess, row, include_heavy=include_heavy)
 
     def get_project_by_id(self, sess: Session, project_id: int) -> Optional[Project]:
         """Load a project directly by its primary key (used for shared-link access)."""
@@ -108,6 +113,20 @@ class ProjectRepo:
         if row is None:
             return None
         return self._row_to_project(sess, row)
+
+    def get_project_by_id_meta(self, sess: Session, project_id: int) -> Optional[Project]:
+        """Like get_project_by_id but defers summary_polyline and elevation_profile_json.
+
+        SQLite must read overflow pages for large TEXT columns even when the value
+        is not used in Python.  Deferring those two columns keeps the SELECT result
+        small and avoids hundreds of random disk reads on a NAS — cold meta load
+        drops from ~19 s to under 1 s on spinning-disk NAS storage.
+        Activities returned have summary_polyline=None and elevation_profile=None.
+        """
+        row = sess.get(DBProject, project_id)
+        if row is None:
+            return None
+        return self._row_to_project(sess, row, include_heavy=False)
 
     def create_project(self, sess: Session, user_info_id: int, name: str) -> Project:
         """Create an empty project in the DB and return it."""
@@ -429,8 +448,13 @@ class ProjectRepo:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _row_to_project(self, sess: Session, row: DBProject) -> Project:
-        """Reconstruct an in-memory Project from DB rows."""
+    def _row_to_project(self, sess: Session, row: DBProject, include_heavy: bool = True) -> Project:
+        """Reconstruct an in-memory Project from DB rows.
+
+        include_heavy=False defers summary_polyline and elevation_profile_json from
+        the SQL query, avoiding overflow-page reads on large activities.  Activities
+        will have summary_polyline=None and elevation_profile=None.
+        """
         fs_raw = json.loads(row.filter_state_json or "{}")
         filter_state = ProjectFilterState(
             start_date=fs_raw.get("start_date"),
@@ -449,13 +473,14 @@ class ProjectRepo:
             r.activity_id for r in item_rows
             if r.item_type == "activity" and r.activity_id is not None
         ]
-        act_rows = (
-            sess.exec(
-                select(DBActivity).where(DBActivity.id.in_(activity_ids))
-            ).all()
-            if activity_ids else []
-        )
-        act_by_id = {r.id: self._row_to_activity(r) for r in act_rows}
+        _act_query = select(DBActivity).where(DBActivity.id.in_(activity_ids))
+        if not include_heavy:
+            _act_query = _act_query.options(
+                _sa_defer(DBActivity.summary_polyline),
+                _sa_defer(DBActivity.elevation_profile_json),
+            )
+        act_rows = sess.exec(_act_query).all() if activity_ids else []
+        act_by_id = {r.id: self._row_to_activity(r, include_heavy=include_heavy) for r in act_rows}
 
         # Load memory rows for this project
         memory_rows = sess.exec(
@@ -649,8 +674,13 @@ class ProjectRepo:
         )
 
     @staticmethod
-    def _row_to_activity(row: DBActivity) -> Activity:
-        """Reconstruct the domain Activity dataclass from a DB row."""
+    def _row_to_activity(row: DBActivity, include_heavy: bool = True) -> Activity:
+        """Reconstruct the domain Activity dataclass from a DB row.
+
+        include_heavy=False skips accessing deferred columns summary_polyline and
+        elevation_profile_json (both returned as None).  The caller must have queried
+        with those columns deferred so that no lazy-load round-trip is triggered.
+        """
         from datetime import datetime
 
         def _dt(s: str) -> datetime:
@@ -694,13 +724,13 @@ class ProjectRepo:
             elev_low=row.elev_low,
             start_latlng=json.loads(row.start_latlng_json) if row.start_latlng_json else None,
             end_latlng=json.loads(row.end_latlng_json) if row.end_latlng_json else None,
-            summary_polyline=row.summary_polyline,
+            summary_polyline=row.summary_polyline if include_heavy else None,
             elevation_profile=(
                 (
                     ep["distances_km"],
                     ep["elevations_m"],
                 )
-                if (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
+                if include_heavy and (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
                 else None
             ),
         )
