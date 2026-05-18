@@ -260,6 +260,7 @@ class _MapPanelState extends State<MapPanel> {
     bool hasSelection,
     BuildContext context,
   ) {
+    if (!widget.notifier.isGeoLoaded) return [];
     final markers = <Marker>[];
     final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {
@@ -723,6 +724,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     bool hasSelection,
     BuildContext context,
   ) {
+    if (!widget.notifier.isGeoLoaded) return [];
     final markers = <Marker>[];
     final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {

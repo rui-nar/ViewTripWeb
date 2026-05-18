@@ -25,25 +25,22 @@ import 'sync_import_notifier.dart';
 class _ViewProjectService extends ProjectService {
   final String projectName;
 
-  /// Resolves with the full ~3 MB response (elevation_profile included).
-  /// Assigned by getDetails(); awaited by ViewProjectNotifier.loadView().
-  late Future<Map<String, dynamic>> fullDetailsFuture;
-
   _ViewProjectService(this.projectName);
 
-  /// Fires GET /meta and GET / in parallel.  Returns meta quickly so
-  /// ProjectNotifier.load() can render the UI; stores the full-details
-  /// future for ViewProjectNotifier.loadView() to await for phase 2.
-  ///
-  /// Meta is awaited before fullDetailsFuture is fired — same bandwidth
-  /// isolation rationale as _SharedProjectService.getDetails().
+  /// Returns the lightweight /meta response so load() can render the UI quickly.
+  /// Full details are fetched separately via fetchFullDetails() after load()
+  /// returns, giving meta exclusive NAS uplink bandwidth.
   @override
   Future<Map<String, dynamic>> getDetails(String name) async {
     final meta = await api.get('/api/projects/$name/meta') as Map<String, dynamic>;
-    fullDetailsFuture = api.get('/api/projects/$name').then(
-      (data) => data as Map<String, dynamic>,
-    );
     return meta;
+  }
+
+  /// Fetches the full ~3 MB response (elevation_profile included).
+  /// Called by ViewProjectNotifier.loadView() after load() has returned.
+  Future<Map<String, dynamic>> fetchFullDetails(String name) async {
+    final data = await api.get('/api/projects/$name');
+    return data as Map<String, dynamic>;
   }
 }
 
@@ -71,6 +68,7 @@ class ViewProjectNotifier extends ProjectNotifier {
   Future<void> loadView(String projectName) async {
     isMetaLoaded = false;
     isElevationLoaded = false;
+    isGeoLoaded = false;
 
     // Phase 1: load() calls _viewSvc.getDetails() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
@@ -79,9 +77,10 @@ class ViewProjectNotifier extends ProjectNotifier {
     isMetaLoaded = true;
     notifyListeners(); // project name, map, activity panel visible
 
-    // Phase 2 (background): await the full ~3 MB response for elevation data.
+    // Phase 2 (background): fetch full ~3 MB response for elevation data.
+    // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
-      final fullDetails = await _viewSvc.fullDetailsFuture;
+      final fullDetails = await _viewSvc.fetchFullDetails(projectName);
       if (_disposed || currentLoadKey != projectName) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {

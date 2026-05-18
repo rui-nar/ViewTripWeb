@@ -22,34 +22,30 @@ class _SharedProjectService extends ProjectService {
   final String? anonymousId;
   String ownerName = '';
 
-  /// Resolves with the full ~3 MB response (elevation_profile included).
-  /// Assigned by getDetails() when both requests are fired; awaited later by
-  /// SharedProjectNotifier.loadShared() for phase 2 elevation update.
-  late Future<Map<String, dynamic>> fullDetailsFuture;
-
   _SharedProjectService(this.token, {this.anonymousId});
 
   String get _aidParam =>
       anonymousId != null ? '?aid=${Uri.encodeComponent(anonymousId!)}' : '';
 
-  /// Fires GET /meta and GET / in parallel.  Returns the lightweight meta
-  /// quickly so ProjectNotifier.load() can render the UI; stores the full
-  /// details future for SharedProjectNotifier.loadShared() to await later.
-  ///
-  /// Meta is awaited before fullDetailsFuture is fired so the lightweight
-  /// response gets exclusive NAS uplink bandwidth (~363 KB at ~140 KB/s =
-  /// ~2.6 s warm) instead of competing with the 3 MB full-details response.
+  /// Returns the lightweight /meta response (~363 KB) so load() can render
+  /// the UI quickly.  Full details are fetched separately via fetchFullDetails()
+  /// after load() returns, giving meta exclusive NAS uplink bandwidth.
   @override
   Future<Map<String, dynamic>> getDetails(String _) async {
     final meta =
         await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
     ownerName = (meta['owner_name'] as String?) ?? '';
-    fullDetailsFuture = api.get('/api/share/$token$_aidParam').then((data) {
-      final m = data as Map<String, dynamic>;
-      ownerName = (m['owner_name'] as String?) ?? '';
-      return m;
-    });
     return meta;
+  }
+
+  /// Fetches the full ~3 MB response (elevation_profile included).
+  /// Called by SharedProjectNotifier.loadShared() after load() has returned,
+  /// so meta gets exclusive bandwidth before this request fires.
+  Future<Map<String, dynamic>> fetchFullDetails() async {
+    final data = await api.get('/api/share/$token$_aidParam');
+    final m = data as Map<String, dynamic>;
+    ownerName = (m['owner_name'] as String?) ?? '';
+    return m;
   }
 
   @override
@@ -105,6 +101,7 @@ class SharedProjectNotifier extends ProjectNotifier {
   Future<void> loadShared() async {
     isMetaLoaded = false;
     isElevationLoaded = false;
+    isGeoLoaded = false;
 
     // Phase 1: load() calls _sharedSvc.getDetails() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
@@ -113,9 +110,10 @@ class SharedProjectNotifier extends ProjectNotifier {
     isMetaLoaded = true;
     notifyListeners(); // project name, activity list, memories now visible
 
-    // Phase 2 (background): await the full ~3 MB response for elevation data.
+    // Phase 2 (background): fetch the full ~3 MB response for elevation data.
+    // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
-      final fullDetails = await _sharedSvc.fullDetailsFuture;
+      final fullDetails = await _sharedSvc.fetchFullDetails();
       if (_disposed || currentLoadKey != token) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {

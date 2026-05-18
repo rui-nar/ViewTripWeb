@@ -32,6 +32,7 @@ class ProjectNotifier extends ChangeNotifier
   /// loadShared() / loadView() and flipped to true as each phase completes.
   bool isMetaLoaded = true;
   bool isElevationLoaded = true;
+  bool isGeoLoaded = true;
 
   /// The activity currently highlighted on the map. Null = no selection.
   @override dynamic selectedActivityId;
@@ -342,6 +343,7 @@ class ProjectNotifier extends ChangeNotifier
         geo = fullGeo;
       }
       _buildFullTrack();
+      isGeoLoaded = true;
       notifyListeners();
     } on Exception catch (e) {
       // Non-fatal — low-res map is still shown
