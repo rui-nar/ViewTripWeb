@@ -645,6 +645,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
+  bool _showMemories = true;
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
   // Track-style cache fields.
@@ -1204,7 +1205,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               ),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
-            if (_cachedMemoryMarkers.isNotEmpty)
+            if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedMemoryMarkers),
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
@@ -1247,6 +1248,30 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         ),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
+        if (_cachedMemoryMarkers.isNotEmpty)
+          Positioned(
+            top: 12,
+            left: 12,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Memories',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.white,
+                  ),
+                ),
+                Transform.scale(
+                  scale: 0.7,
+                  child: Switch(
+                    value: _showMemories,
+                    onChanged: (v) => setState(() => _showMemories = v),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
