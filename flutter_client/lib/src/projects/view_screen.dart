@@ -34,12 +34,16 @@ class _ViewProjectService extends ProjectService {
   /// Fires GET /meta and GET / in parallel.  Returns meta quickly so
   /// ProjectNotifier.load() can render the UI; stores the full-details
   /// future for ViewProjectNotifier.loadView() to await for phase 2.
+  ///
+  /// Meta is awaited before fullDetailsFuture is fired — same bandwidth
+  /// isolation rationale as _SharedProjectService.getDetails().
   @override
   Future<Map<String, dynamic>> getDetails(String name) async {
+    final meta = await api.get('/api/projects/$name/meta') as Map<String, dynamic>;
     fullDetailsFuture = api.get('/api/projects/$name').then(
       (data) => data as Map<String, dynamic>,
     );
-    return await api.get('/api/projects/$name/meta') as Map<String, dynamic>;
+    return meta;
   }
 }
 

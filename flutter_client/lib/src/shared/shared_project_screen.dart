@@ -35,16 +35,20 @@ class _SharedProjectService extends ProjectService {
   /// Fires GET /meta and GET / in parallel.  Returns the lightweight meta
   /// quickly so ProjectNotifier.load() can render the UI; stores the full
   /// details future for SharedProjectNotifier.loadShared() to await later.
+  ///
+  /// Meta is awaited before fullDetailsFuture is fired so the lightweight
+  /// response gets exclusive NAS uplink bandwidth (~363 KB at ~140 KB/s =
+  /// ~2.6 s warm) instead of competing with the 3 MB full-details response.
   @override
   Future<Map<String, dynamic>> getDetails(String _) async {
+    final meta =
+        await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
+    ownerName = (meta['owner_name'] as String?) ?? '';
     fullDetailsFuture = api.get('/api/share/$token$_aidParam').then((data) {
       final m = data as Map<String, dynamic>;
       ownerName = (m['owner_name'] as String?) ?? '';
       return m;
     });
-    final meta =
-        await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
-    ownerName = (meta['owner_name'] as String?) ?? '';
     return meta;
   }
 
