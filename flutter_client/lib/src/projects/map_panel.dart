@@ -587,10 +587,13 @@ class _MapPanelState extends State<MapPanel> {
                     color: Colors.white,
                   ),
                 ),
-                Switch(
-                  value: _showMemories,
-                  onChanged: (v) => setState(() => _showMemories = v),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                Transform.scale(
+                  scale: 0.7, // Adjust this value to set the size
+                  child: Switch(
+                    value: _showMemories,
+                    onChanged: (v) => setState(() => _showMemories = v),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
                 ),
               ],
             ),
