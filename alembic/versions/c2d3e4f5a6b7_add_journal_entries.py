@@ -35,9 +35,16 @@ def upgrade() -> None:
     op.create_index(op.f('ix_journalentry_date'), 'journalentry', ['date'], unique=False)
     op.create_index(op.f('ix_journalentry_project_id'), 'journalentry', ['project_id'], unique=False)
     op.add_column('projectitem', sa.Column('journal_id', sa.Integer(), nullable=True))
+    with op.batch_alter_table('projectitem', schema=None) as batch_op:
+        batch_op.create_foreign_key(
+            'fk_projectitem_journal_id_journalentry',
+            'journalentry', ['journal_id'], ['id'],
+        )
 
 
 def downgrade() -> None:
+    with op.batch_alter_table('projectitem', schema=None) as batch_op:
+        batch_op.drop_constraint('fk_projectitem_journal_id_journalentry', type_='foreignkey')
     op.drop_column('projectitem', 'journal_id')
     op.drop_index(op.f('ix_journalentry_project_id'), table_name='journalentry')
     op.drop_index(op.f('ix_journalentry_date'), table_name='journalentry')
