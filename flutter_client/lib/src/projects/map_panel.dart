@@ -582,20 +582,21 @@ class _MapPanelState extends State<MapPanel> {
               color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.9),
               borderRadius: BorderRadius.circular(8),
               elevation: 2,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(8),
-                onTap: () => setState(() => _showMemories = !_showMemories),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Icon(
-                    _showMemories
-                        ? Icons.photo_camera
-                        : Icons.photo_camera_outlined,
-                    size: 20,
-                    color: _showMemories
-                        ? Theme.of(context).colorScheme.primary
-                        : Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Memories',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Switch(
+                      value: _showMemories,
+                      onChanged: (v) => setState(() => _showMemories = v),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ],
                 ),
               ),
             ),
