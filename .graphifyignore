@@ -1,0 +1,43 @@
+# Compiled / generated output
+web_client/
+flutter_client/build/
+flutter_client/.dart_tool/
+flutter_client/android/
+flutter_client/ios/
+flutter_client/linux/
+flutter_client/macos/
+flutter_client/windows/
+flutter_client/web/
+
+# Reflex/React frontend (JS, node_modules)
+.web/
+
+# Python virtualenv and caches
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+
+# Graphify own output (avoid circular ingestion)
+graphify-out/
+src/graphify-out/
+api/graphify-out/
+
+# Static assets and non-code
+assets/
+docs/
+uploaded_files/
+data/
+
+# IDE and tooling config
+.vscode/
+.idea/
+.github/
+.claude/
+.states/
+
+# Misc
+*.db
+*.db-shm
+*.db-wal
