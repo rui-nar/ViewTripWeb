@@ -903,6 +903,8 @@ def add_activities(
         added = project.add_activities(activities)
         _repo.save_project(sess, user_info_id, project)
 
+    bust_geo_cache(user_info_id, name)
+
     if pending:
         pending_ids = [a.id for a in pending if a.id is not None]
         background_tasks.add_task(
