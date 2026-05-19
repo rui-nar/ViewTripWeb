@@ -507,6 +507,8 @@ class ProjectRepo:
         memories: List[Memory] = []
         journal_entries: List[JournalEntry] = []
         seen_ids: set[int] = set()
+        seen_memory_ids: set[int] = set()
+        seen_journal_ids: set[int] = set()
 
         for ir in item_rows:
             if ir.item_type == "activity" and ir.activity_id is not None:
@@ -517,15 +519,21 @@ class ProjectRepo:
                         activities.append(act)
                         seen_ids.add(ir.activity_id)
             elif ir.item_type == "memory" and ir.memory_id is not None:
+                if ir.memory_id in seen_memory_ids:
+                    continue  # deduplicate stale duplicate rows
                 mem = memory_by_id.get(ir.memory_id)
                 if mem:
                     items.append(ProjectItem(item_type="memory", memory=mem))
                     memories.append(mem)
+                    seen_memory_ids.add(ir.memory_id)
             elif ir.item_type == "journal" and ir.journal_id is not None:
+                if ir.journal_id in seen_journal_ids:
+                    continue  # deduplicate stale duplicate rows
                 jentry = journal_by_id.get(ir.journal_id)
                 if jentry:
                     items.append(ProjectItem(item_type="journal", journal=jentry))
                     journal_entries.append(jentry)
+                    seen_journal_ids.add(ir.journal_id)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))

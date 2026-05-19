@@ -259,13 +259,13 @@ def delete_memory(
             except OSError:
                 pass
 
-        # Remove the DBProjectItem
-        item_row = sess.exec(
+        # Remove all DBProjectItem rows for this memory (guards against stale duplicates)
+        item_rows = sess.exec(
             select(DBProjectItem).where(
                 DBProjectItem.memory_id == memory_id
             )
-        ).first()
-        if item_row:
+        ).all()
+        for item_row in item_rows:
             sess.delete(item_row)
 
         sess.delete(mem_row)
