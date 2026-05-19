@@ -625,10 +625,15 @@ class ProjectRepo:
             return
         existing = sess.get(DBActivity, act.id)
         if existing is not None:
-            # Only update mutable user-visible fields; preserve enrichment columns
+            # Update mutable user-visible fields always.
             existing.name = act.name
             existing.kudos_count = act.kudos_count
             existing.achievement_count = act.achievement_count
+            # If the stored polyline is null but the incoming one is not, take
+            # the incoming value — the user may have fixed their Strava map
+            # privacy and re-synced, or the first sync happened to return null.
+            if existing.summary_polyline is None and act.summary_polyline:
+                existing.summary_polyline = act.summary_polyline
             return
 
         def _iso(dt) -> str:
