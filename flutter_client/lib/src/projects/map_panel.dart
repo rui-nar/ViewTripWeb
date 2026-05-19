@@ -10,6 +10,7 @@ import 'package:vector_map_tiles/vector_map_tiles.dart';
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'marker_icons.dart';
 import 'memory_detail_modal.dart';
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
@@ -264,7 +265,6 @@ class _MapPanelState extends State<MapPanel> {
     BuildContext context,
   ) {
     final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {
       if (item['item_type'] != 'memory') continue;
       final mem = item['memory'] as Map<String, dynamic>?;
@@ -273,48 +273,21 @@ class _MapPanelState extends State<MapPanel> {
       final lon = (mem['lon'] as num?)?.toDouble();
       if (lat == null || lon == null) continue;
       final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
       final isSelected = selectedMemoryId?.toString() == memId;
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFFEA580C)
-          : hasSelection
-              ? const Color(0xA0F97316)
-              : const Color(0xFFF97316);
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: Image.network(
-            thumbUrl,
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
-            headers: authHeaders,
-            errorBuilder: (_, __, ___) =>
-                Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white),
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
+      final isDimmed = hasSelection && !isSelected;
+      final w = isSelected ? 60.0 : 48.0;
+      final h = isSelected ? 68.0 : 55.0;
       markers.add(Marker(
         point: LatLng(lat, lon),
-        width: size,
-        height: size,
+        width: w,
+        height: h,
+        alignment: Alignment.bottomCenter,
         child: GestureDetector(
           onTap: () {
             widget.notifier.selectMemory(mem['id']);
             showMemoryDetail(context, widget.notifier, mem, readOnly: true);
           },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: Center(child: inner),
-          ),
+          child: MemoryMapMarker(isSelected: isSelected, isDimmed: isDimmed),
         ),
       ));
     }
@@ -337,28 +310,17 @@ class _MapPanelState extends State<MapPanel> {
       if (lat == null || lon == null) continue;
       final jId = j['id']?.toString() ?? '';
       final isSelected = selectedJournalId?.toString() == jId;
-      const size = 22.0;
-      final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
-          : hasSelection
-              ? const Color(0xA064748B)
-              : const Color(0xFF64748B);
+      final isDimmed = hasSelection && !isSelected;
+      final w = isSelected ? 50.0 : 38.0;
+      final h = isSelected ? 56.0 : 43.0;
       markers.add(Marker(
         point: LatLng(lat, lon),
-        width: size,
-        height: size,
+        width: w,
+        height: h,
+        alignment: Alignment.bottomCenter,
         child: GestureDetector(
           onTap: () => widget.notifier.selectJournal(j['id']),
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: const Center(
-              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
-            ),
-          ),
+          child: JournalMapMarker(isSelected: isSelected, isDimmed: isDimmed),
         ),
       ));
     }
@@ -784,7 +746,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     BuildContext context,
   ) {
     final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
     for (final item in items) {
       if (item['item_type'] != 'memory') continue;
       final mem = item['memory'] as Map<String, dynamic>?;
@@ -793,52 +754,21 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final lon = (mem['lon'] as num?)?.toDouble();
       if (lat == null || lon == null) continue;
       final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
       final isSelected = selectedMemoryId?.toString() == memId;
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFFEA580C)
-          : hasSelection
-              ? const Color(0xA0F97316)
-              : const Color(0xFFF97316);
-
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: Image.network(
-            thumbUrl,
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
-            headers: authHeaders,
-            errorBuilder: (_, __, ___) => Icon(Icons.photo_camera,
-                size: size * 0.45, color: Colors.white),
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
-
+      final isDimmed = hasSelection && !isSelected;
+      final w = isSelected ? 60.0 : 48.0;
+      final h = isSelected ? 68.0 : 55.0;
       markers.add(Marker(
         point: LatLng(lat, lon),
-        width: size,
-        height: size,
+        width: w,
+        height: h,
+        alignment: Alignment.bottomCenter,
         child: GestureDetector(
           onTap: () {
             widget.notifier.selectMemory(mem['id']);
             showMemoryDetail(context, widget.notifier, mem);
           },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected
-                  ? Border.all(color: Colors.white, width: 2)
-                  : null,
-            ),
-            child: Center(child: inner),
-          ),
+          child: MemoryMapMarker(isSelected: isSelected, isDimmed: isDimmed),
         ),
       ));
     }
@@ -861,28 +791,17 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       if (lat == null || lon == null) continue;
       final jId = j['id']?.toString() ?? '';
       final isSelected = selectedJournalId?.toString() == jId;
-      const size = 22.0;
-      final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
-          : hasSelection
-              ? const Color(0xA064748B)
-              : const Color(0xFF64748B);
+      final isDimmed = hasSelection && !isSelected;
+      final w = isSelected ? 50.0 : 38.0;
+      final h = isSelected ? 56.0 : 43.0;
       markers.add(Marker(
         point: LatLng(lat, lon),
-        width: size,
-        height: size,
+        width: w,
+        height: h,
+        alignment: Alignment.bottomCenter,
         child: GestureDetector(
           onTap: () => widget.notifier.selectJournal(j['id']),
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: const Center(
-              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
-            ),
-          ),
+          child: JournalMapMarker(isSelected: isSelected, isDimmed: isDimmed),
         ),
       ));
     }

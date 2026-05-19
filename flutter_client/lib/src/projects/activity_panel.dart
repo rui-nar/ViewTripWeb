@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../core/design_tokens.dart';
 import 'day_meta_editor.dart';
 import 'journal_dialog.dart';
+import 'marker_icons.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
@@ -532,7 +533,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
+              leading: const MemoryGlyph(size: 24),
               title: const Text('Memory'),
               onTap: () {
                 Navigator.of(context).pop();
@@ -548,7 +549,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.book_outlined),
+              leading: const JournalGlyph(size: 24),
               title: const Text('Journal entry'),
               onTap: () {
                 Navigator.of(context).pop();
@@ -748,9 +749,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
               ],
               const Spacer(),
               IconButton(
-                icon: Icon(
-                  Icons.photo_library_outlined,
+                icon: MemoryGlyph(
                   size: 20,
+                  filled: _memoriesOnly,
                   color: _memoriesOnly ? theme.colorScheme.primary : null,
                 ),
                 tooltip: _memoriesOnly ? 'Show all' : 'Memories only',
@@ -758,9 +759,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
                 onPressed: () => setState(() => _memoriesOnly = !_memoriesOnly),
               ),
               IconButton(
-                icon: Icon(
-                  notifier.showJournals ? Icons.book : Icons.book_outlined,
+                icon: JournalGlyph(
                   size: 20,
+                  filled: notifier.showJournals,
                   color: notifier.showJournals ? theme.colorScheme.primary : null,
                 ),
                 tooltip: notifier.showJournals ? 'Hide journals' : 'Show journals',
@@ -1158,12 +1159,14 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 : null,
                             leading: dragHandle,
                             title: Row(children: [
-                              Icon(Icons.photo_camera_outlined,
-                                  size: 16,
-                                  color: isSelected
-                                      ? theme.colorScheme.primary
-                                      : theme.colorScheme.primary
-                                          .withValues(alpha: 0.7)),
+                              MemoryGlyph(
+                                size: 16,
+                                filled: isSelected,
+                                color: isSelected
+                                    ? theme.colorScheme.primary
+                                    : theme.colorScheme.primary
+                                        .withValues(alpha: 0.7),
+                              ),
                               const SizedBox(width: 8),
                               Flexible(
                                   child: Text(label,
@@ -1205,19 +1208,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 : null,
                             leading: dragHandle,
                             title: Row(children: [
-                              Container(
-                                width: 24,
-                                height: 24,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF64748B)
-                                      .withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Icon(Icons.book_outlined,
-                                    size: 14,
-                                    color: isSelected
-                                        ? const Color(0xFF44AAFF)
-                                        : const Color(0xFF64748B)),
+                              JournalGlyph(
+                                size: 18,
+                                filled: isSelected,
+                                color: isSelected
+                                    ? const Color(0xFF44AAFF)
+                                    : const Color(0xFF64748B),
                               ),
                               const SizedBox(width: 8),
                               Flexible(
