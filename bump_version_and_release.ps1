@@ -50,17 +50,17 @@ $pubspecContent = Get-Content $PUBSPEC -Raw
 if ($pubspecContent -notmatch '(?m)^version:\s*(\d+)\.(\d+)\.(\d+)\+(\d+)') {
     Die "Could not parse 'version: X.Y.Z+N' from pubspec.yaml"
 }
-$major = [int]$Matches[1]
-$minor = [int]$Matches[2]
-$patch = [int]$Matches[3]
-$build = [int]$Matches[4]
+$major    = [int]$Matches[1]
+$minor    = [int]$Matches[2]
+$patchNum = [int]$Matches[3]
+$build    = [int]$Matches[4]
 
-$oldVersion = "$major.$minor.$patch+$build"
-$oldTag     = "v$major.$minor.$patch"
+$oldVersion = "$major.$minor.$patchNum+$build"
+$oldTag     = "v$major.$minor.$patchNum"
 
 if ($Patch) {
-    $newVersion = "$major.$minor.$($patch + 1)+$build"
-    $newTag     = "v$major.$minor.$($patch + 1)"
+    $newVersion = "$major.$minor.$($patchNum + 1)+$build"
+    $newTag     = "v$major.$minor.$($patchNum + 1)"
 } else {
     $newVersion = "$major.$($minor + 1).0+$build"
     $newTag     = "v$major.$($minor + 1).0"
