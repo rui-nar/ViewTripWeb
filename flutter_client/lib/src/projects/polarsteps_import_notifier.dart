@@ -175,8 +175,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
         };
 
         try {
-          final result = await api.post('/api/memories/', body)
-              as Map<String, dynamic>;
+          final result = await _postWithRetry('/api/memories/', body);
           final memId = result['id']?.toString();
 
           // Upload photos for this step
@@ -211,5 +210,26 @@ class PolarstepsImportNotifier extends ChangeNotifier {
 
   Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
     await api.post('/api/memories/$memId/photos/from-url', {'url': photoUrl});
+  }
+
+  /// POST with automatic retry on 5xx — handles transient server errors
+  /// (DB startup race, SQLite lock contention, temporary overload).
+  Future<Map<String, dynamic>> _postWithRetry(
+    String url,
+    Map<String, dynamic> body, {
+    int maxAttempts = 3,
+  }) async {
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await api.post(url, body) as Map<String, dynamic>;
+      } on ApiException catch (e) {
+        if (e.statusCode >= 500 && attempt < maxAttempts - 1) {
+          await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+          continue;
+        }
+        rethrow;
+      }
+    }
+    throw StateError('unreachable');
   }
 }
