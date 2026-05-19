@@ -17,11 +17,13 @@
     - git configured with push access to origin.
 
 .EXAMPLE
-    .\bump_version_and_release.ps1
+    .\bump_version_and_release.ps1            # minor bump (0.36.0 -> 0.37.0)
+    .\bump_version_and_release.ps1 -Patch     # patch bump (0.36.0 -> 0.36.1)
     .\bump_version_and_release.ps1 -DryRun
 #>
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Patch
 )
 
 Set-StrictMode -Version Latest
@@ -50,14 +52,19 @@ if ($pubspecContent -notmatch '(?m)^version:\s*(\d+)\.(\d+)\.(\d+)\+(\d+)') {
 }
 $major = [int]$Matches[1]
 $minor = [int]$Matches[2]
-# $patch and $build are captured but we reset patch and keep build
+$patch = [int]$Matches[3]
 $build = [int]$Matches[4]
 
-$oldVersion = "$major.$minor.$($Matches[3])+$build"
-$newMinor   = $minor + 1
-$newVersion = "$major.$newMinor.0+$build"
-$oldTag     = "v$major.$minor.$($Matches[3])"
-$newTag     = "v$major.$newMinor.0"
+$oldVersion = "$major.$minor.$patch+$build"
+$oldTag     = "v$major.$minor.$patch"
+
+if ($Patch) {
+    $newVersion = "$major.$minor.$($patch + 1)+$build"
+    $newTag     = "v$major.$minor.$($patch + 1)"
+} else {
+    $newVersion = "$major.$($minor + 1).0+$build"
+    $newTag     = "v$major.$($minor + 1).0"
+}
 
 Write-Host "  $oldVersion  ->  $newVersion  (tag: $oldTag -> $newTag)"
 
@@ -80,8 +87,14 @@ if ($dirty) {
 
 # ── 3. Collect commit log since last tag (for release notes) ──────────────────
 Step "Collecting commits since $oldTag"
-git fetch --tags | Out-Null
-$commits = git log "$oldTag..HEAD" --pretty=format:"- %s" 2>&1
+git fetch --tags 2>$null
+$tagExists = git tag -l $oldTag
+if ($tagExists) {
+    $commits = git log "$oldTag..HEAD" --pretty=format:"- %s" 2>&1
+} else {
+    Write-Host "  Note: tag $oldTag not found locally — using last 30 commits" -ForegroundColor Yellow
+    $commits = git log "--pretty=format:- %s" -30 2>&1
+}
 if (-not $commits) { $commits = "- No new commits since $oldTag" }
 $releaseBody = "## What's changed`n`n$($commits -join "`n")"
 Write-Host $releaseBody
@@ -92,9 +105,10 @@ $updated = $pubspecContent -replace "(?m)^(version:\s*)$([regex]::Escape($oldVer
 Set-Content -Path $PUBSPEC -Value $updated -NoNewline
 
 # ── 5. Update _kAppVersion in project_settings_dialog.dart ───────────────────
-Step "Updating _kAppVersion in project_settings_dialog.dart to $major.$newMinor.0"
+$newVersionCore = $newTag.TrimStart('v')
+Step "Updating _kAppVersion in project_settings_dialog.dart to $newVersionCore"
 $dialogContent = Get-Content $SETTINGS -Raw
-$updatedDialog = $dialogContent -replace "(?m)^(const _kAppVersion = ')[^']+(';)", "`${1}$major.$newMinor.0`${2}"
+$updatedDialog = $dialogContent -replace "(?m)^(const _kAppVersion = ')[^']+(';)", "`${1}$newVersionCore`${2}"
 Set-Content -Path $SETTINGS -Value $updatedDialog -NoNewline
 
 # ── 6. Commit ──────────────────────────────────────────��──────────────────────
