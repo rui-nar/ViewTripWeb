@@ -807,8 +807,16 @@ class ProjectNotifier extends ChangeNotifier
     } catch (_) {}
   }
 
+  bool _isDisposed = false;
+
+  @override
+  void notifyListeners() {
+    if (!_isDisposed) super.notifyListeners();
+  }
+
   @override
   void dispose() {
+    _isDisposed = true;
     _stopPhotoPolling();
     previewArcNotifier.dispose();
     elevationCursorNotifier.dispose();
