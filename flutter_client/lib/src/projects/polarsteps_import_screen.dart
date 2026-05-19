@@ -21,7 +21,9 @@ class _PolarstepsImportScreenState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<PolarstepsImportNotifier>().loadTrips();
+      final n = context.read<PolarstepsImportNotifier>();
+      n.projectName = widget.projectName;
+      n.loadTrips();
     });
   }
 
@@ -285,24 +287,35 @@ class _StepList extends StatelessWidget {
               final thumbUrl = photos.isNotEmpty
                   ? photos.first['thumb_url'] as String?
                   : null;
-              final selected = id != null && notifier.selectedStepIds.contains(id);
+              final alreadyImported =
+                  id != null && notifier.alreadyImportedIds.contains(id);
+              final selected =
+                  !alreadyImported && id != null && notifier.selectedStepIds.contains(id);
 
               return CheckboxListTile(
-                value: selected,
-                onChanged: id == null || notifier.isImporting
+                value: alreadyImported ? false : selected,
+                onChanged: alreadyImported || id == null || notifier.isImporting
                     ? null
                     : (_) => notifier.toggleStep(id),
                 title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(
-                  [
-                    if (date != null) date,
-                    if (locationName != null) locationName,
-                    if (photos.isNotEmpty)
-                      '${photos.length} photo${photos.length > 1 ? 's' : ''}',
-                  ].join('  ·  '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                subtitle: alreadyImported
+                    ? Text(
+                        'Already imported',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.outline,
+                          fontSize: 12,
+                        ),
+                      )
+                    : Text(
+                        [
+                          if (date != null) date,
+                          if (locationName != null) locationName,
+                          if (photos.isNotEmpty)
+                            '${photos.length} photo${photos.length > 1 ? 's' : ''}',
+                        ].join('  ·  '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                 secondary: thumbUrl != null
                     ? ClipRRect(
                         borderRadius: BorderRadius.circular(4),

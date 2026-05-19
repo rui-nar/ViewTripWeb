@@ -144,6 +144,7 @@ class MemoryBody(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
     insert_after_index: Optional[int] = None  # POST only
+    polarsteps_step_id: Optional[int] = None
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -169,6 +170,7 @@ def create_memory(
             geo_mode=body.geo_mode,
             lat=lat,
             lon=lon,
+            polarsteps_step_id=body.polarsteps_step_id,
         )
         sess.add(mem_row)
         sess.flush()  # populate mem_row.id

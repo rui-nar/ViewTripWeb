@@ -3,6 +3,10 @@ import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 
 class PolarstepsImportNotifier extends ChangeNotifier {
+  // ── Project context ────────────────────────────────────────────────────────
+  String? _projectName;
+  set projectName(String value) => _projectName = value;
+
   // ── Trips ──────────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> trips = [];
   Map<String, dynamic>? selectedTrip;
@@ -11,6 +15,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   // ── Steps ──────────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> steps = [];
   final Set<int> selectedStepIds = {};
+  final Set<int> alreadyImportedIds = {};
   bool isLoadingSteps = false;
 
   // ── Import ─────────────────────────────────────────────────────────────────
@@ -53,18 +58,34 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     selectedTrip = trip;
     steps = [];
     selectedStepIds.clear();
+    alreadyImportedIds.clear();
     isLoadingSteps = true;
     error = null;
     notifyListeners();
     try {
       final tripId = trip['id'] as int;
-      final raw =
-          await api.get('/api/polarsteps/trips/$tripId/steps') as List<dynamic>;
+      final projectParam = _projectName != null
+          ? '?project_name=${Uri.encodeComponent(_projectName!)}'
+          : '';
+      final raw = await api.get(
+              '/api/polarsteps/trips/$tripId/steps$projectParam')
+          as List<dynamic>;
       steps = raw.cast<Map<String, dynamic>>();
-      // Pre-select all steps
+
+      // Identify already-imported steps
+      for (final s in steps) {
+        if (s['already_imported'] == true) {
+          final id = s['id'];
+          if (id is int) alreadyImportedIds.add(id);
+        }
+      }
+
+      // Pre-select only new (not yet imported) steps
       for (final s in steps) {
         final id = s['id'];
-        if (id is int) selectedStepIds.add(id);
+        if (id is int && !alreadyImportedIds.contains(id)) {
+          selectedStepIds.add(id);
+        }
       }
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
@@ -78,6 +99,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     selectedTrip = null;
     steps = [];
     selectedStepIds.clear();
+    alreadyImportedIds.clear();
     notifyListeners();
   }
 
@@ -95,7 +117,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   void selectAll() {
     for (final s in steps) {
       final id = s['id'];
-      if (id is int) selectedStepIds.add(id);
+      if (id is int && !alreadyImportedIds.contains(id)) selectedStepIds.add(id);
     }
     notifyListeners();
   }
@@ -139,6 +161,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
         final description = step['description'] as String?;
         final lat = (step['lat'] as num?)?.toDouble();
         final lon = (step['lon'] as num?)?.toDouble();
+        final stepId = step['id'] as int?;
 
         final body = <String, dynamic>{
           'project_name': projectName,
@@ -148,6 +171,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
           if (description != null) 'description': description,
           if (lat != null) 'lat': lat,
           if (lon != null) 'lon': lon,
+          if (stepId != null) 'polarsteps_step_id': stepId,
         };
 
         try {

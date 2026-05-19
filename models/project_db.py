@@ -206,6 +206,7 @@ class DBMemory(sqlmodel.SQLModel, table=True):
     geo_mode: str = sqlmodel.Field(default="start_of_day")
     lat: Optional[float] = sqlmodel.Field(default=None)
     lon: Optional[float] = sqlmodel.Field(default=None)
+    polarsteps_step_id: Optional[int] = sqlmodel.Field(default=None, index=True)
 
 
 class DBJournalEntry(sqlmodel.SQLModel, table=True):

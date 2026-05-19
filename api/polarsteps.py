@@ -9,7 +9,7 @@ Routes:
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from sqlmodel import select
 
 from api.deps import get_current_user
 from models.db import get_session
+from models.project_db import DBMemory, DBProject
 from models.user import PolarstepsToken
 from src.api.polarsteps_client import PolarstepsClient, format_step, format_trip
 
@@ -143,6 +144,7 @@ def polarsteps_trips(
 def polarsteps_trip_steps(
     trip_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
+    project_name: Optional[str] = None,
 ) -> list[dict]:
     user_info_id = int(current_user["sub"])
     client = _require_client(user_info_id)
@@ -152,4 +154,26 @@ def polarsteps_trip_steps(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Polarsteps token expired")
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
-    return [format_step(s) for s in raw_steps]
+
+    imported_ids: set[int] = set()
+    if project_name:
+        with get_session() as sess:
+            proj = sess.exec(
+                select(DBProject).where(
+                    DBProject.user_info_id == user_info_id,
+                    DBProject.name == project_name,
+                )
+            ).first()
+            if proj:
+                rows = sess.exec(
+                    select(DBMemory.polarsteps_step_id).where(
+                        DBMemory.project_id == proj.id,
+                        DBMemory.polarsteps_step_id.is_not(None),
+                    )
+                ).all()
+                imported_ids = {r for r in rows}
+
+    steps = [format_step(s) for s in raw_steps]
+    for s in steps:
+        s['already_imported'] = s.get('id') in imported_ids
+    return steps
