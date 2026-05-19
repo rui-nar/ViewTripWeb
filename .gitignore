@@ -64,3 +64,4 @@ dev.ps1
 graphify-out/
 .graphify_*
 _viewtripweb.db_
+delete_memories.py
