@@ -6,7 +6,7 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
@@ -119,8 +119,9 @@ class _ViewBody extends StatefulWidget {
   State<_ViewBody> createState() => _ViewBodyState();
 }
 
-class _ViewBodyState extends State<_ViewBody> {
-  final MapController _mapController = MapController();
+class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
+  late final AnimatedMapController _mapController =
+      AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   bool _autoZoom = false;
 
   void _openSyncDialog(BuildContext context) {
@@ -324,7 +325,7 @@ class _ViewBodyState extends State<_ViewBody> {
 
 class _ViewLayout extends StatelessWidget {
   final ViewProjectNotifier notifier;
-  final MapController mapController;
+  final AnimatedMapController mapController;
   final bool autoZoom;
 
   const _ViewLayout({

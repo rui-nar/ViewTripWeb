@@ -4,6 +4,7 @@ import 'dart:math' show pow;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
@@ -18,7 +19,7 @@ LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
 class MapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
-  final MapController mapController;
+  final AnimatedMapController mapController;
   final String basemapUrl;
   final List<String> basemapSubdomains;
   final String? labelsUrl;
@@ -384,14 +385,15 @@ class _MapPanelState extends State<MapPanel> {
         if (p.longitude < minLon) minLon = p.longitude;
         if (p.longitude > maxLon) maxLon = p.longitude;
       }
-      widget.mapController.fitCamera(
-        CameraFit.bounds(
+      widget.mapController.animatedFitCamera(
+        cameraFit: CameraFit.bounds(
           bounds: LatLngBounds(
             LatLng(minLat, minLon),
             LatLng(maxLat, maxLon),
           ),
           padding: const EdgeInsets.fromLTRB(32, 32, 32, 32 + 160),
         ),
+        curve: Curves.easeInOut,
       );
     });
   }
@@ -411,7 +413,7 @@ class _MapPanelState extends State<MapPanel> {
     // target. Selecting an activity takes priority over updating the cursor.
     final geo = widget.notifier.geo;
     if (geo != null) {
-      final zoom = widget.mapController.camera.zoom;
+      final zoom = widget.mapController.mapController.camera.zoom;
       final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
       final threshold = pow(15.0 * pixelDeg, 2).toDouble();
       double minHit = threshold;
@@ -524,7 +526,7 @@ class _MapPanelState extends State<MapPanel> {
     return Stack(
       children: [
         FlutterMap(
-          mapController: widget.mapController,
+          mapController: widget.mapController.mapController,
           options: MapOptions(
             initialCenter: const LatLng(0, 0),
             initialZoom: 2,
@@ -664,7 +666,7 @@ class _MapPanelState extends State<MapPanel> {
 
 class ManageMapPanel extends StatefulWidget {
   final ProjectNotifier notifier;
-  final MapController mapController;
+  final AnimatedMapController mapController;
   final bool autoZoom;
   final String basemapUrl;
   final List<String> basemapSubdomains;
@@ -936,11 +938,12 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         if (p.longitude < minLon) minLon = p.longitude;
         if (p.longitude > maxLon) maxLon = p.longitude;
       }
-      widget.mapController.fitCamera(
-        CameraFit.bounds(
+      widget.mapController.animatedFitCamera(
+        cameraFit: CameraFit.bounds(
           bounds: LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
           padding: const EdgeInsets.fromLTRB(32, 32, 32, 32 + 160),
         ),
+        curve: Curves.easeInOut,
       );
     });
   }
@@ -949,7 +952,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     // ── Activity hit-test ────────────────────────────────────────────────────
     final geo = widget.notifier.geo;
     if (geo != null) {
-      final zoom = widget.mapController.camera.zoom;
+      final zoom = widget.mapController.mapController.camera.zoom;
       final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
       final threshold = pow(15.0 * pixelDeg, 2).toDouble();
       double minHit = threshold;
@@ -1270,12 +1273,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           if (p.longitude < minLon) minLon = p.longitude;
           if (p.longitude > maxLon) maxLon = p.longitude;
         }
-        widget.mapController.fitCamera(
-          CameraFit.bounds(
+        widget.mapController.animatedFitCamera(
+          cameraFit: CameraFit.bounds(
             bounds: LatLngBounds(
                 LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
             padding: const EdgeInsets.fromLTRB(48, 48, 48, 48 + 160),
           ),
+          curve: Curves.easeInOut,
         );
       });
     }
@@ -1283,7 +1287,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return Stack(
       children: [
         FlutterMap(
-          mapController: widget.mapController,
+          mapController: widget.mapController.mapController,
           options: MapOptions(
             initialCenter: const LatLng(48.0, 10.0),
             initialZoom: 4,
@@ -1399,7 +1403,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
 
 class MobileActivityPanelOverlay extends StatelessWidget {
   final ProjectNotifier notifier;
-  final MapController mapController;
+  final AnimatedMapController mapController;
   final double height;
 
   const MobileActivityPanelOverlay({

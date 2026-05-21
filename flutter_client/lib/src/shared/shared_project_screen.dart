@@ -2,7 +2,7 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
@@ -194,8 +194,10 @@ class _SharedProjectView extends StatefulWidget {
   State<_SharedProjectView> createState() => _SharedProjectViewState();
 }
 
-class _SharedProjectViewState extends State<_SharedProjectView> {
-  final MapController _mapController = MapController();
+class _SharedProjectViewState extends State<_SharedProjectView>
+    with TickerProviderStateMixin {
+  late final AnimatedMapController _mapController =
+      AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
 
   @override
   void dispose() {

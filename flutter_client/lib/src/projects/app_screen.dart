@@ -5,7 +5,7 @@ library;
 // dart:html is intentional — ViewTripWeb targets Flutter Web only.
 import 'dart:html' as html;
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
@@ -32,8 +32,9 @@ class AppScreen extends StatefulWidget {
   State<AppScreen> createState() => _AppScreenState();
 }
 
-class _AppScreenState extends State<AppScreen> {
-  final MapController _mapController = MapController();
+class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
+  late final AnimatedMapController _mapController =
+      AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   final ValueNotifier<bool> _mapFitted = ValueNotifier(false);
