@@ -2,7 +2,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
@@ -17,7 +17,7 @@ import 'segment_dialog.dart';
 
 class ActivityPanel extends StatefulWidget {
   final ProjectNotifier notifier;
-  final MapController? mapController;
+  final AnimatedMapController? mapController;
   final ScrollController? scrollController;
   const ActivityPanel({
     super.key,
@@ -412,7 +412,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     super.didChangeDependencies();
     final theme = Theme.of(context);
     _segmentTitleStyle =
-        theme.textTheme.labelMedium?.copyWith(fontStyle: FontStyle.italic);
+        theme.textTheme.labelSmall?.copyWith(fontStyle: FontStyle.italic);
   }
 
 
@@ -484,8 +484,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final target = LatLng((raw[0] as num).toDouble(), (raw[1] as num).toDouble());
     final mc = widget.mapController;
     if (mc == null) return;
-    if (!mc.camera.visibleBounds.contains(target)) {
-      mc.move(target, mc.camera.zoom.clamp(10.0, 15.0));
+    if (!mc.mapController.camera.visibleBounds.contains(target)) {
+      mc.animateTo(
+        dest: target,
+        zoom: mc.mapController.camera.zoom.clamp(10.0, 15.0),
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -499,8 +504,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final target = LatLng(lat, lon);
     final mc = widget.mapController;
     if (mc == null) return;
-    if (!mc.camera.visibleBounds.contains(target)) {
-      mc.move(target, mc.camera.zoom.clamp(4.0, 10.0));
+    if (!mc.mapController.camera.visibleBounds.contains(target)) {
+      mc.animateTo(
+        dest: target,
+        zoom: mc.mapController.camera.zoom.clamp(4.0, 10.0),
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -511,8 +521,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
     if (lat != null && lon != null) {
       final target = LatLng(lat, lon);
       final mc = widget.mapController;
-      if (mc != null && !mc.camera.visibleBounds.contains(target)) {
-        mc.move(target, mc.camera.zoom.clamp(8.0, 15.0));
+      if (mc != null && !mc.mapController.camera.visibleBounds.contains(target)) {
+        mc.animateTo(
+          dest: target,
+          zoom: mc.mapController.camera.zoom.clamp(8.0, 15.0),
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOut,
+        );
       }
     }
     showMemoryDetail(context, widget.notifier, mem);
@@ -588,8 +603,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
     if (lat != null && lon != null) {
       final target = LatLng(lat, lon);
       final mc = widget.mapController;
-      if (mc != null && !mc.camera.visibleBounds.contains(target)) {
-        mc.move(target, mc.camera.zoom.clamp(8.0, 15.0));
+      if (mc != null && !mc.mapController.camera.visibleBounds.contains(target)) {
+        mc.animateTo(
+          dest: target,
+          zoom: mc.mapController.camera.zoom.clamp(8.0, 15.0),
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOut,
+        );
       }
     }
   }
@@ -805,24 +825,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                     _lastShowJournals   = notifier.showJournals;
                   }
                   final displayList = _cachedFilteredList!;
-                  return ReorderableListView.builder(
-                    scrollController: widget.scrollController,
-                    buildDefaultDragHandles: false,
-                    onReorder: (fromV, toV) {
-                      final fromEntry = fromV < displayList.length
-                          ? displayList[fromV] : null;
-                      if (fromEntry is! _PanelItem) return;
-                      final fromOrig = fromEntry.originalIndex;
-                      final adjToV = toV > fromV ? toV - 1 : toV;
-                      int origCount = 0;
-                      int? toOrig;
-                      for (int k = 0; k < displayList.length; k++) {
-                        if (k == adjToV) { toOrig = origCount; break; }
-                        if (displayList[k] is _PanelItem) origCount++;
-                      }
-                      toOrig ??= notifier.items.length - 1;
-                      notifier.reorderItems(fromOrig, toOrig);
-                    },
+                  return ListView.builder(
+                    controller: widget.scrollController,
                     itemCount: displayList.length,
                     itemBuilder: (context, vi) {
                       final entry = displayList[vi];
@@ -1046,12 +1050,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                       final i = panelItem.originalIndex;
                       final item = panelItem.item;
                       final isActivity = item['item_type'] == 'activity';
-                      final dragHandle = ReorderableDragStartListener(
-                        index: vi,
-                        child: const Icon(Icons.drag_handle,
-                            size: 18, color: Colors.grey),
-                      );
-
                       if (isActivity) {
                         final a = activityById[item['activity_id']];
                         if (a == null) {
@@ -1072,7 +1070,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   color: theme.colorScheme.onError),
                             ),
                             child: ListTile(
-                              leading: dragHandle,
+                              dense: true,
                               title: const Text('Unknown activity'),
                               trailing: const Icon(Icons.help_outline),
                             ),
@@ -1104,30 +1102,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 activityId?.toString() ==
                                 n.selectedActivityId?.toString(),
                             builder: (_, isSelected, __) => ListTile(
+                              dense: true,
                               tileColor: isSelected
                                   ? theme.colorScheme.primaryContainer
                                       .withValues(alpha: 0.45)
                                   : null,
-                              leading: dragHandle,
                               title: Row(children: [
                                 _ActivityIconBox(type: type),
                                 const SizedBox(width: 8),
                                 Flexible(
                                   child: Text(name,
-                                      style: theme.textTheme.labelMedium),
+                                      style: theme.textTheme.labelSmall),
                                 ),
                               ]),
                               subtitle: Text(
                                 '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
                                 style: theme.textTheme.bodySmall,
-                              ),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.add_road, size: 18),
-                                onPressed: () => _showSegmentDialog(
-                                  context,
-                                  notifier,
-                                  insertAfterIndex: i,
-                                ),
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),
                             ),
@@ -1156,7 +1146,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 ? theme.colorScheme.tertiaryContainer
                                     .withValues(alpha: 0.45)
                                 : null,
-                            leading: dragHandle,
                             title: Row(children: [
                               Icon(Icons.photo_camera_outlined,
                                   size: 16,
@@ -1167,7 +1156,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               const SizedBox(width: 8),
                               Flexible(
                                   child: Text(label,
-                                      style: theme.textTheme.labelMedium)),
+                                      style: theme.textTheme.labelSmall)),
                             ]),
                             subtitle: memDesc != null && memDesc.isNotEmpty
                                 ? Text(memDesc,
@@ -1203,7 +1192,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             tileColor: isSelected
                                 ? const Color(0xFF64748B).withValues(alpha: 0.15)
                                 : null,
-                            leading: dragHandle,
                             title: Row(children: [
                               Container(
                                 width: 24,
@@ -1222,7 +1210,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               const SizedBox(width: 8),
                               Flexible(
                                 child: Text(label,
-                                    style: theme.textTheme.labelMedium),
+                                    style: theme.textTheme.labelSmall),
                               ),
                             ]),
                             subtitle: jDesc != null && jDesc.isNotEmpty
@@ -1275,11 +1263,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             selector: (_, n) =>
                                 n.selectedSegmentId?.toString() == segId,
                             builder: (_, isSelected, __) => ListTile(
+                              dense: true,
                               tileColor: isSelected
                                   ? theme.colorScheme.secondaryContainer
                                       .withValues(alpha: 0.45)
                                   : null,
-                              leading: dragHandle,
                               title: Row(children: [
                                 Container(
                                   width: 32,
@@ -1305,28 +1293,14 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               ]),
                               subtitle: Text(segType ?? '',
                                   style: theme.textTheme.bodySmall),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.edit_outlined,
-                                        size: 18),
-                                    onPressed: () => _showSegmentDialog(
-                                      context,
-                                      notifier,
-                                      editSegment: seg,
-                                      insertAfterIndex: null,
-                                    ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.add_road, size: 18),
-                                    onPressed: () => _showSegmentDialog(
-                                      context,
-                                      notifier,
-                                      insertAfterIndex: i,
-                                    ),
-                                  ),
-                                ],
+                              trailing: IconButton(
+                                icon: const Icon(Icons.edit_outlined, size: 18),
+                                onPressed: () => _showSegmentDialog(
+                                  context,
+                                  notifier,
+                                  editSegment: seg,
+                                  insertAfterIndex: null,
+                                ),
                               ),
                               onTap: _multiSelect ? null : () => _flyToSegment(seg),
                             ),
@@ -1383,9 +1357,9 @@ Future<void> _showSegmentDialog(
 }) async {
   // Defer to a post-frame callback so the dialog is added to the overlay
   // after the current frame's layout pass completes. Without this, the
-  // Overlay rebuild that showDialog triggers can cause the ReorderableListView's
-  // LayoutBuilder to process dirty elements (including OverlayPortal tooltips)
-  // during its layout callback, violating Flutter's render-mutation invariant.
+  // Overlay rebuild that showDialog triggers can process dirty elements
+  // (including OverlayPortal tooltips) during a layout callback, violating
+  // Flutter's render-mutation invariant.
   WidgetsBinding.instance.addPostFrameCallback((_) {
     if (!context.mounted) return;
     showDialog<void>(
