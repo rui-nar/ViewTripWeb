@@ -156,6 +156,16 @@ def create_memory(
     with get_session() as sess:
         project_id = _get_project_id(sess, user_info_id, body.project_name)
 
+        if body.polarsteps_step_id is not None:
+            existing = sess.exec(
+                select(DBMemory).where(
+                    DBMemory.project_id == project_id,
+                    DBMemory.polarsteps_step_id == body.polarsteps_step_id,
+                )
+            ).first()
+            if existing:
+                return {"id": existing.id}
+
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
             lat, lon = _resolve_geo(sess, project_id, body.date, body.geo_mode)
