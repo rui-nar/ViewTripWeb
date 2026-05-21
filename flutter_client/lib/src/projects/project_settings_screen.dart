@@ -298,10 +298,6 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   }
 
   Widget _generalSection() {
-    final n = _notifier;
-    final days = n.dayMeta.length;
-    final activities = n.items.where((i) => i['item_type'] == 'activity').length;
-
     return _SectionCard(
       eyebrow: '01',
       title: 'General',
@@ -309,13 +305,34 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // KPI row
-          IntrinsicHeight(
-            child: Row(
+          // Project name
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _kpiCell('Days', days.toString(), null),
-                const VerticalDivider(width: 1, color: _kBorder),
-                _kpiCell('Activities', activities.toString(), const Color(0xFFFC4C02)),
+                const Text('Project name', style: TextStyle(
+                  color: _kText2, fontSize: 13.5, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _nameCtrl,
+                  style: const TextStyle(
+                    color: _kText1, fontSize: 15, fontWeight: FontWeight.w600),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: true,
+                    fillColor: _kBg,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: _kBorder),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: _kBorder),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -739,29 +756,6 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   }
 
   // ── Small helpers ────────────────────────────────────────────────────────────
-
-  Widget _kpiCell(String label, String value, Color? accent) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label.toUpperCase(), style: const TextStyle(
-              fontFamily: 'monospace', fontSize: 10, fontWeight: FontWeight.w500,
-              color: _kDim, letterSpacing: 1.4,
-            )),
-            const SizedBox(height: 4),
-            Text(value, style: TextStyle(
-              fontFamily: 'monospace', fontSize: 22, fontWeight: FontWeight.w500,
-              color: accent ?? _kText1, fontFeatures: const [FontFeature.tabularFigures()],
-              letterSpacing: -0.5,
-            )),
-          ],
-        ),
-      ),
-    );
-  }
 
   static Widget _fieldRow({required String label, String? hint, required Widget right}) {
     return Padding(
