@@ -4,10 +4,11 @@ import 'package:flutter/material.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
 
-/// Shows a detail view for a memory — name, date/time, description, thumbnail
-/// strip with navigation arrows, and edit/delete controls.
+/// Shows a detail view for a memory — photo mosaic, date, description,
+/// prev/next navigation and edit/delete controls.
 ///
-/// Opens as a dialog via [showMemoryDetail].
+/// Desktop (≥640px): two-column split — photo mosaic left, content right.
+/// Mobile (<640px): hero photo on top, scrollable content below.
 void showMemoryDetail(
   BuildContext context,
   ProjectNotifier notifier,
@@ -17,16 +18,32 @@ void showMemoryDetail(
   showDialog(
     context: context,
     useRootNavigator: true,
-    builder: (_) => _MemoryDetailModal(notifier: notifier, memory: memory, readOnly: readOnly),
+    builder: (_) =>
+        _MemoryDetailModal(notifier: notifier, memory: memory, readOnly: readOnly),
   );
 }
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const _kBg     = Color(0xFF0F1A26);
+const _kBgDark = Color(0xFF0C1722);
+const _kBorder = Color(0xFF1F2F42);
+const _kText1  = Color(0xFFE2E8F0);
+const _kText2  = Color(0xFFCBD5E1);
+const _kDim    = Color(0xFF64748B);
+const _kOrange = Color(0xFFFC4C02);
+const _kBlue   = Color(0xFF1D4ED8);
+const _kRed    = Color(0xFFEF4444);
 
 class _MemoryDetailModal extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> memory;
   final bool readOnly;
 
-  const _MemoryDetailModal({required this.notifier, required this.memory, this.readOnly = false});
+  const _MemoryDetailModal({
+    required this.notifier,
+    required this.memory,
+    this.readOnly = false,
+  });
 
   @override
   State<_MemoryDetailModal> createState() => _MemoryDetailModalState();
@@ -34,10 +51,12 @@ class _MemoryDetailModal extends StatefulWidget {
 
 class _MemoryDetailModalState extends State<_MemoryDetailModal> {
   late Map<String, dynamic> _current;
-  int _photoViewerIndex = -1; // -1 = closed
+  int _photoViewerIndex = -1;
 
-  static const _months = ['Jan','Feb','Mar','Apr','May','Jun',
-                           'Jul','Aug','Sep','Oct','Nov','Dec'];
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
 
   static String _fmtDate(String? ds) {
     if (ds == null) return '';
@@ -75,10 +94,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     await showDialog(
       context: context,
       useRootNavigator: true,
-      builder: (_) => MemoryDialog(
-        notifier: widget.notifier,
-        editMemory: _current,
-      ),
+      builder: (_) => MemoryDialog(notifier: widget.notifier, editMemory: _current),
     );
   }
 
@@ -125,10 +141,9 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final photos = (_current['photos'] as List?)?.cast<String>() ?? [];
-    final mems = _allMemories;
-    final idx = _currentIndex;
+    final mems   = _allMemories;
+    final idx    = _currentIndex;
     final hasPrev = idx > 0;
     final hasNext = idx < mems.length - 1;
 
@@ -143,125 +158,413 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     }
 
     return Dialog(
-      insetPadding: const EdgeInsets.all(24),
+      backgroundColor: _kBg,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 500),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // ── Header ─────────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
-              child: Row(
-                children: [
-                  const Icon(Icons.photo_camera_outlined, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _current['name'] as String? ??
-                          _fmtDate(_current['date'] as String?),
-                      style: theme.textTheme.titleMedium,
+        constraints: const BoxConstraints(maxWidth: 880, maxHeight: 640),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wide = constraints.maxWidth >= 640;
+            return wide
+                ? _desktopLayout(photos, mems, idx, hasPrev, hasNext)
+                : _mobileLayout(photos, mems, idx, hasPrev, hasNext);
+          },
+        ),
+      ),
+    );
+  }
+
+  // ── Desktop layout: left mosaic + right content ────────────────────────────
+
+  Widget _desktopLayout(
+    List<String> photos,
+    List<Map<String, dynamic>> mems,
+    int idx,
+    bool hasPrev,
+    bool hasNext,
+  ) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: _photoMosaic(photos)),
+          Expanded(child: _contentPane(photos, mems, idx, hasPrev, hasNext)),
+        ],
+      ),
+    );
+  }
+
+  // ── Mobile layout: hero on top + scrollable content ────────────────────────
+
+  Widget _mobileLayout(
+    List<String> photos,
+    List<Map<String, dynamic>> mems,
+    int idx,
+    bool hasPrev,
+    bool hasNext,
+  ) {
+    final name        = _current['name'] as String?;
+    final description = (_current['description'] as String?) ?? '';
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Hero with overlaid title
+          SizedBox(
+            height: 260,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (photos.isNotEmpty)
+                  Image.network(
+                    _photoThumbUrl(photos[0]),
+                    fit: BoxFit.cover,
+                    headers: _authHeaders,
+                  )
+                else
+                  Container(
+                    color: _kBgDark,
+                    child: const Center(
+                      child: Icon(Icons.photo_camera_outlined,
+                          size: 64, color: Color(0x44CBD5E1)),
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () =>
-                        Navigator.of(context, rootNavigator: true).pop(),
-                  ),
-                ],
-              ),
-            ),
-            // Date + time
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-              child: Text(
-                [
-                  _fmtDate(_current['date'] as String?),
-                  if (_current['time'] != null) _current['time'] as String,
-                ].join(' · '),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-
-            // ── Description ────────────────────────────────────────────
-            if ((_current['description'] as String?)?.isNotEmpty == true) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                child: Text(_current['description'] as String),
-              ),
-            ],
-
-            // ── Thumbnail strip ────────────────────────────────────────
-            if (photos.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 90,
-                child: ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  scrollDirection: Axis.horizontal,
-                  itemCount: photos.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (_, i) => GestureDetector(
-                    onTap: () => setState(() => _photoViewerIndex = i),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.network(
-                        _photoThumbUrl(photos[i]),
-                        width: 90,
-                        height: 90,
-                        fit: BoxFit.cover,
-                        headers: _authHeaders,
+                // Bottom gradient
+                const Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Colors.transparent, _kBg],
+                        stops: [0.4, 1.0],
                       ),
                     ),
                   ),
                 ),
+                // Day badge
+                Positioned(
+                  top: 8, left: 8,
+                  child: _dayBadge(_current['date'] as String?),
+                ),
+                // Close
+                Positioned(
+                  top: 4, right: 4,
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: _kText2),
+                    onPressed: () =>
+                        Navigator.of(context, rootNavigator: true).pop(),
+                  ),
+                ),
+                // Photo count
+                if (photos.length > 1)
+                  Positioned(
+                    top: 44, right: 8,
+                    child: _photoCountChip(photos.length),
+                  ),
+                // Title over gradient
+                if (name != null && name.isNotEmpty)
+                  Positioned(
+                    bottom: 12, left: 16, right: 16,
+                    child: Text(
+                      name,
+                      style: const TextStyle(
+                        color: _kText1, fontSize: 18,
+                        fontWeight: FontWeight.w700, letterSpacing: -0.3,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // Scrollable body
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _fmtDate(_current['date'] as String?).toUpperCase(),
+                    style: const TextStyle(
+                      color: _kOrange, fontFamily: 'monospace',
+                      fontSize: 11, letterSpacing: 1.5,
+                    ),
+                  ),
+                  if (description.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(description,
+                        style: const TextStyle(
+                            color: _kText2, fontSize: 15, height: 1.7)),
+                  ],
+                  if (photos.length > 1) ...[
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 60,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: photos.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 6),
+                        itemBuilder: (_, i) => GestureDetector(
+                          onTap: () => setState(() => _photoViewerIndex = i),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.network(
+                              _photoThumbUrl(photos[i]),
+                              width: 60, height: 60, fit: BoxFit.cover,
+                              headers: _authHeaders,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                ],
               ),
-            ],
+            ),
+          ),
+          _footerRow(),
+        ],
+      ),
+    );
+  }
 
-            // ── Navigation + actions ───────────────────────────────────
+  // ── Photo mosaic (desktop left pane) ──────────────────────────────────────
+
+  Widget _photoMosaic(List<String> photos) {
+    return Container(
+      color: _kBgDark,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (photos.isNotEmpty)
+                  Image.network(
+                    _photoThumbUrl(photos[0]),
+                    fit: BoxFit.cover,
+                    headers: _authHeaders,
+                  )
+                else
+                  const Center(
+                    child: Icon(Icons.photo_camera_outlined,
+                        size: 64, color: Color(0x44CBD5E1)),
+                  ),
+                Positioned(
+                  top: 8, left: 8,
+                  child: _dayBadge(_current['date'] as String?),
+                ),
+                if (photos.length > 1)
+                  Positioned(
+                    top: 8, right: 8,
+                    child: _photoCountChip(photos.length),
+                  ),
+              ],
+            ),
+          ),
+          // Up to 2 thumbnails below hero
+          if (photos.length > 1)
             Padding(
-              padding: const EdgeInsets.fromLTRB(8, 12, 8, 8),
+              padding: const EdgeInsets.all(8),
               child: Row(
                 children: [
-                  IconButton(
-                    icon: const Icon(Icons.chevron_left),
-                    tooltip: 'Previous memory',
-                    onPressed: hasPrev ? () => _navigate(-1) : null,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.chevron_right),
-                    tooltip: 'Next memory',
-                    onPressed: hasNext ? () => _navigate(1) : null,
-                  ),
-                  if (mems.isNotEmpty)
-                    Text(
-                      '${idx + 1} / ${mems.length}',
-                      style: theme.textTheme.bodySmall,
-                    ),
-                  const Spacer(),
-                  if (!widget.readOnly) ...[
-                    TextButton.icon(
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      label: const Text('Edit'),
-                      onPressed: _edit,
-                    ),
-                    const SizedBox(width: 4),
-                    TextButton.icon(
-                      icon: Icon(Icons.delete_outline, size: 16,
-                          color: theme.colorScheme.error),
-                      label: Text('Delete',
-                          style: TextStyle(color: theme.colorScheme.error)),
-                      onPressed: _delete,
+                  for (int i = 1; i <= 2 && i < photos.length; i++) ...[
+                    if (i > 1) const SizedBox(width: 6),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() => _photoViewerIndex = i),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            height: 60,
+                            child: Image.network(
+                              _photoThumbUrl(photos[i]),
+                              fit: BoxFit.cover,
+                              headers: _authHeaders,
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ],
               ),
             ),
-          ],
+        ],
+      ),
+    );
+  }
+
+  // ── Content pane (desktop right pane) ─────────────────────────────────────
+
+  Widget _contentPane(
+    List<String> photos,
+    List<Map<String, dynamic>> mems,
+    int idx,
+    bool hasPrev,
+    bool hasNext,
+  ) {
+    final theme       = Theme.of(context);
+    final name        = _current['name'] as String?;
+    final dateStr     = _current['date'] as String?;
+    final description = (_current['description'] as String?) ?? '';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+          child: _navRow(mems, idx, hasPrev, hasNext),
         ),
+        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            _fmtDate(dateStr).toUpperCase(),
+            style: const TextStyle(
+              color: _kOrange, fontFamily: 'monospace',
+              fontSize: 11, letterSpacing: 1.5,
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            (name != null && name.isNotEmpty) ? name : _fmtDate(dateStr),
+            style: theme.textTheme.headlineMedium?.copyWith(
+              color: _kText1,
+              fontWeight: FontWeight.w700,
+              fontSize: 22,
+              letterSpacing: -0.3,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (description.isNotEmpty)
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: SingleChildScrollView(
+                child: Text(
+                  description,
+                  style: const TextStyle(
+                      color: _kText2, fontSize: 15, height: 1.7),
+                ),
+              ),
+            ),
+          )
+        else
+          const Spacer(),
+        _footerRow(),
+      ],
+    );
+  }
+
+  // ── Shared helpers ────────────────────────────────────────────────────────
+
+  Widget _navRow(
+      List<Map<String, dynamic>> mems, int idx, bool hasPrev, bool hasNext) {
+    return Row(
+      children: [
+        IconButton(
+          icon: const Icon(Icons.chevron_left, color: _kText2),
+          visualDensity: VisualDensity.compact,
+          onPressed: hasPrev ? () => _navigate(-1) : null,
+        ),
+        IconButton(
+          icon: const Icon(Icons.chevron_right, color: _kText2),
+          visualDensity: VisualDensity.compact,
+          onPressed: hasNext ? () => _navigate(1) : null,
+        ),
+        if (mems.isNotEmpty)
+          Text(
+            '${idx + 1} / ${mems.length}',
+            style: const TextStyle(color: _kDim, fontSize: 13),
+          ),
+        const Spacer(),
+        IconButton(
+          icon: const Icon(Icons.close, color: _kText2),
+          visualDensity: VisualDensity.compact,
+          onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
+        ),
+      ],
+    );
+  }
+
+  Widget _footerRow() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: const BoxDecoration(
+        color: _kBgDark,
+        border: Border(top: BorderSide(color: _kBorder)),
+      ),
+      child: Row(
+        children: [
+          if (!widget.readOnly)
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: _kRed,
+                side: const BorderSide(color: _kRed),
+              ),
+              icon: const Icon(Icons.delete_outline, size: 16),
+              label: const Text('Delete'),
+              onPressed: _delete,
+            ),
+          const Spacer(),
+          if (!widget.readOnly)
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _kBlue,
+                foregroundColor: Colors.white,
+              ),
+              icon: const Icon(Icons.edit_outlined, size: 16),
+              label: const Text('Edit memory'),
+              onPressed: _edit,
+            ),
+        ],
+      ),
+    );
+  }
+
+  static Widget _dayBadge(String? dateStr) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: _kBgDark,
+        border: Border.all(color: _kBorder),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        _fmtDate(dateStr),
+        style: const TextStyle(
+          color: _kText2, fontSize: 11, fontWeight: FontWeight.w500),
+      ),
+    );
+  }
+
+  static Widget _photoCountChip(int count) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xCC0C1722),
+        border: Border.all(color: _kBorder),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.photo_library_outlined, size: 12, color: _kText2),
+          const SizedBox(width: 4),
+          Text('$count photos',
+              style: const TextStyle(color: _kText2, fontSize: 11)),
+        ],
       ),
     );
   }
@@ -315,7 +618,6 @@ class _PhotoViewerState extends State<_PhotoViewer> {
       child: SizedBox.expand(
         child: Stack(
           children: [
-            // Photo pages
             PageView.builder(
               controller: _page,
               itemCount: widget.photos.length,
@@ -326,7 +628,6 @@ class _PhotoViewerState extends State<_PhotoViewer> {
                 headers: widget.authHeaders,
               ),
             ),
-            // Close button
             Positioned(
               top: 16, right: 16,
               child: IconButton(
@@ -334,11 +635,9 @@ class _PhotoViewerState extends State<_PhotoViewer> {
                 onPressed: widget.onClose,
               ),
             ),
-            // Prev arrow
             if (widget.photos.length > 1)
               Positioned(
-                left: 8,
-                top: 0, bottom: 0,
+                left: 8, top: 0, bottom: 0,
                 child: Center(
                   child: IconButton(
                     icon: const Icon(Icons.chevron_left,
@@ -352,11 +651,9 @@ class _PhotoViewerState extends State<_PhotoViewer> {
                   ),
                 ),
               ),
-            // Next arrow
             if (widget.photos.length > 1)
               Positioned(
-                right: 8,
-                top: 0, bottom: 0,
+                right: 8, top: 0, bottom: 0,
                 child: Center(
                   child: IconButton(
                     icon: const Icon(Icons.chevron_right,
@@ -370,10 +667,8 @@ class _PhotoViewerState extends State<_PhotoViewer> {
                   ),
                 ),
               ),
-            // Index indicator
             Positioned(
-              bottom: 16,
-              left: 0, right: 0,
+              bottom: 16, left: 0, right: 0,
               child: Center(
                 child: Text(
                   '${_current + 1} / ${widget.photos.length}',
