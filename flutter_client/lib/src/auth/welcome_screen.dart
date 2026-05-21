@@ -388,7 +388,8 @@ class _HeroText extends StatelessWidget {
                   gradient: _gradBlue,
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Text('v0.8.2',
+                child: Text(
+                    const String.fromEnvironment('APP_VERSION', defaultValue: 'dev'),
                     style: _mono(10, FontWeight.w700, Colors.white)
                         .copyWith(letterSpacing: 0.05)),
               ),
@@ -1753,7 +1754,7 @@ class _FootBottom extends StatelessWidget {
     final fg2 = theme.colorScheme.onSurfaceVariant;
     return Row(
       children: [
-        Text('© 2026 ViewTrip · v0.8.2', style: _mono(12, FontWeight.w500, fg2)),
+        Text('© ${DateTime.now().year} ViewTrip · ${const String.fromEnvironment('APP_VERSION', defaultValue: 'dev')}', style: _mono(12, FontWeight.w500, fg2)),
         const Spacer(),
         Text('Built on Flutter + FastAPI · Designed in slate',
             style: _mono(12, FontWeight.w500, fg2)),

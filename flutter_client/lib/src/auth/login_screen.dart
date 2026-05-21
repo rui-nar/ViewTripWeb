@@ -281,6 +281,15 @@ class _LoginScreenState extends State<LoginScreen> {
                                     const Text('Continue with Google'),
                               ),
                             ),
+
+                      const SizedBox(height: 24),
+                      Text(
+                        '© ${DateTime.now().year} ViewTrip · ${const String.fromEnvironment('APP_VERSION', defaultValue: 'dev')}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
                     ],
                   ),
                 ),
