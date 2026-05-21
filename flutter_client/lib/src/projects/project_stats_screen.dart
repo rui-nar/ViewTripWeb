@@ -163,12 +163,14 @@ class ProjectStatsScreen extends StatefulWidget {
   final String projectName;
   final List<String> availableTags;
   final Map<String, String> sleepingOptionGroups;
+  final ProjectService? service;
 
   const ProjectStatsScreen({
     super.key,
     required this.projectName,
     this.availableTags = const [],
     this.sleepingOptionGroups = const {},
+    this.service,
   });
 
   @override
@@ -188,7 +190,7 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
   }
 
   void _load() {
-    final future = ProjectService()
+    final future = (widget.service ?? ProjectService())
         .getStats(widget.projectName, tags: _selectedTags.toList());
     future.then((data) {
       if (!mounted) return;

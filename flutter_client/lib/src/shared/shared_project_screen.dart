@@ -13,6 +13,7 @@ import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingP
 import '../projects/map_panel.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
+import '../projects/project_stats_screen.dart';
 import 'anonymous_id.dart';
 
 // ── Shared service — calls /api/share/{token}, appends ?aid= when provided ───
@@ -59,6 +60,15 @@ class _SharedProjectService extends ProjectService {
     final data = await api.get('/api/share/$token/geo/low-res');
     return data as Map<String, dynamic>;
   }
+
+  @override
+  Future<Map<String, dynamic>> getStats(String _, {List<String> tags = const []}) async {
+    final query = tags.isEmpty
+        ? ''
+        : '?${tags.map((t) => 'tags=${Uri.encodeComponent(t)}').join('&')}';
+    final data = await api.get('/api/share/$token/stats$query');
+    return data as Map<String, dynamic>;
+  }
 }
 
 // ── Shared notifier ───────────────────────────────────────────────────────────
@@ -67,6 +77,8 @@ class SharedProjectNotifier extends ProjectNotifier {
   final String token;
   final _SharedProjectService _sharedSvc;
   String get ownerName => _sharedSvc.ownerName;
+  @override
+  ProjectService get service => _sharedSvc;
   bool _disposed = false;
 
   @override
@@ -208,6 +220,24 @@ class _SharedProjectViewState extends State<_SharedProjectView> {
                   : notifier.projectName!
               : 'Shared project',
         ),
+        actions: [
+          if (notifier.isMetaLoaded)
+            IconButton(
+              icon: const Icon(Icons.bar_chart_outlined),
+              tooltip: 'Statistics',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ProjectStatsScreen(
+                    projectName: notifier.projectName ?? '',
+                    availableTags: notifier.availableTags,
+                    sleepingOptionGroups: notifier.sleepingOptionGroups,
+                    service: notifier.service,
+                  ),
+                ),
+              ),
+            ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(28),
           child: Container(

@@ -4,6 +4,7 @@ Routes:
     GET /api/share/{token}                                     — project details for a shared link
     GET /api/share/{token}/meta                                — lightweight details (no elevation/polylines)
     GET /api/share/{token}/geo                                 — GeoJSON for a shared project
+    GET /api/share/{token}/stats                               — project statistics (no auth required)
     GET /api/share/{token}/tiles/{z}/{x}/{y}.png               — raster track tile (cached)
     GET /api/share/{token}/photos/{memory_id}/{uuid}/thumb     — memory photo thumbnail (no auth)
     GET /api/share/{token}/photos/{memory_id}/{uuid}           — memory photo full-res (no auth)
@@ -77,7 +78,7 @@ from models.user import UserInfo
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 from src.models.great_circle import great_circle_points
-from src.project.project_repo import ProjectRepo
+from src.project.project_repo import ProjectRepo, _compute_stats
 from src.tile_renderer import get_cached_tile, get_or_build_features, get_or_create_tile
 
 router = APIRouter(prefix="/api/share", tags=["share"])
@@ -442,6 +443,33 @@ def shared_project_geo(
     _record_visit(project_id, token_type, aid, current_user)
     features = get_or_build_features(token, lambda: _build_features(project))
     return {"type": "FeatureCollection", "features": features}
+
+
+@router.get("/{token}/stats")
+def shared_project_stats(
+    token: str,
+    tags: Optional[List[str]] = Query(default=None),
+) -> dict:
+    """Return project statistics for a shared link (no auth required)."""
+    project, _token_type, project_id, _owner_uid = _get_project_and_type(token)
+
+    if tags:
+        return _compute_stats(project, tag_filter=tags)
+
+    with get_session() as sess:
+        row = sess.exec(select(DBProject).where(DBProject.id == project_id)).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        if row.stats_json is None:
+            _repo.compute_and_cache_stats(sess, row.user_info_id, row.name)
+            row = sess.exec(select(DBProject).where(DBProject.id == project_id)).first()
+        stats = json.loads(row.stats_json or "{}")
+        stats["tag_options"] = sorted({
+            t
+            for dm in json.loads(row.day_meta_json or "{}").values()
+            for t in (dm.get("tags") or [])
+        })
+    return stats
 
 
 @router.get("/{token}/tiles/{z}/{x}/{y}.png")
