@@ -540,7 +540,10 @@ class _MapPanelState extends State<MapPanel> {
               VectorTileLayer(
                 tileProviders: _vectorStyle!.providers,
                 theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
               )
             else if (_tileProvider != null) ...[
               TileLayer(
@@ -1298,7 +1301,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               VectorTileLayer(
                 tileProviders: _vectorStyle!.providers,
                 theme: _vectorStyle!.theme,
+                sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
+                layerMode: VectorTileLayerMode.vector,
+                maximumZoom: 22,
               )
             else if (_tileProvider != null)
               TileLayer(
