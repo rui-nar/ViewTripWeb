@@ -17,6 +17,7 @@ import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
 import '../projects/polarsteps_import_screen.dart';
 import '../projects/polarsteps_import_notifier.dart';
+import '../projects/project_settings_screen.dart';
 import '../projects/project_stats_screen.dart';
 import '../settings/settings_screen.dart';
 import '../shared/shared_project_screen.dart';
@@ -131,6 +132,13 @@ GoRouter buildRouter(BuildContext context) {
               projectName: projectName,
               availableTags: availableTags,
               sleepingOptionGroups: sleepingOptionGroups);
+        },
+      ),
+      GoRoute(
+        path: '/project-settings',
+        builder: (context, state) {
+          final projectName = state.uri.queryParameters['project'] ?? '';
+          return ProjectSettingsScreen(projectName: projectName);
         },
       ),
       GoRoute(
