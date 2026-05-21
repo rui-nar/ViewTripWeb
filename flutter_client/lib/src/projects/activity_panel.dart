@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
 import 'day_meta_editor.dart';
+import 'journal_detail_modal.dart';
 import 'journal_dialog.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
@@ -1230,7 +1231,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             ),
                             onTap: _multiSelect
                                 ? null
-                                : () => _flyToJournal(jMap),
+                                : () {
+                                    _flyToJournal(jMap);
+                                    showJournalDetail(context, widget.notifier, jMap);
+                                  },
                           ),
                         );
                       } else {
