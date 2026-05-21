@@ -148,7 +148,9 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       final coordsChanged = prevStartLat != startLat || prevStartLon != startLon ||
           prevEndLat != endLat || prevEndLon != endLon;
       final resetToGreatCircle = coordsChanged || routeMode == 'great_circle';
-      if (resetToGreatCircle || prevRouteMode != 'rail') {
+      if (resetToGreatCircle || (prevRouteMode != 'rail' &&
+                                  prevRouteMode != 'ferry' &&
+                                  prevRouteMode != 'bus')) {
         upsertSegmentInGeo(segId, _segmentFeature(
             segId, segmentType, label, startLat, startLon, endLat, endLon));
       }
@@ -159,11 +161,12 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     }
   }
 
-  /// Resolve real railway geometry for a train segment via HAFAS + Overpass.
+  /// Resolve OSM route geometry for a train, boat, or bus segment.
   /// On success updates the segment's feature in [geo] and notifies listeners.
   /// Returns the result map or throws on error.
   Future<Map<String, dynamic>> resolveTrainRoute(
     String segId, {
+    String routeMode = 'rail',
     String? hafasProvider,
     String? trainNumber,
     String? date,
@@ -189,7 +192,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
             item['segment']?['id']?.toString() == segId) {
           segmentType = item['segment']?['segment_type'] as String?;
           final seg = Map<String, dynamic>.from(item['segment'] as Map);
-          seg['route_mode'] = 'rail';
+          seg['route_mode'] = routeMode;
           if (trainNumber != null) seg['train_number'] = trainNumber;
           if (hafasProvider != null) seg['hafas_provider'] = hafasProvider;
           item['segment'] = seg;
@@ -202,7 +205,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
         'properties': {
           'type': 'segment',
           'segment_id': segId,
-          'route_mode': 'rail',
+          'route_mode': routeMode,
           if (segmentType != null) 'segment_type': segmentType,
         },
       };

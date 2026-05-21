@@ -17,7 +17,6 @@ import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'map_panel.dart';
 import 'image_export.dart';
-import 'project_settings_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
 
@@ -413,12 +412,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 switch (v) {
                   case 0: if (!_isExporting) _exportOptions();
                   case 1: _showShareDialog();
-                  case 2: showDialog<void>(
-                    context: context,
-                    useRootNavigator: true,
-                    builder: (_) => ProjectSettingsDialog(
-                      notifier: context.read<ProjectNotifier>(),
-                    ),
+                  case 2: context.push(
+                    '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
                   );
                   case 3: context.push('/settings');
                   case 4: context.go('/projects');
@@ -510,12 +505,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             IconButton(
               icon: const Icon(Icons.tune),
               tooltip: 'Project settings',
-              onPressed: isLoading ? null : () => showDialog<void>(
-                context: context,
-                useRootNavigator: true,
-                builder: (_) => ProjectSettingsDialog(
-                  notifier: context.read<ProjectNotifier>(),
-                ),
+              onPressed: isLoading ? null : () => context.push(
+                '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
               ),
             ),
             IconButton(

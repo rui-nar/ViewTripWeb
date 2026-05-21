@@ -1217,17 +1217,16 @@ def resolve_segment_route(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """
-    Resolve the actual railway geometry for a train segment.
+    Resolve OSM-based route geometry for a train, boat, or bus segment.
 
-    Calls the HAFAS schedule API (optional) to get the stop sequence, then
-    queries Overpass for the corresponding rail track geometry.
-    Stores the result in segment.route_polyline and sets route_mode="rail".
+    Train: calls the HAFAS schedule API (optional) for the stop sequence, then
+    queries Overpass for rail track geometry.
+    Boat/ferry and bus: query Overpass for route=ferry / route=bus relations.
 
     Returns {"polyline": [[lon,lat],…], "stop_count": N}.
     On any unrecoverable error returns 422 and leaves the segment unchanged.
     """
-    from src.services.hafas_service import HafasError, get_stop_sequence
-    from src.services.overpass_service import OverpassError, get_rail_geometry
+    from src.services.overpass_service import OverpassError
 
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -1246,44 +1245,87 @@ def resolve_segment_route(
         if seg is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
-        use_date = body.date or seg.date
-        stops: list[dict] = [
-            {"lat": seg.start.lat, "lon": seg.start.lon},
-            {"lat": seg.end.lat,   "lon": seg.end.lon},
-        ]
+        if seg.segment_type == "train":
+            from src.services.hafas_service import HafasError, get_stop_sequence
+            from src.services.overpass_service import get_rail_geometry
 
-        # Step 1: HAFAS stop sequence (optional)
-        if body.hafas_provider and body.train_number:
+            use_date = body.date or seg.date
+            stops: list[dict] = [
+                {"lat": seg.start.lat, "lon": seg.start.lon},
+                {"lat": seg.end.lat,   "lon": seg.end.lon},
+            ]
+
+            if body.hafas_provider and body.train_number:
+                try:
+                    stops = get_stop_sequence(
+                        provider=body.hafas_provider,
+                        train_number=body.train_number,
+                        date=use_date or "",
+                        start_lat=seg.start.lat,
+                        start_lon=seg.start.lon,
+                        end_lat=seg.end.lat,
+                        end_lon=seg.end.lon,
+                    )
+                except HafasError:
+                    pass
+
             try:
-                stops = get_stop_sequence(
-                    provider=body.hafas_provider,
-                    train_number=body.train_number,
-                    date=use_date or "",
-                    start_lat=seg.start.lat,
-                    start_lon=seg.start.lon,
-                    end_lat=seg.end.lat,
-                    end_lon=seg.end.lon,
+                polyline = get_rail_geometry(stops)
+            except OverpassError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Could not resolve rail geometry: {exc}",
                 )
-            except HafasError:
-                # Fallback: coordinate-only; stops stays as start+end pair
-                pass
 
-        # Step 2: Overpass railway geometry
-        try:
-            polyline = get_rail_geometry(stops)
-        except OverpassError as exc:
+            seg.route_mode     = "rail"
+            seg.route_polyline = json.dumps(polyline)
+            if body.train_number:
+                seg.train_number = body.train_number
+            if body.hafas_provider:
+                seg.hafas_provider = body.hafas_provider
+
+        elif seg.segment_type == "boat":
+            from src.services.overpass_service import get_ferry_geometry
+
+            try:
+                polyline = get_ferry_geometry(
+                    seg.start.lat, seg.start.lon,
+                    seg.end.lat,   seg.end.lon,
+                )
+            except OverpassError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Could not resolve ferry geometry: {exc}",
+                )
+            stops = [{"lat": seg.start.lat, "lon": seg.start.lon},
+                     {"lat": seg.end.lat,   "lon": seg.end.lon}]
+            seg.route_mode     = "ferry"
+            seg.route_polyline = json.dumps(polyline)
+
+        elif seg.segment_type == "bus":
+            from src.services.overpass_service import get_bus_geometry
+
+            try:
+                polyline = get_bus_geometry(
+                    seg.start.lat, seg.start.lon,
+                    seg.end.lat,   seg.end.lon,
+                )
+            except OverpassError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Could not resolve bus geometry: {exc}",
+                )
+            stops = [{"lat": seg.start.lat, "lon": seg.start.lon},
+                     {"lat": seg.end.lat,   "lon": seg.end.lon}]
+            seg.route_mode     = "bus"
+            seg.route_polyline = json.dumps(polyline)
+
+        else:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Could not resolve rail geometry: {exc}",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Route resolution only supported for train, boat, and bus segments",
             )
 
-        # Step 3: Persist
-        seg.route_mode     = "rail"
-        seg.route_polyline = json.dumps(polyline)
-        if body.train_number:
-            seg.train_number = body.train_number
-        if body.hafas_provider:
-            seg.hafas_provider = body.hafas_provider
         _repo.save_project(sess, user_info_id, project)
     bust_geo_cache(user_info_id, name)
 
