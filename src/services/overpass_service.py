@@ -307,6 +307,120 @@ def _dijkstra(
 
 
 # ---------------------------------------------------------------------------
+# Ferry / bus geometry  (shared Overpass route-relation strategy)
+# ---------------------------------------------------------------------------
+
+def get_ferry_geometry(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
+    """Return [[lon, lat], …] polyline following OSM ferry route geometry."""
+    return _get_route_geometry("ferry", lat1, lon1, lat2, lon2)
+
+
+def get_bus_geometry(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
+    """Return [[lon, lat], …] polyline following OSM bus route geometry."""
+    return _get_route_geometry("bus", lat1, lon1, lat2, lon2)
+
+
+def _get_route_geometry(
+    route_tag: str,
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+) -> list[list[float]]:
+    """
+    Two strategies tried in order:
+      A  Route-relation strategy: query OSM route relations for *route_tag*
+         (e.g. "ferry", "bus"), pick the best-fitting one, return trimmed geometry.
+      B  Coordinate fallback: Dijkstra on way members tagged route=*route_tag*.
+    """
+    try:
+        return _via_route_relation_type(route_tag, lat1, lon1, lat2, lon2)
+    except OverpassError:
+        return _via_way_type_fallback(route_tag, lat1, lon1, lat2, lon2)
+
+
+def _via_route_relation_type(
+    route_tag: str,
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+) -> list[list[float]]:
+    buf = max(abs(lat1 - lat2), abs(lon1 - lon2)) * 0.5 + 0.5
+    bbox = (
+        min(lat1, lat2) - buf, min(lon1, lon2) - buf,
+        max(lat1, lat2) + buf, max(lon1, lon2) + buf,
+    )
+    query = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel["route"="{route_tag}"]({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});
+._;
+out geom;
+"""
+    data = _overpass(query)
+    relations = data.get("elements", [])
+
+    best: Optional[list[list[float]]] = None
+    best_score = math.inf
+    for rel in relations:
+        geom = _extract_geometry(rel, lat1, lon1, lat2, lon2)
+        if geom and len(geom) >= 2:
+            length = sum(_sq(geom[i], geom[i + 1]) for i in range(len(geom) - 1))
+            if length < best_score:
+                best_score = length
+                best = geom
+
+    if best is None:
+        raise OverpassError(f"No {route_tag} route relation found in bounding box")
+    return best
+
+
+def _via_way_type_fallback(
+    route_tag: str,
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+) -> list[list[float]]:
+    buf = 0.25
+    bbox = (
+        min(lat1, lat2) - buf, min(lon1, lon2) - buf,
+        max(lat1, lat2) + buf, max(lon1, lon2) + buf,
+    )
+    query = (
+        f"[out:json][timeout:{_TIMEOUT_QUERY}];"
+        f'way["route"="{route_tag}"]'
+        f"({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});"
+        "out geom;"
+    )
+    try:
+        data = _overpass(query)
+    except OverpassError:
+        return _straight(lat1, lon1, lat2, lon2)
+
+    ways = data.get("elements", [])
+    if not ways:
+        return _straight(lat1, lon1, lat2, lon2)
+
+    nodes: dict[str, list[float]] = {}
+    adj:   dict[str, list[str]]   = {}
+    for way in ways:
+        prev: Optional[str] = None
+        for pt in way.get("geometry", []):
+            nid = f"{pt['lat']:.6f},{pt['lon']:.6f}"
+            nodes[nid] = [pt["lon"], pt["lat"]]
+            if prev is not None:
+                adj.setdefault(prev, []).append(nid)
+                adj.setdefault(nid,  []).append(prev)
+            prev = nid
+
+    if not nodes:
+        return _straight(lat1, lon1, lat2, lon2)
+
+    start_node = _nearest_node(nodes, lat1, lon1)
+    end_node   = _nearest_node(nodes, lat2, lon2)
+    path = _dijkstra(nodes, adj, start_node, end_node)
+
+    if path:
+        return [[lon1, lat1]] + [nodes[n] for n in path] + [[lon2, lat2]]
+    return _straight(lat1, lon1, lat2, lon2)
+
+
+# ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
 

@@ -248,7 +248,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final trainNum = _trainNumberCtrl.text.trim().isEmpty
         ? null
         : _trainNumberCtrl.text.trim();
-    final needsResolve = _segmentType == 'train' && _routeMode == 'rail';
+    final needsResolve =
+        (_segmentType == 'train' && _routeMode == 'rail')  ||
+        (_segmentType == 'boat'  && _routeMode == 'ferry') ||
+        (_segmentType == 'bus'   && _routeMode == 'bus');
 
     String resolveSegId = '';
     if (widget.editSegment != null) {
@@ -263,7 +266,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         date: dateStr,
         trainNumber: trainNum,
         hafasProvider: needsResolve ? _hafasProvider : null,
-        routeMode: _segmentType == 'train' ? _routeMode : null,
+        routeMode: {'train', 'boat', 'bus'}.contains(_segmentType) ? _routeMode : null,
       );
       resolveSegId = widget.editSegment!['id'] as String;
     } else {
@@ -288,12 +291,18 @@ class _SegmentDialogState extends State<SegmentDialog> {
       final notifier  = widget.notifier;
       final provider  = _hafasProvider;
       final segId     = resolveSegId;
-      messenger.showSnackBar(const SnackBar(
-        content: Text('Calculating rail route — this may take up to a minute…'),
-        duration: Duration(seconds: 10),
+      final routeMode = const {'train': 'rail', 'boat': 'ferry', 'bus': 'bus'}[_segmentType]!;
+      final resolveMsg = routeMode == 'ferry'
+          ? 'Calculating ferry route — this may take up to a minute…'
+          : routeMode == 'bus'
+              ? 'Calculating bus route — this may take up to a minute…'
+              : 'Calculating rail route — this may take up to a minute…';
+      messenger.showSnackBar(SnackBar(
+        content: Text(resolveMsg),
+        duration: const Duration(seconds: 10),
       ));
       Navigator.of(context).pop();
-      unawaited(_resolveAsync(notifier, segId, provider, trainNum, dateStr, messenger));
+      unawaited(_resolveAsync(notifier, segId, routeMode, provider, trainNum, dateStr, messenger));
     } else {
       Navigator.of(context).pop();
     }
@@ -302,6 +311,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
   static Future<void> _resolveAsync(
     ProjectNotifier notifier,
     String segId,
+    String routeMode,
     String hafasProvider,
     String? trainNumber,
     String? date,
@@ -310,19 +320,25 @@ class _SegmentDialogState extends State<SegmentDialog> {
     try {
       final result = await notifier.resolveTrainRoute(
         segId,
-        hafasProvider: hafasProvider,
-        trainNumber: trainNumber,
+        routeMode: routeMode,
+        hafasProvider: routeMode == 'rail' ? hafasProvider : null,
+        trainNumber:   routeMode == 'rail' ? trainNumber   : null,
         date: date,
       );
       final stopCount = result['stop_count'] as int? ?? 0;
+      final msg = switch (routeMode) {
+        'ferry' => 'Ferry route resolved',
+        'bus'   => 'Bus route resolved',
+        _       => 'Rail route resolved · $stopCount stops',
+      };
       messenger.showSnackBar(SnackBar(
-        content: Text('Rail route resolved · $stopCount stops'),
+        content: Text(msg),
         duration: const Duration(seconds: 5),
       ));
     } catch (e) {
       final msg = e.toString().replaceFirst('Exception: ', '');
       messenger.showSnackBar(SnackBar(
-        content: Text('Rail route unavailable: $msg'),
+        content: Text('Route unavailable: $msg'),
         duration: const Duration(seconds: 6),
       ));
     }
@@ -362,8 +378,16 @@ class _SegmentDialogState extends State<SegmentDialog> {
                     ButtonSegment(value: 'boat',   icon: Icon(Icons.directions_boat), label: Text('Boat')),
                   ],
                   selected: {_segmentType},
-                  onSelectionChanged: (s) =>
-                      setState(() => _segmentType = s.first),
+                  onSelectionChanged: (s) => setState(() {
+                    final prev = _segmentType;
+                    _segmentType = s.first;
+                    const modeForType = {'train': 'rail', 'boat': 'ferry', 'bus': 'bus'};
+                    if (modeForType[prev] != null &&
+                        _routeMode == modeForType[prev] &&
+                        s.first != prev) {
+                      _routeMode = 'great_circle';
+                    }
+                  }),
                   multiSelectionEnabled: false,
                 ),
               ),
@@ -560,6 +584,64 @@ class _SegmentDialogState extends State<SegmentDialog> {
                     ),
                   ),
                 ],
+              ],
+
+              // ── Ferry route section (boat only) ───────────────────────
+              if (_segmentType == 'boat') ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                Text('Ferry route', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'great_circle',
+                        icon: Icon(Icons.show_chart, size: 16),
+                        label: Text('Great circle'),
+                      ),
+                      ButtonSegment(
+                        value: 'ferry',
+                        icon: Icon(Icons.directions_boat, size: 16),
+                        label: Text('Follow ferry route'),
+                      ),
+                    ],
+                    selected: {_routeMode == 'ferry' ? 'ferry' : 'great_circle'},
+                    onSelectionChanged: (s) => setState(() => _routeMode = s.first),
+                    multiSelectionEnabled: false,
+                  ),
+                ),
+              ],
+
+              // ── Bus route section (bus only) ──────────────────────────
+              if (_segmentType == 'bus') ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                Text('Bus route', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'great_circle',
+                        icon: Icon(Icons.show_chart, size: 16),
+                        label: Text('Great circle'),
+                      ),
+                      ButtonSegment(
+                        value: 'bus',
+                        icon: Icon(Icons.directions_bus, size: 16),
+                        label: Text('Follow bus route'),
+                      ),
+                    ],
+                    selected: {_routeMode == 'bus' ? 'bus' : 'great_circle'},
+                    onSelectionChanged: (s) => setState(() => _routeMode = s.first),
+                    multiSelectionEnabled: false,
+                  ),
+                ),
               ],
             ],
           ),

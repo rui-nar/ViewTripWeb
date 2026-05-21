@@ -858,7 +858,7 @@ def _compute_low_res_geo(project: Project) -> str:
             })
         elif item.item_type == "segment" and item.segment is not None:
             seg = item.segment
-            if seg.route_mode == "rail" and seg.route_polyline:
+            if seg.route_mode in ("rail", "ferry", "bus") and seg.route_polyline:
                 coords = json.loads(seg.route_polyline)
             else:
                 pts = great_circle_points(
