@@ -361,9 +361,15 @@ out geom;
     for rel in relations:
         geom = _extract_geometry(rel, lat1, lon1, lat2, lon2)
         if geom and len(geom) >= 2:
-            length = sum(_sq(geom[i], geom[i + 1]) for i in range(len(geom) - 1))
-            if length < best_score:
-                best_score = length
+            # Score by endpoint proximity: _trim guarantees geom[0] is the
+            # point in the relation nearest (lon1,lat1) and geom[-1] nearest
+            # (lon2,lat2), so a low score means the route actually connects
+            # the requested ports. Scoring by total path length (the previous
+            # approach) caused long open-sea crossings to lose to short coastal
+            # hops that happened to fall inside the same bounding box.
+            score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
+            if score < best_score:
+                best_score = score
                 best = geom
 
     if best is None:
@@ -390,11 +396,11 @@ def _via_way_type_fallback(
     try:
         data = _overpass(query)
     except OverpassError:
-        return _straight(lat1, lon1, lat2, lon2)
+        raise
 
     ways = data.get("elements", [])
     if not ways:
-        return _straight(lat1, lon1, lat2, lon2)
+        raise OverpassError(f"No {route_tag} ways found in bounding box")
 
     nodes: dict[str, list[float]] = {}
     adj:   dict[str, list[str]]   = {}
@@ -409,7 +415,7 @@ def _via_way_type_fallback(
             prev = nid
 
     if not nodes:
-        return _straight(lat1, lon1, lat2, lon2)
+        raise OverpassError(f"No {route_tag} nodes found in bounding box")
 
     start_node = _nearest_node(nodes, lat1, lon1)
     end_node   = _nearest_node(nodes, lat2, lon2)
@@ -417,12 +423,14 @@ def _via_way_type_fallback(
 
     if path:
         return [[lon1, lat1]] + [nodes[n] for n in path] + [[lon2, lat2]]
-    return _straight(lat1, lon1, lat2, lon2)
+    raise OverpassError(f"No {route_tag} path found between endpoints")
 
 
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
+
+
 
 def _straight(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
     return [[lon1, lat1], [lon2, lat2]]
