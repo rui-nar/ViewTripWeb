@@ -101,9 +101,12 @@ class _StatCard extends StatelessWidget {
           children: [
             Icon(icon, size: 28, color: theme.colorScheme.primary),
             const SizedBox(height: 6),
-            Text(value,
-                style: theme.textTheme.titleLarge
-                    ?.copyWith(fontWeight: FontWeight.bold)),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(value,
+                  style: theme.textTheme.titleLarge
+                      ?.copyWith(fontWeight: FontWeight.bold)),
+            ),
             const SizedBox(height: 2),
             Text(label,
                 style: theme.textTheme.bodySmall
