@@ -1167,12 +1167,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 : null,
                             trailing: IconButton(
                               icon: const Icon(Icons.edit_outlined, size: 18),
-                              onPressed: () => showDialog(
-                                context: context,
-                                useRootNavigator: true,
-                                builder: (_) => MemoryDialog(
-                                    notifier: notifier, editMemory: mem),
-                              ),
+                              onPressed: () => showMemoryDetail(
+                                context, notifier, mem),
                             ),
                             onTap: _multiSelect ? null : () => _flyToMemory(mem),
                           ),
