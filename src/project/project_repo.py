@@ -183,6 +183,9 @@ class ProjectRepo:
         row.counters_json = json.dumps([
             {"name": c.name, "start": c.start} for c in project.counters
         ])
+        row.track_color = project.track_color
+        row.track_width = project.track_width
+        row.alternating_track_colors = project.alternating_track_colors
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
 
@@ -582,6 +585,9 @@ class ProjectRepo:
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
             counters=counters,
+            track_color=getattr(row, 'track_color', None) or "#F97316",
+            track_width=float(getattr(row, 'track_width', None) or 2.5),
+            alternating_track_colors=bool(getattr(row, 'alternating_track_colors', False)),
         )
         project.rebuild_map()
         return project

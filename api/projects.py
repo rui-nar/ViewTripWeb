@@ -452,6 +452,32 @@ def get_sync_meta(
     }
 
 
+class TrackStyleUpdateRequest(BaseModel):
+    track_color: Optional[str] = None       # "#RRGGBB" hex
+    track_width: Optional[float] = None
+    alternating_track_colors: Optional[bool] = None
+
+
+@router.put("/{name}/track-style", status_code=status.HTTP_204_NO_CONTENT)
+def update_track_style(
+    name: str,
+    body: TrackStyleUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> None:
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_project_row(sess, user_info_id, name)
+        if body.track_color is not None:
+            row.track_color = body.track_color
+        if body.track_width is not None:
+            row.track_width = body.track_width
+        if body.alternating_track_colors is not None:
+            row.alternating_track_colors = body.alternating_track_colors
+        row.updated_at = time.time()
+        sess.add(row)
+        sess.commit()
+
+
 class SyncMetaUpdateRequest(BaseModel):
     auto_sync_enabled: Optional[bool] = None
     linked_ps_trip_id: Optional[int] = None

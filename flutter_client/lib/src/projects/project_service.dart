@@ -40,6 +40,21 @@ class ProjectService {
     return data as Map<String, dynamic>;
   }
 
+  /// PUT /api/projects/{name}/track-style
+  Future<void> saveTrackStyle(
+    String name, {
+    String? trackColor,
+    double? trackWidth,
+    bool? alternating,
+  }) async {
+    final enc = Uri.encodeComponent(name);
+    await api.put('/api/projects/$enc/track-style', {
+      if (trackColor != null) 'track_color': trackColor,
+      if (trackWidth != null) 'track_width': trackWidth,
+      if (alternating != null) 'alternating_track_colors': alternating,
+    });
+  }
+
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
   Future<Map<String, dynamic>> resolveTrainRoute(
     String projectName,

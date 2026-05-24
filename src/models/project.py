@@ -107,6 +107,10 @@ class Project:
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)
     journal_entries: List[JournalEntry] = field(default_factory=list)
+    # Track display style — persisted per project
+    track_color: str = "#F97316"
+    track_width: float = 2.5
+    alternating_track_colors: bool = False
     # Derived lookup — rebuilt after load, not serialised
     _activity_map: Dict[int, Activity] = field(
         default_factory=dict, repr=False, compare=False

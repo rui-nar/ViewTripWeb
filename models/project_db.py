@@ -46,6 +46,10 @@ class DBProject(sqlmodel.SQLModel, table=True):
     sleeping_options_json: Optional[str] = sqlmodel.Field(default="[]")
     # Project-defined counters: [{name, start}]
     counters_json: Optional[str] = sqlmodel.Field(default="[]")
+    # Track display style
+    track_color: str = sqlmodel.Field(default="#F97316")
+    track_width: float = sqlmodel.Field(default=2.5)
+    alternating_track_colors: bool = sqlmodel.Field(default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +74,9 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
     "day_meta_json",
     "sleeping_options_json",
     "counters_json",
+    "track_color",
+    "track_width",
+    "alternating_track_colors",
 })
 
 _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({

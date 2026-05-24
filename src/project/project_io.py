@@ -110,6 +110,9 @@ class ProjectIO:
             "sleeping_options": project.sleeping_options,
             "sleeping_option_groups": project.sleeping_option_groups,
             "counters": [{"name": c.name, "start": c.start} for c in project.counters],
+            "track_color": project.track_color,
+            "track_width": project.track_width,
+            "alternating_track_colors": project.alternating_track_colors,
         }
 
     @staticmethod

@@ -96,17 +96,33 @@ class ProjectNotifier extends ChangeNotifier
   /// Non-null when background check found new items; cleared by markSynced().
   ({List<Map<String, dynamic>> strava, List<Map<String, dynamic>> polarsteps})? pendingSync;
 
-  // ── Track style (UI-only, not persisted to server) ───────────────────────
+  // ── Track style ───────────────────────────────────────────────────────────
   Color trackColor = const Color(0xFFF97316);
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
 
-  void setTrackStyle({Color? color, double? width, bool? alternating}) {
+  Future<void> setTrackStyle({Color? color, double? width, bool? alternating}) async {
     if (color != null) trackColor = color;
     if (width != null) trackWidth = width;
     if (alternating != null) alternatingTrackColors = alternating;
     notifyListeners();
+    final name = projectName;
+    if (name == null) return;
+    try {
+      await _service.saveTrackStyle(
+        name,
+        trackColor: color != null ? _colorToHex(color) : null,
+        trackWidth: width,
+        alternating: alternating,
+      );
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
   }
+
+  static String _colorToHex(Color c) =>
+      '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
   static const _defaultSleepingOptions = [
     'Camping', 'Bivouac', 'Shelter', 'Pension/Guesthouse', 'Hotel', 'Apartment',
@@ -1012,6 +1028,14 @@ class ProjectNotifier extends ChangeNotifier
   void _applyDetails(dynamic details, String name) {
     projectName = details['name'] as String? ?? name;
     tripStart   = details['trip_start'] as String?;
+    final rawColor = details['track_color'] as String?;
+    if (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#')) {
+      trackColor = Color(int.parse(rawColor.substring(1), radix: 16) | 0xFF000000);
+    }
+    final rawWidth = details['track_width'] as num?;
+    if (rawWidth != null) trackWidth = rawWidth.toDouble();
+    final rawAlt = details['alternating_track_colors'] as bool?;
+    if (rawAlt != null) alternatingTrackColors = rawAlt;
     tripEnd     = details['trip_end']   as String?;
     final rawActivities = details['activities'];
     activities = rawActivities is List
