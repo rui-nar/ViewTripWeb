@@ -7,6 +7,17 @@ String _fmtCounter(double v) {
   return v.toStringAsFixed(1);
 }
 
+const _counterPalette = [
+  Color(0xFF3B82F6),
+  Color(0xFFEF4444),
+  Color(0xFF22C55E),
+  Color(0xFFF59E0B),
+  Color(0xFFA855F7),
+  Color(0xFF14B8A6),
+  Color(0xFFEC4899),
+  Color(0xFFFC4C02),
+];
+
 // ── Counter section ───────────────────────────────────────────────────────────
 
 class _CounterSection extends StatefulWidget {
@@ -17,101 +28,186 @@ class _CounterSection extends StatefulWidget {
 }
 
 class _CounterSectionState extends State<_CounterSection> {
-  int _selectedIdx = 0;
+  late Set<int> _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _enabled = Set.of(List.generate(widget.counterStats.length, (i) => i));
+  }
 
   @override
   void didUpdateWidget(_CounterSection old) {
     super.didUpdateWidget(old);
-    if (_selectedIdx >= widget.counterStats.length) _selectedIdx = 0;
+    _enabled = _enabled.where((i) => i < widget.counterStats.length).toSet();
   }
 
   @override
   Widget build(BuildContext context) {
-    final sel    = widget.counterStats[_selectedIdx];
-    final name   = sel['name'] as String;
-    final total  = (sel['total'] as num?)?.toDouble() ?? 0.0;
-    final start  = (sel['start'] as num?)?.toDouble() ?? 0.0;
-    final series = (sel['series'] as List?)
-            ?.cast<Map<String, dynamic>>() ??
-        const <Map<String, dynamic>>[];
+    final theme = Theme.of(context);
+    final stats = widget.counterStats;
+
+    final enabledWithSeries = _enabled.where((i) {
+      final s = (stats[i]['series'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      return s.isNotEmpty;
+    }).toSet();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (widget.counterStats.length > 1)
-          DropdownButton<int>(
-            value: _selectedIdx,
-            underline: const SizedBox.shrink(),
-            items: widget.counterStats.indexed
-                .map((p) => DropdownMenuItem(
-                      value: p.$1,
-                      child: Text(p.$2['name'] as String),
-                    ))
-                .toList(),
-            onChanged: (i) => setState(() => _selectedIdx = i!),
+        // ── Tiles ────────────────────────────────────────────────────────
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: List.generate(stats.length, (i) {
+            final c       = stats[i];
+            final enabled = _enabled.contains(i);
+            final color   = _counterPalette[i % _counterPalette.length];
+            final total   = (c['total'] as num?)?.toDouble() ?? 0.0;
+
+            return GestureDetector(
+              onTap: () => setState(() {
+                if (enabled) {
+                  _enabled.remove(i);
+                } else {
+                  _enabled.add(i);
+                }
+              }),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: enabled
+                      ? color.withValues(alpha: 0.12)
+                      : Colors.transparent,
+                  border: Border.all(
+                    color: enabled ? color : theme.colorScheme.outlineVariant,
+                    width: enabled ? 1.5 : 1,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _fmtCounter(total),
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        color: enabled
+                            ? color
+                            : theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      c['name'] as String,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: enabled
+                            ? color.withValues(alpha: 0.8)
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ),
+        // ── Chart ────────────────────────────────────────────────────────
+        if (enabledWithSeries.isNotEmpty)
+          _CounterChart(
+            counterStats: stats,
+            enabledIndices: enabledWithSeries,
           ),
-        _StatCard(
-            icon: Icons.pin_outlined,
-            label: name,
-            value: _fmtCounter(total)),
-        if (series.isNotEmpty)
-          _CounterChart(series: series, startValue: start),
       ],
     );
   }
 }
 
-// ── Counter chart (step-function line chart) ──────────────────────────────────
+// ── Multi-counter line chart ──────────────────────────────────────────────────
 
 class _CounterChart extends StatelessWidget {
-  final List<Map<String, dynamic>> series;
-  final double startValue;
-  const _CounterChart({required this.series, required this.startValue});
+  final List<Map<String, dynamic>> counterStats;
+  final Set<int> enabledIndices;
+
+  const _CounterChart({
+    required this.counterStats,
+    required this.enabledIndices,
+  });
 
   @override
   Widget build(BuildContext context) {
-    if (series.isEmpty) return const SizedBox.shrink();
-
     final theme = Theme.of(context);
 
-    // Parse dates and compute integer day offsets from the first date.
-    final firstDate = DateTime.parse(series.first['date'] as String);
+    // Earliest date across all enabled series (shared X origin).
+    DateTime? earliest;
+    for (final i in enabledIndices) {
+      final series =
+          (counterStats[i]['series'] as List?)?.cast<Map<String, dynamic>>() ??
+              [];
+      if (series.isEmpty) continue;
+      final d = DateTime.parse(series.first['date'] as String);
+      if (earliest == null || d.isBefore(earliest)) earliest = d;
+    }
+    if (earliest == null) return const SizedBox.shrink();
 
-    double dayOffset(String d) =>
-        DateTime.parse(d).difference(firstDate).inDays.toDouble();
+    final origin = earliest;
+    double dayOff(String ds) =>
+        DateTime.parse(ds).difference(origin).inDays.toDouble();
 
-    // Build step-function spots: for each jump, emit a horizontal point
-    // at the previous value before the vertical jump.
-    final spots = <FlSpot>[];
-    double prevValue = startValue;
-    for (final pt in series) {
-      final x = dayOffset(pt['date'] as String);
-      final y = (pt['value'] as num).toDouble();
-      if (spots.isNotEmpty) {
-        spots.add(FlSpot(x, prevValue)); // horizontal step
-      }
-      spots.add(FlSpot(x, y));
-      prevValue = y;
+    // One LineChartBarData per enabled counter.
+    final bars       = <LineChartBarData>[];
+    var globalMin    = double.infinity;
+    var globalMax    = double.negativeInfinity;
+
+    for (final i in enabledIndices) {
+      final series =
+          (counterStats[i]['series'] as List?)?.cast<Map<String, dynamic>>() ??
+              [];
+      if (series.isEmpty) continue;
+
+      final color = _counterPalette[i % _counterPalette.length];
+      final spots = series.map((pt) {
+        final y = (pt['value'] as num).toDouble();
+        if (y < globalMin) globalMin = y;
+        if (y > globalMax) globalMax = y;
+        return FlSpot(dayOff(pt['date'] as String), y);
+      }).toList();
+
+      bars.add(LineChartBarData(
+        spots: spots,
+        isCurved: false,
+        color: color,
+        barWidth: 2,
+        dotData: FlDotData(
+          show: true,
+          getDotPainter: (_, __, ___, ____) => FlDotCirclePainter(
+            radius: 3.5,
+            color: color,
+            strokeWidth: 0,
+          ),
+        ),
+      ));
     }
 
-    // Which x-values are real data points (not the duplicated step points).
-    final dataXSet = series.map((p) => dayOffset(p['date'] as String)).toSet();
+    if (bars.isEmpty) return const SizedBox.shrink();
 
-    final color = theme.colorScheme.primary;
+    final yPad  = (globalMax - globalMin).abs() < 1
+        ? 1.0
+        : (globalMax - globalMin) * 0.1;
+    final maxX  = bars
+        .expand((b) => b.spots)
+        .map((s) => s.x)
+        .reduce((a, b) => a > b ? a : b);
 
-    // X-axis label formatter.
     String xLabel(double x) {
-      final d = firstDate.add(Duration(days: x.toInt()));
+      final d = origin.add(Duration(days: x.toInt()));
       const months = [
         'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
       ];
       return '${months[d.month - 1]} ${d.day}';
     }
-
-    final minY = spots.map((s) => s.y).reduce((a, b) => a < b ? a : b);
-    final maxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
-    final yPad = (maxY - minY).abs() < 1 ? 1.0 : (maxY - minY) * 0.1;
 
     return Padding(
       padding: const EdgeInsets.only(top: 12),
@@ -119,8 +215,8 @@ class _CounterChart extends StatelessWidget {
         height: 200,
         child: LineChart(
           LineChartData(
-            minY: minY - yPad,
-            maxY: maxY + yPad,
+            minY: globalMin - yPad,
+            maxY: globalMax + yPad,
             gridData: FlGridData(
               show: true,
               drawVerticalLine: false,
@@ -145,11 +241,10 @@ class _CounterChart extends StatelessWidget {
                 sideTitles: SideTitles(
                   showTitles: true,
                   reservedSize: 24,
-                  interval: spots.last.x < 7 ? 1 : (spots.last.x / 4).ceilToDouble(),
+                  interval: maxX < 7 ? 1 : (maxX / 4).ceilToDouble(),
                   getTitlesWidget: (v, _) => Text(
                     xLabel(v),
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(fontSize: 10),
+                    style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
                   ),
                 ),
               ),
@@ -158,23 +253,7 @@ class _CounterChart extends StatelessWidget {
               rightTitles: const AxisTitles(
                   sideTitles: SideTitles(showTitles: false)),
             ),
-            lineBarsData: [
-              LineChartBarData(
-                spots: spots,
-                isCurved: false,
-                color: color,
-                barWidth: 2,
-                dotData: FlDotData(
-                  show: true,
-                  checkToShowDot: (spot, _) => dataXSet.contains(spot.x),
-                  getDotPainter: (_, __, ___, ____) => FlDotCirclePainter(
-                    radius: 4,
-                    color: color,
-                    strokeWidth: 0,
-                  ),
-                ),
-              ),
-            ],
+            lineBarsData: bars,
           ),
         ),
       ),
