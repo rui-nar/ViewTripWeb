@@ -18,9 +18,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('project', sa.Column('track_color', sa.String(), nullable=True, server_default='#F97316'))
-    op.add_column('project', sa.Column('track_width', sa.Float(), nullable=True, server_default='2.5'))
-    op.add_column('project', sa.Column('alternating_track_colors', sa.Boolean(), nullable=True, server_default='0'))
+    op.add_column('project', sa.Column('track_color', sa.String(), nullable=False, server_default='#F97316'))
+    op.add_column('project', sa.Column('track_width', sa.Float(), nullable=False, server_default='2.5'))
+    op.add_column('project', sa.Column('alternating_track_colors', sa.Boolean(), nullable=False, server_default='0'))
 
 
 def downgrade() -> None:
