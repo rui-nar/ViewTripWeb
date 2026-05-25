@@ -10,6 +10,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   String? get projectName;
   List<Map<String, dynamic>> get items;
+  set items(List<Map<String, dynamic>> v);
   String? get error;
   set error(String? v);
 
@@ -105,6 +106,15 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
       error = errorMessage(e);
       notifyListeners();
     }
+  }
+
+  void removeJournalLocally(String journalId) {
+    items = items
+        .where((item) =>
+            !(item['item_type'] == 'journal' &&
+              item['journal']?['id']?.toString() == journalId))
+        .toList();
+    notifyListeners();
   }
 
   Future<void> deleteJournal(String journalId) async {

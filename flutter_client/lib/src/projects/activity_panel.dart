@@ -103,7 +103,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
   String? _anchorDayKey; // last day tapped without Shift — range-select anchor
 
   // Narrow-layout: day keys whose edit strip is revealed by swipe-right
-  final Set<String> _expandedDayEdits = {};
 
   // Memories-only filter toggle
   bool _memoriesOnly = false;
@@ -840,14 +839,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final isSingleSelected = !_multiSelect && _selectedDay == h.dateKey;
                         final isHighlighted = _multiSelect ? isMultiChecked : isSingleSelected;
                         final isWide = MediaQuery.of(context).size.width >= 720;
-                        final isEditExpanded = !isWide && _expandedDayEdits.contains(h.dateKey);
-
                         Widget headerRow = InkWell(
                           key: isWide ? ValueKey('header_${h.dayNumber}') : null,
                           onTap: () {
-                            if (!isWide) {
-                              setState(() => _expandedDayEdits.remove(h.dateKey));
-                            }
                             if (_multiSelect) {
                               _handleMultiSelectTap(h.dateKey);
                             } else {
@@ -999,47 +993,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         );
 
                         if (!isWide) {
-                          headerRow = GestureDetector(
-                            key: ValueKey('header_${h.dayNumber}'),
-                            onHorizontalDragEnd: (details) {
-                              if ((details.primaryVelocity ?? 0) > 0) {
-                                setState(() {
-                                  if (isEditExpanded) {
-                                    _expandedDayEdits.remove(h.dateKey);
-                                  } else {
-                                    _expandedDayEdits.add(h.dateKey);
-                                  }
-                                });
-                              }
-                            },
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                headerRow,
-                                AnimatedContainer(
-                                  duration: const Duration(milliseconds: 200),
-                                  curve: Curves.easeOut,
-                                  height: isEditExpanded ? 40.0 : 0.0,
-                                  clipBehavior: Clip.hardEdge,
-                                  decoration: const BoxDecoration(),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
-                                    children: [
-                                      TextButton.icon(
-                                        icon: const Icon(Icons.edit_outlined, size: 16),
-                                        label: const Text('Edit day'),
-                                        onPressed: () {
-                                          setState(() => _expandedDayEdits.remove(h.dateKey));
-                                          showDayMetaSheet(context, notifier, h.dateKey,
-                                              orderedDateKeys: _orderedDayKeys());
-                                        },
-                                      ),
-                                      const SizedBox(width: 8),
-                                    ],
-                                  ),
-                                ),
-                              ],
+                          headerRow = Dismissible(
+                            key: ValueKey('header_swipe_${h.dayNumber}'),
+                            direction: DismissDirection.startToEnd,
+                            background: Container(
+                              color: const Color(0xFF1D4ED8),
+                              alignment: Alignment.centerLeft,
+                              padding: const EdgeInsets.only(left: 20),
+                              child: const Icon(Icons.edit_outlined,
+                                  color: Colors.white),
                             ),
+                            confirmDismiss: (_) async {
+                              showDayMetaSheet(context, notifier, h.dateKey,
+                                  orderedDateKeys: _orderedDayKeys());
+                              return false;
+                            },
+                            child: headerRow,
                           );
                         }
 
@@ -1137,40 +1106,69 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             (memDate != null
                                 ? _fmtMemDate(memDate, memTime)
                                 : 'Memory');
-                        return Selector<ProjectNotifier, bool>(
+                        return Dismissible(
                           key: ValueKey('mem_$memId'),
-                          selector: (_, n) =>
-                              n.selectedMemoryId?.toString() == memId,
-                          builder: (_, isSelected, __) => ListTile(
-                            dense: true,
-                            tileColor: isSelected
-                                ? theme.colorScheme.tertiaryContainer
-                                    .withValues(alpha: 0.45)
-                                : null,
-                            title: Row(children: [
-                              Icon(Icons.photo_camera_outlined,
-                                  size: 16,
-                                  color: isSelected
-                                      ? theme.colorScheme.primary
-                                      : theme.colorScheme.primary
-                                          .withValues(alpha: 0.7)),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                  child: Text(label,
-                                      style: theme.textTheme.labelSmall)),
-                            ]),
-                            subtitle: memDesc != null && memDesc.isNotEmpty
-                                ? Text(memDesc,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodySmall)
-                                : null,
-                            trailing: IconButton(
-                              icon: const Icon(Icons.edit_outlined, size: 18),
-                              onPressed: () => showMemoryDetail(
-                                context, notifier, mem),
+                          direction: DismissDirection.horizontal,
+                          background: Container(
+                            color: const Color(0xFF1D4ED8),
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.only(left: 20),
+                            child: const Icon(Icons.edit_outlined,
+                                color: Colors.white),
+                          ),
+                          secondaryBackground: Container(
+                            color: theme.colorScheme.error,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: Icon(Icons.delete_outline,
+                                color: theme.colorScheme.onError),
+                          ),
+                          confirmDismiss: (direction) async {
+                            if (direction == DismissDirection.startToEnd) {
+                              showMemoryDetail(context, notifier, mem);
+                              return false;
+                            }
+                            _dismissWithUndo(
+                              context: context,
+                              notifier: notifier,
+                              label: 'Removed "$label"',
+                              onOptimistic: () =>
+                                  notifier.removeMemoryLocally(memId),
+                              onConfirm: () => notifier.deleteMemory(memId),
+                            );
+                            return true;
+                          },
+                          child: Selector<ProjectNotifier, bool>(
+                            selector: (_, n) =>
+                                n.selectedMemoryId?.toString() == memId,
+                            builder: (_, isSelected, __) => ListTile(
+                              dense: true,
+                              tileColor: isSelected
+                                  ? theme.colorScheme.tertiaryContainer
+                                      .withValues(alpha: 0.45)
+                                  : null,
+                              title: Row(children: [
+                                Icon(Icons.photo_camera_outlined,
+                                    size: 16,
+                                    color: isSelected
+                                        ? theme.colorScheme.primary
+                                        : theme.colorScheme.primary
+                                            .withValues(alpha: 0.7)),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                    child: Text(label,
+                                        style: theme.textTheme.labelSmall)),
+                              ]),
+                              subtitle: memDesc != null && memDesc.isNotEmpty
+                                  ? Text(memDesc,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.bodySmall)
+                                  : null,
+                              onTap: _multiSelect
+                                  ? null
+                                  : () => _flyToMemory(mem),
                             ),
-                            onTap: _multiSelect ? null : () => _flyToMemory(mem),
                           ),
                         );
                       } else if (item['item_type'] == 'journal') {
@@ -1180,57 +1178,87 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final jTime = jMap['time'] as String?;
                         final jDesc = jMap['description'] as String?;
                         final label = jDate != null ? _fmtMemDate(jDate, jTime) : 'Journal';
-                        return Selector<ProjectNotifier, bool>(
+                        return Dismissible(
                           key: ValueKey('journal_$jId'),
-                          selector: (_, n) =>
-                              n.selectedJournalId?.toString() == jId,
-                          builder: (_, isSelected, __) => ListTile(
-                            dense: true,
-                            tileColor: isSelected
-                                ? const Color(0xFF64748B).withValues(alpha: 0.15)
-                                : null,
-                            title: Row(children: [
-                              Container(
-                                width: 24,
-                                height: 24,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF64748B)
-                                      .withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Icon(Icons.book_outlined,
-                                    size: 14,
-                                    color: isSelected
-                                        ? const Color(0xFF44AAFF)
-                                        : const Color(0xFF64748B)),
-                              ),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                child: Text(label,
-                                    style: theme.textTheme.labelSmall),
-                              ),
-                            ]),
-                            subtitle: jDesc != null && jDesc.isNotEmpty
-                                ? Text(jDesc,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodySmall)
-                                : null,
-                            trailing: IconButton(
-                              icon: const Icon(Icons.edit_outlined, size: 18),
-                              onPressed: () => showDialog(
+                          direction: DismissDirection.horizontal,
+                          background: Container(
+                            color: const Color(0xFF1D4ED8),
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.only(left: 20),
+                            child: const Icon(Icons.edit_outlined,
+                                color: Colors.white),
+                          ),
+                          secondaryBackground: Container(
+                            color: theme.colorScheme.error,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: Icon(Icons.delete_outline,
+                                color: theme.colorScheme.onError),
+                          ),
+                          confirmDismiss: (direction) async {
+                            if (direction == DismissDirection.startToEnd) {
+                              showDialog<void>(
                                 context: context,
                                 useRootNavigator: true,
                                 builder: (_) => JournalDialog(
                                     notifier: notifier, editEntry: jMap),
-                              ),
+                              );
+                              return false;
+                            }
+                            _dismissWithUndo(
+                              context: context,
+                              notifier: notifier,
+                              label: 'Removed "$label"',
+                              onOptimistic: () =>
+                                  notifier.removeJournalLocally(jId),
+                              onConfirm: () => notifier.deleteJournal(jId),
+                            );
+                            return true;
+                          },
+                          child: Selector<ProjectNotifier, bool>(
+                            selector: (_, n) =>
+                                n.selectedJournalId?.toString() == jId,
+                            builder: (_, isSelected, __) => ListTile(
+                              dense: true,
+                              tileColor: isSelected
+                                  ? const Color(0xFF64748B)
+                                      .withValues(alpha: 0.15)
+                                  : null,
+                              title: Row(children: [
+                                Container(
+                                  width: 24,
+                                  height: 24,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF64748B)
+                                        .withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Icon(Icons.book_outlined,
+                                      size: 14,
+                                      color: isSelected
+                                          ? const Color(0xFF44AAFF)
+                                          : const Color(0xFF64748B)),
+                                ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(label,
+                                      style: theme.textTheme.labelSmall),
+                                ),
+                              ]),
+                              subtitle: jDesc != null && jDesc.isNotEmpty
+                                  ? Text(jDesc,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.bodySmall)
+                                  : null,
+                              onTap: _multiSelect
+                                  ? null
+                                  : () {
+                                      _flyToJournal(jMap);
+                                      showJournalDetail(
+                                          context, widget.notifier, jMap);
+                                    },
                             ),
-                            onTap: _multiSelect
-                                ? null
-                                : () {
-                                    _flyToJournal(jMap);
-                                    showJournalDetail(context, widget.notifier, jMap);
-                                  },
                           ),
                         );
                       } else {
@@ -1243,22 +1271,37 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             seg['label'] as String? ?? segType ?? 'Segment';
                         return Dismissible(
                           key: ValueKey('seg_$segId'),
-                          direction: DismissDirection.endToStart,
-                          onDismissed: (_) => _dismissWithUndo(
-                            context: context,
-                            notifier: notifier,
-                            label: 'Removed "$label"',
-                            onOptimistic: () =>
-                                notifier.removeSegmentLocally(segId),
-                            onConfirm: () => notifier.deleteSegment(segId),
-                          ),
+                          direction: DismissDirection.horizontal,
                           background: Container(
+                            color: const Color(0xFF1D4ED8),
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.only(left: 20),
+                            child: const Icon(Icons.edit_outlined,
+                                color: Colors.white),
+                          ),
+                          secondaryBackground: Container(
                             color: theme.colorScheme.error,
                             alignment: Alignment.centerRight,
                             padding: const EdgeInsets.only(right: 20),
                             child: Icon(Icons.delete_outline,
                                 color: theme.colorScheme.onError),
                           ),
+                          confirmDismiss: (direction) async {
+                            if (direction == DismissDirection.startToEnd) {
+                              _showSegmentDialog(context, notifier,
+                                  editSegment: seg, insertAfterIndex: null);
+                              return false;
+                            }
+                            _dismissWithUndo(
+                              context: context,
+                              notifier: notifier,
+                              label: 'Removed "$label"',
+                              onOptimistic: () =>
+                                  notifier.removeSegmentLocally(segId),
+                              onConfirm: () => notifier.deleteSegment(segId),
+                            );
+                            return true;
+                          },
                           child: Selector<ProjectNotifier, bool>(
                             selector: (_, n) =>
                                 n.selectedSegmentId?.toString() == segId,

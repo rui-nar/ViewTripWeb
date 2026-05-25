@@ -14,6 +14,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   String? get projectName;
   List<Map<String, dynamic>> get items;
+  set items(List<Map<String, dynamic>> v);
   String? get error;
   set error(String? v);
 
@@ -118,6 +119,15 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
       error = errorMessage(e);
       notifyListeners();
     }
+  }
+
+  void removeMemoryLocally(String memoryId) {
+    items = items
+        .where((item) =>
+            !(item['item_type'] == 'memory' &&
+              item['memory']?['id']?.toString() == memoryId))
+        .toList();
+    notifyListeners();
   }
 
   Future<void> deleteMemory(String memoryId) async {
