@@ -850,31 +850,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               Expanded(
                 child: Column(
                   children: [
-                    _StickyHeader(
-                      nameCtrl: _nameCtrl,
-                      tripStart: _tripStart,
-                      tripEnd: _tripEnd,
-                      onPickStart: () async {
-                        final picked = await showDatePicker(
-                          context: context,
-                          useRootNavigator: true,
-                          initialDate: _tripStart ?? DateTime.now(),
-                          firstDate: DateTime(2000),
-                          lastDate: DateTime(2100),
-                        );
-                        if (picked != null) setState(() => _tripStart = picked);
-                      },
-                      onPickEnd: () async {
-                        final picked = await showDatePicker(
-                          context: context,
-                          useRootNavigator: true,
-                          initialDate: _tripEnd ?? DateTime.now(),
-                          firstDate: DateTime(2000),
-                          lastDate: DateTime(2100),
-                        );
-                        if (picked != null) setState(() => _tripEnd = picked);
-                      },
-                    ),
+                    _StickyHeader(nameCtrl: _nameCtrl),
                     Expanded(
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.all(20),
@@ -1126,21 +1102,8 @@ class _Sidebar extends StatelessWidget {
 
 class _StickyHeader extends StatelessWidget {
   final TextEditingController nameCtrl;
-  final DateTime? tripStart;
-  final DateTime? tripEnd;
-  final VoidCallback onPickStart;
-  final VoidCallback onPickEnd;
 
-  static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  static String _fmt(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
-
-  const _StickyHeader({
-    required this.nameCtrl,
-    required this.tripStart,
-    required this.tripEnd,
-    required this.onPickStart,
-    required this.onPickEnd,
-  });
+  const _StickyHeader({required this.nameCtrl});
 
   @override
   Widget build(BuildContext context) {
@@ -1178,35 +1141,6 @@ class _StickyHeader extends StatelessWidget {
               ],
             ),
           ),
-          // Date chips
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            decoration: BoxDecoration(
-              color: _kBgCard,
-              border: Border.all(color: _kBorder),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _dateChip(
-                  icon: Icons.event,
-                  label: 'Trip start',
-                  value: tripStart == null ? 'Inferred' : _fmt(tripStart!),
-                  muted: tripStart == null,
-                  onTap: onPickStart,
-                ),
-                Container(width: 1, height: 24, color: const Color(0xFF243648)),
-                _dateChip(
-                  icon: Icons.event_available,
-                  label: 'Trip end',
-                  value: tripEnd == null ? 'Ongoing' : _fmt(tripEnd!),
-                  muted: tripEnd == null,
-                  onTap: onPickEnd,
-                ),
-              ],
-            ),
-          ),
           // Version
           const SizedBox(width: 16),
           const Text(
@@ -1218,42 +1152,6 @@ class _StickyHeader extends StatelessWidget {
     );
   }
 
-  static Widget _dateChip({
-    required IconData icon,
-    required String label,
-    required String value,
-    required bool muted,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(7),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 15, color: _kDim),
-            const SizedBox(width: 6),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label.toUpperCase(), style: const TextStyle(
-                  fontFamily: 'monospace', fontSize: 9, fontWeight: FontWeight.w600,
-                  color: _kDim, letterSpacing: 1.2,
-                )),
-                Text(value, style: TextStyle(
-                  fontSize: 12.5, fontWeight: FontWeight.w500,
-                  color: muted ? _kMuted : _kText2,
-                  fontStyle: muted ? FontStyle.italic : FontStyle.normal,
-                )),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 // ── Section card wrapper ───────────────────────────────────────────────────────
