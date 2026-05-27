@@ -50,6 +50,16 @@ class _StatsBody extends StatelessWidget {
     final totalSleepingNights =
         sleepingEntries.fold<int>(0, (s, e) => s + (e.value as num).toInt());
 
+    final distPerTagRaw =
+        (stats['distance_per_tag'] as Map<String, dynamic>?) ?? {};
+    final tagPieEntries = distPerTagRaw.entries
+        .map((e) => MapEntry(e.key, (e.value as num).toDouble()))
+        .where((e) => e.value > 0)
+        .toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final totalTagDist =
+        tagPieEntries.fold<double>(0, (s, e) => s + e.value);
+
     // Filter to modes with non-zero distance.
     final modeEntries = _modeColors.entries
         .where((e) => ((byMode[e.key] as num?)?.toDouble() ?? 0.0) > 0)
@@ -83,6 +93,63 @@ class _StatsBody extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Distance per tag pie chart ────────────────────────────────
+          if (tagPieEntries.length >= 2) ...[
+            _SectionHeader('Distance by tag'),
+            SizedBox(
+              height: 220,
+              child: PieChart(
+                PieChartData(
+                  sectionsSpace: 2,
+                  centerSpaceRadius: 44,
+                  sections: tagPieEntries.indexed.map((pair) {
+                    final idx = pair.$1;
+                    final e = pair.$2;
+                    final pct = totalTagDist > 0
+                        ? e.value / totalTagDist * 100
+                        : 0.0;
+                    return PieChartSectionData(
+                      color: _counterPalette[idx % _counterPalette.length],
+                      value: e.value,
+                      title: '${pct.toStringAsFixed(0)}%',
+                      radius: 68,
+                      titleStyle: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 16,
+              runSpacing: 8,
+              children: tagPieEntries.indexed.map((pair) {
+                final idx = pair.$1;
+                final e = pair.$2;
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: _counterPalette[idx % _counterPalette.length],
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text('${e.key}  ${_fmtDistance(e.value)}'),
+                  ],
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 8),
+          ],
+
           // ── Summary cards ──────────────────────────────────────────────
           _SectionHeader('Overview'),
           Row(

@@ -1003,6 +1003,25 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
         label = meta.sleeping if meta.sleeping else "No data"
         sleeping_counts[label] += 1
 
+    # ── Ride distance per tag (always over all activities, ignores tag_filter) ─
+    dist_per_tag: Dict[str, float] = {}
+    if tag_options:
+        date_tags: Dict[str, list] = {
+            dk: list(meta.tags or [])
+            for dk, meta in project.day_meta.items()
+        }
+        for a in project.activities:
+            if (a.type or "other").lower() != "ride":
+                continue
+            if a.start_date_local is None:
+                continue
+            try:
+                act_date = a.start_date_local.date().isoformat()
+            except AttributeError:
+                act_date = str(a.start_date_local)[:10]
+            for tag in date_tags.get(act_date, []):
+                dist_per_tag[tag] = dist_per_tag.get(tag, 0.0) + (a.distance or 0.0)
+
     # ── Distance + counts by segment type ───────────────────────────────────
     seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}
     seg_counts: Dict[str, int] = defaultdict(int)
@@ -1040,5 +1059,6 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
             for n in project.sleeping_options
         },
         "tag_options": tag_options,
+        "distance_per_tag": dist_per_tag,
         "counters": _compute_counter_stats(project, allowed_dates),
     }
