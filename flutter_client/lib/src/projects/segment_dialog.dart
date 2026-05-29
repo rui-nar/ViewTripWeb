@@ -34,6 +34,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
   bool _saving = false;
   Timer? _previewDebounce;
 
+  dynamic _startActivityId;
+  dynamic _endActivityId;
+  late List<Map<String, dynamic>> _activityList;
+
   // Rail-track fields (train segments only)
   String _routeMode = 'great_circle';
   String _hafasProvider = 'db';
@@ -80,6 +84,13 @@ class _SegmentDialogState extends State<SegmentDialog> {
     _hafasProvider = (seg?['hafas_provider'] as String?) ?? 'db';
     _trainNumberCtrl = TextEditingController(
         text: seg?['train_number'] as String? ?? '');
+    _activityList = List<Map<String, dynamic>>.from(widget.notifier.activities)
+      ..sort((a, b) {
+        final da = (a['start_date_local'] as String?) ?? '';
+        final db = (b['start_date_local'] as String?) ?? '';
+        return da.compareTo(db);
+      });
+
     // Auto-populate from adjacent activities if creating new segment
     if (seg == null) _autoPopulate();
 
@@ -143,6 +154,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         if (endLl is List && endLl.length >= 2) {
           _startLatCtrl.text = (endLl[0] as num).toStringAsFixed(6);
           _startLonCtrl.text = (endLl[1] as num).toStringAsFixed(6);
+          _startActivityId = prev['activity_id'];
         }
       } else if (prev['item_type'] == 'segment') {
         final end = prev['segment']?['end'] as Map?;
@@ -163,6 +175,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         if (startLl is List && startLl.length >= 2) {
           _endLatCtrl.text = (startLl[0] as num).toStringAsFixed(6);
           _endLonCtrl.text = (startLl[1] as num).toStringAsFixed(6);
+          _endActivityId = next['activity_id'];
         }
       } else if (next['item_type'] == 'segment') {
         final start = next['segment']?['start'] as Map?;
@@ -237,13 +250,18 @@ class _SegmentDialogState extends State<SegmentDialog> {
   }
 
   Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
+    final startLat = double.tryParse(_startLatCtrl.text.trim());
+    final startLon = double.tryParse(_startLonCtrl.text.trim());
+    final endLat   = double.tryParse(_endLatCtrl.text.trim());
+    final endLon   = double.tryParse(_endLonCtrl.text.trim());
+    if (startLat == null || startLon == null ||
+        endLat   == null || endLon   == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Set a start and end location')),
+      );
+      return;
+    }
     setState(() => _saving = true);
-
-    final startLat = double.parse(_startLatCtrl.text.trim());
-    final startLon = double.parse(_startLonCtrl.text.trim());
-    final endLat = double.parse(_endLatCtrl.text.trim());
-    final endLon = double.parse(_endLonCtrl.text.trim());
     final dateStr = _date != null ? _toIso(_date!) : null;
     final trainNum = _trainNumberCtrl.text.trim().isEmpty
         ? null
@@ -344,12 +362,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
     }
   }
 
-  String? _validateCoord(String? v) {
-    if (v == null || v.trim().isEmpty) return 'Required';
-    if (double.tryParse(v.trim()) == null) return 'Invalid number';
-    return null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -441,94 +453,54 @@ class _SegmentDialogState extends State<SegmentDialog> {
                 ),
               ),
               const SizedBox(height: 4),
-              // Start
-              Row(
-                children: [
-                  const Text('Start'),
-                  const Spacer(),
-                  TextButton.icon(
-                    icon: const Icon(Icons.location_on_outlined, size: 16),
-                    label: const Text('Pick on map'),
-                    style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact),
-                    onPressed: () => _pickLocation(
-                      title: 'Pick start location',
-                      latCtrl: _startLatCtrl,
-                      lonCtrl: _startLonCtrl,
-                      isStart: true,
-                    ),
-                  ),
-                ],
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _startLatCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Lat'),
-                      keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true, signed: true),
-                      validator: _validateCoord,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _startLonCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Lon'),
-                      keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true, signed: true),
-                      validator: _validateCoord,
-                    ),
-                  ),
-                ],
+              // ── Start ────────────────────────────────────────────────
+              _EndpointRow(
+                label: 'Start',
+                activities: _activityList,
+                selectedId: _startActivityId,
+                hint: 'From activity (end point)',
+                latCtrl: _startLatCtrl,
+                lonCtrl: _startLonCtrl,
+                onActivityChanged: (a) => setState(() {
+                  _startActivityId = a?['id'];
+                  if (a == null) return;
+                  final ll = a['end_latlng'];
+                  if (ll is List && ll.length >= 2) {
+                    _startLatCtrl.text = (ll[0] as num).toStringAsFixed(6);
+                    _startLonCtrl.text = (ll[1] as num).toStringAsFixed(6);
+                  }
+                }),
+                onPickMap: () => _pickLocation(
+                  title: 'Pick start location',
+                  latCtrl: _startLatCtrl,
+                  lonCtrl: _startLonCtrl,
+                  isStart: true,
+                ),
               ),
               const SizedBox(height: 12),
-              // End
-              Row(
-                children: [
-                  const Text('End'),
-                  const Spacer(),
-                  TextButton.icon(
-                    icon: const Icon(Icons.location_on_outlined, size: 16),
-                    label: const Text('Pick on map'),
-                    style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact),
-                    onPressed: () => _pickLocation(
-                      title: 'Pick end location',
-                      latCtrl: _endLatCtrl,
-                      lonCtrl: _endLonCtrl,
-                      isStart: false,
-                    ),
-                  ),
-                ],
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _endLatCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Lat'),
-                      keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true, signed: true),
-                      validator: _validateCoord,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _endLonCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Lon'),
-                      keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true, signed: true),
-                      validator: _validateCoord,
-                    ),
-                  ),
-                ],
+              // ── End ──────────────────────────────────────────────────────
+              _EndpointRow(
+                label: 'End',
+                activities: _activityList,
+                selectedId: _endActivityId,
+                hint: 'From activity (start point)',
+                latCtrl: _endLatCtrl,
+                lonCtrl: _endLonCtrl,
+                onActivityChanged: (a) => setState(() {
+                  _endActivityId = a?['id'];
+                  if (a == null) return;
+                  final ll = a['start_latlng'];
+                  if (ll is List && ll.length >= 2) {
+                    _endLatCtrl.text = (ll[0] as num).toStringAsFixed(6);
+                    _endLonCtrl.text = (ll[1] as num).toStringAsFixed(6);
+                  }
+                }),
+                onPickMap: () => _pickLocation(
+                  title: 'Pick end location',
+                  latCtrl: _endLatCtrl,
+                  lonCtrl: _endLonCtrl,
+                  isStart: false,
+                ),
               ),
 
               // ── Rail track section (train only) ──────────────────────
@@ -662,6 +634,128 @@ class _SegmentDialogState extends State<SegmentDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Endpoint row (activity picker + map picker, no raw coord fields) ──────────
+
+class _EndpointRow extends StatelessWidget {
+  final String label;
+  final List<Map<String, dynamic>> activities;
+  final dynamic selectedId;
+  final String hint;
+  final TextEditingController latCtrl;
+  final TextEditingController lonCtrl;
+  final void Function(Map<String, dynamic>?) onActivityChanged;
+  final VoidCallback onPickMap;
+
+  const _EndpointRow({
+    required this.label,
+    required this.activities,
+    required this.selectedId,
+    required this.hint,
+    required this.latCtrl,
+    required this.lonCtrl,
+    required this.onActivityChanged,
+    required this.onPickMap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    Map<String, dynamic>? selectedActivity;
+    if (selectedId != null) {
+      try {
+        selectedActivity =
+            activities.firstWhere((a) => a['id'] == selectedId);
+      } catch (_) {}
+    }
+
+    final hasCoords =
+        latCtrl.text.isNotEmpty && lonCtrl.text.isNotEmpty;
+
+    String? statusText;
+    if (selectedActivity != null) {
+      statusText = selectedActivity['name'] as String? ?? 'Activity';
+    } else if (hasCoords) {
+      final lat = double.tryParse(latCtrl.text);
+      final lon = double.tryParse(lonCtrl.text);
+      if (lat != null && lon != null) {
+        statusText =
+            '${lat.toStringAsFixed(3)}°, ${lon.toStringAsFixed(3)}°';
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Text(label,
+              style: theme.textTheme.labelMedium
+                  ?.copyWith(fontWeight: FontWeight.w600)),
+          const Spacer(),
+          TextButton.icon(
+            icon: const Icon(Icons.location_on_outlined, size: 16),
+            label: const Text('Pick on map'),
+            style:
+                TextButton.styleFrom(visualDensity: VisualDensity.compact),
+            onPressed: onPickMap,
+          ),
+        ]),
+        if (activities.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          DropdownButtonFormField<dynamic>(
+            initialValue: selectedId,
+            isExpanded: true,
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: hint,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            ),
+            items: [
+              const DropdownMenuItem<dynamic>(
+                value: null,
+                child: Text('— clear —',
+                    style: TextStyle(fontStyle: FontStyle.italic)),
+              ),
+              ...activities.map((a) => DropdownMenuItem<dynamic>(
+                    value: a['id'],
+                    child: Text(
+                      a['name'] as String? ?? 'Activity',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  )),
+            ],
+            onChanged: (id) {
+              if (id == null) {
+                onActivityChanged(null);
+              } else {
+                try {
+                  onActivityChanged(
+                      activities.firstWhere((a) => a['id'] == id));
+                } catch (_) {
+                  onActivityChanged(null);
+                }
+              }
+            },
+          ),
+        ],
+        const SizedBox(height: 4),
+        Text(
+          statusText ?? 'No location set',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: statusText != null
+                ? theme.colorScheme.primary
+                : theme.colorScheme.onSurfaceVariant
+                    .withValues(alpha: 0.6),
+            fontStyle:
+                statusText == null ? FontStyle.italic : FontStyle.normal,
+          ),
         ),
       ],
     );
