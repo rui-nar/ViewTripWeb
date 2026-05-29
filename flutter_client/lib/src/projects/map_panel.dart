@@ -1154,13 +1154,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final double strokeWidth;
       if (isSegment) {
         if (isHighlighted) {
-          color = const Color(0xFF44AAFF);
+          color = trackColor;
           strokeWidth = 4.0;
         } else if (hasSelection) {
-          color = const Color(0x60888888);
+          color = trackColor.withAlpha(0x60);
           strokeWidth = 2.0;
         } else {
-          color = const Color(0xFF888888);
+          color = trackColor;
           strokeWidth = 2.0;
         }
       } else {
@@ -1175,7 +1175,14 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           strokeWidth = trackWidth;
         }
       }
-      polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
+      polylines.add(Polyline(
+        points: points,
+        color: color,
+        strokeWidth: strokeWidth,
+        pattern: isSegment
+            ? StrokePattern.dashed(segments: const [12, 8])
+            : const StrokePattern.solid(),
+      ));
     }
     return polylines;
   }
