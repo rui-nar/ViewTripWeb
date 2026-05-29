@@ -173,14 +173,14 @@ class _MapPanelState extends State<MapPanel> {
       final double strokeWidth;
       if (isSegment) {
         if (isSelSeg) {
-          color = const Color(0xFF44AAFF);
-          strokeWidth = 4.0;
+          color = trackColor;
+          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
         } else if (hasSelection) {
-          color = const Color(0x60888888);
-          strokeWidth = 2.0;
+          color = trackColor.withAlpha(0x60);
+          strokeWidth = trackWidth;
         } else {
-          color = const Color(0xFF888888);
-          strokeWidth = 2.0;
+          color = trackColor;
+          strokeWidth = trackWidth;
         }
       } else {
         if (isSelAct) {
@@ -194,7 +194,14 @@ class _MapPanelState extends State<MapPanel> {
           strokeWidth = trackWidth;
         }
       }
-      polylines.add(Polyline(points: points, color: color, strokeWidth: strokeWidth));
+      polylines.add(Polyline(
+        points: points,
+        color: color,
+        strokeWidth: strokeWidth,
+        pattern: isSegment
+            ? StrokePattern.dashed(segments: const [12, 8])
+            : const StrokePattern.solid(),
+      ));
     }
     return polylines;
   }
@@ -213,6 +220,7 @@ class _MapPanelState extends State<MapPanel> {
     Map<String, dynamic> geo,
     dynamic selectedSegmentId,
     bool hasSelection,
+    Color trackColor,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
@@ -233,10 +241,10 @@ class _MapPanelState extends State<MapPanel> {
           segId == selectedSegmentId.toString();
 
       final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
+          ? trackColor
           : hasSelection
-              ? const Color(0x60888888)
-              : const Color(0xFF888888);
+              ? trackColor.withAlpha(0x60)
+              : trackColor;
 
       markers.add(Marker(
         point: point,
@@ -502,7 +510,7 @@ class _MapPanelState extends State<MapPanel> {
       final hasSelection = selActId != null || selSegId != null ||
           selMemId != null || selJournalId != null;
       _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection)
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
@@ -734,6 +742,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     Map<String, dynamic> geo,
     dynamic selectedSegmentId,
     bool hasSelection,
+    Color trackColor,
   ) {
     final features = geo['features'];
     if (features is! List) return [];
@@ -754,10 +763,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           segId == selectedSegmentId.toString();
 
       final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
+          ? trackColor
           : hasSelection
-              ? const Color(0x60888888)
-              : const Color(0xFF888888);
+              ? trackColor.withAlpha(0x60)
+              : trackColor;
 
       markers.add(Marker(
         point: point,
@@ -1225,7 +1234,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
       _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection)
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
