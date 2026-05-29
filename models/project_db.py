@@ -287,6 +287,34 @@ class DBShareVisit(sqlmodel.SQLModel, table=True):
     last_seen_at: float = sqlmodel.Field(default_factory=time.time)
 
 
+class DBMemoryComment(sqlmodel.SQLModel, table=True):
+    """A comment on a memory — posted by an authenticated user."""
+
+    __tablename__ = "memory_comment"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    memory_id: int = sqlmodel.Field(foreign_key="memory.id", index=True)
+    parent_comment_id: Optional[int] = sqlmodel.Field(
+        default=None, foreign_key="memory_comment.id"
+    )
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id")
+    commenter_name: str = sqlmodel.Field(default="")  # snapshot of display_name at post time
+    text: str = sqlmodel.Field(default="")
+    created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
+
+
+class DBMemoryLike(sqlmodel.SQLModel, table=True):
+    """A like on a memory — posted by an authenticated user."""
+
+    __tablename__ = "memory_like"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    memory_id: int = sqlmodel.Field(foreign_key="memory.id", index=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id")
+    liker_name: str = sqlmodel.Field(default="")  # snapshot of display_name at like time
+    created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
+
+
 class DBStravaCache(sqlmodel.SQLModel, table=True):
     """Per-user cache of the raw Strava activity list.
 

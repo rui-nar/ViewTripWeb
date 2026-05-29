@@ -1141,34 +1141,72 @@ class _ActivityPanelState extends State<ActivityPanel> {
                           child: Selector<ProjectNotifier, bool>(
                             selector: (_, n) =>
                                 n.selectedMemoryId?.toString() == memId,
-                            builder: (_, isSelected, __) => ListTile(
-                              dense: true,
-                              tileColor: isSelected
-                                  ? theme.colorScheme.tertiaryContainer
-                                      .withValues(alpha: 0.45)
-                                  : null,
-                              title: Row(children: [
-                                Icon(Icons.photo_camera_outlined,
-                                    size: 16,
-                                    color: isSelected
-                                        ? theme.colorScheme.primary
-                                        : theme.colorScheme.primary
-                                            .withValues(alpha: 0.7)),
-                                const SizedBox(width: 8),
-                                Flexible(
-                                    child: Text(label,
-                                        style: theme.textTheme.labelSmall)),
-                              ]),
-                              subtitle: memDesc != null && memDesc.isNotEmpty
-                                  ? Text(memDesc,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.bodySmall)
-                                  : null,
-                              onTap: _multiSelect
-                                  ? null
-                                  : () => _flyToMemory(mem),
-                            ),
+                            builder: (_, isSelected, __) {
+                              final commentCount =
+                                  (mem['comment_count'] as num?)?.toInt() ?? 0;
+                              final likeCount =
+                                  (mem['like_count'] as num?)?.toInt() ?? 0;
+                              final hasEngagement =
+                                  commentCount > 0 || likeCount > 0;
+                              return ListTile(
+                                dense: true,
+                                tileColor: isSelected
+                                    ? theme.colorScheme.tertiaryContainer
+                                        .withValues(alpha: 0.45)
+                                    : null,
+                                title: Row(children: [
+                                  Icon(Icons.photo_camera_outlined,
+                                      size: 16,
+                                      color: isSelected
+                                          ? theme.colorScheme.primary
+                                          : theme.colorScheme.primary
+                                              .withValues(alpha: 0.7)),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                      child: Text(label,
+                                          style: theme.textTheme.labelSmall)),
+                                ]),
+                                subtitle: memDesc != null && memDesc.isNotEmpty
+                                    ? Text(memDesc,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.bodySmall)
+                                    : null,
+                                trailing: hasEngagement
+                                    ? Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (commentCount > 0) ...[
+                                            const Icon(
+                                                Icons.chat_bubble_outline,
+                                                size: 12,
+                                                color: Color(0xFF64748B)),
+                                            const SizedBox(width: 2),
+                                            Text('$commentCount',
+                                                style: const TextStyle(
+                                                    fontSize: 11,
+                                                    color: Color(0xFF64748B))),
+                                          ],
+                                          if (commentCount > 0 && likeCount > 0)
+                                            const SizedBox(width: 8),
+                                          if (likeCount > 0) ...[
+                                            const Icon(Icons.favorite,
+                                                size: 12,
+                                                color: Color(0xFFEF4444)),
+                                            const SizedBox(width: 2),
+                                            Text('$likeCount',
+                                                style: const TextStyle(
+                                                    fontSize: 11,
+                                                    color: Color(0xFF64748B))),
+                                          ],
+                                        ],
+                                      )
+                                    : null,
+                                onTap: _multiSelect
+                                    ? null
+                                    : () => _flyToMemory(mem),
+                              );
+                            },
                           ),
                         );
                       } else if (item['item_type'] == 'journal') {

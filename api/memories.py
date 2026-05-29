@@ -15,8 +15,9 @@ import io
 import json
 import os
 import uuid as uuid_lib
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
@@ -26,7 +27,8 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from api.deps import get_current_user
-from models.project_db import DBMemory, DBProject, DBProjectItem
+from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBProjectItem
+from models.user import UserInfo
 from src.models.memory import Memory
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
@@ -418,3 +420,189 @@ def serve_photo_thumb(
             return FileResponse(str(full_path), media_type="image/jpeg")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
     return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
+# ── Comments ──────────────────────────────────────────────────────────────────
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_comment_tree(rows: List[DBMemoryComment]) -> List[Dict]:
+    """Convert flat comment rows into a fully recursive tree."""
+    by_id: Dict[int, Dict] = {}
+    for r in rows:
+        by_id[r.id] = {
+            "id": r.id,
+            "user_info_id": r.user_info_id,
+            "commenter_name": r.commenter_name,
+            "text": r.text,
+            "created_at": r.created_at,
+            "replies": [],
+        }
+    roots: List[Dict] = []
+    for r in rows:
+        node = by_id[r.id]
+        if r.parent_comment_id is not None and r.parent_comment_id in by_id:
+            by_id[r.parent_comment_id]["replies"].append(node)
+        else:
+            roots.append(node)
+    return roots
+
+
+class CommentBody(BaseModel):
+    text: str
+    parent_comment_id: Optional[int] = None
+
+
+@router.get("/{memory_id}/comments")
+def list_comments(
+    memory_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+        rows = sess.exec(
+            select(DBMemoryComment)
+            .where(DBMemoryComment.memory_id == memory_id)
+            .order_by(DBMemoryComment.created_at)
+        ).all()
+        return _build_comment_tree(list(rows))
+
+
+@router.post("/{memory_id}/comments", status_code=status.HTTP_201_CREATED)
+def add_comment(
+    memory_id: int,
+    body: CommentBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+        user_row = sess.get(UserInfo, user_info_id)
+        commenter_name = user_row.display_name if user_row else ""
+
+        if body.parent_comment_id is not None:
+            parent = sess.get(DBMemoryComment, body.parent_comment_id)
+            if parent is None or parent.memory_id != memory_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid parent comment")
+
+        row = DBMemoryComment(
+            memory_id=memory_id,
+            parent_comment_id=body.parent_comment_id,
+            user_info_id=user_info_id,
+            commenter_name=commenter_name,
+            text=body.text,
+            created_at=_utc_now(),
+        )
+        sess.add(row)
+        sess.commit()
+        return {"id": row.id}
+
+
+@router.delete("/{memory_id}/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_comment(
+    memory_id: int,
+    comment_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        comment_row = sess.get(DBMemoryComment, comment_id)
+        if comment_row is None or comment_row.memory_id != memory_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+
+        project_row = sess.get(DBProject, mem_row.project_id)
+        is_owner = project_row is not None and project_row.user_info_id == user_info_id
+        is_author = comment_row.user_info_id == user_info_id
+        if not (is_owner or is_author):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+        # Delete all descendants first (recursive via ordered query)
+        _delete_comment_subtree(sess, comment_id)
+        sess.commit()
+
+
+def _delete_comment_subtree(sess, comment_id: int) -> None:
+    """Delete a comment and all its descendants (BFS)."""
+    queue = [comment_id]
+    while queue:
+        current = queue.pop(0)
+        children = sess.exec(
+            select(DBMemoryComment).where(DBMemoryComment.parent_comment_id == current)
+        ).all()
+        for child in children:
+            queue.append(child.id)
+            sess.delete(child)
+        row = sess.get(DBMemoryComment, current)
+        if row is not None:
+            sess.delete(row)
+
+
+# ── Likes ─────────────────────────────────────────────────────────────────────
+
+@router.get("/{memory_id}/likes")
+def get_likes(
+    memory_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+        like_rows = sess.exec(
+            select(DBMemoryLike).where(DBMemoryLike.memory_id == memory_id)
+        ).all()
+        liked_by_me = any(r.user_info_id == user_info_id for r in like_rows)
+        return {
+            "count": len(like_rows),
+            "liked_by_me": liked_by_me,
+            "likers": [{"name": r.liker_name, "user_info_id": r.user_info_id} for r in like_rows],
+        }
+
+
+@router.post("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def like_memory(
+    memory_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+        existing = sess.exec(
+            select(DBMemoryLike).where(
+                DBMemoryLike.memory_id == memory_id,
+                DBMemoryLike.user_info_id == user_info_id,
+            )
+        ).first()
+        if existing:
+            return  # idempotent
+        user_row = sess.get(UserInfo, user_info_id)
+        liker_name = user_row.display_name if user_row else ""
+        sess.add(DBMemoryLike(
+            memory_id=memory_id,
+            user_info_id=user_info_id,
+            liker_name=liker_name,
+            created_at=_utc_now(),
+        ))
+        sess.commit()
+
+
+@router.delete("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def unlike_memory(
+    memory_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _get_owned_memory(sess, memory_id, user_info_id)
+        existing = sess.exec(
+            select(DBMemoryLike).where(
+                DBMemoryLike.memory_id == memory_id,
+                DBMemoryLike.user_info_id == user_info_id,
+            )
+        ).first()
+        if existing:
+            sess.delete(existing)
+            sess.commit()

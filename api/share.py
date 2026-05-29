@@ -73,7 +73,7 @@ from fastapi.responses import FileResponse, Response
 from sqlmodel import select
 
 from api.deps import get_optional_current_user
-from models.project_db import DBMemory, DBProject, DBShareVisit
+from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBShareVisit
 from models.user import UserInfo
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -551,3 +551,169 @@ def shared_photo_full(token: str, memory_id: int, photo_uuid: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
     return FileResponse(str(path), media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+# ── Share: comments & likes ───────────────────────────────────────────────────
+
+from pydantic import BaseModel as _BaseModel
+from api.memories import _build_comment_tree, _delete_comment_subtree, _utc_now
+
+
+def _resolve_shared_memory(token: str, memory_id: int):
+    """Validate share token and confirm memory belongs to the shared project.
+
+    Returns (project_id, owner_user_info_id).  Raises 404 on any mismatch.
+    """
+    _project, token_type, project_id, owner_uid = _get_project_and_type(token)
+    if token_type == "no_memories":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    with get_session() as sess:
+        mem_row = sess.get(DBMemory, memory_id)
+        if mem_row is None or mem_row.project_id != project_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    return project_id, owner_uid
+
+
+@router.get("/{token}/memories/{memory_id}/comments")
+def shared_list_comments(token: str, memory_id: int):
+    _resolve_shared_memory(token, memory_id)
+    with get_session() as sess:
+        rows = sess.exec(
+            select(DBMemoryComment)
+            .where(DBMemoryComment.memory_id == memory_id)
+            .order_by(DBMemoryComment.created_at)
+        ).all()
+        return _build_comment_tree(list(rows))
+
+
+class _SharedCommentBody(_BaseModel):
+    text: str
+    parent_comment_id: Optional[int] = None
+
+
+@router.post("/{token}/memories/{memory_id}/comments", status_code=201)
+def shared_add_comment(
+    token: str,
+    memory_id: int,
+    body: _SharedCommentBody,
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    _resolve_shared_memory(token, memory_id)
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        user_row = sess.get(UserInfo, user_info_id)
+        commenter_name = user_row.display_name if user_row else ""
+
+        if body.parent_comment_id is not None:
+            parent = sess.get(DBMemoryComment, body.parent_comment_id)
+            if parent is None or parent.memory_id != memory_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid parent comment")
+
+        row = DBMemoryComment(
+            memory_id=memory_id,
+            parent_comment_id=body.parent_comment_id,
+            user_info_id=user_info_id,
+            commenter_name=commenter_name,
+            text=body.text,
+            created_at=_utc_now(),
+        )
+        sess.add(row)
+        sess.commit()
+        return {"id": row.id}
+
+
+@router.delete("/{token}/memories/{memory_id}/comments/{comment_id}", status_code=204)
+def shared_delete_comment(
+    token: str,
+    memory_id: int,
+    comment_id: int,
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    _project_id, owner_uid = _resolve_shared_memory(token, memory_id)
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        comment_row = sess.get(DBMemoryComment, comment_id)
+        if comment_row is None or comment_row.memory_id != memory_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+        is_owner = user_info_id == owner_uid
+        is_author = comment_row.user_info_id == user_info_id
+        if not (is_owner or is_author):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        _delete_comment_subtree(sess, comment_id)
+        sess.commit()
+
+
+@router.get("/{token}/memories/{memory_id}/likes")
+def shared_get_likes(
+    token: str,
+    memory_id: int,
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    _resolve_shared_memory(token, memory_id)
+    user_info_id = int(current_user["sub"]) if current_user else None
+    with get_session() as sess:
+        like_rows = sess.exec(
+            select(DBMemoryLike).where(DBMemoryLike.memory_id == memory_id)
+        ).all()
+        liked_by_me = any(r.user_info_id == user_info_id for r in like_rows) if user_info_id else False
+        return {
+            "count": len(like_rows),
+            "liked_by_me": liked_by_me,
+            "likers": [{"name": r.liker_name, "user_info_id": r.user_info_id} for r in like_rows],
+        }
+
+
+@router.post("/{token}/memories/{memory_id}/like", status_code=204)
+def shared_like_memory(
+    token: str,
+    memory_id: int,
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    _resolve_shared_memory(token, memory_id)
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        existing = sess.exec(
+            select(DBMemoryLike).where(
+                DBMemoryLike.memory_id == memory_id,
+                DBMemoryLike.user_info_id == user_info_id,
+            )
+        ).first()
+        if existing:
+            return
+        user_row = sess.get(UserInfo, user_info_id)
+        liker_name = user_row.display_name if user_row else ""
+        sess.add(DBMemoryLike(
+            memory_id=memory_id,
+            user_info_id=user_info_id,
+            liker_name=liker_name,
+            created_at=_utc_now(),
+        ))
+        sess.commit()
+
+
+@router.delete("/{token}/memories/{memory_id}/like", status_code=204)
+def shared_unlike_memory(
+    token: str,
+    memory_id: int,
+    current_user: Annotated[Optional[dict], Depends(get_optional_current_user)] = None,
+):
+    if current_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    _resolve_shared_memory(token, memory_id)
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        existing = sess.exec(
+            select(DBMemoryLike).where(
+                DBMemoryLike.memory_id == memory_id,
+                DBMemoryLike.user_info_id == user_info_id,
+            )
+        ).first()
+        if existing:
+            sess.delete(existing)
+            sess.commit()

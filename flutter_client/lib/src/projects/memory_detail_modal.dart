@@ -1,25 +1,35 @@
 // ignore_for_file: deprecated_member_use
 import 'package:flutter/material.dart';
 
+import '../api/client.dart';
+import '../shared/shared_memory_service.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
 
 /// Shows a detail view for a memory — photo mosaic, date, description,
-/// prev/next navigation and edit/delete controls.
+/// likes, comments, prev/next navigation and edit/delete controls.
 ///
 /// Desktop (≥640px): two-column split — photo mosaic left, content right.
 /// Mobile (<640px): hero photo on top, scrollable content below.
+///
+/// Pass [shareToken] when opening from a shared-project view so that
+/// comment/like API calls go to the share endpoints.
 void showMemoryDetail(
   BuildContext context,
   ProjectNotifier notifier,
   Map<String, dynamic> memory, {
   bool readOnly = false,
+  String? shareToken,
 }) {
   showDialog(
     context: context,
     useRootNavigator: true,
-    builder: (_) =>
-        _MemoryDetailModal(notifier: notifier, memory: memory, readOnly: readOnly),
+    builder: (_) => _MemoryDetailModal(
+      notifier: notifier,
+      memory: memory,
+      readOnly: readOnly,
+      shareToken: shareToken,
+    ),
   );
 }
 
@@ -38,11 +48,13 @@ class _MemoryDetailModal extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> memory;
   final bool readOnly;
+  final String? shareToken;
 
   const _MemoryDetailModal({
     required this.notifier,
     required this.memory,
     this.readOnly = false,
+    this.shareToken,
   });
 
   @override
@@ -52,6 +64,20 @@ class _MemoryDetailModal extends StatefulWidget {
 class _MemoryDetailModalState extends State<_MemoryDetailModal> {
   late Map<String, dynamic> _current;
   int _photoViewerIndex = -1;
+
+  // ── Likes state ───────────────────────────────────────────────────────────
+  int _likeCount = 0;
+  bool _likedByMe = false;
+  List<Map<String, dynamic>> _likers = [];
+  bool _likeBusy = false;
+
+  // ── Comments state ────────────────────────────────────────────────────────
+  List<Map<String, dynamic>> _comments = [];
+  bool _commentsLoading = false;
+  int? _replyToId;
+  String? _replyToName;
+  final _commentCtrl = TextEditingController();
+  bool _submitting = false;
 
   static const _months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -65,11 +91,145 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     return '${_months[d.month - 1]} ${d.day}, ${d.year}';
   }
 
+  String get _memoryId => _current['id']?.toString() ?? '';
+
   @override
   void initState() {
     super.initState();
     _current = widget.memory;
+    _likeCount = (_current['like_count'] as num?)?.toInt() ?? 0;
+    _loadLikes();
+    _loadComments();
   }
+
+  @override
+  void dispose() {
+    _commentCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Data loaders ──────────────────────────────────────────────────────────
+
+  Future<void> _loadLikes() async {
+    try {
+      final Map<String, dynamic> data;
+      final id = int.tryParse(_memoryId);
+      if (widget.shareToken != null && id != null) {
+        data = await sharedMemoryService.fetchLikes(widget.shareToken!, id);
+      } else {
+        data = await widget.notifier.fetchLikes(_memoryId);
+      }
+      if (mounted) {
+        setState(() {
+          _likeCount   = (data['count'] as num?)?.toInt() ?? 0;
+          _likedByMe   = data['liked_by_me'] as bool? ?? false;
+          _likers      = (data['likers'] as List?)
+                ?.cast<Map<String, dynamic>>() ?? [];
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _loadComments() async {
+    if (!mounted) return;
+    setState(() => _commentsLoading = true);
+    try {
+      final List<Map<String, dynamic>> data;
+      final id = int.tryParse(_memoryId);
+      if (widget.shareToken != null && id != null) {
+        data = await sharedMemoryService.fetchComments(widget.shareToken!, id);
+      } else {
+        data = await widget.notifier.fetchComments(_memoryId);
+      }
+      if (mounted) setState(() => _comments = data);
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _commentsLoading = false);
+    }
+  }
+
+  // ── Like / unlike ─────────────────────────────────────────────────────────
+
+  Future<void> _toggleLike() async {
+    if (_likeBusy || !api.isAuthenticated) return;
+    setState(() {
+      _likeBusy  = true;
+      _likedByMe = !_likedByMe;
+      _likeCount += _likedByMe ? 1 : -1;
+    });
+    try {
+      final id = int.tryParse(_memoryId);
+      if (widget.shareToken != null && id != null) {
+        if (_likedByMe) {
+          await sharedMemoryService.likeMemory(widget.shareToken!, id);
+        } else {
+          await sharedMemoryService.unlikeMemory(widget.shareToken!, id);
+        }
+      } else {
+        if (_likedByMe) {
+          await widget.notifier.likeMemory(_memoryId);
+        } else {
+          await widget.notifier.unlikeMemory(_memoryId);
+        }
+      }
+      await _loadLikes();
+    } catch (_) {
+      // Revert optimistic update
+      if (mounted) {
+        setState(() {
+          _likedByMe = !_likedByMe;
+          _likeCount += _likedByMe ? 1 : -1;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _likeBusy = false);
+    }
+  }
+
+  // ── Comment submit ────────────────────────────────────────────────────────
+
+  Future<void> _submitComment() async {
+    final text = _commentCtrl.text.trim();
+    if (text.isEmpty || _submitting) return;
+    setState(() => _submitting = true);
+    try {
+      final id = int.tryParse(_memoryId);
+      if (widget.shareToken != null && id != null) {
+        await sharedMemoryService.addComment(
+          widget.shareToken!, id, text,
+          parentCommentId: _replyToId,
+        );
+      } else {
+        await widget.notifier.addComment(
+          _memoryId, text,
+          parentCommentId: _replyToId,
+        );
+      }
+      _commentCtrl.clear();
+      if (mounted) setState(() { _replyToId = null; _replyToName = null; });
+      await _loadComments();
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _deleteComment(int commentId) async {
+    try {
+      if (widget.shareToken != null) {
+        final id = int.tryParse(_memoryId);
+        if (id != null) {
+          await sharedMemoryService.deleteComment(
+              widget.shareToken!, id, commentId);
+        }
+      } else {
+        await widget.notifier.deleteComment(_memoryId, commentId);
+      }
+      await _loadComments();
+    } catch (_) {}
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
 
   List<Map<String, dynamic>> get _allMemories => widget.notifier.items
       .where((i) => i['item_type'] == 'memory')
@@ -86,7 +246,18 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     final mems = _allMemories;
     if (mems.isEmpty) return;
     final next = (_currentIndex + delta).clamp(0, mems.length - 1);
-    setState(() => _current = mems[next]);
+    setState(() {
+      _current     = mems[next];
+      _comments    = [];
+      _likeCount   = (_current['like_count'] as num?)?.toInt() ?? 0;
+      _likedByMe   = false;
+      _likers      = [];
+      _replyToId   = null;
+      _replyToName = null;
+      _commentCtrl.clear();
+    });
+    _loadLikes();
+    _loadComments();
   }
 
   Future<void> _edit() async {
@@ -161,7 +332,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
       backgroundColor: _kBg,
       insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 880, maxHeight: 640),
+        constraints: const BoxConstraints(maxWidth: 880, maxHeight: 700),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final wide = constraints.maxWidth >= 640;
@@ -214,7 +385,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
         children: [
           // Hero with overlaid title
           SizedBox(
-            height: 260,
+            height: 240,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -232,7 +403,6 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                           size: 64, color: Color(0x44CBD5E1)),
                     ),
                   ),
-                // Bottom gradient
                 const Positioned.fill(
                   child: DecoratedBox(
                     decoration: BoxDecoration(
@@ -245,12 +415,10 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                     ),
                   ),
                 ),
-                // Day badge
                 Positioned(
                   top: 8, left: 8,
                   child: _dayBadge(_current['date'] as String?),
                 ),
-                // Close
                 Positioned(
                   top: 4, right: 4,
                   child: IconButton(
@@ -259,13 +427,11 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                         Navigator.of(context, rootNavigator: true).pop(),
                   ),
                 ),
-                // Photo count
                 if (photos.length > 1)
                   Positioned(
                     top: 44, right: 8,
                     child: _photoCountChip(photos.length),
                   ),
-                // Title over gradient
                 if (name != null && name.isNotEmpty)
                   Positioned(
                     bottom: 12, left: 16, right: 16,
@@ -322,11 +488,23 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                       ),
                     ),
                   ],
+                  const SizedBox(height: 16),
+                  _CommentsSection(
+                    comments: _comments,
+                    loading: _commentsLoading,
+                    canDelete: !widget.readOnly && widget.shareToken == null,
+                    onDelete: _deleteComment,
+                    onReply: (id, name) => setState(() {
+                      _replyToId   = id;
+                      _replyToName = name;
+                    }),
+                  ),
                   const SizedBox(height: 12),
                 ],
               ),
             ),
           ),
+          if (api.isAuthenticated) _commentInput(),
           _footerRow(),
         ],
       ),
@@ -368,7 +546,6 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
               ],
             ),
           ),
-          // Up to 2 thumbnails below hero
           if (photos.length > 1)
             Padding(
               padding: const EdgeInsets.all(8),
@@ -422,7 +599,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
           child: _navRow(mems, idx, hasPrev, hasNext),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Text(
@@ -447,23 +624,118 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
           ),
         ),
         const SizedBox(height: 12),
-        if (description.isNotEmpty)
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: SingleChildScrollView(
-                child: Text(
-                  description,
-                  style: const TextStyle(
-                      color: _kText2, fontSize: 15, height: 1.7),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (description.isNotEmpty) ...[
+                  Text(
+                    description,
+                    style: const TextStyle(
+                        color: _kText2, fontSize: 15, height: 1.7),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                _CommentsSection(
+                  comments: _comments,
+                  loading: _commentsLoading,
+                  canDelete: !widget.readOnly && widget.shareToken == null,
+                  onDelete: _deleteComment,
+                  onReply: (id, name) => setState(() {
+                    _replyToId   = id;
+                    _replyToName = name;
+                  }),
                 ),
-              ),
+                const SizedBox(height: 8),
+              ],
             ),
-          )
-        else
-          const Spacer(),
+          ),
+        ),
+        if (api.isAuthenticated) _commentInput(),
         _footerRow(),
       ],
+    );
+  }
+
+  // ── Comment input bar ─────────────────────────────────────────────────────
+
+  Widget _commentInput() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: _kBgDark,
+        border: Border(top: BorderSide(color: _kBorder)),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_replyToName != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.reply, size: 14, color: _kDim),
+                  const SizedBox(width: 4),
+                  Text('Replying to $_replyToName',
+                      style: const TextStyle(color: _kDim, fontSize: 12)),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => setState(() {
+                      _replyToId   = null;
+                      _replyToName = null;
+                    }),
+                    child: const Icon(Icons.close, size: 14, color: _kDim),
+                  ),
+                ],
+              ),
+            ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _commentCtrl,
+                  style: const TextStyle(color: _kText1, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: _replyToName != null
+                        ? 'Write a reply…'
+                        : 'Add a comment…',
+                    hintStyle: const TextStyle(color: _kDim, fontSize: 14),
+                    filled: true,
+                    fillColor: _kBg,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: _kBorder),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: _kBorder),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: _kBlue),
+                    ),
+                  ),
+                  onSubmitted: (_) => _submitComment(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: _submitting
+                    ? const SizedBox(
+                        width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.send, color: _kBlue),
+                onPressed: _submitting ? null : _submitComment,
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -500,14 +772,14 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
 
   Widget _footerRow() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(12),
       decoration: const BoxDecoration(
         color: _kBgDark,
         border: Border(top: BorderSide(color: _kBorder)),
       ),
       child: Row(
         children: [
-          if (!widget.readOnly)
+          if (!widget.readOnly && widget.shareToken == null)
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kRed,
@@ -518,15 +790,80 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
               onPressed: _delete,
             ),
           const Spacer(),
-          if (!widget.readOnly)
+          // Likes bar
+          _likesBar(),
+          if (!widget.readOnly && widget.shareToken == null) ...[
+            const SizedBox(width: 12),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 backgroundColor: _kBlue,
                 foregroundColor: Colors.white,
               ),
               icon: const Icon(Icons.edit_outlined, size: 16),
-              label: const Text('Edit memory'),
+              label: const Text('Edit'),
               onPressed: _edit,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _likesBar() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_likeCount > 0)
+          GestureDetector(
+            onTap: _likers.isEmpty ? null : _showLikers,
+            child: Text(
+              '$_likeCount',
+              style: TextStyle(
+                color: _likers.isEmpty ? _kDim : _kText2,
+                fontSize: 13,
+                decoration:
+                    _likers.isEmpty ? null : TextDecoration.underline,
+              ),
+            ),
+          ),
+        if (_likeCount > 0) const SizedBox(width: 4),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          icon: Icon(
+            _likedByMe ? Icons.favorite : Icons.favorite_border,
+            color: _likedByMe ? _kRed : _kDim,
+            size: 20,
+          ),
+          tooltip: api.isAuthenticated
+              ? (_likedByMe ? 'Unlike' : 'Like')
+              : 'Sign in to like',
+          onPressed: api.isAuthenticated ? _toggleLike : null,
+        ),
+      ],
+    );
+  }
+
+  void _showLikers() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _kBgDark,
+      builder: (_) => ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text('Liked by',
+              style: TextStyle(color: _kText1, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 12),
+          for (final l in _likers)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  const Icon(Icons.favorite, size: 14, color: _kRed),
+                  const SizedBox(width: 8),
+                  Text(l['name'] as String? ?? '',
+                      style: const TextStyle(color: _kText2)),
+                ],
+              ),
             ),
         ],
       ),
@@ -567,6 +904,204 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
         ],
       ),
     );
+  }
+}
+
+// ── Comments section ──────────────────────────────────────────────────────────
+
+class _CommentsSection extends StatelessWidget {
+  final List<Map<String, dynamic>> comments;
+  final bool loading;
+  final bool canDelete;
+  final void Function(int commentId) onDelete;
+  final void Function(int commentId, String commenterName) onReply;
+
+  const _CommentsSection({
+    required this.comments,
+    required this.loading,
+    required this.canDelete,
+    required this.onDelete,
+    required this.onReply,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Center(child: SizedBox(
+          width: 18, height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2))),
+      );
+    }
+    if (comments.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 4),
+        child: Text('No comments yet.',
+            style: TextStyle(color: _kDim, fontSize: 13)),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${_countAll(comments)} comment${_countAll(comments) == 1 ? '' : 's'}',
+          style: const TextStyle(
+              color: _kText2, fontWeight: FontWeight.w600, fontSize: 13),
+        ),
+        const SizedBox(height: 8),
+        for (final c in comments)
+          _CommentNode(
+            comment: c,
+            depth: 0,
+            canDelete: canDelete,
+            onDelete: onDelete,
+            onReply: onReply,
+          ),
+      ],
+    );
+  }
+
+  static int _countAll(List<Map<String, dynamic>> comments) {
+    int count = 0;
+    for (final c in comments) {
+      count++;
+      final replies = (c['replies'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+      count += _countAll(replies);
+    }
+    return count;
+  }
+}
+
+class _CommentNode extends StatelessWidget {
+  final Map<String, dynamic> comment;
+  final int depth;
+  final bool canDelete;
+  final void Function(int commentId) onDelete;
+  final void Function(int commentId, String commenterName) onReply;
+
+  const _CommentNode({
+    required this.comment,
+    required this.depth,
+    required this.canDelete,
+    required this.onDelete,
+    required this.onReply,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final id      = (comment['id'] as num?)?.toInt() ?? 0;
+    final name    = comment['commenter_name'] as String? ?? '';
+    final text    = comment['text'] as String? ?? '';
+    final created = comment['created_at'] as String? ?? '';
+    final replies = (comment['replies'] as List?)
+        ?.cast<Map<String, dynamic>>() ?? [];
+
+    final timeLabel = _relativeTime(created);
+
+    return Padding(
+      padding: EdgeInsets.only(left: depth * 16.0, bottom: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Avatar initial
+              Container(
+                width: 28, height: 28,
+                decoration: BoxDecoration(
+                  color: _kBorder,
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  name.isNotEmpty ? name[0].toUpperCase() : '?',
+                  style: const TextStyle(
+                      color: _kText1, fontSize: 12, fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(name,
+                            style: const TextStyle(
+                                color: _kText1,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600)),
+                        const SizedBox(width: 6),
+                        Text(timeLabel,
+                            style: const TextStyle(
+                                color: _kDim, fontSize: 11)),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(text,
+                        style: const TextStyle(
+                            color: _kText2, fontSize: 13, height: 1.5)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        if (api.isAuthenticated)
+                          GestureDetector(
+                            onTap: () => onReply(id, name),
+                            child: const Text('Reply',
+                                style: TextStyle(
+                                    color: _kDim,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500)),
+                          ),
+                        if (canDelete) ...[
+                          if (api.isAuthenticated) const SizedBox(width: 12),
+                          GestureDetector(
+                            onTap: () => onDelete(id),
+                            child: const Text('Delete',
+                                style: TextStyle(
+                                    color: _kRed,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500)),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (replies.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Column(
+                children: replies
+                    .map((r) => _CommentNode(
+                          comment: r,
+                          depth: depth + 1,
+                          canDelete: canDelete,
+                          onDelete: onDelete,
+                          onReply: onReply,
+                        ))
+                    .toList(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static String _relativeTime(String iso) {
+    final dt = DateTime.tryParse(iso);
+    if (dt == null) return '';
+    final diff = DateTime.now().toUtc().difference(dt.toUtc());
+    if (diff.inSeconds < 60) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24)   return '${diff.inHours}h ago';
+    if (diff.inDays < 30)    return '${diff.inDays}d ago';
+    return '${(diff.inDays / 30).floor()}mo ago';
   }
 }
 

@@ -17,3 +17,5 @@ class Memory:
     geo_mode: str = "start_of_day"          # "start_of_day" | "end_of_day" | "custom"
     lat: Optional[float] = None
     lon: Optional[float] = None
+    comment_count: int = 0
+    like_count: int = 0

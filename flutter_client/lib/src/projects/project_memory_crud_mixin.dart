@@ -185,4 +185,41 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
       notifyListeners();
     }
   }
+
+  // ── Comments ────────────────────────────────────────────────────────────────
+
+  Future<List<Map<String, dynamic>>> fetchComments(String memoryId) async {
+    final data = await api.get('/api/memories/$memoryId/comments');
+    return (data as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<void> addComment(
+    String memoryId,
+    String text, {
+    int? parentCommentId,
+  }) async {
+    await api.post('/api/memories/$memoryId/comments', {
+      'text': text,
+      if (parentCommentId != null) 'parent_comment_id': parentCommentId,
+    });
+  }
+
+  Future<void> deleteComment(String memoryId, int commentId) async {
+    await api.delete('/api/memories/$memoryId/comments/$commentId');
+  }
+
+  // ── Likes ───────────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> fetchLikes(String memoryId) async {
+    final data = await api.get('/api/memories/$memoryId/likes');
+    return data as Map<String, dynamic>;
+  }
+
+  Future<void> likeMemory(String memoryId) async {
+    await api.post('/api/memories/$memoryId/like', {});
+  }
+
+  Future<void> unlikeMemory(String memoryId) async {
+    await api.delete('/api/memories/$memoryId/like');
+  }
 }

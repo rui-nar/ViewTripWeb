@@ -19,6 +19,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func
+
 from models.db import get_session
 from sqlalchemy.orm import defer as _sa_defer
 from sqlmodel import Session, select
@@ -26,7 +28,7 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBProjectItem
 from src.models.activity import Activity
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
@@ -497,7 +499,31 @@ class ProjectRepo:
         memory_rows = sess.exec(
             select(DBMemory).where(DBMemory.project_id == row.id)
         ).all()
-        memory_by_id = {mr.id: self._row_to_memory(mr) for mr in memory_rows}
+
+        # Batch-load comment and like counts for all memories in one query each
+        memory_ids = [mr.id for mr in memory_rows if mr.id is not None]
+        comment_counts: Dict[int, int] = {}
+        like_counts: Dict[int, int] = {}
+        if memory_ids:
+            for mid, cnt in sess.exec(
+                select(DBMemoryComment.memory_id, func.count(DBMemoryComment.id).label("cnt"))
+                .where(DBMemoryComment.memory_id.in_(memory_ids))
+                .group_by(DBMemoryComment.memory_id)
+            ).all():
+                comment_counts[mid] = cnt
+            for mid, cnt in sess.exec(
+                select(DBMemoryLike.memory_id, func.count(DBMemoryLike.id).label("cnt"))
+                .where(DBMemoryLike.memory_id.in_(memory_ids))
+                .group_by(DBMemoryLike.memory_id)
+            ).all():
+                like_counts[mid] = cnt
+
+        memory_by_id: Dict[int, Memory] = {}
+        for mr in memory_rows:
+            mem = self._row_to_memory(mr)
+            mem.comment_count = comment_counts.get(mr.id, 0)
+            mem.like_count = like_counts.get(mr.id, 0)
+            memory_by_id[mr.id] = mem
 
         # Load journal entry rows for this project
         journal_rows = sess.exec(

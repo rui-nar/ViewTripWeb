@@ -188,6 +188,8 @@ class ProjectIO:
                 "geo_mode": mem.geo_mode,
                 "lat": mem.lat,
                 "lon": mem.lon,
+                "comment_count": mem.comment_count,
+                "like_count": mem.like_count,
             }
         elif item.item_type == "journal" and item.journal is not None:
             j = item.journal
