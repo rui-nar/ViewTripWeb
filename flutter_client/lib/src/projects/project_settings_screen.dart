@@ -1125,17 +1125,11 @@ class _StickyHeader extends StatelessWidget {
                   color: _kDim, letterSpacing: 1.4, height: 1,
                 )),
                 const SizedBox(height: 4),
-                IntrinsicWidth(
-                  child: TextField(
-                    controller: nameCtrl,
-                    style: const TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.w700, color: _kText1,
-                      letterSpacing: -0.5,
-                    ),
-                    decoration: const InputDecoration(
-                      isDense: true, border: InputBorder.none,
-                      contentPadding: EdgeInsets.zero,
-                    ),
+                Text(
+                  nameCtrl.text,
+                  style: const TextStyle(
+                    fontSize: 20, fontWeight: FontWeight.w700, color: _kText1,
+                    letterSpacing: -0.5,
                   ),
                 ),
               ],
