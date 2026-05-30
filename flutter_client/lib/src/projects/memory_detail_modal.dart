@@ -881,7 +881,6 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kRed,
                 side: const BorderSide(color: _kRed),
-                fixedSize: const Size(double.nan, 36),
               ),
               icon: const Icon(Icons.delete_outline, size: 16),
               label: const Text('Delete'),

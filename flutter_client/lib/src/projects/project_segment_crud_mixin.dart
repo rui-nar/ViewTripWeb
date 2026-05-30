@@ -232,11 +232,12 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   Future<void> deleteSegment(String segId) async {
     final name = projectName;
     if (name == null) return;
-    // removeSegmentLocally already called via onOptimistic before the undo window
+    // removeSegmentLocally already called via onOptimistic before the undo window.
+    // No reload needed — reloading would bring back other pending-delete segments
+    // (still in the DB) and cause ghost reappearances while their toasts are active.
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');
-      await reloadDetailsOnly(name);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
