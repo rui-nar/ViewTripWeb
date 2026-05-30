@@ -767,12 +767,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Icon(Icons.reply, size: 14, color: _kDim),
-                  const SizedBox(width: 4),
-                  Text('Replying to $_replyToName',
-                      style: const TextStyle(color: _kDim, fontSize: 12)),
-                  const Spacer(),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.reply, size: 14, color: _kDim),
+                      const SizedBox(width: 4),
+                      Text('Replying to $_replyToName',
+                          style: const TextStyle(color: _kDim, fontSize: 12)),
+                    ],
+                  ),
                   GestureDetector(
                     onTap: () => setState(() {
                       _replyToId   = null;
@@ -869,6 +874,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
         border: Border(top: BorderSide(color: _kBorder)),
       ),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           if (!widget.readOnly && widget.shareToken == null)
             OutlinedButton.icon(
@@ -879,22 +885,27 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
               icon: const Icon(Icons.delete_outline, size: 16),
               label: const Text('Delete'),
               onPressed: _delete,
-            ),
-          const Spacer(),
-          // Likes bar
-          _likesBar(),
-          if (!widget.readOnly && widget.shareToken == null) ...[
-            const SizedBox(width: 12),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _kBlue,
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.edit_outlined, size: 16),
-              label: const Text('Edit'),
-              onPressed: _edit,
-            ),
-          ],
+            )
+          else
+            const SizedBox.shrink(),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _likesBar(),
+              if (!widget.readOnly && widget.shareToken == null) ...[
+                const SizedBox(width: 12),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _kBlue,
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('Edit'),
+                  onPressed: _edit,
+                ),
+              ],
+            ],
+          ),
         ],
       ),
     );
