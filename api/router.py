@@ -66,7 +66,6 @@ async def scalar_docs() -> HTMLResponse:
     return get_scalar_api_reference(
         openapi_url="/openapi.json",
         title="ViewTrip API",
-        scalar_theme="purple",
     )
 
 
