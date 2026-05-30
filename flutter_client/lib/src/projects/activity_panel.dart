@@ -88,9 +88,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
   List<Map<String, dynamic>>? _lastActivities;
   Map<dynamic, Map<String, dynamic>> _activityById = {};
 
-  // Tracks the last selectedActivityId we reacted to, so we only auto-expand
-  // and scroll when a new selection arrives (e.g. from a map tap).
+  // Tracks the last selectedActivityId / selectedSegmentId we reacted to,
+  // so we only auto-expand and scroll when a new selection arrives.
   String? _prevSelectedActivityIdStr;
+  String? _prevSelectedSegmentIdStr;
 
   // Day grouping state
   Set<int> _collapsedDays = {};
@@ -311,6 +312,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
   void initState() {
     super.initState();
     _prevSelectedActivityIdStr = widget.notifier.selectedActivityId?.toString();
+    _prevSelectedSegmentIdStr = widget.notifier.selectedSegmentId?.toString();
     widget.notifier.addListener(_onNotifierChanged);
     _refreshActivityById(widget.notifier.activities);
     _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
@@ -329,16 +331,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
       oldWidget.notifier.removeListener(_onNotifierChanged);
       widget.notifier.addListener(_onNotifierChanged);
       _prevSelectedActivityIdStr = widget.notifier.selectedActivityId?.toString();
+      _prevSelectedSegmentIdStr = widget.notifier.selectedSegmentId?.toString();
     }
     _refreshActivityById(widget.notifier.activities);
     _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
   }
 
   void _onNotifierChanged() {
-    final id = widget.notifier.selectedActivityId?.toString();
-    if (id == _prevSelectedActivityIdStr) return;
-    _prevSelectedActivityIdStr = id;
-    if (id != null) _expandAndScrollToActivity(id);
+    final actId = widget.notifier.selectedActivityId?.toString();
+    if (actId != _prevSelectedActivityIdStr) {
+      _prevSelectedActivityIdStr = actId;
+      if (actId != null) _expandAndScrollToActivity(actId);
+    }
+    final segId = widget.notifier.selectedSegmentId?.toString();
+    if (segId != _prevSelectedSegmentIdStr) {
+      _prevSelectedSegmentIdStr = segId;
+      if (segId != null) _expandAndScrollToSegment(segId);
+    }
   }
 
   void _expandAndScrollToActivity(String activityIdStr) {
@@ -407,6 +416,66 @@ class _ActivityPanelState extends State<ActivityPanel> {
     }
   }
 
+  void _expandAndScrollToSegment(String segIdStr) {
+    // Walk _lastItems (raw list) to find the segment's date — the _PanelItem
+    // for this segment may not be in _displayList yet if its day is collapsed.
+    String? targetDateKey;
+    if (_lastItems != null) {
+      for (final item in _lastItems!) {
+        if (item['item_type'] != 'segment') continue;
+        if (item['segment']?['id']?.toString() != segIdStr) continue;
+        targetDateKey = item['segment']?['date'] as String?;
+        break;
+      }
+    }
+
+    // DayHeaders are always in _displayList (even for collapsed days).
+    if (targetDateKey != null) {
+      int? targetDayNumber;
+      for (final e in _displayList) {
+        if (e is _DayHeader && e.dateKey == targetDateKey) {
+          targetDayNumber = e.dayNumber;
+          break;
+        }
+      }
+      if (targetDayNumber != null && _collapsedDays.contains(targetDayNumber)) {
+        setState(() {
+          _collapsedDays.remove(targetDayNumber);
+          _lastItems = null; // force display list rebuild so segment is visible
+        });
+      }
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollToSegment(segIdStr);
+    });
+  }
+
+  void _scrollToSegment(String segIdStr) {
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+
+    const double headerHeight = 44.0;
+    const double itemHeight = 72.0;
+    double offset = 0;
+    for (final e in _displayList) {
+      if (e is _DayHeader) {
+        offset += headerHeight;
+      } else if (e is _PanelItem) {
+        if (e.item['item_type'] == 'segment' &&
+            e.item['segment']?['id']?.toString() == segIdStr) {
+          sc.animateTo(
+            (offset - 80).clamp(0.0, sc.position.maxScrollExtent),
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOut,
+          );
+          return;
+        }
+        offset += itemHeight;
+      }
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -454,25 +523,37 @@ class _ActivityPanelState extends State<ActivityPanel> {
     required Future<void> Function() onConfirm,
     VoidCallback? onOptimistic,
   }) {
-    // Remove the item from the list immediately so the dismissed Dismissible
-    // widget is gone before the SnackBar triggers a Scaffold rebuild.
     onOptimistic?.call();
     final messenger = ScaffoldMessenger.of(context);
-    final controller = messenger.showSnackBar(SnackBar(
+    messenger.clearSnackBars();
+
+    // Track whether the user pressed Undo so the delayed confirm can skip.
+    var undone = false;
+
+    messenger.showSnackBar(SnackBar(
       content: Text(label),
       duration: const Duration(seconds: 5),
       action: SnackBarAction(
         label: 'Undo',
         onPressed: () {
+          undone = true;
           final name = notifier.projectName;
           if (name != null) notifier.load(name);
         },
       ),
     ));
-    controller.closed.then((reason) {
-      if (reason != SnackBarClosedReason.action) {
-        onConfirm();
-      }
+
+    // Use Future.delayed instead of controller.closed.then() — the closed
+    // future can get orphaned after widget rebuilds triggered by
+    // reloadDetailsOnly(), leaving the SnackBar stuck on screen indefinitely.
+    // The extra 500 ms lets the natural auto-dismiss animation finish first;
+    // clearSnackBars() is a no-op when the bar is already gone.
+    Future.delayed(const Duration(milliseconds: 5500), () {
+      if (undone) return;
+      try {
+        messenger.clearSnackBars();
+      } catch (_) {}
+      onConfirm();
     });
   }
 
@@ -831,6 +912,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                     itemBuilder: (context, vi) {
                       final entry = displayList[vi];
 
+                      final isWide = MediaQuery.of(context).size.width >= 720;
+
                       // ── Day header ──────────────────────────────────────────
                       if (entry is _DayHeader) {
                         final h = entry;
@@ -838,7 +921,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final isMultiChecked = _selectedDays.contains(h.dateKey);
                         final isSingleSelected = !_multiSelect && _selectedDay == h.dateKey;
                         final isHighlighted = _multiSelect ? isMultiChecked : isSingleSelected;
-                        final isWide = MediaQuery.of(context).size.width >= 720;
                         Widget headerRow = InkWell(
                           key: isWide ? ValueKey('header_${h.dayNumber}') : null,
                           onTap: () {
@@ -1077,17 +1159,32 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ? theme.colorScheme.primaryContainer
                                       .withValues(alpha: 0.45)
                                   : null,
-                              title: Row(children: [
-                                _ActivityIconBox(type: type),
-                                const SizedBox(width: 8),
-                                Flexible(
-                                  child: Text(name,
-                                      style: theme.textTheme.labelSmall),
+                              leading: _ActivityIconBox(type: type),
+                              title: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(name,
+                                      style: theme.textTheme.labelSmall,
+                                      overflow: TextOverflow.ellipsis),
+                                  Text(
+                                    '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
+                                    style: theme.textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 15),
+                                visualDensity: VisualDensity.compact,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                onPressed: () => _dismissWithUndo(
+                                  context: context,
+                                  notifier: notifier,
+                                  label: 'Removed "$name"',
+                                  onConfirm: () => notifier.removeItem(i),
                                 ),
-                              ]),
-                              subtitle: Text(
-                                '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
-                                style: theme.textTheme.bodySmall,
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),
                             ),
@@ -1146,62 +1243,95 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   (mem['comment_count'] as num?)?.toInt() ?? 0;
                               final likeCount =
                                   (mem['like_count'] as num?)?.toInt() ?? 0;
-                              final hasEngagement =
-                                  commentCount > 0 || likeCount > 0;
+                              final iconColor = isSelected
+                                  ? theme.colorScheme.primary
+                                  : theme.colorScheme.primary
+                                      .withValues(alpha: 0.7);
                               return ListTile(
                                 dense: true,
                                 tileColor: isSelected
                                     ? theme.colorScheme.tertiaryContainer
                                         .withValues(alpha: 0.45)
                                     : null,
-                                title: Row(children: [
-                                  Icon(Icons.photo_camera_outlined,
-                                      size: 16,
-                                      color: isSelected
-                                          ? theme.colorScheme.primary
-                                          : theme.colorScheme.primary
-                                              .withValues(alpha: 0.7)),
-                                  const SizedBox(width: 8),
-                                  Flexible(
-                                      child: Text(label,
-                                          style: theme.textTheme.labelSmall)),
-                                ]),
-                                subtitle: memDesc != null && memDesc.isNotEmpty
-                                    ? Text(memDesc,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: theme.textTheme.bodySmall)
-                                    : null,
-                                trailing: hasEngagement
-                                    ? Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (commentCount > 0) ...[
-                                            const Icon(
-                                                Icons.chat_bubble_outline,
-                                                size: 12,
-                                                color: Color(0xFF64748B)),
-                                            const SizedBox(width: 2),
-                                            Text('$commentCount',
-                                                style: const TextStyle(
-                                                    fontSize: 11,
-                                                    color: Color(0xFF64748B))),
-                                          ],
-                                          if (commentCount > 0 && likeCount > 0)
-                                            const SizedBox(width: 8),
-                                          if (likeCount > 0) ...[
-                                            const Icon(Icons.favorite,
-                                                size: 12,
-                                                color: Color(0xFFEF4444)),
-                                            const SizedBox(width: 2),
-                                            Text('$likeCount',
-                                                style: const TextStyle(
-                                                    fontSize: 11,
-                                                    color: Color(0xFF64748B))),
-                                          ],
-                                        ],
-                                      )
-                                    : null,
+                                leading: Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.primary
+                                        .withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(
+                                    Icons.photo_camera_outlined,
+                                    size: 17,
+                                    color: iconColor,
+                                  ),
+                                ),
+                                title: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(label,
+                                        style: theme.textTheme.labelSmall,
+                                        overflow: TextOverflow.ellipsis),
+                                    if (memDesc != null && memDesc.isNotEmpty)
+                                      Text(memDesc,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.bodySmall)
+                                    else if (memDate != null &&
+                                        memName != null)
+                                      Text(_fmtMemDate(memDate, memTime),
+                                          style: theme.textTheme.bodySmall),
+                                  ],
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (commentCount > 0) ...[
+                                      const Icon(Icons.chat_bubble_outline,
+                                          size: 12, color: Color(0xFF64748B)),
+                                      const SizedBox(width: 2),
+                                      Text('$commentCount',
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFF64748B))),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    if (likeCount > 0) ...[
+                                      const Icon(Icons.favorite,
+                                          size: 12, color: Color(0xFFEF4444)),
+                                      const SizedBox(width: 2),
+                                      Text('$likeCount',
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFF64748B))),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    IconButton(
+                                      icon: const Icon(Icons.edit_outlined, size: 15),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      onPressed: () => showMemoryDetail(context, notifier, mem),
+                                    ),
+                                    const SizedBox(width: 2),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline, size: 15),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                      onPressed: () => _dismissWithUndo(
+                                        context: context,
+                                        notifier: notifier,
+                                        label: 'Removed "$label"',
+                                        onOptimistic: () => notifier.removeMemoryLocally(memId),
+                                        onConfirm: () => notifier.deleteMemory(memId),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                                 onTap: _multiSelect
                                     ? null
                                     : () => _flyToMemory(mem),
@@ -1262,33 +1392,66 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ? const Color(0xFF64748B)
                                       .withValues(alpha: 0.15)
                                   : null,
-                              title: Row(children: [
-                                Container(
-                                  width: 24,
-                                  height: 24,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF64748B)
-                                        .withValues(alpha: 0.15),
-                                    borderRadius: BorderRadius.circular(6),
+                              leading: Container(
+                                width: 32,
+                                height: 32,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF64748B)
+                                      .withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Icon(Icons.book_outlined,
+                                    size: 17,
+                                    color: isSelected
+                                        ? const Color(0xFF44AAFF)
+                                        : const Color(0xFF64748B)),
+                              ),
+                              title: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(label,
+                                      style: theme.textTheme.labelSmall,
+                                      overflow: TextOverflow.ellipsis),
+                                  if (jDesc != null && jDesc.isNotEmpty)
+                                    Text(jDesc,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.bodySmall),
+                                ],
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_outlined, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () => showDialog<void>(
+                                      context: context,
+                                      useRootNavigator: true,
+                                      builder: (_) => JournalDialog(
+                                          notifier: notifier, editEntry: jMap),
+                                    ),
                                   ),
-                                  child: Icon(Icons.book_outlined,
-                                      size: 14,
-                                      color: isSelected
-                                          ? const Color(0xFF44AAFF)
-                                          : const Color(0xFF64748B)),
-                                ),
-                                const SizedBox(width: 8),
-                                Flexible(
-                                  child: Text(label,
-                                      style: theme.textTheme.labelSmall),
-                                ),
-                              ]),
-                              subtitle: jDesc != null && jDesc.isNotEmpty
-                                  ? Text(jDesc,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: theme.textTheme.bodySmall)
-                                  : null,
+                                  const SizedBox(width: 2),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                    onPressed: () => _dismissWithUndo(
+                                      context: context,
+                                      notifier: notifier,
+                                      label: 'Removed "$label"',
+                                      onOptimistic: () => notifier.removeJournalLocally(jId),
+                                      onConfirm: () => notifier.deleteJournal(jId),
+                                    ),
+                                  ),
+                                ],
+                              ),
                               onTap: _multiSelect
                                   ? null
                                   : () {
@@ -1372,16 +1535,35 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       style: _segmentTitleStyle),
                                 ),
                               ]),
-                              subtitle: Text(segType ?? '',
-                                  style: theme.textTheme.bodySmall),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.edit_outlined, size: 18),
-                                onPressed: () => _showSegmentDialog(
-                                  context,
-                                  notifier,
-                                  editSegment: seg,
-                                  insertAfterIndex: null,
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_outlined, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () => _showSegmentDialog(
+                                      context, notifier,
+                                      editSegment: seg, insertAfterIndex: null,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 2),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                    onPressed: () => _dismissWithUndo(
+                                      context: context,
+                                      notifier: notifier,
+                                      label: 'Removed "$label"',
+                                      onOptimistic: () => notifier.removeSegmentLocally(segId),
+                                      onConfirm: () => notifier.deleteSegment(segId),
+                                    ),
+                                  ),
+                                ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToSegment(seg),
                             ),
