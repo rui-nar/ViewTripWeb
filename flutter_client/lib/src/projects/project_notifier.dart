@@ -282,6 +282,14 @@ class ProjectNotifier extends ChangeNotifier
       counters = rawCounters is List
           ? rawCounters.map((c) => Map<String, dynamic>.from(c as Map)).toList()
           : [];
+      final rawColor = details['track_color'] as String?;
+      if (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#')) {
+        trackColor = Color(int.parse(rawColor.substring(1), radix: 16) | 0xFF000000);
+      }
+      final rawWidth = details['track_width'] as num?;
+      if (rawWidth != null) trackWidth = rawWidth.toDouble();
+      final rawAlt = details['alternating_track_colors'] as bool?;
+      if (rawAlt != null) alternatingTrackColors = rawAlt;
       _updateStats();
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
