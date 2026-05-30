@@ -7,6 +7,7 @@ Routes:
     PUT    /api/journal/{id}                       — update a journal entry
     DELETE /api/journal/{id}                       — delete a journal entry + its photos
     POST   /api/journal/{id}/photos                — upload a photo
+    POST   /api/journal/{id}/photos/from-url       — queue a photo download from URL
     DELETE /api/journal/{id}/photos/{uuid}         — delete a specific photo
     GET    /api/journal/{id}/photos/{uuid}         — serve full-res photo
     GET    /api/journal/{id}/photos/{uuid}/thumb   — serve thumbnail
@@ -24,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import FileResponse
 from models.db import get_session
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -35,6 +36,22 @@ router = APIRouter(prefix="/api/journal", tags=["journal"])
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
 
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class IDOut(BaseModel):
+    id: int = Field(description="ID of the newly created resource")
+
+
+class UUIDOut(BaseModel):
+    uuid: str = Field(description="UUID of the uploaded photo")
+
+
+class QueuedOut(BaseModel):
+    queued: bool = Field(description="True when the background download was scheduled")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _photo_dir(user_id: str, journal_id: int) -> Path:
     p = Path(_DATA_DIR) / "users" / user_id / "journal" / str(journal_id)
@@ -132,36 +149,38 @@ def _download_photo_from_url(journal_id: int, url: str, user_id: str) -> None:
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class JournalBody(BaseModel):
-    project_name: str
-    date: str
-    geo_mode: str = "start_of_day"
-    time: Optional[str] = None
-    description: Optional[str] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    insert_after_index: Optional[int] = None
+    project_name: str = Field(description="Project the journal entry belongs to")
+    date: str = Field(description="Date of the entry (YYYY-MM-DD)")
+    geo_mode: str = Field("start_of_day", description="How to resolve coordinates: 'start_of_day', 'end_of_day', or 'custom'")
+    time: Optional[str] = Field(None, description="Optional time of day (HH:MM)")
+    description: Optional[str] = Field(None, description="Journal entry text")
+    lat: Optional[float] = Field(None, description="Latitude (required when geo_mode='custom')")
+    lon: Optional[float] = Field(None, description="Longitude (required when geo_mode='custom')")
+    insert_after_index: Optional[int] = Field(None, description="Position in the project item list to insert after")
 
 
 class JournalUpdateBody(BaseModel):
-    date: str
-    geo_mode: str = "start_of_day"
-    time: Optional[str] = None
-    description: Optional[str] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
+    date: str = Field(description="Date of the entry (YYYY-MM-DD)")
+    geo_mode: str = Field("start_of_day", description="How to resolve coordinates")
+    time: Optional[str] = Field(None, description="Optional time of day (HH:MM)")
+    description: Optional[str] = Field(None, description="Journal entry text")
+    lat: Optional[float] = Field(None, description="Latitude (required when geo_mode='custom')")
+    lon: Optional[float] = Field(None, description="Longitude (required when geo_mode='custom')")
 
 
 class PhotoFromUrlIn(BaseModel):
-    url: str
+    url: str = Field(description="Public URL of the image to download")
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=IDOut,
+             summary="Create a journal entry")
 def create_journal(
     body: JournalBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Create a new private journal entry and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project_id = _get_project_id(sess, user_info_id, body.project_name)
@@ -210,12 +229,14 @@ def create_journal(
     return {"id": journal_id}
 
 
-@router.put("/{journal_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{journal_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update a journal entry")
 def update_journal(
     journal_id: int,
     body: JournalUpdateBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Update the text and metadata of an existing journal entry."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
@@ -234,11 +255,13 @@ def update_journal(
         sess.commit()
 
 
-@router.delete("/{journal_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{journal_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a journal entry")
 def delete_journal(
     journal_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Delete a journal entry and all its photos from disk."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
@@ -267,12 +290,14 @@ def delete_journal(
 
 # ── Photos ────────────────────────────────────────────────────────────────────
 
-@router.post("/{journal_id}/photos", status_code=status.HTTP_201_CREATED)
+@router.post("/{journal_id}/photos", status_code=status.HTTP_201_CREATED,
+             response_model=UUIDOut, summary="Upload a photo")
 async def upload_photo(
     journal_id: int,
     file: Annotated[UploadFile, File()],
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Upload a JPEG photo to a journal entry; a 400×400 thumbnail is generated automatically."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_journal(sess, journal_id, user_info_id)
@@ -283,13 +308,15 @@ async def upload_photo(
     return {"uuid": photo_uuid}
 
 
-@router.post("/{journal_id}/photos/from-url", status_code=202)
+@router.post("/{journal_id}/photos/from-url", status_code=202,
+             response_model=QueuedOut, summary="Queue a photo download from URL")
 async def queue_photo_from_url(
     journal_id: int,
     body: PhotoFromUrlIn,
     background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Enqueue a background download of a photo from a public URL."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_journal(sess, journal_id, user_info_id)
@@ -297,12 +324,14 @@ async def queue_photo_from_url(
     return {"queued": True}
 
 
-@router.delete("/{journal_id}/photos/{photo_uuid}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{journal_id}/photos/{photo_uuid}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a photo")
 def delete_photo(
     journal_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Remove a photo from a journal entry and delete its files from disk."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
@@ -321,12 +350,13 @@ def delete_photo(
         sess.commit()
 
 
-@router.get("/{journal_id}/photos/{photo_uuid}")
+@router.get("/{journal_id}/photos/{photo_uuid}", summary="Serve full-resolution photo")
 def serve_photo(
     journal_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return the full-resolution JPEG for a journal photo."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
@@ -341,12 +371,13 @@ def serve_photo(
     return FileResponse(str(full_path), media_type="image/jpeg")
 
 
-@router.get("/{journal_id}/photos/{photo_uuid}/thumb")
+@router.get("/{journal_id}/photos/{photo_uuid}/thumb", summary="Serve photo thumbnail")
 def serve_photo_thumb(
     journal_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return the 400×400 thumbnail JPEG; falls back to full-res if thumb is missing."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)

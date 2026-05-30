@@ -3,6 +3,7 @@
 # For development, install requirements-web.txt directly.
 
 fastapi>=0.110.0
+scalar-fastapi>=1.0.0
 python-multipart>=0.0.9
 uvicorn>=0.30.0
 gunicorn>=21.0.0

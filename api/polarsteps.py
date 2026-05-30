@@ -1,7 +1,7 @@
 """Polarsteps integration endpoints (unofficial cookie-based API).
 
 Routes:
-    GET    /api/polarsteps/status              — {"connected": bool, "username": str|null}
+    GET    /api/polarsteps/status              — connection status
     POST   /api/polarsteps/connect             — validate & store remember_token
     DELETE /api/polarsteps/disconnect          — remove stored token
     GET    /api/polarsteps/trips               — list user's trips
@@ -9,10 +9,10 @@ Routes:
 """
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -23,6 +23,24 @@ from src.api.polarsteps_client import PolarstepsClient, format_step, format_trip
 
 router = APIRouter(prefix="/api/polarsteps", tags=["polarsteps"])
 
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class PolarstepsStatusOut(BaseModel):
+    connected: bool = Field(description="True if a Polarsteps token is stored for this user")
+    username: Optional[str] = Field(None, description="Polarsteps username, or null if not connected")
+
+
+class ConnectedOut(BaseModel):
+    connected: bool = Field(description="Always true on success")
+    username: str = Field(description="Polarsteps username verified from the API")
+
+
+class DisconnectedOut(BaseModel):
+    connected: bool = Field(False, description="Always false after disconnecting")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_token(user_info_id: int) -> PolarstepsToken | None:
     with get_session() as sess:
@@ -43,10 +61,12 @@ def _require_client(user_info_id: int) -> PolarstepsClient:
 
 # ── Status ────────────────────────────────────────────────────────────────────
 
-@router.get("/status")
+@router.get("/status", response_model=PolarstepsStatusOut,
+            summary="Get Polarsteps connection status")
 def polarsteps_status(
     current_user: Annotated[dict, Depends(get_current_user)],
-) -> dict:
+):
+    """Return whether the current user has a stored Polarsteps token."""
     user_info_id = int(current_user["sub"])
     tok = _get_token(user_info_id)
     if tok is None:
@@ -57,14 +77,19 @@ def polarsteps_status(
 # ── Connect ───────────────────────────────────────────────────────────────────
 
 class ConnectRequest(BaseModel):
-    remember_token: str
+    remember_token: str = Field(description="Polarsteps `remember_token` cookie value")
 
 
-@router.post("/connect")
+@router.post("/connect", response_model=ConnectedOut, summary="Connect Polarsteps account")
 def polarsteps_connect(
     body: ConnectRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
-) -> dict:
+):
+    """Validate a Polarsteps remember_token against the Polarsteps API and store it.
+
+    Returns the verified username on success. Returns 401 if the token is invalid
+    and 502 if Polarsteps is unreachable.
+    """
     user_info_id = int(current_user["sub"])
     client = PolarstepsClient(body.remember_token.strip())
     try:
@@ -100,10 +125,12 @@ def polarsteps_connect(
 
 # ── Disconnect ────────────────────────────────────────────────────────────────
 
-@router.delete("/disconnect")
+@router.delete("/disconnect", response_model=DisconnectedOut,
+               summary="Disconnect Polarsteps account")
 def polarsteps_disconnect(
     current_user: Annotated[dict, Depends(get_current_user)],
-) -> dict:
+):
+    """Remove the stored Polarsteps token. No-op if not connected."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         tok = sess.exec(
@@ -117,10 +144,11 @@ def polarsteps_disconnect(
 
 # ── Trips ─────────────────────────────────────────────────────────────────────
 
-@router.get("/trips")
+@router.get("/trips", summary="List Polarsteps trips")
 def polarsteps_trips(
     current_user: Annotated[dict, Depends(get_current_user)],
 ) -> list[dict]:
+    """Return all trips for the connected Polarsteps account."""
     user_info_id = int(current_user["sub"])
     tok = _get_token(user_info_id)
     if tok is None:
@@ -140,12 +168,18 @@ def polarsteps_trips(
 
 # ── Steps ─────────────────────────────────────────────────────────────────────
 
-@router.get("/trips/{trip_id}/steps")
+@router.get("/trips/{trip_id}/steps", summary="List steps for a Polarsteps trip")
 def polarsteps_trip_steps(
     trip_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     project_name: Optional[str] = None,
 ) -> list[dict]:
+    """Return all published steps for a trip.
+
+    If `project_name` is provided, each step will include an `already_imported`
+    flag indicating whether a memory with that Polarsteps step ID already exists
+    in the project.
+    """
     user_info_id = int(current_user["sub"])
     client = _require_client(user_info_id)
     try:

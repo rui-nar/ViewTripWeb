@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from scalar_fastapi import get_scalar_api_reference
 
 from api.auth import router as auth_router
 from api.geo import router as geo_router
@@ -30,7 +31,11 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="ViewTrip API",
-    description="REST API consumed by Flutter and other native clients.",
+    description=(
+        "REST API consumed by the ViewTrip Flutter client (web, Android, iOS).\n\n"
+        "Authentication uses JWT bearer tokens obtained via `/api/auth/login` or OAuth.\n\n"
+        "Interactive docs: [`/docs`](/docs) (Swagger) · [`/scalar`](/scalar) (Scalar)"
+    ),
     version="0.14.1",
     lifespan=lifespan,
 )
@@ -53,6 +58,17 @@ app.include_router(polarsteps_router)
 app.include_router(projects_router)
 app.include_router(share_router)
 app.include_router(strava_router)
+
+
+@app.get("/scalar", include_in_schema=False)
+async def scalar_docs() -> HTMLResponse:
+    """Scalar API reference UI."""
+    return get_scalar_api_reference(
+        openapi_url="/openapi.json",
+        title="ViewTrip API",
+        scalar_theme="purple",
+    )
+
 
 # ── Flutter web SPA — must be registered last so /api/... routes take priority ─
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web_client")

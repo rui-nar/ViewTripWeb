@@ -8,6 +8,13 @@ Routes:
     DELETE /api/memories/{id}/photos/{uuid}         — delete a specific photo
     GET    /api/memories/{id}/photos/{uuid}         — serve full-res photo
     GET    /api/memories/{id}/photos/{uuid}/thumb   — serve thumbnail
+    GET    /api/memories/{id}/comments              — list comments (threaded)
+    POST   /api/memories/{id}/comments              — add a comment
+    DELETE /api/memories/{id}/comments/{cid}        — delete a comment
+    GET    /api/memories/{id}/likes                 — get like count and likers
+    POST   /api/memories/{id}/like                  — like a memory
+    DELETE /api/memories/{id}/like                  — unlike a memory
+    GET    /api/memories/{id}/translations/{lang}   — get translated memory text
 """
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import FileResponse
 from models.db import get_session
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -38,6 +45,48 @@ _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
 
 
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class IDOut(BaseModel):
+    id: int = Field(description="ID of the newly created resource")
+
+
+class UUIDOut(BaseModel):
+    uuid: str = Field(description="UUID of the uploaded photo")
+
+
+class QueuedOut(BaseModel):
+    queued: bool = Field(description="True when the background download was scheduled")
+
+
+class LikerOut(BaseModel):
+    name: str = Field(description="Display name of the user who liked this memory")
+    user_info_id: int = Field(description="Internal user ID")
+
+
+class LikesOut(BaseModel):
+    count: int = Field(description="Total number of likes")
+    liked_by_me: bool = Field(description="True if the authenticated user has liked this memory")
+    likers: List[LikerOut] = Field(description="Users who liked this memory")
+
+
+class CommentOut(BaseModel):
+    id: int = Field(description="Comment ID")
+    user_info_id: int = Field(description="Author's internal user ID")
+    commenter_name: str = Field(description="Display name of the commenter")
+    text: str = Field(description="Comment body")
+    created_at: str = Field(description="ISO-8601 UTC timestamp")
+    replies: List["CommentOut"] = Field(default_factory=list, description="Nested replies")
+
+
+class TranslationOut(BaseModel):
+    lang_code: str = Field(description="BCP-47 language code, e.g. 'fr' or 'de'")
+    name: Optional[str] = Field(None, description="Translated memory name")
+    description: Optional[str] = Field(None, description="Translated memory description")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _photo_dir(user_id: str, memory_id: int) -> Path:
     p = Path(_DATA_DIR) / "users" / user_id / "memories" / str(memory_id)
     p.mkdir(parents=True, exist_ok=True)
@@ -49,9 +98,8 @@ def _resolve_geo(
 ) -> tuple[Optional[float], Optional[float]]:
     """Resolve (lat, lon) from activities on *date* according to *geo_mode*."""
     if geo_mode == "custom":
-        return None, None  # caller supplies lat/lon directly
+        return None, None
 
-    # Find all activities in the project that fall on the given date
     items = sess.exec(
         select(DBProjectItem).where(
             DBProjectItem.project_id == project_id,
@@ -70,7 +118,6 @@ def _resolve_geo(
         select(DBActivity).where(DBActivity.id.in_(activity_ids))
     ).all()
 
-    # Filter to activities whose local date matches
     def _date_of(row) -> str:
         return (row.start_date_local or "")[:10]
 
@@ -78,7 +125,6 @@ def _resolve_geo(
     if not day_acts:
         return None, None
 
-    # Sort by start time
     day_acts.sort(key=lambda r: r.start_date_local or "")
 
     if geo_mode == "start_of_day":
@@ -94,8 +140,6 @@ def _resolve_geo(
 
     return None, None
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _row_to_memory(row: DBMemory) -> Memory:
     return Memory(
@@ -138,23 +182,25 @@ def _get_owned_memory(sess, memory_id: int, user_info_id: int) -> DBMemory:
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
 class MemoryBody(BaseModel):
-    project_name: str
-    date: str
-    geo_mode: str = "start_of_day"  # "start_of_day" | "end_of_day" | "custom"
-    name: Optional[str] = None
-    time: Optional[str] = None
-    description: Optional[str] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    insert_after_index: Optional[int] = None  # POST only
-    polarsteps_step_id: Optional[int] = None
+    project_name: str = Field(description="Project the memory belongs to")
+    date: str = Field(description="Date of the memory (YYYY-MM-DD)")
+    geo_mode: str = Field("start_of_day", description="How to resolve coordinates: 'start_of_day', 'end_of_day', or 'custom'")
+    name: Optional[str] = Field(None, description="Optional memory title")
+    time: Optional[str] = Field(None, description="Optional time of day (HH:MM)")
+    description: Optional[str] = Field(None, description="Free-text notes")
+    lat: Optional[float] = Field(None, description="Latitude (required when geo_mode='custom')")
+    lon: Optional[float] = Field(None, description="Longitude (required when geo_mode='custom')")
+    insert_after_index: Optional[int] = Field(None, description="Position in the project item list to insert after")
+    polarsteps_step_id: Optional[int] = Field(None, description="Polarsteps step ID for deduplication during import")
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=IDOut,
+             summary="Create a memory")
 def create_memory(
     body: MemoryBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Create a new memory in a project and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project_id = _get_project_id(sess, user_info_id, body.project_name)
@@ -186,9 +232,8 @@ def create_memory(
             polarsteps_step_id=body.polarsteps_step_id,
         )
         sess.add(mem_row)
-        sess.flush()  # populate mem_row.id
+        sess.flush()
 
-        # Insert a DBProjectItem at the requested position
         existing_items = sess.exec(
             select(DBProjectItem)
             .where(DBProjectItem.project_id == project_id)
@@ -198,7 +243,6 @@ def create_memory(
         if body.insert_after_index is not None:
             insert_at = max(0, min(len(existing_items), body.insert_after_index + 1))
 
-        # Shift later items
         for item in existing_items:
             if item.position >= insert_at:
                 item.position += 1
@@ -218,21 +262,23 @@ def create_memory(
 
 
 class MemoryUpdateBody(BaseModel):
-    date: str
-    geo_mode: str = "start_of_day"
-    name: Optional[str] = None
-    time: Optional[str] = None
-    description: Optional[str] = None
-    lat: Optional[float] = None
-    lon: Optional[float] = None
+    date: str = Field(description="Date of the memory (YYYY-MM-DD)")
+    geo_mode: str = Field("start_of_day", description="How to resolve coordinates")
+    name: Optional[str] = Field(None, description="Optional memory title")
+    time: Optional[str] = Field(None, description="Optional time of day (HH:MM)")
+    description: Optional[str] = Field(None, description="Free-text notes")
+    lat: Optional[float] = Field(None, description="Latitude (required when geo_mode='custom')")
+    lon: Optional[float] = Field(None, description="Longitude (required when geo_mode='custom')")
 
 
-@router.put("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update a memory")
 def update_memory(
     memory_id: int,
     body: MemoryUpdateBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Update the metadata of an existing memory."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -252,16 +298,17 @@ def update_memory(
         sess.commit()
 
 
-@router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a memory")
 def delete_memory(
     memory_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Delete a memory and all its photos from disk."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
 
-        # Delete photo files from disk
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "memories" / str(memory_id)
         for photo_uuid in photos:
@@ -274,7 +321,6 @@ def delete_memory(
             except OSError:
                 pass
 
-        # Remove all DBProjectItem rows for this memory (guards against stale duplicates)
         item_rows = sess.exec(
             select(DBProjectItem).where(
                 DBProjectItem.memory_id == memory_id
@@ -322,15 +368,17 @@ def _download_photo_from_url(memory_id: int, url: str, user_id: str) -> None:
 
 
 class PhotoFromUrlIn(BaseModel):
-    url: str
+    url: str = Field(description="Public URL of the image to download")
 
 
-@router.post("/{memory_id}/photos", status_code=status.HTTP_201_CREATED)
+@router.post("/{memory_id}/photos", status_code=status.HTTP_201_CREATED,
+             response_model=UUIDOut, summary="Upload a photo")
 async def upload_photo(
     memory_id: int,
     file: Annotated[UploadFile, File()],
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Upload a JPEG photo; a 400×400 thumbnail is generated automatically."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -341,13 +389,15 @@ async def upload_photo(
     return {"uuid": photo_uuid}
 
 
-@router.post("/{memory_id}/photos/from-url", status_code=202)
+@router.post("/{memory_id}/photos/from-url", status_code=202,
+             response_model=QueuedOut, summary="Queue a photo download from URL")
 async def queue_photo_from_url(
     memory_id: int,
     body: PhotoFromUrlIn,
     background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Enqueue a background download of a photo from a public URL."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -355,12 +405,14 @@ async def queue_photo_from_url(
     return {"queued": True}
 
 
-@router.delete("/{memory_id}/photos/{photo_uuid}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{memory_id}/photos/{photo_uuid}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a photo")
 def delete_photo(
     memory_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Remove a photo from a memory and delete its files from disk."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -379,12 +431,13 @@ def delete_photo(
         sess.commit()
 
 
-@router.get("/{memory_id}/photos/{photo_uuid}")
+@router.get("/{memory_id}/photos/{photo_uuid}", summary="Serve full-resolution photo")
 def serve_photo(
     memory_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return the full-resolution JPEG for a memory photo."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -399,12 +452,13 @@ def serve_photo(
     return FileResponse(str(full_path), media_type="image/jpeg")
 
 
-@router.get("/{memory_id}/photos/{photo_uuid}/thumb")
+@router.get("/{memory_id}/photos/{photo_uuid}/thumb", summary="Serve photo thumbnail")
 def serve_photo_thumb(
     memory_id: int,
     photo_uuid: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return the 400×400 thumbnail JPEG; falls back to full-res if thumb is missing."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -415,7 +469,6 @@ def serve_photo_thumb(
     photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "memories" / str(memory_id)
     thumb_path = photo_path / f"{photo_uuid}_thumb.jpg"
     if not thumb_path.exists():
-        # Fall back to full-res if thumb is missing
         full_path = photo_path / f"{photo_uuid}.jpg"
         if full_path.exists():
             return FileResponse(str(full_path), media_type="image/jpeg")
@@ -452,15 +505,17 @@ def _build_comment_tree(rows: List[DBMemoryComment]) -> List[Dict]:
 
 
 class CommentBody(BaseModel):
-    text: str
-    parent_comment_id: Optional[int] = None
+    text: str = Field(description="Comment body text")
+    parent_comment_id: Optional[int] = Field(None, description="ID of the parent comment for threaded replies")
 
 
-@router.get("/{memory_id}/comments")
+@router.get("/{memory_id}/comments", response_model=List[CommentOut],
+            summary="List comments")
 def list_comments(
     memory_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return all comments on a memory as a recursive tree (replies nested under parents)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -472,12 +527,14 @@ def list_comments(
         return _build_comment_tree(list(rows))
 
 
-@router.post("/{memory_id}/comments", status_code=status.HTTP_201_CREATED)
+@router.post("/{memory_id}/comments", status_code=status.HTTP_201_CREATED,
+             response_model=IDOut, summary="Add a comment")
 def add_comment(
     memory_id: int,
     body: CommentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Add a top-level comment or a threaded reply to an existing comment."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -502,12 +559,14 @@ def add_comment(
         return {"id": row.id}
 
 
-@router.delete("/{memory_id}/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{memory_id}/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a comment")
 def delete_comment(
     memory_id: int,
     comment_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Delete a comment and all its replies. Allowed for the comment author or project owner."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -521,7 +580,6 @@ def delete_comment(
         if not (is_owner or is_author):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
-        # Delete all descendants first (recursive via ordered query)
         _delete_comment_subtree(sess, comment_id)
         sess.commit()
 
@@ -544,11 +602,12 @@ def _delete_comment_subtree(sess, comment_id: int) -> None:
 
 # ── Likes ─────────────────────────────────────────────────────────────────────
 
-@router.get("/{memory_id}/likes")
+@router.get("/{memory_id}/likes", response_model=LikesOut, summary="Get likes")
 def get_likes(
     memory_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return the like count, whether the caller has liked this memory, and the list of likers."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -563,11 +622,13 @@ def get_likes(
         }
 
 
-@router.post("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT,
+             summary="Like a memory")
 def like_memory(
     memory_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Like a memory. Idempotent — calling this twice has no effect."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -578,7 +639,7 @@ def like_memory(
             )
         ).first()
         if existing:
-            return  # idempotent
+            return
         user_row = sess.get(UserInfo, user_info_id)
         liker_name = user_row.display_name if user_row else ""
         sess.add(DBMemoryLike(
@@ -590,11 +651,13 @@ def like_memory(
         sess.commit()
 
 
-@router.delete("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Unlike a memory")
 def unlike_memory(
     memory_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Remove the caller's like from a memory. No-op if not liked."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         _get_owned_memory(sess, memory_id, user_info_id)
@@ -614,12 +677,19 @@ def unlike_memory(
 import json as _json
 
 
-@router.get("/{memory_id}/translations/{lang_code}")
+@router.get("/{memory_id}/translations/{lang_code}", response_model=TranslationOut,
+            summary="Get memory translation")
 async def get_translation(
     memory_id: int,
     lang_code: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
+    """Return a translated version of the memory's name and description.
+
+    Translations are generated on first request via Google Translate and cached
+    in the database. Subsequent calls for the same memory + language return
+    instantly from cache. The language must be enabled in the project's settings.
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
@@ -637,7 +707,6 @@ async def get_translation(
         if cached:
             return {"lang_code": lang_code, "name": cached.name, "description": cached.description}
 
-    # Translate outside the session to avoid holding it open during an HTTP call
     try:
         translated_name = await translate_text(mem_row.name, lang_code) if mem_row.name else None
         translated_desc = await translate_text(mem_row.description, lang_code) if mem_row.description else None
