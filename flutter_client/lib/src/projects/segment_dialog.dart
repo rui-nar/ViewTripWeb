@@ -88,7 +88,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
       ..sort((a, b) {
         final da = (a['start_date_local'] as String?) ?? '';
         final db = (b['start_date_local'] as String?) ?? '';
-        return da.compareTo(db);
+        return db.compareTo(da); // most recent first
       });
 
     // Auto-populate from adjacent activities if creating new segment
@@ -186,18 +186,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
       }
     }
 
-    // Infer date: walk backwards from insertAfter to find nearest dated item
-    for (int i = insertAfter; i >= 0; i--) {
-      final it = items[i];
-      if (it['item_type'] == 'activity') {
-        final a = actById(it['activity_id']);
-        final ds = a?['start_date_local'] as String?;
-        if (ds != null) { _date = DateTime.tryParse(ds); break; }
-      } else if (it['item_type'] == 'segment') {
-        final ds = it['segment']?['date'] as String?;
-        if (ds != null) { _date = DateTime.tryParse(ds); break; }
-      }
-    }
   }
 
   @override
@@ -254,6 +242,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final startLon = double.tryParse(_startLonCtrl.text.trim());
     final endLat   = double.tryParse(_endLatCtrl.text.trim());
     final endLon   = double.tryParse(_endLonCtrl.text.trim());
+    if (_date == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Set a date for the segment')),
+      );
+      return;
+    }
     if (startLat == null || startLon == null ||
         endLat   == null || endLon   == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -262,7 +256,31 @@ class _SegmentDialogState extends State<SegmentDialog> {
       return;
     }
     setState(() => _saving = true);
-    final dateStr = _date != null ? _toIso(_date!) : null;
+    final dateStr = _toIso(_date!);
+
+    // Default label: "Day N - Type M" when user leaves the field empty.
+    String label = _labelCtrl.text.trim();
+    if (label.isEmpty) {
+      final tripStartStr = widget.notifier.tripStart;
+      int dayNum = 1;
+      if (tripStartStr != null) {
+        final ts = DateTime.parse(tripStartStr);
+        final tripStartDate = DateTime.utc(ts.year, ts.month, ts.day);
+        final segDate = DateTime.utc(_date!.year, _date!.month, _date!.day);
+        dayNum = segDate.difference(tripStartDate).inDays + 1;
+      }
+      final currentSegId = widget.editSegment?['id'] as String?;
+      final siblingsOnDay = widget.notifier.items.where((item) {
+        if (item['item_type'] != 'segment') return false;
+        final seg = item['segment'] as Map?;
+        if (seg?['date'] != dateStr) return false;
+        if (currentSegId != null && seg?['id'] == currentSegId) return false;
+        return true;
+      }).length;
+      final typeLabel = _segmentType[0].toUpperCase() + _segmentType.substring(1);
+      label = 'Day $dayNum - $typeLabel ${siblingsOnDay + 1}';
+    }
+
     final trainNum = _trainNumberCtrl.text.trim().isEmpty
         ? null
         : _trainNumberCtrl.text.trim();
@@ -271,12 +289,26 @@ class _SegmentDialogState extends State<SegmentDialog> {
         (_segmentType == 'boat'  && _routeMode == 'ferry') ||
         (_segmentType == 'bus'   && _routeMode == 'bus');
 
+    // If a start activity is selected, insert the segment immediately after it
+    // so it sits between the start and end activities in the panel.
+    int? insertAfterIndex = widget.insertAfterIndex;
+    if (_startActivityId != null) {
+      final notifierItems = widget.notifier.items;
+      for (int i = 0; i < notifierItems.length; i++) {
+        if (notifierItems[i]['item_type'] == 'activity' &&
+            notifierItems[i]['activity_id'] == _startActivityId) {
+          insertAfterIndex = i;
+          break;
+        }
+      }
+    }
+
     String resolveSegId = '';
     if (widget.editSegment != null) {
       await widget.notifier.updateSegment(
         widget.editSegment!['id'] as String,
         segmentType: _segmentType,
-        label: _labelCtrl.text.trim(),
+        label: label,
         startLat: startLat,
         startLon: startLon,
         endLat: endLat,
@@ -290,12 +322,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
     } else {
       resolveSegId = await widget.notifier.addSegment(
         segmentType: _segmentType,
-        label: _labelCtrl.text.trim(),
+        label: label,
         startLat: startLat,
         startLon: startLon,
         endLat: endLat,
         endLon: endLon,
-        insertAfterIndex: widget.insertAfterIndex,
+        insertAfterIndex: insertAfterIndex,
         date: dateStr,
         trainNumber: trainNum,
         hafasProvider: needsResolve ? _hafasProvider : null,
@@ -320,9 +352,13 @@ class _SegmentDialogState extends State<SegmentDialog> {
         duration: const Duration(seconds: 10),
       ));
       Navigator.of(context).pop();
+      if (widget.editSegment == null) notifier.selectSegment(segId);
       unawaited(_resolveAsync(notifier, segId, routeMode, provider, trainNum, dateStr, messenger));
     } else {
       Navigator.of(context).pop();
+      if (widget.editSegment == null && resolveSegId.isNotEmpty) {
+        widget.notifier.selectSegment(resolveSegId);
+      }
     }
   }
 
@@ -468,6 +504,21 @@ class _SegmentDialogState extends State<SegmentDialog> {
                   if (ll is List && ll.length >= 2) {
                     _startLatCtrl.text = (ll[0] as num).toStringAsFixed(6);
                     _startLonCtrl.text = (ll[1] as num).toStringAsFixed(6);
+                  }
+                  // Set date from the start activity's date.
+                  final ds = a['start_date_local'] as String?;
+                  if (ds != null) _date = DateTime.tryParse(ds);
+                  // Auto-advance end to the chronologically next activity.
+                  // List is sorted descending, so next-in-time = idx - 1.
+                  final idx = _activityList.indexWhere((x) => x['id'] == a['id']);
+                  if (idx > 0) {
+                    final next = _activityList[idx - 1];
+                    _endActivityId = next['id'];
+                    final nll = next['start_latlng'];
+                    if (nll is List && nll.length >= 2) {
+                      _endLatCtrl.text = (nll[0] as num).toStringAsFixed(6);
+                      _endLonCtrl.text = (nll[1] as num).toStringAsFixed(6);
+                    }
                   }
                 }),
                 onPickMap: () => _pickLocation(
@@ -620,20 +671,30 @@ class _SegmentDialogState extends State<SegmentDialog> {
         ),
         ),
       ),
+      actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       actions: [
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        ElevatedButton(
-          onPressed: _saving ? null : _save,
-          child: _saving
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Save'),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.tonal(
+                onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _saving ? null : _save,
+                child: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Save'),
+              ),
+            ),
+          ],
         ),
       ],
     );
