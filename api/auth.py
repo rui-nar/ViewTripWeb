@@ -17,7 +17,7 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from models.db import get_session
@@ -42,28 +42,31 @@ _google_client_id = (
 # ── Request / response schemas ────────────────────────────────────────────────
 
 class TokenRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(description="Email address or username")
+    password: str = Field(description="Account password")
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    display_name: str = ""
+    username: str = Field(description="Email address or username")
+    password: str = Field(description="Account password")
+    display_name: str = Field("", description="Public display name (defaults to username)")
 
 class GoogleTokenRequest(BaseModel):
-    id_token: str  # JWT credential from Google (One Tap or GIS)
+    id_token: str = Field(description="JWT credential from Google One Tap or GIS")
 
 class UpdateProfileRequest(BaseModel):
-    display_name: str
+    display_name: str = Field(description="New public display name")
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(description="Current password for verification")
+    new_password: str = Field(description="New password to set")
 
 class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: dict
+    access_token: str = Field(description="JWT bearer token")
+    token_type: str = Field("bearer", description="Always 'bearer'")
+    user: dict = Field(description="User profile (id, email, display_name, avatar_url, auth_provider)")
+
+class OkOut(BaseModel):
+    ok: bool = Field(True, description="Always true on success")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -89,7 +92,7 @@ def _token_response(user_info: UserInfo) -> TokenResponse:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/token", response_model=TokenResponse)
+@router.post("/token", response_model=TokenResponse, summary="Login with email + password")
 def login(body: TokenRequest):
     """Email + password login — returns a JWT."""
     with get_session() as sess:
@@ -116,7 +119,8 @@ def login(body: TokenRequest):
         return _token_response(user_info)
 
 
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
+             summary="Register a new account")
 def register(body: RegisterRequest):
     """Create a new local account — returns a JWT."""
     with get_session() as sess:
@@ -148,7 +152,7 @@ def register(body: RegisterRequest):
         return _token_response(user_info)
 
 
-@router.post("/google", response_model=TokenResponse)
+@router.post("/google", response_model=TokenResponse, summary="Login with Google")
 def google_login(body: GoogleTokenRequest):
     """Verify a Google id_token and return a JWT (for Flutter / native clients)."""
     if not _google_client_id:
@@ -200,13 +204,13 @@ def google_login(body: GoogleTokenRequest):
         return _token_response(user_info)
 
 
-@router.get("/me")
+@router.get("/me", summary="Get current user profile")
 def me(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Return the current user's profile from the JWT payload."""
+    """Return the current user's profile decoded from the JWT."""
     return current_user
 
 
-@router.put("/me", response_model=TokenResponse)
+@router.put("/me", response_model=TokenResponse, summary="Update display name")
 def update_me(
     body: UpdateProfileRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -224,12 +228,12 @@ def update_me(
         return _token_response(user_info)
 
 
-@router.post("/change-password")
+@router.post("/change-password", response_model=OkOut, summary="Change password")
 def change_password(
     body: ChangePasswordRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Change password — local (email) accounts only."""
+    """Change password — local (email) accounts only. Returns 403 for Google accounts."""
     if current_user.get("auth_provider") != "local":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -254,9 +258,9 @@ def change_password(
     return {"ok": True}
 
 
-@router.delete("/me")
+@router.delete("/me", response_model=OkOut, summary="Delete account")
 def delete_account(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Delete the current user's account and all associated data."""
+    """Permanently delete the current user's account and all associated data."""
     from models.project_db import DBActivity, DBProject, DBProjectItem, DBStravaCache
     from models.user import StravaToken
 

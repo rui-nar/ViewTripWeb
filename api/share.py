@@ -237,7 +237,7 @@ def _record_visit(
         pass
 
 
-@router.get("/{token}")
+@router.get("/{token}", summary="Get shared project details")
 def shared_project(
     token: str,
     aid: Optional[str] = Query(default=None),
@@ -272,7 +272,7 @@ def shared_project(
     return cached_result
 
 
-@router.get("/{token}/meta")
+@router.get("/{token}/meta", summary="Get shared project metadata (lightweight)")
 def shared_project_meta(
     token: str,
     aid: Optional[str] = Query(default=None),
@@ -375,7 +375,7 @@ def _build_features(project) -> List[Dict[str, Any]]:
     return features
 
 
-@router.get("/{token}/geo/low-res")
+@router.get("/{token}/geo/low-res", summary="Low-res GeoJSON for shared project")
 def shared_project_geo_low_res(token: str):
     """Return low-res GeoJSON for fast initial map render.
 
@@ -432,7 +432,7 @@ def shared_project_geo_low_res(token: str):
     return {"type": "FeatureCollection", "features": features}
 
 
-@router.get("/{token}/geo")
+@router.get("/{token}/geo", summary="Full GeoJSON for shared project")
 def shared_project_geo(
     token: str,
     aid: Optional[str] = Query(default=None),
@@ -445,7 +445,7 @@ def shared_project_geo(
     return {"type": "FeatureCollection", "features": features}
 
 
-@router.get("/{token}/stats")
+@router.get("/{token}/stats", summary="Get shared project statistics")
 def shared_project_stats(
     token: str,
     tags: Optional[List[str]] = Query(default=None),
@@ -472,7 +472,7 @@ def shared_project_stats(
     return stats
 
 
-@router.get("/{token}/tiles/{z}/{x}/{y}.png")
+@router.get("/{token}/tiles/{z}/{x}/{y}.png", summary="Raster track tile (PNG)")
 async def shared_project_tile(request: Request, token: str, z: int, x: int, y: int):
     """Return a cached raster tile PNG for the shared project's track layer.
 
@@ -528,7 +528,7 @@ def _shared_photo_path(token: str, memory_id: int, photo_uuid: str, thumb: bool)
     return base / f"{photo_uuid}{suffix}.jpg"
 
 
-@router.get("/{token}/photos/{memory_id}/{photo_uuid}/thumb")
+@router.get("/{token}/photos/{memory_id}/{photo_uuid}/thumb", summary="Serve memory photo thumbnail")
 def shared_photo_thumb(token: str, memory_id: int, photo_uuid: str):
     """Serve a memory photo thumbnail without requiring user authentication."""
     path = _shared_photo_path(token, memory_id, photo_uuid, thumb=True)
@@ -543,7 +543,7 @@ def shared_photo_thumb(token: str, memory_id: int, photo_uuid: str):
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
-@router.get("/{token}/photos/{memory_id}/{photo_uuid}")
+@router.get("/{token}/photos/{memory_id}/{photo_uuid}", summary="Serve full-resolution memory photo")
 def shared_photo_full(token: str, memory_id: int, photo_uuid: str):
     """Serve a full-resolution memory photo without requiring user authentication."""
     path = _shared_photo_path(token, memory_id, photo_uuid, thumb=False)
@@ -555,8 +555,12 @@ def shared_photo_full(token: str, memory_id: int, photo_uuid: str):
 
 # ── Share: comments & likes ───────────────────────────────────────────────────
 
-from pydantic import BaseModel as _BaseModel
-from api.memories import _build_comment_tree, _delete_comment_subtree, _utc_now
+from pydantic import BaseModel as _BaseModel, Field as _Field
+from api.memories import (
+    _build_comment_tree, _delete_comment_subtree, _utc_now,
+    IDOut as _IDOut, CommentOut as _CommentOut,
+    LikesOut as _LikesOut, TranslationOut as _TranslationOut,
+)
 from api.translations import translate_text
 from models.project_db import DBMemoryTranslation
 
@@ -576,8 +580,10 @@ def _resolve_shared_memory(token: str, memory_id: int):
     return project_id, owner_uid
 
 
-@router.get("/{token}/memories/{memory_id}/comments")
+@router.get("/{token}/memories/{memory_id}/comments", response_model=list[_CommentOut],
+            summary="List comments on a shared memory")
 def shared_list_comments(token: str, memory_id: int):
+    """Return all comments as a recursive tree. No authentication required."""
     _resolve_shared_memory(token, memory_id)
     with get_session() as sess:
         rows = sess.exec(
@@ -593,7 +599,8 @@ class _SharedCommentBody(_BaseModel):
     parent_comment_id: Optional[int] = None
 
 
-@router.post("/{token}/memories/{memory_id}/comments", status_code=201)
+@router.post("/{token}/memories/{memory_id}/comments", status_code=201,
+             response_model=_IDOut, summary="Add a comment to a shared memory")
 def shared_add_comment(
     token: str,
     memory_id: int,
@@ -626,7 +633,8 @@ def shared_add_comment(
         return {"id": row.id}
 
 
-@router.delete("/{token}/memories/{memory_id}/comments/{comment_id}", status_code=204)
+@router.delete("/{token}/memories/{memory_id}/comments/{comment_id}", status_code=204,
+               summary="Delete a comment on a shared memory")
 def shared_delete_comment(
     token: str,
     memory_id: int,
@@ -649,7 +657,8 @@ def shared_delete_comment(
         sess.commit()
 
 
-@router.get("/{token}/memories/{memory_id}/likes")
+@router.get("/{token}/memories/{memory_id}/likes", response_model=_LikesOut,
+            summary="Get likes for a shared memory")
 def shared_get_likes(
     token: str,
     memory_id: int,
@@ -669,7 +678,8 @@ def shared_get_likes(
         }
 
 
-@router.post("/{token}/memories/{memory_id}/like", status_code=204)
+@router.post("/{token}/memories/{memory_id}/like", status_code=204,
+             summary="Like a shared memory")
 def shared_like_memory(
     token: str,
     memory_id: int,
@@ -699,7 +709,8 @@ def shared_like_memory(
         sess.commit()
 
 
-@router.delete("/{token}/memories/{memory_id}/like", status_code=204)
+@router.delete("/{token}/memories/{memory_id}/like", status_code=204,
+               summary="Unlike a shared memory")
 def shared_unlike_memory(
     token: str,
     memory_id: int,
@@ -723,7 +734,8 @@ def shared_unlike_memory(
 
 # ── Share: translations ───────────────────────────────────────────────────────
 
-@router.get("/{token}/memories/{memory_id}/translations/{lang_code}")
+@router.get("/{token}/memories/{memory_id}/translations/{lang_code}",
+            response_model=_TranslationOut, summary="Get translation for a shared memory")
 async def shared_get_translation(token: str, memory_id: int, lang_code: str):
     """Return a cached or freshly generated translation for a shared memory.
 

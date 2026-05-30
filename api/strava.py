@@ -19,6 +19,7 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from models.db import get_session
@@ -40,26 +41,46 @@ _project_repo = ProjectRepo()
 router = APIRouter(tags=["strava"])
 
 _cfg = Config("config/config.json")
-# Env vars override config file (used in Docker; config file used for local dev)
 if os.environ.get("STRAVA_CLIENT_ID"):
     _cfg.set("strava.client_id", os.environ["STRAVA_CLIENT_ID"])
 if os.environ.get("STRAVA_CLIENT_SECRET"):
     _cfg.set("strava.client_secret", os.environ["STRAVA_CLIENT_SECRET"])
 
-# Redirect URI for Strava OAuth — override via env var in production
 _CALLBACK_URI = os.environ.get(
     "STRAVA_REDIRECT_URI",
     "http://localhost:8000/api/strava/callback",
 )
-
-# Origin of the Flutter web client — where to redirect after OAuth
 _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5500")
-
-# ── Activity cache ─────────────────────────────────────────────────────────────
-
-# How long a cached activity list is considered fresh (seconds).
 _CACHE_TTL = int(os.environ.get("STRAVA_CACHE_TTL", 3600))
 
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class ConnectUrlOut(BaseModel):
+    url: str = Field(description="Strava OAuth authorization URL to redirect the user to")
+
+class StravaStatusOut(BaseModel):
+    connected: bool = Field(description="True if a Strava token is stored and non-empty")
+
+class CacheStatusOut(BaseModel):
+    cached: bool = Field(description="True if a cached activity list exists")
+    count: int = Field(description="Number of activities in the cache")
+    age_seconds: Optional[float] = Field(None, description="Age of the cache in seconds, or null if not cached")
+
+class SyncResultOut(BaseModel):
+    added: int = Field(description="Number of activities added to the project")
+    total: int = Field(description="Total activities in the project after sync")
+
+class ActivitiesPageOut(BaseModel):
+    activities: List[dict] = Field(description="Page of activity objects, each with an 'in_project' flag")
+    total: int = Field(description="Total matching activities across all pages")
+    page: int = Field(description="Current 1-based page number")
+    per_page: int = Field(description="Items per page")
+    has_more: bool = Field(description="True if more pages are available")
+    cached: bool = Field(description="True if the activity list was served from cache")
+
+
+# ── Activity cache ─────────────────────────────────────────────────────────────
 
 def _load_cache(user_info_id: int) -> Dict[str, Any] | None:
     """Return the cached payload if it exists and is within TTL, else None."""
@@ -102,11 +123,7 @@ def _fetch_all_strava(
     after: Optional[int] = None,
     before: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Paginate through Strava activities and return the raw list.
-
-    Pass ``after``/``before`` (Unix timestamps) to restrict to a date range;
-    omit both to fetch the full history.
-    """
+    """Paginate through Strava activities and return the raw list."""
     all_raw: List[Dict[str, Any]] = []
     page = 1
     while True:
@@ -154,9 +171,10 @@ def _save_refreshed_token(sess, token_row: StravaToken, client: StravaAPI) -> No
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.get("/api/strava/connect")
+@router.get("/api/strava/connect", response_model=ConnectUrlOut,
+            summary="Get Strava OAuth URL")
 def strava_connect(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Return the Strava OAuth authorization URL."""
+    """Return the Strava OAuth authorization URL to redirect the user to."""
     if not _cfg.validate_strava_config():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -166,7 +184,6 @@ def strava_connect(current_user: Annotated[dict, Depends(get_current_user)]):
     from models.user import UserInfo
     from sqlmodel import select
 
-    # Pass the JWT as state so the callback can identify the user without a session cookie
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         user_info = sess.exec(
@@ -182,27 +199,16 @@ def strava_connect(current_user: Annotated[dict, Depends(get_current_user)]):
     return {"url": f"{base_url}&state={state_token}"}
 
 
-@router.get("/api/strava/callback")
+@router.get("/api/strava/callback", include_in_schema=False)
 def strava_callback(
     code: str | None = None,
     error: str | None = None,
     state: str | None = None,
 ):
-    """Handle Strava OAuth redirect.
-
-    Strava sends the user here with ?code=... after authorising.
-    We exchange the code for tokens and store them, then redirect
-    back to the Flutter web app.
-
-    Note: This endpoint is intentionally public — it's the OAuth redirect URI.
-    The user must be identified via state (for production) or via a short-lived
-    cookie. For now we use a simplified flow: the Flutter app passes the JWT in
-    the state param and we decode it here.
-    """
+    """Handle Strava OAuth redirect — exchanges code for tokens and redirects to the Flutter app."""
     if error or not code:
         return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error")
 
-    # state carries the JWT so we know which user is connecting
     if not state:
         return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=error&reason=no_state")
 
@@ -245,7 +251,8 @@ def strava_callback(
     return RedirectResponse(f"{_FRONTEND_ORIGIN}/oauth_callback.html?strava=connected")
 
 
-@router.get("/api/strava/status")
+@router.get("/api/strava/status", response_model=StravaStatusOut,
+            summary="Get Strava connection status")
 def strava_status(current_user: Annotated[dict, Depends(get_current_user)]):
     """Return whether the current user has connected their Strava account."""
     user_info_id = int(current_user["sub"])
@@ -256,7 +263,8 @@ def strava_status(current_user: Annotated[dict, Depends(get_current_user)]):
     return {"connected": row is not None and bool(row.access_token)}
 
 
-@router.delete("/api/strava/disconnect", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/api/strava/disconnect", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Disconnect Strava account")
 def strava_disconnect(current_user: Annotated[dict, Depends(get_current_user)]):
     """Remove the stored Strava token for the current user."""
     user_info_id = int(current_user["sub"])
@@ -269,7 +277,8 @@ def strava_disconnect(current_user: Annotated[dict, Depends(get_current_user)]):
             sess.commit()
 
 
-@router.get("/api/strava/activities")
+@router.get("/api/strava/activities", response_model=ActivitiesPageOut,
+            summary="Browse Strava activities")
 def strava_activities(
     current_user: Annotated[dict, Depends(get_current_user)],
     start_date: Optional[str] = None,   # YYYY-MM-DD
@@ -284,23 +293,12 @@ def strava_activities(
 
     Activities are served from a per-user cache (default TTL: 1 hour).
     Filters (date, type) are applied in-memory so filter changes are instant.
-    Results are paginated: use ``page`` / ``per_page`` to walk through them.
-
-    Pass ``refresh=true`` to force a full re-fetch and rebuild the cache.
-
-    Response shape:
-        {
-          "activities": [...],   # page slice, each with "in_project" flag
-          "total":     int,      # total matching activities (all pages)
-          "page":      int,
-          "per_page":  int,
-          "has_more":  bool,
-          "cached":    bool,
-        }
+    Results are paginated: use `page` / `per_page` to walk through them.
+    Pass `refresh=true` to force a full re-fetch and rebuild the cache.
+    Each activity includes an `in_project` flag when `project` is specified.
     """
     user_info_id = int(current_user["sub"])
 
-    # Convert date strings to Unix epoch for the Strava API
     after_epoch: Optional[int] = None
     before_epoch: Optional[int] = None
     if start_date:
@@ -332,14 +330,10 @@ def strava_activities(
         raw_list: Optional[List[Dict[str, Any]]] = None
 
         if use_date_api:
-            # Date-bounded fetch: bypass the "all activities" cache and pass
-            # epochs directly to the Strava API so only the relevant range
-            # is transferred.  Result is NOT written back to the cache.
             client = _strava_client_for_token(token_row)
             raw_list = _fetch_all_strava(client, after=after_epoch, before=before_epoch)
             _save_refreshed_token(sess, token_row, client)
         else:
-            # No date bounds: use/update the per-user "all activities" cache.
             if not refresh:
                 cache_data = _load_cache(user_info_id)
                 if cache_data is not None:
@@ -351,7 +345,6 @@ def strava_activities(
                 _save_cache(user_info_id, raw_list)
                 _save_refreshed_token(sess, token_row, client)
 
-    # Parse raw dicts → Activity objects
     activities: List[Activity] = []
     for raw in raw_list:
         try:
@@ -359,16 +352,13 @@ def strava_activities(
         except Exception:
             pass
 
-    # Apply type filter
     if types:
         type_set = {t.strip() for t in types.split(",") if t.strip()}
         criteria = FilterCriteria(activity_types=type_set)
         activities = FilterEngine.apply(activities, criteria)
 
-    # Sort newest first (cache order may vary)
     activities.sort(key=lambda a: a.start_date, reverse=True)
 
-    # Determine which activity IDs are already in the project
     in_project_ids: set = set()
     if project:
         with get_session() as sess:
@@ -388,8 +378,6 @@ def strava_activities(
                 in_project_ids = {r.activity_id for r in item_rows if r.activity_id is not None}
 
     total = len(activities)
-
-    # Paginate
     per_page = max(1, min(per_page, 200))
     page = max(1, page)
     offset = (page - 1) * per_page
@@ -412,9 +400,10 @@ def strava_activities(
     }
 
 
-@router.get("/api/strava/cache/status")
+@router.get("/api/strava/cache/status", response_model=CacheStatusOut,
+            summary="Get activity cache status")
 def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Return metadata about the current user's activity cache."""
+    """Return metadata about the current user's Strava activity cache."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = sess.get(DBStravaCache, user_info_id)
@@ -428,7 +417,8 @@ def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]
         return {"cached": False, "count": 0, "age_seconds": None}
 
 
-@router.post("/api/projects/{name}/strava/sync")
+@router.post("/api/projects/{name}/strava/sync", response_model=SyncResultOut,
+             summary="Sync Strava activities into project")
 def strava_sync(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -453,8 +443,6 @@ def strava_sync(
             )
 
         client = _strava_client_for_token(token_row)
-
-        # Fetch all activities from Strava and update cache
         all_raw = _fetch_all_strava(client)
         _save_cache(user_info_id, all_raw)
 
@@ -463,16 +451,13 @@ def strava_sync(
             try:
                 activities.append(Activity.from_strava_api(raw))
             except Exception:
-                pass  # skip malformed entries
+                pass
 
-        # Load project and merge
         project = _project_repo.get_project(sess, user_info_id, name)
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         added = project.add_activities(activities)
         _project_repo.save_project(sess, user_info_id, project)
-
-        # Persist refreshed token if StravaAPI auto-renewed it
         _save_refreshed_token(sess, token_row, client)
 
     if added > 0:

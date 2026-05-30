@@ -37,7 +37,7 @@ from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache
@@ -62,6 +62,48 @@ _repo = ProjectRepo()
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class ProjectCreatedOut(BaseModel):
+    name: str = Field(description="Final project name (may differ if trimmed)")
+    filename: str = Field(description="Backing filename for legacy file-based access")
+
+class ProjectUpdatedOut(BaseModel):
+    name: str = Field(description="Project name after update (reflects any rename)")
+    trip_start: Optional[str] = Field(None, description="Trip start date (YYYY-MM-DD) or null")
+
+class SyncMetaOut(BaseModel):
+    auto_sync_enabled: bool = Field(description="Whether auto-sync is active for this project")
+    linked_ps_trip_id: Optional[int] = Field(None, description="Linked Polarsteps trip ID, or null")
+    last_strava_sync_at: Optional[float] = Field(None, description="Unix timestamp of last Strava sync")
+    last_ps_sync_at: Optional[float] = Field(None, description="Unix timestamp of last Polarsteps sync")
+
+class SegmentIDOut(BaseModel):
+    id: str = Field(description="UUID of the newly created segment")
+
+class ShareTokenOut(BaseModel):
+    share_token: str = Field(description="Public share token for full-project access")
+
+class ShareTokenNoMemoriesOut(BaseModel):
+    share_token_no_memories: str = Field(description="Public share token with memories stripped")
+
+class ShareInfoOut(BaseModel):
+    share_token: Optional[str] = Field(None, description="Full-access share token, or null if not created")
+    share_token_no_memories: Optional[str] = Field(None, description="No-memories share token, or null if not created")
+
+class ActivitiesAddedOut(BaseModel):
+    added: int = Field(description="Number of new activities added")
+    total: int = Field(description="Total activities in the project after add")
+    pending_enrichment: int = Field(description="Activities queued for GPS stream enrichment in background")
+
+class RouteResolvedOut(BaseModel):
+    polyline: List[List[float]] = Field(description="Resolved route as [[lon, lat], …] coordinates")
+    stop_count: int = Field(description="Number of intermediate stops on the route")
+
+class ImportedOut(BaseModel):
+    name: str = Field(description="Name of the imported project")
 
 
 def _refresh_share_tiles(user_info_id: int, project_name: str) -> None:
@@ -212,8 +254,9 @@ def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.get("/")
+@router.get("/", summary="List projects")
 def list_projects(current_user: Annotated[dict, Depends(get_current_user)]):
+    """Return all projects belonging to the current user."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         return _repo.list_projects(sess, user_info_id)
@@ -223,7 +266,8 @@ class CreateProjectRequest(BaseModel):
     name: str
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=ProjectCreatedOut,
+             summary="Create a project")
 def create_project(
     body: CreateProjectRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -240,7 +284,7 @@ def create_project(
     return {"name": name, "filename": name + ProjectIO.EXTENSION}
 
 
-@router.get("/{name}")
+@router.get("/{name}", summary="Get full project data")
 def get_project(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -256,7 +300,7 @@ def get_project(
     return _repo.to_dict(project)
 
 
-@router.get("/{name}/meta")
+@router.get("/{name}/meta", summary="Get project metadata (lightweight)")
 def get_project_meta(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -277,7 +321,7 @@ def get_project_meta(
     return _repo.to_dict(project)
 
 
-@router.get("/{name}/stats")
+@router.get("/{name}/stats", summary="Get project statistics")
 def get_project_stats(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -329,7 +373,7 @@ class ProjectUpdateRequest(BaseModel):
     trip_end: Optional[str] = None    # "YYYY-MM-DD" or None to clear
 
 
-@router.put("/{name}")
+@router.put("/{name}", response_model=ProjectUpdatedOut, summary="Update project name or dates")
 def update_project(
     name: str,
     body: ProjectUpdateRequest,
@@ -377,7 +421,8 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
-@router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update day metadata")
 def update_day_meta(
     name: str,
     body: DayMetaUpdateRequest,
@@ -435,7 +480,7 @@ def _get_project_row(sess, user_info_id: int, name: str) -> DBProject:
     return row
 
 
-@router.get("/{name}/sync-meta")
+@router.get("/{name}/sync-meta", response_model=SyncMetaOut, summary="Get sync configuration")
 def get_sync_meta(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -458,7 +503,8 @@ class TrackStyleUpdateRequest(BaseModel):
     alternating_track_colors: Optional[bool] = None
 
 
-@router.put("/{name}/track-style", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{name}/track-style", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update track style")
 def update_track_style(
     name: str,
     body: TrackStyleUpdateRequest,
@@ -482,7 +528,8 @@ class LanguagesUpdateRequest(BaseModel):
     languages: List[str]  # ISO 639-1 codes, e.g. ["fr", "de"]
 
 
-@router.put("/{name}/languages", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{name}/languages", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update translation languages")
 def update_languages(
     name: str,
     body: LanguagesUpdateRequest,
@@ -504,7 +551,7 @@ class SyncMetaUpdateRequest(BaseModel):
     last_ps_sync_at: Optional[float] = None
 
 
-@router.put("/{name}/sync-meta")
+@router.put("/{name}/sync-meta", response_model=SyncMetaOut, summary="Update sync configuration")
 def update_sync_meta(
     name: str,
     body: SyncMetaUpdateRequest,
@@ -534,7 +581,7 @@ def update_sync_meta(
     }
 
 
-@router.get("/{name}/sync/check")
+@router.get("/{name}/sync/check", summary="Check for new activities to sync")
 def sync_check(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -639,7 +686,7 @@ def sync_check(
     return {"strava": strava_results, "polarsteps": ps_results}
 
 
-@router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a project")
 def delete_project(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -651,7 +698,8 @@ def delete_project(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
-@router.post("/import", status_code=status.HTTP_201_CREATED)
+@router.post("/import", status_code=status.HTTP_201_CREATED, response_model=ImportedOut,
+             summary="Import a .viewtrip file")
 async def import_project(
     file: Annotated[UploadFile, File()],
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -688,7 +736,7 @@ _SEGMENT_GPX_POINTS = 50
 _SAFE_NAME = re.compile(r"[^\w\-. ]")
 
 
-@router.get("/{name}/export")
+@router.get("/{name}/export", summary="Export project as GPX")
 def export_project_gpx(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -813,7 +861,7 @@ def export_project_gpx(
 
 # ── .viewtrip export ──────────────────────────────────────────────────────────
 
-@router.get("/{name}/export-viewtrip")
+@router.get("/{name}/export-viewtrip", summary="Export project as .viewtrip file")
 def export_project_viewtrip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -842,7 +890,7 @@ def export_project_viewtrip(
 
 # ── ZIP export (.viewtrip + photos) ───────────────────────────────────────────
 
-@router.get("/{name}/export-zip")
+@router.get("/{name}/export-zip", summary="Export project as ZIP (with photos)")
 def export_project_zip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -912,7 +960,8 @@ class AddActivitiesRequest(BaseModel):
     activities: List[Dict[str, Any]]
 
 
-@router.post("/{name}/activities")
+@router.post("/{name}/activities", response_model=ActivitiesAddedOut,
+             summary="Add activities to project")
 def add_activities(
     name: str,
     body: AddActivitiesRequest,
@@ -968,7 +1017,7 @@ def add_activities(
 
 # ── Single-activity refresh ────────────────────────────────────────────────────
 
-@router.post("/{name}/activities/{activity_id}/refresh")
+@router.post("/{name}/activities/{activity_id}/refresh", summary="Refresh activity from Strava")
 def refresh_activity(
     name: str,
     activity_id: int,
@@ -1046,7 +1095,8 @@ def refresh_activity(
 
 # ── Item management (delete + reorder) ────────────────────────────────────────
 
-@router.delete("/{name}/items/{index}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/items/{index}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Remove an item from the project")
 def delete_item(
     name: str,
     index: int,
@@ -1075,7 +1125,7 @@ class ReorderRequest(BaseModel):
     to_index: int
 
 
-@router.put("/{name}/items/reorder")
+@router.put("/{name}/items/reorder", summary="Reorder project items")
 def reorder_items(
     name: str,
     body: ReorderRequest,
@@ -1113,7 +1163,8 @@ class SegmentBody(BaseModel):
     route_mode: Optional[str] = None  # "great_circle" | "rail"; None = preserve
 
 
-@router.post("/{name}/segments", status_code=status.HTTP_201_CREATED)
+@router.post("/{name}/segments", status_code=status.HTTP_201_CREATED,
+             response_model=SegmentIDOut, summary="Add a transport segment")
 def create_segment(
     name: str,
     body: SegmentBody,
@@ -1151,7 +1202,8 @@ def create_segment(
     return {"id": seg.id}
 
 
-@router.put("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update a transport segment")
 def update_segment(
     name: str,
     seg_id: str,
@@ -1194,7 +1246,8 @@ def update_segment(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
 
-@router.delete("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a transport segment")
 def delete_segment(
     name: str,
     seg_id: str,
@@ -1224,7 +1277,7 @@ def delete_segment(
 
 # ── Project sharing ────────────────────────────────────────────────────────────
 
-@router.post("/{name}/share")
+@router.post("/{name}/share", response_model=ShareTokenOut, summary="Create share link")
 def create_share_link(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -1254,7 +1307,8 @@ class ResolveRouteRequest(BaseModel):
     date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
 
 
-@router.post("/{name}/segments/{seg_id}/resolve-route")
+@router.post("/{name}/segments/{seg_id}/resolve-route", response_model=RouteResolvedOut,
+             summary="Resolve route geometry for train, ferry, or bus segment")
 def resolve_segment_route(
     name: str,
     seg_id: str,
@@ -1403,7 +1457,7 @@ def revoke_share_link(
         sess.commit()
 
 
-@router.get("/{name}/share-info")
+@router.get("/{name}/share-info", response_model=ShareInfoOut, summary="Get share tokens")
 def get_share_info(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -1425,7 +1479,8 @@ def get_share_info(
         }
 
 
-@router.post("/{name}/share/no-memories")
+@router.post("/{name}/share/no-memories", response_model=ShareTokenNoMemoriesOut,
+             summary="Create no-memories share link")
 def create_share_link_no_memories(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -1448,7 +1503,8 @@ def create_share_link_no_memories(
         return {"share_token_no_memories": row.share_token_no_memories}
 
 
-@router.delete("/{name}/share/no-memories", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}/share/no-memories", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Revoke no-memories share link")
 def revoke_share_link_no_memories(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -1474,7 +1530,7 @@ def revoke_share_link_no_memories(
         sess.commit()
 
 
-@router.get("/{name}/share/visitors")
+@router.get("/{name}/share/visitors", summary="Get share link visitor stats")
 def get_share_visitors(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],

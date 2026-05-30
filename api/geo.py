@@ -55,7 +55,7 @@ def _linestring(coords: List[List[float]], properties: Dict[str, Any]) -> Dict[s
     }
 
 
-@router.get("/project/low-res")
+@router.get("/project/low-res", summary="Low-res GeoJSON for fast map render")
 def project_geo_low_res(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -79,7 +79,7 @@ def project_geo_low_res(
     return json.loads(_compute_low_res_geo(project))
 
 
-@router.get("/project")
+@router.get("/project", summary="Full-resolution GeoJSON (gzip)")
 def project_geo(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -141,7 +141,7 @@ def project_geo(
 
         elif item.item_type == "segment" and item.segment is not None:
             seg = item.segment
-            if seg.route_mode == "rail" and seg.route_polyline:
+            if seg.route_mode in ("rail", "ferry", "bus") and seg.route_polyline:
                 import json as _json
                 coords = _json.loads(seg.route_polyline)
             else:
