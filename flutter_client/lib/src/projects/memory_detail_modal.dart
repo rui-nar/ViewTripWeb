@@ -930,17 +930,22 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
             ),
           ),
         if (_likeCount > 0) const SizedBox(width: 4),
-        IconButton(
-          visualDensity: VisualDensity.compact,
-          icon: Icon(
-            _likedByMe ? Icons.favorite : Icons.favorite_border,
-            color: _likedByMe ? _kRed : _kDim,
-            size: 20,
+        Tooltip(
+          message: _likers.isNotEmpty
+              ? _likers.map((l) => l['name'] as String? ?? '').join('\n')
+              : api.isAuthenticated
+                  ? (_likedByMe ? 'Unlike' : 'Like')
+                  : 'Sign in to like',
+          preferBelow: false,
+          child: IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _likedByMe ? Icons.favorite : Icons.favorite_border,
+              color: _likedByMe ? _kRed : _kDim,
+              size: 20,
+            ),
+            onPressed: api.isAuthenticated ? _toggleLike : null,
           ),
-          tooltip: api.isAuthenticated
-              ? (_likedByMe ? 'Unlike' : 'Like')
-              : 'Sign in to like',
-          onPressed: api.isAuthenticated ? _toggleLike : null,
         ),
       ],
     );
