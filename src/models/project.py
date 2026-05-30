@@ -111,6 +111,8 @@ class Project:
     track_color: str = "#F97316"
     track_width: float = 2.5
     alternating_track_colors: bool = False
+    # ISO 639-1 language codes available for memory translation, e.g. ["fr", "de"]
+    languages: List[str] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised
     _activity_map: Dict[int, Activity] = field(
         default_factory=dict, repr=False, compare=False

@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 import sqlmodel
+from sqlalchemy import UniqueConstraint
 
 
 class DBProject(sqlmodel.SQLModel, table=True):
@@ -50,6 +51,8 @@ class DBProject(sqlmodel.SQLModel, table=True):
     track_color: str = sqlmodel.Field(default="#F97316")
     track_width: float = sqlmodel.Field(default=2.5)
     alternating_track_colors: bool = sqlmodel.Field(default=False)
+    # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
+    languages_json: Optional[str] = sqlmodel.Field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,7 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
     "track_color",
     "track_width",
     "alternating_track_colors",
+    "languages_json",
 })
 
 _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({
@@ -312,6 +316,20 @@ class DBMemoryLike(sqlmodel.SQLModel, table=True):
     memory_id: int = sqlmodel.Field(foreign_key="memory.id", index=True)
     user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id")
     liker_name: str = sqlmodel.Field(default="")  # snapshot of display_name at like time
+    created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
+
+
+class DBMemoryTranslation(sqlmodel.SQLModel, table=True):
+    """A cached translation of a memory's name and description."""
+
+    __tablename__ = "memory_translation"
+    __table_args__ = (UniqueConstraint("memory_id", "lang_code"),)
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    memory_id: int = sqlmodel.Field(foreign_key="memory.id", index=True)
+    lang_code: str  # ISO 639-1, e.g. "fr", "de", "pt"
+    name: Optional[str] = sqlmodel.Field(default=None)
+    description: Optional[str] = sqlmodel.Field(default=None)
     created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
 
 

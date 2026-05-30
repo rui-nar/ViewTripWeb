@@ -71,6 +71,18 @@ class SharedMemoryService {
       '/api/share/$shareToken/memories/$memoryId/like',
     );
   }
+
+  /// GET /api/share/{token}/memories/{mid}/translations/{lang}
+  Future<Map<String, dynamic>> fetchTranslation(
+    String shareToken,
+    int memoryId,
+    String langCode,
+  ) async {
+    final data = await api.get(
+      '/api/share/$shareToken/memories/$memoryId/translations/$langCode',
+    );
+    return data as Map<String, dynamic>;
+  }
 }
 
 final sharedMemoryService = SharedMemoryService();

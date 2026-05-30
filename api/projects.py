@@ -478,6 +478,25 @@ def update_track_style(
         sess.commit()
 
 
+class LanguagesUpdateRequest(BaseModel):
+    languages: List[str]  # ISO 639-1 codes, e.g. ["fr", "de"]
+
+
+@router.put("/{name}/languages", status_code=status.HTTP_204_NO_CONTENT)
+def update_languages(
+    name: str,
+    body: LanguagesUpdateRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> None:
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_project_row(sess, user_info_id, name)
+        row.languages_json = json.dumps(body.languages)
+        row.updated_at = time.time()
+        sess.add(row)
+        sess.commit()
+
+
 class SyncMetaUpdateRequest(BaseModel):
     auto_sync_enabled: Optional[bool] = None
     linked_ps_trip_id: Optional[int] = None

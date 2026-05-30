@@ -55,6 +55,12 @@ class ProjectService {
     });
   }
 
+  /// PUT /api/projects/{name}/languages
+  Future<void> saveLanguages(String name, List<String> languages) async {
+    final enc = Uri.encodeComponent(name);
+    await api.put('/api/projects/$enc/languages', {'languages': languages});
+  }
+
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
   Future<Map<String, dynamic>> resolveTrainRoute(
     String projectName,

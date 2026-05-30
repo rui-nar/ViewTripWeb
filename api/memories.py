@@ -27,7 +27,8 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from api.deps import get_current_user
-from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBProjectItem
+from api.translations import translate_text
+from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
 from src.models.memory import Memory
 
@@ -606,3 +607,52 @@ def unlike_memory(
         if existing:
             sess.delete(existing)
             sess.commit()
+
+
+# ── Translations ──────────────────────────────────────────────────────────────
+
+import json as _json
+
+
+@router.get("/{memory_id}/translations/{lang_code}")
+async def get_translation(
+    memory_id: int,
+    lang_code: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        project_row = sess.get(DBProject, mem_row.project_id)
+        allowed_langs = _json.loads(getattr(project_row, 'languages_json', None) or "[]")
+        if lang_code not in allowed_langs:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Language not enabled for this project")
+
+        cached = sess.exec(
+            select(DBMemoryTranslation).where(
+                DBMemoryTranslation.memory_id == memory_id,
+                DBMemoryTranslation.lang_code == lang_code,
+            )
+        ).first()
+        if cached:
+            return {"lang_code": lang_code, "name": cached.name, "description": cached.description}
+
+    # Translate outside the session to avoid holding it open during an HTTP call
+    try:
+        translated_name = await translate_text(mem_row.name, lang_code) if mem_row.name else None
+        translated_desc = await translate_text(mem_row.description, lang_code) if mem_row.description else None
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Translation service error: {exc}") from exc
+
+    with get_session() as sess:
+        row = DBMemoryTranslation(
+            memory_id=memory_id,
+            lang_code=lang_code,
+            name=translated_name,
+            description=translated_desc,
+            created_at=_utc_now(),
+        )
+        sess.add(row)
+        sess.commit()
+
+    return {"lang_code": lang_code, "name": translated_name, "description": translated_desc}

@@ -79,6 +79,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
   final _commentCtrl = TextEditingController();
   bool _submitting = false;
 
+  // ── Translation state ─────────────────────────────────────────────────────
+  String? _activeLang;
+  final Map<String, Map<String, dynamic>> _translationCache = {};
+  bool _translating = false;
+
+  static const _kLangFlags = {
+    'en': '🇬🇧', 'pt': '🇵🇹', 'fr': '🇫🇷', 'de': '🇩🇪',
+    'es': '🇪🇸', 'it': '🇮🇹', 'nl': '🇳🇱', 'ja': '🇯🇵',
+    'zh': '🇨🇳', 'ru': '🇷🇺', 'ar': '🇸🇦', 'ko': '🇰🇷',
+  };
+
   static const _months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
@@ -229,6 +240,77 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     } catch (_) {}
   }
 
+  // ── Translation ───────────────────────────────────────────────────────────
+
+  String? get _displayName {
+    if (_activeLang != null && _translationCache.containsKey(_activeLang!)) {
+      return _translationCache[_activeLang!]!['name'] as String?;
+    }
+    return _current['name'] as String?;
+  }
+
+  String get _displayDescription {
+    if (_activeLang != null && _translationCache.containsKey(_activeLang!)) {
+      return (_translationCache[_activeLang!]!['description'] as String?) ?? '';
+    }
+    return (_current['description'] as String?) ?? '';
+  }
+
+  Future<void> _loadTranslation(String langCode) async {
+    if (_translationCache.containsKey(langCode)) {
+      setState(() => _activeLang = langCode);
+      return;
+    }
+    setState(() => _translating = true);
+    try {
+      final Map<String, dynamic> data;
+      final id = int.tryParse(_memoryId);
+      if (widget.shareToken != null && id != null) {
+        data = await sharedMemoryService.fetchTranslation(
+            widget.shareToken!, id, langCode);
+      } else {
+        data = await widget.notifier.fetchTranslation(_memoryId, langCode);
+      }
+      if (mounted) {
+        setState(() {
+          _translationCache[langCode] = data;
+          _activeLang = langCode;
+        });
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _translating = false);
+    }
+  }
+
+  Widget _languageBar(List<String> langs) {
+    if (langs.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      child: Row(
+        children: [
+          // "original" reset button
+          _LangButton(
+            label: '✕',
+            active: _activeLang == null,
+            loading: false,
+            onTap: () => setState(() => _activeLang = null),
+          ),
+          const SizedBox(width: 4),
+          ...langs.map((code) => Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: _LangButton(
+              label: _kLangFlags[code] ?? code.toUpperCase(),
+              active: _activeLang == code,
+              loading: _translating && _activeLang != code,
+              onTap: () => _loadTranslation(code),
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
   // ── Navigation ────────────────────────────────────────────────────────────
 
   List<Map<String, dynamic>> get _allMemories => widget.notifier.items
@@ -247,13 +329,15 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     if (mems.isEmpty) return;
     final next = (_currentIndex + delta).clamp(0, mems.length - 1);
     setState(() {
-      _current     = mems[next];
-      _comments    = [];
-      _likeCount   = (_current['like_count'] as num?)?.toInt() ?? 0;
-      _likedByMe   = false;
-      _likers      = [];
-      _replyToId   = null;
-      _replyToName = null;
+      _current           = mems[next];
+      _comments          = [];
+      _likeCount         = (_current['like_count'] as num?)?.toInt() ?? 0;
+      _likedByMe         = false;
+      _likers            = [];
+      _replyToId         = null;
+      _replyToName       = null;
+      _activeLang        = null;
+      _translating       = false;
       _commentCtrl.clear();
     });
     _loadLikes();
@@ -375,8 +459,9 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     bool hasPrev,
     bool hasNext,
   ) {
-    final name        = _current['name'] as String?;
-    final description = (_current['description'] as String?) ?? '';
+    final name        = _displayName;
+    final description = _displayDescription;
+    final langs       = widget.notifier.languages;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
@@ -460,6 +545,10 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                       fontSize: 11, letterSpacing: 1.5,
                     ),
                   ),
+                  if (langs.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    _languageBar(langs),
+                  ],
                   if (description.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(description,
@@ -588,9 +677,10 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     bool hasNext,
   ) {
     final theme       = Theme.of(context);
-    final name        = _current['name'] as String?;
+    final name        = _displayName;
     final dateStr     = _current['date'] as String?;
-    final description = (_current['description'] as String?) ?? '';
+    final description = _displayDescription;
+    final langs       = widget.notifier.languages;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -623,7 +713,8 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
             ),
           ),
         ),
-        const SizedBox(height: 12),
+        if (langs.isNotEmpty) _languageBar(langs),
+        if (langs.isEmpty) const SizedBox(height: 12),
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -1213,6 +1304,52 @@ class _PhotoViewerState extends State<_PhotoViewer> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Language flag button ───────────────────────────────────────────────────────
+
+class _LangButton extends StatelessWidget {
+  final String label;
+  final bool active;
+  final bool loading;
+  final VoidCallback onTap;
+
+  const _LangButton({
+    required this.label,
+    required this.active,
+    required this.loading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: loading ? null : onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: active ? const Color(0x2060A5FA) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: active ? const Color(0xFF60A5FA) : const Color(0xFF1F2F42),
+          ),
+        ),
+        child: loading
+            ? const SizedBox(
+                width: 16, height: 16,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.5, color: Color(0xFF60A5FA)))
+            : Text(label,
+                style: TextStyle(
+                  fontSize: 16,
+                  color: active
+                      ? const Color(0xFF60A5FA)
+                      : const Color(0xFFCBD5E1),
+                )),
       ),
     );
   }

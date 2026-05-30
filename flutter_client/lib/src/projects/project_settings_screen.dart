@@ -56,6 +56,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   late Color _trackColor;
   late double _trackWidth;
   late bool _alternating;
+  late List<String> _languages;
 
   static const _presetColors = [
     Color(0xFFFC4C02), // Strava orange (matches design)
@@ -110,6 +111,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     _trackColor = n.trackColor;
     _trackWidth = n.trackWidth;
     _alternating = n.alternatingTrackColors;
+    _languages = List<String>.from(n.languages);
     _counterNameCtrls = n.counters
         .map((c) => TextEditingController(text: c['name'] as String? ?? ''))
         .toList();
@@ -253,6 +255,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       newCounters: updatedCounters,
     );
     n.setTrackStyle(color: _trackColor, width: _trackWidth, alternating: _alternating);
+    n.saveLanguages(_languages);
     n.saveSyncMeta(
       autoSyncEnabled: _autoSync,
       linkedPsTripId: _linkedPsTripId,
@@ -379,9 +382,82 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               onClear: _tripEnd != null ? () => setState(() => _tripEnd = null) : null,
             ),
           ),
+          const Divider(height: 1, color: _kBorder),
+          _languagesRow(),
         ],
       ),
     );
+  }
+
+  static const _kSupportedLanguages = {
+    'en': '🇬🇧 English',   'pt': '🇵🇹 Portuguese', 'fr': '🇫🇷 French',
+    'de': '🇩🇪 German',    'es': '🇪🇸 Spanish',     'it': '🇮🇹 Italian',
+    'nl': '🇳🇱 Dutch',     'ja': '🇯🇵 Japanese',    'zh': '🇨🇳 Chinese',
+    'ru': '🇷🇺 Russian',   'ar': '🇸🇦 Arabic',      'ko': '🇰🇷 Korean',
+  };
+
+  Widget _languagesRow() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Translation languages',
+              style: TextStyle(color: _kText2, fontSize: 13.5, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 4),
+          const Text(
+            'Guests can switch memory text to any of these languages.',
+            style: TextStyle(color: _kDim, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ..._languages.map((code) => FilterChip(
+                label: Text(_kSupportedLanguages[code] ?? code,
+                    style: const TextStyle(fontSize: 12)),
+                selected: true,
+                onSelected: (_) => setState(() => _languages.remove(code)),
+                deleteIcon: const Icon(Icons.close, size: 14),
+                onDeleted: () => setState(() => _languages.remove(code)),
+                backgroundColor: _kBgCard,
+                selectedColor: _kBlueActive.withAlpha(40),
+                checkmarkColor: _kBlueActive,
+                side: const BorderSide(color: _kBorder),
+                labelStyle: const TextStyle(color: _kText1),
+              )),
+              ActionChip(
+                avatar: const Icon(Icons.add, size: 16, color: _kBlueActive),
+                label: const Text('Add', style: TextStyle(color: _kBlueActive, fontSize: 12)),
+                backgroundColor: _kBgCard,
+                side: const BorderSide(color: _kBorder),
+                onPressed: () => _showAddLanguageDialog(),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAddLanguageDialog() async {
+    final available = _kSupportedLanguages.entries
+        .where((e) => !_languages.contains(e.key))
+        .toList();
+    if (available.isEmpty) return;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: _kBgCard,
+        title: const Text('Add language', style: TextStyle(color: _kText1)),
+        children: available.map((e) => SimpleDialogOption(
+          onPressed: () => Navigator.of(ctx).pop(e.key),
+          child: Text(e.value, style: const TextStyle(color: _kText2, fontSize: 14)),
+        )).toList(),
+      ),
+    );
+    if (picked != null) setState(() => _languages.add(picked));
   }
 
   Widget _integrationsSection() {

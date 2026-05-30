@@ -113,6 +113,7 @@ class ProjectIO:
             "track_color": project.track_color,
             "track_width": project.track_width,
             "alternating_track_colors": project.alternating_track_colors,
+            "languages": project.languages,
         }
 
     @staticmethod

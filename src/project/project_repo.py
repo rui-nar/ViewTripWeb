@@ -28,7 +28,7 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from src.models.activity import Activity
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
@@ -188,6 +188,7 @@ class ProjectRepo:
         row.track_color = project.track_color
         row.track_width = project.track_width
         row.alternating_track_colors = project.alternating_track_colors
+        row.languages_json = json.dumps(project.languages)
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
 
@@ -614,6 +615,7 @@ class ProjectRepo:
             track_color=getattr(row, 'track_color', None) or "#F97316",
             track_width=float(getattr(row, 'track_width', None) or 2.5),
             alternating_track_colors=bool(getattr(row, 'alternating_track_colors', False)),
+            languages=json.loads(getattr(row, 'languages_json', None) or "[]"),
         )
         project.rebuild_map()
         return project

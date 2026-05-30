@@ -557,6 +557,8 @@ def shared_photo_full(token: str, memory_id: int, photo_uuid: str):
 
 from pydantic import BaseModel as _BaseModel
 from api.memories import _build_comment_tree, _delete_comment_subtree, _utc_now
+from api.translations import translate_text
+from models.project_db import DBMemoryTranslation
 
 
 def _resolve_shared_memory(token: str, memory_id: int):
@@ -717,3 +719,53 @@ def shared_unlike_memory(
         if existing:
             sess.delete(existing)
             sess.commit()
+
+
+# ── Share: translations ───────────────────────────────────────────────────────
+
+@router.get("/{token}/memories/{memory_id}/translations/{lang_code}")
+async def shared_get_translation(token: str, memory_id: int, lang_code: str):
+    """Return a cached or freshly generated translation for a shared memory.
+
+    No authentication required — any share-token holder can fetch translations.
+    The lang_code must be in the project's configured languages list.
+    """
+    _project_id, owner_uid = _resolve_shared_memory(token, memory_id)
+
+    with get_session() as sess:
+        proj_row = sess.exec(
+            select(DBProject).where(DBProject.id == _project_id)
+        ).first()
+        allowed_langs = json.loads(getattr(proj_row, 'languages_json', None) or "[]")
+        if lang_code not in allowed_langs:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Language not enabled for this project")
+
+        cached = sess.exec(
+            select(DBMemoryTranslation).where(
+                DBMemoryTranslation.memory_id == memory_id,
+                DBMemoryTranslation.lang_code == lang_code,
+            )
+        ).first()
+        if cached:
+            return {"lang_code": lang_code, "name": cached.name, "description": cached.description}
+
+        mem_row = sess.get(DBMemory, memory_id)
+
+    try:
+        translated_name = await translate_text(mem_row.name, lang_code) if mem_row.name else None
+        translated_desc = await translate_text(mem_row.description, lang_code) if mem_row.description else None
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Translation service error: {exc}") from exc
+
+    with get_session() as sess:
+        row = DBMemoryTranslation(
+            memory_id=memory_id,
+            lang_code=lang_code,
+            name=translated_name,
+            description=translated_desc,
+            created_at=_utc_now(),
+        )
+        sess.add(row)
+        sess.commit()
+
+    return {"lang_code": lang_code, "name": translated_name, "description": translated_desc}

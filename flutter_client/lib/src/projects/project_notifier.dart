@@ -101,6 +101,9 @@ class ProjectNotifier extends ChangeNotifier
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
 
+  // ── Translation languages ─────────────────────────────────────────────────
+  List<String> languages = [];
+
   Future<void> setTrackStyle({Color? color, double? width, bool? alternating}) async {
     if (color != null) trackColor = color;
     if (width != null) trackWidth = width;
@@ -115,6 +118,19 @@ class ProjectNotifier extends ChangeNotifier
         trackWidth: width,
         alternating: alternating,
       );
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> saveLanguages(List<String> langs) async {
+    languages = List<String>.from(langs);
+    notifyListeners();
+    final name = projectName;
+    if (name == null) return;
+    try {
+      await _service.saveLanguages(name, langs);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -290,6 +306,8 @@ class ProjectNotifier extends ChangeNotifier
       if (rawWidth != null) trackWidth = rawWidth.toDouble();
       final rawAlt = details['alternating_track_colors'] as bool?;
       if (rawAlt != null) alternatingTrackColors = rawAlt;
+      final rawLangs = details['languages'];
+      if (rawLangs is List) languages = rawLangs.cast<String>();
       _updateStats();
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
@@ -1044,6 +1062,8 @@ class ProjectNotifier extends ChangeNotifier
     if (rawWidth != null) trackWidth = rawWidth.toDouble();
     final rawAlt = details['alternating_track_colors'] as bool?;
     if (rawAlt != null) alternatingTrackColors = rawAlt;
+    final rawLangs = details['languages'];
+    if (rawLangs is List) languages = rawLangs.cast<String>();
     tripEnd     = details['trip_end']   as String?;
     final rawActivities = details['activities'];
     activities = rawActivities is List

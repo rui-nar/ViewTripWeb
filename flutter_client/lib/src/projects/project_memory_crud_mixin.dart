@@ -222,4 +222,14 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
   Future<void> unlikeMemory(String memoryId) async {
     await api.delete('/api/memories/$memoryId/like');
   }
+
+  // ── Translations ─────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> fetchTranslation(
+    String memoryId,
+    String langCode,
+  ) async {
+    final data = await api.get('/api/memories/$memoryId/translations/$langCode');
+    return data as Map<String, dynamic>;
+  }
 }
