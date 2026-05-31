@@ -51,7 +51,7 @@ class PolarstepsClient:
         """Return steps for a trip, sorted chronologically."""
         data = self._get(f"/trips/{trip_id}")
         raw_steps: list[dict[str, Any]] = data.get("steps", [])
-        raw_steps.sort(key=lambda s: s.get("creation_time") or s.get("start_time") or "")
+        raw_steps.sort(key=lambda s: s.get("start_time") or s.get("creation_time") or "")
         return raw_steps
 
 
@@ -104,7 +104,9 @@ def format_step(raw: dict[str, Any]) -> dict[str, Any]:
         "id": raw.get("id"),
         "name": raw.get("display_name") or raw.get("name") or "",
         "description": raw.get("description") or None,
-        "date": _iso_date(raw.get("creation_time") or raw.get("start_time")),
+        # start_time = arrival timestamp (what Polarsteps shows as the step date).
+        # creation_time = when the user posted the step (can be the next day).
+        "date": _iso_date(raw.get("start_time") or raw.get("creation_time")),
         "lat": loc.get("lat"),
         "lon": loc.get("lon"),
         "location_name": loc.get("locality") or loc.get("name") or loc.get("detail") or None,
