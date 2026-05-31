@@ -261,7 +261,17 @@ class _SegmentDialogState extends State<SegmentDialog> {
     // Default label: "Day N - Type M" when user leaves the field empty.
     String label = _labelCtrl.text.trim();
     if (label.isEmpty) {
-      final tripStartStr = widget.notifier.tripStart;
+      // Resolve trip start — explicit setting first, then earliest activity date
+      // (mirrors the activity panel's _buildDisplayList fallback logic).
+      String? tripStartStr = widget.notifier.tripStart;
+      if (tripStartStr == null) {
+        for (final a in widget.notifier.activities) {
+          final ds = (a['start_date_local'] as String?)?.split('T').first;
+          if (ds != null && (tripStartStr == null || ds.compareTo(tripStartStr) < 0)) {
+            tripStartStr = ds;
+          }
+        }
+      }
       int dayNum = 1;
       if (tripStartStr != null) {
         final ts = DateTime.parse(tripStartStr);
