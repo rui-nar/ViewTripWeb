@@ -19,7 +19,7 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func
+from sqlalchemy import delete, func, insert
 
 from models.db import get_session
 from sqlalchemy.orm import defer as _sa_defer
@@ -629,36 +629,41 @@ class ProjectRepo:
     def _replace_items(
         self, sess: Session, project_id: int, items: List[ProjectItem]
     ) -> None:
-        """Delete all existing project_item rows and insert fresh ones."""
-        old_items = sess.exec(
-            select(DBProjectItem).where(DBProjectItem.project_id == project_id)
-        ).all()
-        for item in old_items:
-            sess.delete(item)
-        sess.flush()
+        """Delete all existing project_item rows and insert fresh ones.
 
+        Uses a single bulk DELETE and a single bulk INSERT instead of O(N)
+        individual ORM calls — reduces 400 SQL statements to 2 for a 200-item
+        project.
+        """
+        sess.exec(delete(DBProjectItem).where(DBProjectItem.project_id == project_id))
+
+        if not items:
+            return
+
+        rows = []
         for pos, item in enumerate(items):
-            db_item = DBProjectItem(
-                project_id=project_id,
-                position=pos,
-                item_type=item.item_type,
-                activity_id=item.activity_id if item.item_type == "activity" else None,
-                segment_json=(
+            rows.append({
+                "project_id": project_id,
+                "position": pos,
+                "item_type": item.item_type,
+                "activity_id": item.activity_id if item.item_type == "activity" else None,
+                "segment_json": (
                     json.dumps(ProjectIO._serialise_item(item)["segment"])
                     if item.item_type == "segment" else None
                 ),
-                memory_id=(
+                "memory_id": (
                     item.memory.id
                     if item.item_type == "memory" and item.memory is not None
                     else None
                 ),
-                journal_id=(
+                "journal_id": (
                     item.journal.id
                     if item.item_type == "journal" and item.journal is not None
                     else None
                 ),
-            )
-            sess.add(db_item)
+            })
+
+        sess.exec(insert(DBProjectItem).values(rows))
 
     def _upsert_activity(
         self, sess: Session, user_info_id: int, act: Activity
