@@ -15,6 +15,47 @@ import 'memory_detail_modal.dart';
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
+/// Returns the coordinate at 50% of the total chord length — accurate even
+/// when points are unevenly spaced (e.g. resolved rail/ferry/bus routes).
+LatLng? _arcMidpoint(List coords) {
+  if (coords.isEmpty) return null;
+  if (coords.length == 1) {
+    final c = coords[0];
+    if (c is! List || c.length < 2) return null;
+    return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
+  }
+  double total = 0;
+  final lens = <double>[0.0];
+  for (int i = 1; i < coords.length; i++) {
+    final a = coords[i - 1], b = coords[i];
+    if (a is! List || b is! List || a.length < 2 || b.length < 2) {
+      lens.add(total);
+      continue;
+    }
+    final dlat = (b[1] as num).toDouble() - (a[1] as num).toDouble();
+    final dlon = (b[0] as num).toDouble() - (a[0] as num).toDouble();
+    total += pow(dlat * dlat + dlon * dlon, 0.5);
+    lens.add(total);
+  }
+  final half = total / 2;
+  for (int i = 1; i < lens.length; i++) {
+    if (lens[i] >= half) {
+      final t = (lens[i] - lens[i - 1]) == 0
+          ? 0.0
+          : (half - lens[i - 1]) / (lens[i] - lens[i - 1]);
+      final a = coords[i - 1], b = coords[i];
+      if (a is! List || b is! List || a.length < 2 || b.length < 2) break;
+      return LatLng(
+        (a[1] as num).toDouble() + t * ((b[1] as num).toDouble() - (a[1] as num).toDouble()),
+        (a[0] as num).toDouble() + t * ((b[0] as num).toDouble() - (a[0] as num).toDouble()),
+      );
+    }
+  }
+  final last = coords.last;
+  if (last is! List || last.length < 2) return null;
+  return LatLng((last[1] as num).toDouble(), (last[0] as num).toDouble());
+}
+
 IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
   'run' || 'virtualrun'                  => Icons.directions_run,
   'ride' || 'virtualride' || 'ebikeride' => Icons.directions_bike,
@@ -38,9 +79,8 @@ List<Marker> _buildActivityMarkersFromGeo(
     final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
     if (coords is! List || coords.length < 2) continue;
 
-    final mid = coords[coords.length ~/ 2];
-    if (mid is! List || mid.length < 2) continue;
-    final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+    final point = _arcMidpoint(coords);
+    if (point == null) continue;
 
     final actId = props['activity_id']?.toString();
     final sportType = props['sport_type'] as String?;
@@ -286,9 +326,8 @@ class _MapPanelState extends State<MapPanel> {
       final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List || coords.isEmpty) continue;
 
-      final mid = coords[coords.length ~/ 2];
-      if (mid is! List || mid.length < 2) continue;
-      final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+      final point = _arcMidpoint(coords);
+      if (point == null) continue;
 
       final segId = props['segment_id']?.toString();
       final isSelected = selectedSegmentId != null &&
@@ -831,9 +870,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List || coords.isEmpty) continue;
 
-      final mid = coords[coords.length ~/ 2];
-      if (mid is! List || mid.length < 2) continue;
-      final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+      final point = _arcMidpoint(coords);
+      if (point == null) continue;
 
       final segId = props['segment_id']?.toString();
       final isSelected = selectedSegmentId != null &&
