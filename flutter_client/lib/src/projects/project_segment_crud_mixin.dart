@@ -81,9 +81,27 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
         },
       ) as Map<String, dynamic>;
       final newId = result['id'] as String;
+      // Replace the optimistic placeholder with the confirmed segment.
+      for (int i = 0; i < items.length; i++) {
+        if (items[i]['item_type'] == 'segment' &&
+            items[i]['segment']?['id'] == '__optimistic__') {
+          items[i] = {
+            'item_type': 'segment',
+            'segment': {
+              'id': newId,
+              'segment_type': segmentType,
+              'label': label,
+              'date': date,
+              'start': {'lat': startLat, 'lon': startLon},
+              'end': {'lat': endLat, 'lon': endLon},
+            },
+          };
+          break;
+        }
+      }
       upsertSegmentInGeo(newId, _segmentFeature(
           newId, segmentType, label, startLat, startLon, endLat, endLon));
-      await reloadDetailsOnly(name);
+      notifyListeners();
       return newId;
     } on Exception catch (e) {
       error = errorMessage(e);
@@ -154,7 +172,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
         upsertSegmentInGeo(segId, _segmentFeature(
             segId, segmentType, label, startLat, startLon, endLat, endLon));
       }
-      await reloadDetailsOnly(name);
+      notifyListeners();
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
