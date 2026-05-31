@@ -1223,9 +1223,16 @@ def sort_items(
                     key = f"{d}T{t}"
             elif item.item_type == "segment" and item.segment is not None:
                 if item.segment.date:
-                    key = f"{item.segment.date}T12:00:00"
+                    pred_day = last_date[:10] if last_date != FALLBACK else None
+                    if pred_day == item.segment.date:
+                        # Same day as predecessor: sort right after it so the
+                        # segment stays between the two activities it connects.
+                        key = last_date
+                    else:
+                        # Different day: anchor to start of the segment's day.
+                        key = f"{item.segment.date}T00:00:01"
                 else:
-                    key = last_date  # inherit predecessor's date
+                    key = last_date  # undated: inherit predecessor's datetime
 
             if key != FALLBACK:
                 last_date = key
