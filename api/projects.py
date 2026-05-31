@@ -1201,8 +1201,19 @@ def sort_items(
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-        # First pass: assign each item a sort key, propagating dates forward
-        # so undated segments inherit from the item before them.
+        # Build a lookup: (lat_4dp, lon_4dp) → activity start_date isoformat
+        # for every activity end-point. Segments whose start coordinates match
+        # an activity's end coordinates are sorted immediately after that activity,
+        # regardless of where they currently sit in the list.
+        act_end_to_date: Dict[tuple, str] = {}
+        for item in project.items:
+            if item.item_type == "activity" and item.activity_id is not None:
+                act = project._activity_map.get(item.activity_id)
+                if act and act.end_latlng and act.start_date:
+                    k = (round(act.end_latlng[0], 4), round(act.end_latlng[1], 4))
+                    act_end_to_date[k] = act.start_date.isoformat()
+
+        # First pass: assign each item a sort key.
         keys: List[str] = []
         last_date = FALLBACK
         for item in project.items:
@@ -1222,17 +1233,20 @@ def sort_items(
                 if d:
                     key = f"{d}T{t}"
             elif item.item_type == "segment" and item.segment is not None:
-                if item.segment.date:
-                    pred_day = last_date[:10] if last_date != FALLBACK else None
-                    if pred_day == item.segment.date:
-                        # Same day as predecessor: sort right after it so the
-                        # segment stays between the two activities it connects.
-                        key = last_date
+                seg = item.segment
+                # Primary: match segment start → activity end by coordinates.
+                if seg.start:
+                    coord_key = (round(seg.start.lat, 4), round(seg.start.lon, 4))
+                    matched = act_end_to_date.get(coord_key)
+                    if matched:
+                        key = matched  # sort right after the departing activity
+                # Fallback: use date field or inherit from predecessor.
+                if key == FALLBACK:
+                    if seg.date:
+                        pred_day = last_date[:10] if last_date != FALLBACK else None
+                        key = last_date if pred_day == seg.date else f"{seg.date}T00:00:01"
                     else:
-                        # Different day: anchor to start of the segment's day.
-                        key = f"{item.segment.date}T00:00:01"
-                else:
-                    key = last_date  # undated: inherit predecessor's datetime
+                        key = last_date
 
             if key != FALLBACK:
                 last_date = key
