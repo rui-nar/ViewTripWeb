@@ -15,6 +15,58 @@ import 'memory_detail_modal.dart';
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
+IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
+  'run' || 'virtualrun'                  => Icons.directions_run,
+  'ride' || 'virtualride' || 'ebikeride' => Icons.directions_bike,
+  'hike' || 'walk'                       => Icons.hiking,
+  _                                      => Icons.map_outlined,
+};
+
+List<Marker> _buildActivityMarkersFromGeo(
+  Map<String, dynamic> geo,
+  dynamic selectedActivityId,
+  bool hasSelection,
+  Color trackColor,
+) {
+  final features = geo['features'];
+  if (features is! List) return const [];
+  final markers = <Marker>[];
+  for (final feature in features) {
+    if (feature is! Map) continue;
+    final props = feature['properties'] as Map? ?? {};
+    if (props['type'] != 'activity') continue;
+    final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is! List || coords.length < 2) continue;
+
+    final mid = coords[coords.length ~/ 2];
+    if (mid is! List || mid.length < 2) continue;
+    final point = LatLng((mid[1] as num).toDouble(), (mid[0] as num).toDouble());
+
+    final actId = props['activity_id']?.toString();
+    final sportType = props['sport_type'] as String?;
+    final isSelected = selectedActivityId != null &&
+        actId == selectedActivityId.toString();
+
+    final bgColor = isSelected
+        ? trackColor
+        : hasSelection
+            ? trackColor.withAlpha(0x60)
+            : trackColor;
+
+    markers.add(Marker(
+      point: point,
+      width: 22,
+      height: 22,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+        child: Icon(_iconForActivityType(sportType), color: Colors.white, size: 13),
+      ),
+    ));
+  }
+  return markers;
+}
+
 // ── MapPanel ──────────────────────────────────────────────────────────────────
 
 class MapPanel extends StatefulWidget {
@@ -62,6 +114,7 @@ class _MapPanelState extends State<MapPanel> {
   bool? _lastShowJournals;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
+  List<Marker> _cachedActivityMarkers = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
@@ -527,6 +580,9 @@ class _MapPanelState extends State<MapPanel> {
           : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
           selMemId != null || selJournalId != null;
+      _cachedActivityMarkers = geo != null
+          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor)
+          : [];
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
           : [];
@@ -609,6 +665,8 @@ class _MapPanelState extends State<MapPanel> {
                 // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
                 simplificationTolerance: 0.5,
               ),
+            if (_cachedActivityMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedActivityMarkers),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
@@ -729,6 +787,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   dynamic _lastSelectedJournalId = _sentinel;
   List<Map<String, dynamic>>? _lastItems;
   List<Polyline> _cachedPolylines = [];
+  List<Marker> _cachedActivityMarkers = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
@@ -1276,6 +1335,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
+      _cachedActivityMarkers = geo != null
+          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor)
+          : [];
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
           : [];
@@ -1371,6 +1433,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 polylines: _cachedPolylines,
                 simplificationTolerance: 0.5,
               ),
+            if (_cachedActivityMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedActivityMarkers),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
