@@ -62,7 +62,10 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     final insertAt = insertAfterIndex != null
         ? (insertAfterIndex + 1).clamp(0, items.length)
         : items.length;
-    items.insert(insertAt, placeholder);
+    // Assign a new list so identical() in the panel detects the change.
+    final newItems = List<Map<String, dynamic>>.from(items);
+    newItems.insert(insertAt, placeholder);
+    items = newItems;
     notifyListeners();
     try {
       final result = await api.post(
@@ -81,24 +84,26 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
         },
       ) as Map<String, dynamic>;
       final newId = result['id'] as String;
-      // Replace the optimistic placeholder with the confirmed segment.
-      for (int i = 0; i < items.length; i++) {
-        if (items[i]['item_type'] == 'segment' &&
-            items[i]['segment']?['id'] == '__optimistic__') {
-          items[i] = {
-            'item_type': 'segment',
-            'segment': {
-              'id': newId,
-              'segment_type': segmentType,
-              'label': label,
-              'date': date,
-              'start': {'lat': startLat, 'lon': startLon},
-              'end': {'lat': endLat, 'lon': endLon},
-            },
-          };
-          break;
-        }
-      }
+      // Replace the optimistic placeholder with the confirmed segment,
+      // creating a new list so identical() in the panel triggers a rebuild.
+      items = [
+        for (final item in items)
+          if (item['item_type'] == 'segment' &&
+              item['segment']?['id'] == '__optimistic__')
+            {
+              'item_type': 'segment',
+              'segment': {
+                'id': newId,
+                'segment_type': segmentType,
+                'label': label,
+                'date': date,
+                'start': {'lat': startLat, 'lon': startLon},
+                'end': {'lat': endLat, 'lon': endLon},
+              },
+            }
+          else
+            item,
+      ];
       upsertSegmentInGeo(newId, _segmentFeature(
           newId, segmentType, label, startLat, startLon, endLat, endLon));
       notifyListeners();
@@ -127,25 +132,33 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     if (name == null) return;
     String? prevRouteMode;
     double? prevStartLat, prevStartLon, prevEndLat, prevEndLon;
-    for (final item in items) {
-      if (item['item_type'] == 'segment' &&
-          item['segment']?['id']?.toString() == segId) {
-        final old = item['segment'] as Map;
-        prevRouteMode = old['route_mode'] as String?;
-        prevStartLat  = (old['start']?['lat'] as num?)?.toDouble();
-        prevStartLon  = (old['start']?['lon'] as num?)?.toDouble();
-        prevEndLat    = (old['end']?['lat'] as num?)?.toDouble();
-        prevEndLon    = (old['end']?['lon'] as num?)?.toDouble();
-        final seg = Map<String, dynamic>.from(old);
-        seg['segment_type'] = segmentType;
-        seg['label'] = label;
-        seg['date'] = date;
-        seg['start'] = {'lat': startLat, 'lon': startLon};
-        seg['end']   = {'lat': endLat,   'lon': endLon};
-        item['segment'] = seg;
-        break;
-      }
-    }
+    // Build a new list (new reference) so identical() in the panel fires.
+    items = [
+      for (final item in items)
+        if (item['item_type'] == 'segment' &&
+            item['segment']?['id']?.toString() == segId)
+          () {
+            final old = item['segment'] as Map;
+            prevRouteMode = old['route_mode'] as String?;
+            prevStartLat  = (old['start']?['lat'] as num?)?.toDouble();
+            prevStartLon  = (old['start']?['lon'] as num?)?.toDouble();
+            prevEndLat    = (old['end']?['lat'] as num?)?.toDouble();
+            prevEndLon    = (old['end']?['lon'] as num?)?.toDouble();
+            return {
+              'item_type': 'segment',
+              'segment': {
+                ...Map<String, dynamic>.from(old),
+                'segment_type': segmentType,
+                'label': label,
+                'date': date,
+                'start': {'lat': startLat, 'lon': startLon},
+                'end': {'lat': endLat, 'lon': endLon},
+              },
+            };
+          }()
+        else
+          item,
+    ];
     notifyListeners();
     try {
       await api.put(
