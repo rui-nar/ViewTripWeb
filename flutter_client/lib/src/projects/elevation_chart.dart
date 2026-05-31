@@ -256,8 +256,8 @@ class _ElevationChartState extends State<ElevationChart> {
               isCurved: true,
               color: widget.showLine
                   ? (widget.color ?? Colors.black)
-                  : Colors.transparent,
-              barWidth: widget.showLine ? 2 : 0,
+                  : const Color(0x01000000), // alpha=1: invisible but touchable
+              barWidth: 2,
               dotData: const FlDotData(show: false),
               belowBarData: BarAreaData(
                 show: true,
