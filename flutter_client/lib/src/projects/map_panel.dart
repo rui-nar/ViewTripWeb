@@ -1248,7 +1248,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     if (!identical(geo, _lastGeo) || selectionChanged2 ||
         !identical(items, _lastItems) || styleChanged2 ||
         showJournals2 != _lastShowJournals) {
-      if (selectionChanged2) widget.fittedNotifier.value = false;
+      if (selectionChanged2 && widget.autoZoom) widget.fittedNotifier.value = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
