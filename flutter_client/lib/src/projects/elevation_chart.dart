@@ -80,9 +80,25 @@ class _ElevationChartState extends State<ElevationChart> {
   static Widget _elevLeftTitle(double value, TitleMeta meta) =>
       Text('${value.toInt()} m', style: const TextStyle(fontSize: 9));
 
-  static Widget _elevBottomTitle(double value, TitleMeta meta) =>
-      Text('${value.toStringAsFixed(0)} km',
-          style: const TextStyle(fontSize: 9));
+  static Widget _elevBottomTitle(double value, TitleMeta meta) {
+    // Skip the first and last tick to avoid clipping at chart edges.
+    if (value == meta.min || value == meta.max) return const SizedBox.shrink();
+    return Text('${value.toStringAsFixed(0)} km',
+        style: const TextStyle(fontSize: 9));
+  }
+
+  double get _bottomInterval {
+    if (_spots.isEmpty) return 50;
+    final total = _spots.last.x;
+    if (total <= 30)   return 5;
+    if (total <= 100)  return 10;
+    if (total <= 250)  return 25;
+    if (total <= 600)  return 50;
+    if (total <= 1200) return 100;
+    if (total <= 3000) return 200;
+    if (total <= 6000) return 500;
+    return 1000;
+  }
 
   void _compute(List<Map<String, dynamic>> activities, dynamic selectedId) {
     final source = selectedId == null
@@ -223,6 +239,7 @@ class _ElevationChartState extends State<ElevationChart> {
               sideTitles: SideTitles(
                 showTitles: true,
                 reservedSize: 22,
+                interval: _bottomInterval,
                 getTitlesWidget: _elevBottomTitle,
               ),
             ),
