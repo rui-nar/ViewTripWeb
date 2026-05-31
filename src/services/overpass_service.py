@@ -326,15 +326,24 @@ def _get_route_geometry(
     lat2: float, lon2: float,
 ) -> list[list[float]]:
     """
-    Two strategies tried in order:
+    Three strategies tried in order:
       A  Route-relation strategy: query OSM route relations for *route_tag*
          (e.g. "ferry", "bus"), pick the best-fitting one, return trimmed geometry.
-      B  Coordinate fallback: Dijkstra on way members tagged route=*route_tag*.
+      B  Way route=* fallback: Dijkstra on ways tagged route=*route_tag*.
+      C  ferry=yes way fallback (ferry only): Dijkstra on ways tagged ferry=yes.
+         Many short island-hopper crossings use this tag instead of route=ferry.
     """
     try:
         return _via_route_relation_type(route_tag, lat1, lon1, lat2, lon2)
     except OverpassError:
+        pass
+    try:
         return _via_way_type_fallback(route_tag, lat1, lon1, lat2, lon2)
+    except OverpassError:
+        pass
+    if route_tag == "ferry":
+        return _via_ferry_yes_fallback(lat1, lon1, lat2, lon2)
+    raise OverpassError(f"No {route_tag} route found between the two endpoints")
 
 
 def _via_route_relation_type(
@@ -342,7 +351,10 @@ def _via_route_relation_type(
     lat1: float, lon1: float,
     lat2: float, lon2: float,
 ) -> list[list[float]]:
-    buf = max(abs(lat1 - lat2), abs(lon1 - lon2)) * 0.5 + 0.5
+    # Clamp buffer: enough headroom to capture terminal areas, but not so large
+    # that mega-routes (Stockholm–Turku) flood the result and cause timeouts.
+    raw_buf = max(abs(lat1 - lat2), abs(lon1 - lon2)) * 0.5 + 0.15
+    buf = min(raw_buf, 0.4)
     bbox = (
         min(lat1, lat2) - buf, min(lon1, lon2) - buf,
         max(lat1, lat2) + buf, max(lon1, lon2) + buf,
@@ -424,6 +436,60 @@ def _via_way_type_fallback(
     if path:
         return [[lon1, lat1]] + [nodes[n] for n in path] + [[lon2, lat2]]
     raise OverpassError(f"No {route_tag} path found between endpoints")
+
+
+def _via_ferry_yes_fallback(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float,
+) -> list[list[float]]:
+    """Strategy C: Dijkstra on OSM ways tagged ferry=yes.
+
+    Many short island-hopper crossings (e.g. Finnish/Åland archipelago ferries)
+    tag the navigable route as ferry=yes on a way rather than using a
+    route=ferry relation or way.  This is the last resort before giving up.
+    """
+    buf = min(max(abs(lat1 - lat2), abs(lon1 - lon2)) * 0.5 + 0.15, 0.4)
+    bbox = (
+        min(lat1, lat2) - buf, min(lon1, lon2) - buf,
+        max(lat1, lat2) + buf, max(lon1, lon2) + buf,
+    )
+    query = (
+        f"[out:json][timeout:{_TIMEOUT_QUERY}];"
+        f'way["ferry"="yes"]'
+        f"({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});"
+        "out geom;"
+    )
+    try:
+        data = _overpass(query)
+    except OverpassError:
+        raise
+
+    ways = data.get("elements", [])
+    if not ways:
+        raise OverpassError("No ferry=yes ways found in bounding box")
+
+    nodes: dict[str, list[float]] = {}
+    adj:   dict[str, list[str]]   = {}
+    for way in ways:
+        prev: Optional[str] = None
+        for pt in way.get("geometry", []):
+            nid = f"{pt['lat']:.6f},{pt['lon']:.6f}"
+            nodes[nid] = [pt["lon"], pt["lat"]]
+            if prev is not None:
+                adj.setdefault(prev, []).append(nid)
+                adj.setdefault(nid,  []).append(prev)
+            prev = nid
+
+    if not nodes:
+        raise OverpassError("No ferry=yes nodes found in bounding box")
+
+    start_node = _nearest_node(nodes, lat1, lon1)
+    end_node   = _nearest_node(nodes, lat2, lon2)
+    path = _dijkstra(nodes, adj, start_node, end_node)
+
+    if path:
+        return [[lon1, lat1]] + [nodes[n] for n in path] + [[lon2, lat2]]
+    raise OverpassError("No ferry path found between endpoints via ferry=yes ways")
 
 
 # ---------------------------------------------------------------------------
