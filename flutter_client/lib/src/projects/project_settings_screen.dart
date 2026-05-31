@@ -58,6 +58,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   Color? _trackSecondaryColor; // null = auto-derive
   late double _trackWidth;
   late bool _alternating;
+  Color? _elevationChartColor; // null = use black
+  late bool _elevationChartShowLine;
   late List<String> _languages;
 
   static const _sectionLabels = [
@@ -101,6 +103,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     _trackSecondaryColor = n.trackSecondaryColor;
     _trackWidth = n.trackWidth;
     _alternating = n.alternatingTrackColors;
+    _elevationChartColor = n.elevationChartColor;
+    _elevationChartShowLine = n.elevationChartShowLine;
     _languages = List<String>.from(n.languages);
     _counterNameCtrls = n.counters
         .map((c) => TextEditingController(text: c['name'] as String? ?? ''))
@@ -249,6 +253,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       secondaryColor: _trackSecondaryColor,
       width: _trackWidth,
       alternating: _alternating,
+      elevationColor: _elevationChartColor,
+      elevationShowLine: _elevationChartShowLine,
     );
     n.saveLanguages(_languages);
     n.saveSyncMeta(
@@ -690,6 +696,61 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ),
             ),
           ],
+
+          // ── Elevation chart ─────────────────────────────────────────────
+          const Divider(height: 1, color: _kBorder),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
+            child: Text('Elevation chart', style: const TextStyle(
+              fontFamily: 'monospace', fontSize: 10, fontWeight: FontWeight.w600,
+              color: _kDim, letterSpacing: 1.4,
+            )),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+            child: _ColorPickerRow(
+              label: 'Chart colour',
+              color: _elevationChartColor ?? Colors.black,
+              badge: _elevationChartColor == null ? 'auto' : null,
+              onTap: () => _pickColor(
+                current: _elevationChartColor ?? Colors.black,
+                title: 'Chart colour',
+                onPicked: (c) => setState(() => _elevationChartColor = c),
+              ),
+              onClear: _elevationChartColor != null
+                  ? () => setState(() => _elevationChartColor = null)
+                  : null,
+            ),
+          ),
+          const Divider(height: 1, color: _kBorder),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 14, 22, 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _elevationChartShowLine = !_elevationChartShowLine),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Show line',
+                            style: TextStyle(color: _kText2, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                        SizedBox(height: 2),
+                        Text('Draw the line on top of the filled area.',
+                            style: TextStyle(color: _kDim, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Switch(
+                  value: _elevationChartShowLine,
+                  activeThumbColor: _kBlueActive,
+                  onChanged: (v) => setState(() => _elevationChartShowLine = v),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

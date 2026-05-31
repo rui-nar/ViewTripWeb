@@ -287,10 +287,10 @@ class _MapPanelState extends State<MapPanel> {
       final isSelected = selectedMemoryId?.toString() == memId;
       final size = isSelected ? 34.0 : 28.0;
       final bgColor = isSelected
-          ? const Color(0xFFEA580C)
+          ? const Color(0xFF333333)
           : hasSelection
-              ? const Color(0xA0F97316)
-              : const Color(0xFFF97316);
+              ? const Color(0xA0000000)
+              : Colors.black;
       Widget inner;
       if (photos.isNotEmpty) {
         final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
@@ -645,7 +645,7 @@ class _MapPanelState extends State<MapPanel> {
                       height: 16,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: const Color(0xFFF97316),
+                          color: Colors.black,
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.white, width: 2),
                         ),
@@ -826,10 +826,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final isSelected = selectedMemoryId?.toString() == memId;
       final size = isSelected ? 34.0 : 28.0;
       final bgColor = isSelected
-          ? const Color(0xFFEA580C)
+          ? const Color(0xFF333333)
           : hasSelection
-              ? const Color(0xA0F97316)
-              : const Color(0xFFF97316);
+              ? const Color(0xA0000000)
+              : Colors.black;
 
       Widget inner;
       if (photos.isNotEmpty) {
@@ -1404,7 +1404,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                       height: 16,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: const Color(0xFFF97316),
+                          color: Colors.black,
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.white, width: 2),
                         ),

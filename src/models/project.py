@@ -112,6 +112,9 @@ class Project:
     track_secondary_color: Optional[str] = None  # None = auto-derive from primary
     track_width: float = 2.5
     alternating_track_colors: bool = False
+    # Elevation chart style
+    elevation_chart_color: Optional[str] = None  # None = use black
+    elevation_chart_show_line: bool = True
     # ISO 639-1 language codes available for memory translation, e.g. ["fr", "de"]
     languages: List[str] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised

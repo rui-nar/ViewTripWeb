@@ -122,7 +122,7 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
         points: pts,
         color: isSegment
             ? const Color(0x88888888)
-            : const Color(0x80F97316),
+            : Colors.black.withValues(alpha: 0.5),
         strokeWidth: isSegment ? 1.5 : 2.5,
       ));
     }

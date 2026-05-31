@@ -22,6 +22,12 @@ class ElevationChart extends StatefulWidget {
   /// per-activity track (0-based distances) when one is selected.
   final List<(double, GeoPoint)> track;
 
+  /// Color of the chart line and fill. Defaults to black when null.
+  final Color? color;
+
+  /// When false, the line is hidden but the filled area below still renders.
+  final bool showLine;
+
   const ElevationChart({
     super.key,
     required this.activities,
@@ -29,6 +35,8 @@ class ElevationChart extends StatefulWidget {
     this.selectedActivityId,
     this.onCursorChanged,
     this.mapCursorNotifier,
+    this.color,
+    this.showLine = true,
   });
 
   @override
@@ -229,7 +237,7 @@ class _ElevationChartState extends State<ElevationChart> {
             return ExtraLinesData(verticalLines: [
               VerticalLine(
                 x: d,
-                color: const Color(0xFFF97316),
+                color: widget.color ?? Colors.black,
                 strokeWidth: 1.5,
                 dashArray: [4, 4],
               ),
@@ -238,17 +246,22 @@ class _ElevationChartState extends State<ElevationChart> {
           lineTouchData: LineTouchData(
             touchCallback: _onTouch,
             handleBuiltInTouches: true,
+            touchTooltipData: LineTouchTooltipData(
+              getTooltipColor: (_) => Colors.transparent,
+            ),
           ),
           lineBarsData: [
             LineChartBarData(
               spots: _spots,
               isCurved: true,
-              color: const Color(0xFFF97316),
-              barWidth: 2,
+              color: widget.showLine
+                  ? (widget.color ?? Colors.black)
+                  : Colors.transparent,
+              barWidth: widget.showLine ? 2 : 0,
               dotData: const FlDotData(show: false),
               belowBarData: BarAreaData(
                 show: true,
-                color: const Color(0xFFF97316).withValues(alpha: 0.2),
+                color: (widget.color ?? Colors.black).withValues(alpha: 0.2),
               ),
             ),
           ],

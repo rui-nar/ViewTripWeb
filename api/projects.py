@@ -502,6 +502,8 @@ class TrackStyleUpdateRequest(BaseModel):
     track_secondary_color: Optional[str] = None  # "#RRGGBB" hex; null = auto-derive
     track_width: Optional[float] = None
     alternating_track_colors: Optional[bool] = None
+    elevation_chart_color: Optional[str] = None  # "#RRGGBB" hex; null = use default
+    elevation_chart_show_line: Optional[bool] = None
 
 
 @router.put("/{name}/track-style", status_code=status.HTTP_204_NO_CONTENT,
@@ -522,6 +524,10 @@ def update_track_style(
             row.track_width = body.track_width
         if body.alternating_track_colors is not None:
             row.alternating_track_colors = body.alternating_track_colors
+        if 'elevation_chart_color' in body.model_fields_set:
+            row.elevation_chart_color = body.elevation_chart_color
+        if body.elevation_chart_show_line is not None:
+            row.elevation_chart_show_line = body.elevation_chart_show_line
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()

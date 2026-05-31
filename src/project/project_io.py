@@ -114,6 +114,8 @@ class ProjectIO:
             "track_secondary_color": project.track_secondary_color,
             "track_width": project.track_width,
             "alternating_track_colors": project.alternating_track_colors,
+            "elevation_chart_color": project.elevation_chart_color,
+            "elevation_chart_show_line": project.elevation_chart_show_line,
             "languages": project.languages,
         }
 

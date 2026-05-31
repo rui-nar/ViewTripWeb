@@ -97,10 +97,12 @@ class ProjectNotifier extends ChangeNotifier
   ({List<Map<String, dynamic>> strava, List<Map<String, dynamic>> polarsteps})? pendingSync;
 
   // ── Track style ───────────────────────────────────────────────────────────
-  Color trackColor = const Color(0xFFF97316);
+  Color trackColor = const Color(0xFF000000);
   Color? trackSecondaryColor; // null = auto-derive from primary
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
+  Color? elevationChartColor; // null = use black
+  bool elevationChartShowLine = true;
 
   // ── Translation languages ─────────────────────────────────────────────────
   List<String> languages = [];
@@ -110,11 +112,15 @@ class ProjectNotifier extends ChangeNotifier
     Object? secondaryColor = _kUnset, // pass null explicitly to clear
     double? width,
     bool? alternating,
+    Object? elevationColor = _kUnset, // pass null explicitly to clear
+    bool? elevationShowLine,
   }) async {
     if (color != null) trackColor = color;
     if (secondaryColor != _kUnset) trackSecondaryColor = secondaryColor as Color?;
     if (width != null) trackWidth = width;
     if (alternating != null) alternatingTrackColors = alternating;
+    if (elevationColor != _kUnset) elevationChartColor = elevationColor as Color?;
+    if (elevationShowLine != null) elevationChartShowLine = elevationShowLine;
     notifyListeners();
     final name = projectName;
     if (name == null) return;
@@ -127,6 +133,10 @@ class ProjectNotifier extends ChangeNotifier
             : _kUnset,
         trackWidth: width,
         alternating: alternating,
+        elevationChartColor: elevationColor != _kUnset
+            ? (elevationColor != null ? _colorToHex(elevationColor as Color) : null)
+            : _kUnset,
+        elevationChartShowLine: elevationShowLine,
       );
     } on Exception catch (e) {
       error = _msg(e);
@@ -322,6 +332,12 @@ class ProjectNotifier extends ChangeNotifier
       if (rawWidth != null) trackWidth = rawWidth.toDouble();
       final rawAlt = details['alternating_track_colors'] as bool?;
       if (rawAlt != null) alternatingTrackColors = rawAlt;
+      final rawElColor = details['elevation_chart_color'] as String?;
+      elevationChartColor = (rawElColor != null && rawElColor.length == 7 && rawElColor.startsWith('#'))
+          ? Color(int.parse(rawElColor.substring(1), radix: 16) | 0xFF000000)
+          : null;
+      final rawElLine = details['elevation_chart_show_line'] as bool?;
+      if (rawElLine != null) elevationChartShowLine = rawElLine;
       final rawLangs = details['languages'];
       if (rawLangs is List) languages = rawLangs.cast<String>();
       _updateStats();
@@ -1078,6 +1094,12 @@ class ProjectNotifier extends ChangeNotifier
     if (rawWidth != null) trackWidth = rawWidth.toDouble();
     final rawAlt = details['alternating_track_colors'] as bool?;
     if (rawAlt != null) alternatingTrackColors = rawAlt;
+    final rawElColor = details['elevation_chart_color'] as String?;
+    elevationChartColor = (rawElColor != null && rawElColor.length == 7 && rawElColor.startsWith('#'))
+        ? Color(int.parse(rawElColor.substring(1), radix: 16) | 0xFF000000)
+        : null;
+    final rawElLine = details['elevation_chart_show_line'] as bool?;
+    if (rawElLine != null) elevationChartShowLine = rawElLine;
     final rawLangs = details['languages'];
     if (rawLangs is List) languages = rawLangs.cast<String>();
     tripEnd     = details['trip_end']   as String?;

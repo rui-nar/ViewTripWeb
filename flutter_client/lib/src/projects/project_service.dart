@@ -47,6 +47,8 @@ class ProjectService {
     Object? trackSecondaryColor = _kUnset, // null = clear, _kUnset = don't send
     double? trackWidth,
     bool? alternating,
+    Object? elevationChartColor = _kUnset, // null = clear, _kUnset = don't send
+    bool? elevationChartShowLine,
   }) async {
     final enc = Uri.encodeComponent(name);
     await api.put('/api/projects/$enc/track-style', {
@@ -54,6 +56,8 @@ class ProjectService {
       if (trackSecondaryColor != _kUnset) 'track_secondary_color': trackSecondaryColor,
       if (trackWidth != null) 'track_width': trackWidth,
       if (alternating != null) 'alternating_track_colors': alternating,
+      if (elevationChartColor != _kUnset) 'elevation_chart_color': elevationChartColor,
+      if (elevationChartShowLine != null) 'elevation_chart_show_line': elevationChartShowLine,
     });
   }
 

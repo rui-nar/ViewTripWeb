@@ -141,7 +141,7 @@ Future<void> performOffscreenExport({
       final isSegment = props['type'] == 'segment';
       polylines.add(Polyline(
         points: points,
-        color: isSegment ? const Color(0xFF888888) : const Color(0xFFF97316),
+        color: isSegment ? const Color(0xFF888888) : Colors.black,
         strokeWidth: isSegment ? 2.0 : 2.5,
       ));
     }

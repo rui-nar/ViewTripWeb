@@ -52,6 +52,9 @@ class DBProject(sqlmodel.SQLModel, table=True):
     track_secondary_color: Optional[str] = sqlmodel.Field(default=None)  # "#RRGGBB" or None = auto-derive
     track_width: float = sqlmodel.Field(default=2.5)
     alternating_track_colors: bool = sqlmodel.Field(default=False)
+    # Elevation chart style
+    elevation_chart_color: Optional[str] = sqlmodel.Field(default=None)  # "#RRGGBB" or None = use black
+    elevation_chart_show_line: bool = sqlmodel.Field(default=True)
     # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
     languages_json: Optional[str] = sqlmodel.Field(default=None)
 
@@ -82,6 +85,8 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
     "track_secondary_color",
     "track_width",
     "alternating_track_colors",
+    "elevation_chart_color",
+    "elevation_chart_show_line",
     "languages_json",
 })
 

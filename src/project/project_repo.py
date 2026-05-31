@@ -189,6 +189,8 @@ class ProjectRepo:
         row.track_secondary_color = project.track_secondary_color
         row.track_width = project.track_width
         row.alternating_track_colors = project.alternating_track_colors
+        row.elevation_chart_color = project.elevation_chart_color
+        row.elevation_chart_show_line = project.elevation_chart_show_line
         row.languages_json = json.dumps(project.languages)
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
@@ -617,6 +619,8 @@ class ProjectRepo:
             track_secondary_color=getattr(row, 'track_secondary_color', None) or None,
             track_width=float(getattr(row, 'track_width', None) or 2.5),
             alternating_track_colors=bool(getattr(row, 'alternating_track_colors', False)),
+            elevation_chart_color=getattr(row, 'elevation_chart_color', None),
+            elevation_chart_show_line=bool(getattr(row, 'elevation_chart_show_line', True)),
             languages=json.loads(getattr(row, 'languages_json', None) or "[]"),
         )
         project.rebuild_map()
