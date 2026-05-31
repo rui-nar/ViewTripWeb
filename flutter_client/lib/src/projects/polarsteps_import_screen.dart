@@ -273,12 +273,13 @@ class _StepList extends StatelessWidget {
             itemCount: notifier.steps.length,
             separatorBuilder: (_, __) => const Divider(height: 1),
             itemBuilder: (context, i) {
-              final step = notifier.steps[i];
+              final ri = notifier.steps.length - 1 - i;
+              final step = notifier.steps[ri];
               final id = step['id'] as int?;
               final name =
                   (step['name'] as String?)?.isNotEmpty == true
                       ? step['name'] as String
-                      : 'Step ${i + 1}';
+                      : 'Step ${ri + 1}';
               final date = step['date'] as String?;
               final locationName = step['location_name'] as String?;
               final photos =
