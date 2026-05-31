@@ -190,6 +190,7 @@ def polarsteps_trip_steps(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
     imported_ids: set[int] = set()
+    existing_name_dates: set[tuple[str | None, str | None]] = set()
     if project_name:
         with get_session() as sess:
             proj = sess.exec(
@@ -207,7 +208,19 @@ def polarsteps_trip_steps(
                 ).all()
                 imported_ids = {r for r in rows}
 
+                # Fallback for memories imported before polarsteps_step_id existed:
+                # match by (name, date) so they're still recognised as already imported.
+                name_date_rows = sess.exec(
+                    select(DBMemory.name, DBMemory.date).where(
+                        DBMemory.project_id == proj.id,
+                        DBMemory.polarsteps_step_id.is_(None),
+                    )
+                ).all()
+                existing_name_dates = {(r[0], r[1]) for r in name_date_rows}
+
     steps = [format_step(s) for s in raw_steps]
     for s in steps:
-        s['already_imported'] = s.get('id') in imported_ids
+        by_id = s.get('id') in imported_ids
+        by_name_date = (s.get('name'), s.get('date')) in existing_name_dates
+        s['already_imported'] = by_id or by_name_date
     return steps
