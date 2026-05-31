@@ -1110,12 +1110,16 @@ class _ActivityPanelState extends State<ActivityPanel> {
                           return Dismissible(
                             key: ValueKey('act_${item['activity_id']}'),
                             direction: DismissDirection.endToStart,
-                            onDismissed: (_) => _dismissWithUndo(
-                              context: context,
-                              notifier: notifier,
-                              label: 'Activity removed',
-                              onConfirm: () => notifier.removeItem(i),
-                            ),
+                            confirmDismiss: (_) async {
+                              _dismissWithUndo(
+                                context: context,
+                                notifier: notifier,
+                                label: 'Activity removed',
+                                onOptimistic: () => notifier.removeItemLocally(i),
+                                onConfirm: () => notifier.confirmRemoveItem(i),
+                              );
+                              return true;
+                            },
                             background: Container(
                               color: theme.colorScheme.error,
                               alignment: Alignment.centerRight,
@@ -1138,12 +1142,16 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         return Dismissible(
                           key: ValueKey('act_$activityId'),
                           direction: DismissDirection.endToStart,
-                          onDismissed: (_) => _dismissWithUndo(
-                            context: context,
-                            notifier: notifier,
-                            label: 'Removed "$name"',
-                            onConfirm: () => notifier.removeItem(i),
-                          ),
+                          confirmDismiss: (_) async {
+                            _dismissWithUndo(
+                              context: context,
+                              notifier: notifier,
+                              label: 'Removed "$name"',
+                              onOptimistic: () => notifier.removeItemLocally(i),
+                              onConfirm: () => notifier.confirmRemoveItem(i),
+                            );
+                            return true;
+                          },
                           background: Container(
                             color: theme.colorScheme.error,
                             alignment: Alignment.centerRight,

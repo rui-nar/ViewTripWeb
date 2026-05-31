@@ -925,10 +925,7 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> removeItem(int index) async {
-    final name = projectName;
-    if (name == null) return;
-    // Immediate local update so the list responds without a blank flash.
+  void removeItemLocally(int index) {
     if (index >= 0 && index < items.length) {
       final removed = items.removeAt(index);
       if (removed['item_type'] == 'activity') {
@@ -937,6 +934,27 @@ class ProjectNotifier extends ChangeNotifier
       }
     }
     notifyListeners();
+  }
+
+  Future<void> removeItem(int index) async {
+    final name = projectName;
+    if (name == null) return;
+    removeItemLocally(index);
+    try {
+      await api.delete(
+          '/api/projects/${Uri.encodeComponent(name)}/items/$index');
+      await _silentReload(name);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
+  /// API-only delete used by the undo-aware dismiss flow: the local removal
+  /// has already happened via [removeItemLocally].
+  Future<void> confirmRemoveItem(int index) async {
+    final name = projectName;
+    if (name == null) return;
     try {
       await api.delete(
           '/api/projects/${Uri.encodeComponent(name)}/items/$index');
