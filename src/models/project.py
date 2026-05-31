@@ -146,23 +146,44 @@ class Project:
         return result
 
     def add_activities(self, new_activities: List[Activity]) -> int:
-        """Merge new activities into the project pool and append new ones to items.
+        """Merge new activities into the project pool, inserting each at the
+        chronologically correct position rather than always appending to the end.
 
         Returns the count of activities actually added (not already present).
         """
         self.rebuild_map()
         existing_ids = {a.id for a in self.activities if a.id is not None}
         added = 0
-        for act in sorted(new_activities, key=lambda a: a.start_date):
+        for act in sorted(new_activities, key=lambda a: a.start_date or ""):
             if act.id not in existing_ids:
                 self.activities.append(act)
                 self._activity_map[act.id] = act
                 existing_ids.add(act.id)
-                self.items.append(ProjectItem(item_type="activity", activity_id=act.id))
+                self.items.insert(
+                    self._chronological_insert_pos(act),
+                    ProjectItem(item_type="activity", activity_id=act.id),
+                )
                 added += 1
         if added:
             self._fill_day_gaps()
         return added
+
+    def _chronological_insert_pos(self, act: "Activity") -> int:
+        """Return the index at which *act* should be inserted to keep items in
+        chronological order.  Scans forward through the existing items and
+        returns the position immediately after the last activity whose
+        start_date is <= act.start_date.  Non-activity items (segments,
+        memories, journals) are skipped so they are not disrupted.
+        """
+        if not act.start_date:
+            return len(self.items)
+        insert_pos = 0
+        for idx, item in enumerate(self.items):
+            if item.item_type == "activity" and item.activity_id is not None:
+                existing = self._activity_map.get(item.activity_id)
+                if existing and existing.start_date and existing.start_date <= act.start_date:
+                    insert_pos = idx + 1
+        return insert_pos
 
     def _fill_day_gaps(self) -> None:
         """Create empty DayMeta entries for any dates missing between the first and last activity."""

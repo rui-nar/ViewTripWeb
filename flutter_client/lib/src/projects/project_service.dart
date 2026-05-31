@@ -63,6 +63,12 @@ class ProjectService {
 
   static const Object _kUnset = Object();
 
+  /// PUT /api/projects/{name}/items/sort
+  Future<void> sortItems(String name) async {
+    final enc = Uri.encodeComponent(name);
+    await api.put('/api/projects/$enc/items/sort', {});
+  }
+
   /// PUT /api/projects/{name}/languages
   Future<void> saveLanguages(String name, List<String> languages) async {
     final enc = Uri.encodeComponent(name);

@@ -851,6 +851,12 @@ class _ActivityPanelState extends State<ActivityPanel> {
               ],
               const Spacer(),
               IconButton(
+                icon: const Icon(Icons.sort, size: 20),
+                tooltip: 'Sort by date',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => notifier.sortItemsByDate(),
+              ),
+              IconButton(
                 icon: Icon(
                   Icons.photo_library_outlined,
                   size: 20,

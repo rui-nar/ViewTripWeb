@@ -965,6 +965,18 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  Future<void> sortItemsByDate() async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      await _service.sortItems(name);
+      await _silentReloadDetailsOnly(name);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+    }
+  }
+
   Future<void> reorderItems(int fromIndex, int toIndex) async {
     final name = projectName;
     if (name == null) return;

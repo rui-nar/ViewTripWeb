@@ -1171,6 +1171,78 @@ def reorder_items(
     return [ProjectIO._serialise_item(i) for i in project.items]
 
 
+@router.put("/{name}/items/sort", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Sort project items chronologically")
+def sort_items(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Re-order all project items by date/time.
+
+    Sort keys by item type:
+    - activity  → start_date_local
+    - memory    → date + time
+    - journal   → date + time
+    - segment   → date field if set; otherwise inherits the date of the
+                  preceding dated item so undated segments stay near the
+                  activities they connect.
+    Items with no resolvable date are placed at the end, preserving their
+    relative order (stable sort).
+    """
+    FALLBACK = "9999-12-31T23:59:59"
+
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+        # First pass: assign each item a sort key, propagating dates forward
+        # so undated segments inherit from the item before them.
+        keys: List[str] = []
+        last_date = FALLBACK
+        for item in project.items:
+            key: str = FALLBACK
+            if item.item_type == "activity" and item.activity_id is not None:
+                act = project._activity_map.get(item.activity_id)
+                if act and act.start_date:
+                    key = act.start_date.isoformat()
+            elif item.item_type == "memory" and item.memory is not None:
+                d = item.memory.date
+                t = item.memory.time or "00:00"
+                if d:
+                    key = f"{d}T{t}"
+            elif item.item_type == "journal" and item.journal is not None:
+                d = item.journal.date
+                t = getattr(item.journal, "time", None) or "00:00"
+                if d:
+                    key = f"{d}T{t}"
+            elif item.item_type == "segment" and item.segment is not None:
+                if item.segment.date:
+                    key = f"{item.segment.date}T12:00:00"
+                else:
+                    key = last_date  # inherit predecessor's date
+
+            if key != FALLBACK:
+                last_date = key
+            keys.append(key)
+
+        # Stable sort: items with the same key preserve their original order.
+        project.items = [
+            item for _, item in sorted(
+                zip(keys, project.items), key=lambda t: t[0]
+            )
+        ]
+        _repo.save_project(sess, user_info_id, project)
+    bust_geo_cache(user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+
+
 # ── Segment CRUD ───────────────────────────────────────────────────────────────
 
 class SegmentBody(BaseModel):
