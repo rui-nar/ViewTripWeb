@@ -206,19 +206,24 @@ def _enrich_activities(
     return pending
 
 
-def _enrich_pending_background(
-    pending_ids: List[int],
+def _enrich_activities_background(
+    activity_ids: List[int],
     user_info_id: int,
     project_name: str,
 ) -> None:
-    """Sleep until the Strava rate-limit window resets, then enrich remaining activities."""
-    time.sleep(RateLimiter.WINDOW_SECONDS + 5)
+    """Enrich GPS streams for newly imported activities in the background.
 
+    Starts immediately (no sleep) so the response is never blocked.  Each
+    activity is written to the DB as it completes so partial progress is
+    preserved on interruption.  Strava 429 responses are handled by the
+    StravaAPI client (sleeps Retry-After then continues).
+    """
     client = _strava_client_for_user(user_info_id)
     if client is None:
         return
 
-    for activity_id in pending_ids:
+    any_enriched = False
+    for activity_id in activity_ids:
         try:
             streams  = client.get_activity_streams(activity_id)
             latlng   = streams.get("latlng",   {}).get("data") or []
@@ -242,8 +247,22 @@ def _enrich_pending_background(
                     _repo.update_activity_enrichment(
                         sess, activity_id, polyline_str, ep_json
                     )
+                any_enriched = True
         except Exception:
             pass
+
+    if any_enriched:
+        bust_geo_cache(user_info_id, project_name)
+
+
+def _enrich_pending_background(
+    pending_ids: List[int],
+    user_info_id: int,
+    project_name: str,
+) -> None:
+    """Sleep until the Strava rate-limit window resets, then enrich remaining activities."""
+    time.sleep(RateLimiter.WINDOW_SECONDS + 5)
+    _enrich_activities_background(pending_ids, user_info_id, project_name)
 
 
 def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
@@ -991,11 +1010,6 @@ def add_activities(
         except Exception:
             pass
 
-    pending: List[Activity] = []
-    client = _strava_client_for_user(user_info_id)
-    if client is not None:
-        pending = _enrich_activities(activities, client)
-
     with get_session() as sess:
         project = _repo.get_project(
             sess, user_info_id, name,
@@ -1008,10 +1022,11 @@ def add_activities(
 
     bust_geo_cache(user_info_id, name)
 
-    if pending:
-        pending_ids = [a.id for a in pending if a.id is not None]
+    # Enrich GPS streams in the background immediately — never blocks this response.
+    activity_ids = [a.id for a in activities if a.id is not None]
+    if activity_ids:
         background_tasks.add_task(
-            _enrich_pending_background, pending_ids, user_info_id, name
+            _enrich_activities_background, activity_ids, user_info_id, name
         )
 
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
@@ -1020,7 +1035,7 @@ def add_activities(
     return {
         "added": added,
         "total": len(project.activities),
-        "pending_enrichment": len(pending),
+        "pending_enrichment": len(activity_ids),
     }
 
 
