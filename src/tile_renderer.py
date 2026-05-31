@@ -37,7 +37,7 @@ _CACHE_ROOT = Path(__file__).parent.parent / "data" / "tiles"
 # Only tiles that intersect track segments are rendered (not the full bbox).
 _PRERENDER_MAX_ZOOM = 14
 
-_TRACK_RGBA = (249, 115, 22, 200)   # orange — matches client 0xFFF97316
+_TRACK_RGBA = (0, 0, 0, 200)   # black
 _SEG_RGBA   = (136, 136, 136, 200)  # gray   — matches client 0xFF888888
 _LINE_WIDTH = 6
 
