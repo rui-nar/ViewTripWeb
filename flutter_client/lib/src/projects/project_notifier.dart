@@ -97,7 +97,7 @@ class ProjectNotifier extends ChangeNotifier
   ({List<Map<String, dynamic>> strava, List<Map<String, dynamic>> polarsteps})? pendingSync;
 
   // ── Track style ───────────────────────────────────────────────────────────
-  Color trackColor = const Color(0xFF000000);
+  Color trackColor = const Color(0xFF6B7280); // gray-500 — shown while project loads
   Color? trackSecondaryColor; // null = auto-derive from primary
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
