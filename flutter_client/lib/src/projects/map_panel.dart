@@ -126,6 +126,7 @@ class _MapPanelState extends State<MapPanel> {
     bool alternating,
     List<Map<String, dynamic>> items, {
     bool selectedOnly = false,
+    Color? trackSecondaryColor,
   }) {
     final features = geo['features'];
     if (features is! List) return [];
@@ -139,7 +140,7 @@ class _MapPanelState extends State<MapPanel> {
         if (id != null) actIdx[id] = ai++;
       }
     }
-    final altColor = _alternateColor(trackColor);
+    final altColor = trackSecondaryColor ?? _alternateColor(trackColor);
 
     final polylines = <Polyline>[];
     final hasSelection = selectedActivityId != null || selectedSegmentId != null;
@@ -416,23 +417,25 @@ class _MapPanelState extends State<MapPanel> {
   }
 
   void _onMapTap(LatLng latlng) {
-    // ── Activity hit-test ────────────────────────────────────────────────────
-    // Degrees per pixel at the current zoom; 15-pixel radius defines the click
-    // target. Selecting an activity takes priority over updating the cursor.
+    // ── Activity + segment hit-test ──────────────────────────────────────────
+    // Single pass over all GeoJSON features; pick the closest one within a
+    // 15-pixel radius. Activity and segment hits both select their panel item.
     final geo = widget.notifier.geo;
     if (geo != null) {
       final zoom = widget.mapController.mapController.camera.zoom;
       final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
       final threshold = pow(15.0 * pixelDeg, 2).toDouble();
       double minHit = threshold;
-      dynamic hitId;
+      dynamic hitActivityId;
+      String? hitSegmentId;
 
       final features = geo['features'];
       if (features is List) {
         for (final f in features) {
           if (f is! Map) continue;
           final props = f['properties'] as Map? ?? {};
-          if (props['type'] != 'activity') continue;
+          final type = props['type'] as String?;
+          if (type != 'activity' && type != 'segment') continue;
           final coords = (f['geometry'] as Map? ?? {})['coordinates'];
           if (coords is! List) continue;
           for (final c in coords) {
@@ -440,13 +443,26 @@ class _MapPanelState extends State<MapPanel> {
             final dLat = (c[1] as num).toDouble() - latlng.latitude;
             final dLon = (c[0] as num).toDouble() - latlng.longitude;
             final d = dLat * dLat + dLon * dLon;
-            if (d < minHit) { minHit = d; hitId = props['activity_id']; }
+            if (d < minHit) {
+              minHit = d;
+              if (type == 'activity') {
+                hitActivityId = props['activity_id'];
+                hitSegmentId = null;
+              } else {
+                hitSegmentId = props['segment_id']?.toString();
+                hitActivityId = null;
+              }
+            }
           }
         }
       }
 
-      if (hitId != null) {
-        widget.notifier.selectActivity(hitId);
+      if (hitActivityId != null) {
+        widget.notifier.selectActivity(hitActivityId);
+        return;
+      }
+      if (hitSegmentId != null) {
+        widget.notifier.selectSegment(hitSegmentId);
         return;
       }
     }
@@ -479,6 +495,7 @@ class _MapPanelState extends State<MapPanel> {
     final showJournals = notifier.showJournals;
     final items = notifier.items;
     final trackColor = notifier.trackColor;
+    final trackSecondaryColor = notifier.trackSecondaryColor;
     final trackWidth = notifier.trackWidth;
     final alternating = notifier.alternatingTrackColors;
     final selectionChanged = selActId != _lastSelectedId ||
@@ -502,7 +519,8 @@ class _MapPanelState extends State<MapPanel> {
       final tilesActive = widget.trackTileUrlTemplate != null;
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
-              alternating, items, selectedOnly: tilesActive)
+              alternating, items,
+              selectedOnly: tilesActive, trackSecondaryColor: trackSecondaryColor)
           : [];
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
@@ -958,21 +976,23 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   }
 
   void _onMapTap(LatLng latlng) {
-    // ── Activity hit-test ────────────────────────────────────────────────────
+    // ── Activity + segment hit-test ──────────────────────────────────────────
     final geo = widget.notifier.geo;
     if (geo != null) {
       final zoom = widget.mapController.mapController.camera.zoom;
       final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
       final threshold = pow(15.0 * pixelDeg, 2).toDouble();
       double minHit = threshold;
-      dynamic hitId;
+      dynamic hitActivityId;
+      String? hitSegmentId;
 
       final features = geo['features'];
       if (features is List) {
         for (final f in features) {
           if (f is! Map) continue;
           final props = f['properties'] as Map? ?? {};
-          if (props['type'] != 'activity') continue;
+          final type = props['type'] as String?;
+          if (type != 'activity' && type != 'segment') continue;
           final coords = (f['geometry'] as Map? ?? {})['coordinates'];
           if (coords is! List) continue;
           for (final c in coords) {
@@ -980,13 +1000,26 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             final dLat = (c[1] as num).toDouble() - latlng.latitude;
             final dLon = (c[0] as num).toDouble() - latlng.longitude;
             final d = dLat * dLat + dLon * dLon;
-            if (d < minHit) { minHit = d; hitId = props['activity_id']; }
+            if (d < minHit) {
+              minHit = d;
+              if (type == 'activity') {
+                hitActivityId = props['activity_id'];
+                hitSegmentId = null;
+              } else {
+                hitSegmentId = props['segment_id']?.toString();
+                hitActivityId = null;
+              }
+            }
           }
         }
       }
 
-      if (hitId != null) {
-        widget.notifier.selectActivity(hitId);
+      if (hitActivityId != null) {
+        widget.notifier.selectActivity(hitActivityId);
+        return;
+      }
+      if (hitSegmentId != null) {
+        widget.notifier.selectSegment(hitSegmentId);
         return;
       }
     }
@@ -1083,8 +1116,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     List<Map<String, dynamic>> items,
     Color trackColor,
     double trackWidth,
-    bool alternating,
-  ) {
+    bool alternating, {
+    Color? trackSecondaryColor,
+  }) {
     final features = geo['features'];
     if (features is! List) return [];
 
@@ -1097,7 +1131,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         if (id != null) actIdx[id] = ai++;
       }
     }
-    final altColor = _MapPanelState._alternateColor(trackColor);
+    final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
 
     // For day selection, union ids across all selected days.
     Set<String>? dayActIds;
@@ -1200,6 +1234,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     final showJournals2 = notifier.showJournals;
     final items = notifier.items;
     final trackColor = notifier.trackColor;
+    final trackSecondaryColor2 = notifier.trackSecondaryColor;
     final trackWidth = notifier.trackWidth;
     final alternating = notifier.alternatingTrackColors;
     final selectionChanged2 = selActId != _lastSelectedId ||
@@ -1236,7 +1271,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       };
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById,
-              items, trackColor, trackWidth, alternating)
+              items, trackColor, trackWidth, alternating,
+              trackSecondaryColor: trackSecondaryColor2)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;

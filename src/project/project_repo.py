@@ -186,6 +186,7 @@ class ProjectRepo:
             {"name": c.name, "start": c.start} for c in project.counters
         ])
         row.track_color = project.track_color
+        row.track_secondary_color = project.track_secondary_color
         row.track_width = project.track_width
         row.alternating_track_colors = project.alternating_track_colors
         row.languages_json = json.dumps(project.languages)
@@ -613,6 +614,7 @@ class ProjectRepo:
             sleeping_option_groups=sleeping_option_groups,
             counters=counters,
             track_color=getattr(row, 'track_color', None) or "#F97316",
+            track_secondary_color=getattr(row, 'track_secondary_color', None) or None,
             track_width=float(getattr(row, 'track_width', None) or 2.5),
             alternating_track_colors=bool(getattr(row, 'alternating_track_colors', False)),
             languages=json.loads(getattr(row, 'languages_json', None) or "[]"),

@@ -393,19 +393,19 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final sc = widget.scrollController;
     if (sc == null || !sc.hasClients) return;
 
-    // Walk the display list to estimate the pixel offset of the target item.
-    // Headers are ~44px tall; two-line ListTile items are ~72px.
-    const double headerHeight = 44.0;
-    const double itemHeight = 72.0;
+    const double headerHeight = 40.0;
+    const double itemHeight = 64.0;
     double offset = 0;
-    for (final e in _displayList) {
+    final list = _cachedFilteredList ?? _displayList;
+    for (final e in list) {
       if (e is _DayHeader) {
         offset += headerHeight;
       } else if (e is _PanelItem) {
         if (e.item['item_type'] == 'activity' &&
             e.item['activity_id']?.toString() == activityIdStr) {
+          final center = offset + itemHeight / 2 - sc.position.viewportDimension / 2;
           sc.animateTo(
-            (offset - 80).clamp(0.0, sc.position.maxScrollExtent),
+            center.clamp(0.0, sc.position.maxScrollExtent),
             duration: const Duration(milliseconds: 350),
             curve: Curves.easeOut,
           );
@@ -455,17 +455,19 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final sc = widget.scrollController;
     if (sc == null || !sc.hasClients) return;
 
-    const double headerHeight = 44.0;
-    const double itemHeight = 72.0;
+    const double headerHeight = 40.0;
+    const double itemHeight = 64.0;
     double offset = 0;
-    for (final e in _displayList) {
+    final list = _cachedFilteredList ?? _displayList;
+    for (final e in list) {
       if (e is _DayHeader) {
         offset += headerHeight;
       } else if (e is _PanelItem) {
         if (e.item['item_type'] == 'segment' &&
             e.item['segment']?['id']?.toString() == segIdStr) {
+          final center = offset + itemHeight / 2 - sc.position.viewportDimension / 2;
           sc.animateTo(
-            (offset - 80).clamp(0.0, sc.position.maxScrollExtent),
+            center.clamp(0.0, sc.position.maxScrollExtent),
             duration: const Duration(milliseconds: 350),
             curve: Curves.easeOut,
           );
@@ -1578,32 +1580,17 @@ class _ActivityPanelState extends State<ActivityPanel> {
         // ── Footer buttons ────────────────────────────────────────────────────
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.add, size: 10),
-                  label: const Text('Add segment'),
-                  onPressed: () => _showSegmentDialog(
-                    context,
-                    notifier,
-                    insertAfterIndex: items.isNotEmpty ? items.length - 1 : null,
-                  ),
-                ),
+          child: SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.add, size: 10),
+              label: const Text('Add…'),
+              onPressed: () => _showAddItemSheet(
+                context, notifier,
+                insertAfterIndex:
+                    items.isNotEmpty ? items.length - 1 : null,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.add, size: 10),
-                  label: const Text('Add…'),
-                  onPressed: () => _showAddItemSheet(
-                    context, notifier,
-                    insertAfterIndex:
-                        items.isNotEmpty ? items.length - 1 : null,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
 

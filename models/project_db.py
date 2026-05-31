@@ -49,6 +49,7 @@ class DBProject(sqlmodel.SQLModel, table=True):
     counters_json: Optional[str] = sqlmodel.Field(default="[]")
     # Track display style
     track_color: str = sqlmodel.Field(default="#F97316")
+    track_secondary_color: Optional[str] = sqlmodel.Field(default=None)  # "#RRGGBB" or None = auto-derive
     track_width: float = sqlmodel.Field(default=2.5)
     alternating_track_colors: bool = sqlmodel.Field(default=False)
     # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
@@ -78,6 +79,7 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
     "sleeping_options_json",
     "counters_json",
     "track_color",
+    "track_secondary_color",
     "track_width",
     "alternating_track_colors",
     "languages_json",

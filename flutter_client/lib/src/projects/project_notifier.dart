@@ -98,14 +98,21 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Track style ───────────────────────────────────────────────────────────
   Color trackColor = const Color(0xFFF97316);
+  Color? trackSecondaryColor; // null = auto-derive from primary
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
 
   // ── Translation languages ─────────────────────────────────────────────────
   List<String> languages = [];
 
-  Future<void> setTrackStyle({Color? color, double? width, bool? alternating}) async {
+  Future<void> setTrackStyle({
+    Color? color,
+    Object? secondaryColor = _kUnset, // pass null explicitly to clear
+    double? width,
+    bool? alternating,
+  }) async {
     if (color != null) trackColor = color;
+    if (secondaryColor != _kUnset) trackSecondaryColor = secondaryColor as Color?;
     if (width != null) trackWidth = width;
     if (alternating != null) alternatingTrackColors = alternating;
     notifyListeners();
@@ -115,6 +122,9 @@ class ProjectNotifier extends ChangeNotifier
       await _service.saveTrackStyle(
         name,
         trackColor: color != null ? _colorToHex(color) : null,
+        trackSecondaryColor: secondaryColor != _kUnset
+            ? (secondaryColor != null ? _colorToHex(secondaryColor as Color) : null)
+            : _kUnset,
         trackWidth: width,
         alternating: alternating,
       );
@@ -123,6 +133,8 @@ class ProjectNotifier extends ChangeNotifier
       notifyListeners();
     }
   }
+
+  static const Object _kUnset = Object();
 
   Future<void> saveLanguages(List<String> langs) async {
     languages = List<String>.from(langs);
@@ -302,6 +314,10 @@ class ProjectNotifier extends ChangeNotifier
       if (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#')) {
         trackColor = Color(int.parse(rawColor.substring(1), radix: 16) | 0xFF000000);
       }
+      final rawSecColor = details['track_secondary_color'] as String?;
+      trackSecondaryColor = (rawSecColor != null && rawSecColor.length == 7 && rawSecColor.startsWith('#'))
+          ? Color(int.parse(rawSecColor.substring(1), radix: 16) | 0xFF000000)
+          : null;
       final rawWidth = details['track_width'] as num?;
       if (rawWidth != null) trackWidth = rawWidth.toDouble();
       final rawAlt = details['alternating_track_colors'] as bool?;

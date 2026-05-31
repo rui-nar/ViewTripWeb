@@ -44,16 +44,20 @@ class ProjectService {
   Future<void> saveTrackStyle(
     String name, {
     String? trackColor,
+    Object? trackSecondaryColor = _kUnset, // null = clear, _kUnset = don't send
     double? trackWidth,
     bool? alternating,
   }) async {
     final enc = Uri.encodeComponent(name);
     await api.put('/api/projects/$enc/track-style', {
       if (trackColor != null) 'track_color': trackColor,
+      if (trackSecondaryColor != _kUnset) 'track_secondary_color': trackSecondaryColor,
       if (trackWidth != null) 'track_width': trackWidth,
       if (alternating != null) 'alternating_track_colors': alternating,
     });
   }
+
+  static const Object _kUnset = Object();
 
   /// PUT /api/projects/{name}/languages
   Future<void> saveLanguages(String name, List<String> languages) async {

@@ -43,6 +43,9 @@ dependencies:
   # Typography
   google_fonts: ^8.1.0
 
+  # Color picker
+  flutter_colorpicker: ^1.1.0
+
   # Map + charts
   flutter_map: ^8.3.0
   flutter_map_animations: ^0.10.0

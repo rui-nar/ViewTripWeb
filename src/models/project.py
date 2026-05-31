@@ -109,6 +109,7 @@ class Project:
     journal_entries: List[JournalEntry] = field(default_factory=list)
     # Track display style — persisted per project
     track_color: str = "#F97316"
+    track_secondary_color: Optional[str] = None  # None = auto-derive from primary
     track_width: float = 2.5
     alternating_track_colors: bool = False
     # ISO 639-1 language codes available for memory translation, e.g. ["fr", "de"]

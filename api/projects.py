@@ -498,7 +498,8 @@ def get_sync_meta(
 
 
 class TrackStyleUpdateRequest(BaseModel):
-    track_color: Optional[str] = None       # "#RRGGBB" hex
+    track_color: Optional[str] = None           # "#RRGGBB" hex
+    track_secondary_color: Optional[str] = None  # "#RRGGBB" hex; null = auto-derive
     track_width: Optional[float] = None
     alternating_track_colors: Optional[bool] = None
 
@@ -515,6 +516,8 @@ def update_track_style(
         row = _get_project_row(sess, user_info_id, name)
         if body.track_color is not None:
             row.track_color = body.track_color
+        if 'track_secondary_color' in body.model_fields_set:
+            row.track_secondary_color = body.track_secondary_color
         if body.track_width is not None:
             row.track_width = body.track_width
         if body.alternating_track_colors is not None:

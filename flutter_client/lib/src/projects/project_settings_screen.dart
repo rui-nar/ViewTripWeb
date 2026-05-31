@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
@@ -54,22 +55,10 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   Map<String, dynamic>? _visitors;
 
   late Color _trackColor;
+  Color? _trackSecondaryColor; // null = auto-derive
   late double _trackWidth;
   late bool _alternating;
   late List<String> _languages;
-
-  static const _presetColors = [
-    Color(0xFFFC4C02), // Strava orange (matches design)
-    Color(0xFFEF4444),
-    Color(0xFF3B82F6),
-    Color(0xFF22C55E),
-    Color(0xFFA855F7),
-    Color(0xFFEC4899),
-    Color(0xFFF59E0B),
-    Color(0xFF14B8A6),
-    Color(0xFFF1F5F9),
-    Color(0xFF475569),
-  ];
 
   static const _sectionLabels = [
     (icon: Icons.tune,     label: 'General'),
@@ -109,6 +98,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     _autoSync = n.autoSyncEnabled;
     _linkedPsTripId = n.linkedPsTripId;
     _trackColor = n.trackColor;
+    _trackSecondaryColor = n.trackSecondaryColor;
     _trackWidth = n.trackWidth;
     _alternating = n.alternatingTrackColors;
     _languages = List<String>.from(n.languages);
@@ -254,7 +244,12 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       newSleepingOptionGroups: updatedGroups,
       newCounters: updatedCounters,
     );
-    n.setTrackStyle(color: _trackColor, width: _trackWidth, alternating: _alternating);
+    n.setTrackStyle(
+      color: _trackColor,
+      secondaryColor: _trackSecondaryColor,
+      width: _trackWidth,
+      alternating: _alternating,
+    );
     n.saveLanguages(_languages);
     n.saveSyncMeta(
       autoSyncEnabled: _autoSync,
@@ -264,27 +259,40 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     if (mounted) context.pop();
   }
 
-  Widget _colorPreview(Color base) {
-    final alt = _MapPanelStateColorHelper.alternateColor(base);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _swatch(base, 24),
-        if (_alternating) ...[
-          const SizedBox(width: 4),
-          _swatch(alt, 24),
+  Future<void> _pickColor({
+    required Color current,
+    required ValueChanged<Color> onPicked,
+    required String title,
+  }) async {
+    Color temp = current;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SingleChildScrollView(
+          child: HueRingPicker(
+            pickerColor: current,
+            onColorChanged: (c) => temp = c,
+            enableAlpha: false,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              onPicked(temp);
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Select'),
+          ),
         ],
-      ],
+      ),
     );
   }
 
-  static Widget _swatch(Color c, double size) => Container(
-    width: size, height: size,
-    decoration: BoxDecoration(
-      color: c, shape: BoxShape.circle,
-      border: Border.all(color: Colors.white24),
-    ),
-  );
 
   // ── Section content ──────────────────────────────────────────────────────────
 
@@ -581,6 +589,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   }
 
   Widget _trackSection() {
+    final autoSecondary = _MapPanelStateColorHelper.alternateColor(_trackColor);
+    final effectiveSecondary = _trackSecondaryColor ?? autoSecondary;
     return _SectionCard(
       eyebrow: '04',
       title: 'Track style',
@@ -588,46 +598,17 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Color swatches
+          // Primary colour picker
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 16, 22, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Colour', style: TextStyle(
-                  fontFamily: 'monospace', fontSize: 10, fontWeight: FontWeight.w600,
-                  color: _kDim, letterSpacing: 1.4,
-                )),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 10, runSpacing: 10,
-                  children: _presetColors.map((c) {
-                    final selected = _trackColor.toARGB32() == c.toARGB32();
-                    return GestureDetector(
-                      onTap: () => setState(() => _trackColor = c),
-                      child: Container(
-                        width: 32, height: 32,
-                        decoration: BoxDecoration(
-                          color: c, shape: BoxShape.circle,
-                          border: Border.all(
-                            color: selected ? Colors.white : const Color(0x22FFFFFF),
-                            width: selected ? 2.5 : 1,
-                          ),
-                          boxShadow: selected
-                              ? [BoxShadow(color: c.withAlpha(128), blurRadius: 8)]
-                              : null,
-                        ),
-                        child: selected
-                            ? Icon(Icons.check, size: 16,
-                                color: ThemeData.estimateBrightnessForColor(c) == Brightness.dark
-                                    ? Colors.white
-                                    : Colors.black87)
-                            : null,
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ],
+            child: _ColorPickerRow(
+              label: 'Primary colour',
+              color: _trackColor,
+              onTap: () => _pickColor(
+                current: _trackColor,
+                title: 'Primary colour',
+                onPicked: (c) => setState(() => _trackColor = c),
+              ),
             ),
           ),
           const SizedBox(height: 16),
@@ -659,7 +640,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ],
             ),
           ),
-          // Alternating
+          // Alternating toggle
           const Divider(height: 1, color: _kBorder),
           Padding(
             padding: const EdgeInsets.fromLTRB(22, 14, 22, 14),
@@ -674,14 +655,12 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
                         Text('Alternating colours',
                             style: TextStyle(color: _kText2, fontSize: 13.5, fontWeight: FontWeight.w600)),
                         SizedBox(height: 2),
-                        Text('Every other activity uses a muted hue.',
+                        Text('Every other activity uses the secondary colour.',
                             style: TextStyle(color: _kDim, fontSize: 12)),
                       ],
                     ),
                   ),
                 ),
-                const SizedBox(width: 12),
-                _colorPreview(_trackColor),
                 const SizedBox(width: 12),
                 Switch(
                   value: _alternating,
@@ -691,6 +670,26 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ],
             ),
           ),
+          // Secondary colour picker (only when alternating is on)
+          if (_alternating) ...[
+            const Divider(height: 1, color: _kBorder),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(22, 16, 22, 16),
+              child: _ColorPickerRow(
+                label: 'Secondary colour',
+                color: effectiveSecondary,
+                badge: _trackSecondaryColor == null ? 'auto' : null,
+                onTap: () => _pickColor(
+                  current: effectiveSecondary,
+                  title: 'Secondary colour',
+                  onPicked: (c) => setState(() => _trackSecondaryColor = c),
+                ),
+                onClear: _trackSecondaryColor != null
+                    ? () => setState(() => _trackSecondaryColor = null)
+                    : null,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1560,5 +1559,71 @@ class _MapPanelStateColorHelper {
         .withSaturation((hsl.saturation * 0.42).clamp(0.0, 1.0))
         .withLightness((hsl.lightness * 1.18).clamp(0.0, 1.0))
         .toColor();
+  }
+}
+
+// ── Color picker row ───────────────────────────────────────────────────────────
+
+class _ColorPickerRow extends StatelessWidget {
+  final String label;
+  final Color color;
+  final String? badge; // e.g. "auto"
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  const _ColorPickerRow({
+    required this.label,
+    required this.color,
+    required this.onTap,
+    this.badge,
+    this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'monospace', fontSize: 10, fontWeight: FontWeight.w600,
+              color: _kDim, letterSpacing: 1.4,
+            ),
+          ),
+        ),
+        if (badge != null)
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1F2F42),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(badge!,
+                style: const TextStyle(fontSize: 10, color: _kMuted)),
+          ),
+        if (onClear != null)
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 16, color: _kMuted),
+            tooltip: 'Reset to auto',
+            visualDensity: VisualDensity.compact,
+            onPressed: onClear,
+          ),
+        GestureDetector(
+          onTap: onTap,
+          child: Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.white24, width: 1.5),
+              boxShadow: [BoxShadow(color: color.withAlpha(100), blurRadius: 6)],
+            ),
+            child: const Icon(Icons.colorize, size: 16, color: Colors.white70),
+          ),
+        ),
+      ],
+    );
   }
 }
