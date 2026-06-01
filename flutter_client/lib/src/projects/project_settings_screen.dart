@@ -62,13 +62,18 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   late bool _elevationChartShowLine;
   late List<String> _languages;
 
+  // Local deep-copy of dayMeta so tag edits are applied immediately and
+  // passed to saveDayMeta on Save without touching the notifier until then.
+  late Map<String, Map<String, dynamic>> _dayMeta;
+
   static const _sectionLabels = [
-    (icon: Icons.tune,     label: 'General'),
-    (icon: Icons.hub,      label: 'Integrations'),
-    (icon: Icons.share,    label: 'Sharing'),
-    (icon: Icons.polyline, label: 'Track style'),
-    (icon: Icons.hotel,    label: 'Sleeping'),
-    (icon: Icons.tag,      label: 'Counters'),
+    (icon: Icons.tune,          label: 'General'),
+    (icon: Icons.hub,           label: 'Integrations'),
+    (icon: Icons.share,         label: 'Sharing'),
+    (icon: Icons.polyline,      label: 'Track style'),
+    (icon: Icons.hotel,         label: 'Sleeping'),
+    (icon: Icons.tag,           label: 'Counters'),
+    (icon: Icons.label_outlined, label: 'Tags'),
   ];
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -106,6 +111,14 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     _elevationChartColor = n.elevationChartColor;
     _elevationChartShowLine = n.elevationChartShowLine;
     _languages = List<String>.from(n.languages);
+    _dayMeta = {
+      for (final e in n.dayMeta.entries)
+        e.key: {
+          ...e.value,
+          if (e.value['tags'] is List)
+            'tags': List<String>.from((e.value['tags'] as List).cast<String>()),
+        }
+    };
     _counterNameCtrls = n.counters
         .map((c) => TextEditingController(text: c['name'] as String? ?? ''))
         .toList();
@@ -243,7 +256,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       tripEndStr,
     );
     n.saveDayMeta(
-      newDayMeta: n.dayMeta,
+      newDayMeta: _dayMeta,
       newSleepingOptions: updatedOpts,
       newSleepingOptionGroups: updatedGroups,
       newCounters: updatedCounters,
@@ -310,6 +323,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       3 => _trackSection(),
       4 => _sleepingSection(),
       5 => _countersSection(),
+      6 => _tagsSection(),
       _ => const SizedBox.shrink(),
     };
   }
@@ -888,6 +902,139 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ── Tags section ─────────────────────────────────────────────────────────────
+
+  List<String> _allTags() {
+    final counts = <String, int>{};
+    for (final day in _dayMeta.values) {
+      for (final tag in (day['tags'] as List?)?.cast<String>() ?? <String>[]) {
+        counts[tag] = (counts[tag] ?? 0) + 1;
+      }
+    }
+    return counts.keys.toList()..sort((a, b) => counts[b]!.compareTo(counts[a]!));
+  }
+
+  int _tagCount(String tag) => _dayMeta.values
+      .where((d) => ((d['tags'] as List?)?.cast<String>() ?? <String>[]).contains(tag))
+      .length;
+
+  void _renameTag(String oldName, String newName) {
+    final trimmed = newName.trim();
+    if (trimmed.isEmpty || trimmed == oldName) return;
+    setState(() {
+      for (final day in _dayMeta.values) {
+        final tags = (day['tags'] as List?)?.cast<String>().toList() ?? <String>[];
+        final idx = tags.indexOf(oldName);
+        if (idx >= 0) { tags[idx] = trimmed; day['tags'] = tags; }
+      }
+    });
+  }
+
+  void _deleteTag(String name) {
+    setState(() {
+      for (final day in _dayMeta.values) {
+        final tags = (day['tags'] as List?)?.cast<String>().toList() ?? <String>[];
+        if (tags.remove(name)) day['tags'] = tags;
+      }
+    });
+  }
+
+  Future<void> _showRenameTagDialog(String current) async {
+    final ctrl = TextEditingController(text: current);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Rename tag'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'New name'),
+          onSubmitted: (v) => Navigator.of(context).pop(v),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(ctrl.text), child: const Text('Rename')),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (result != null) _renameTag(current, result);
+  }
+
+  Widget _tagsSection() {
+    final tags = _allTags();
+    return _SectionCard(
+      eyebrow: '07',
+      title: 'Tags',
+      subtitle: 'Rename or remove tags across all days.',
+      child: tags.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(22),
+              child: Text(
+                'No tags yet. Add tags to days from the activity panel.',
+                style: const TextStyle(color: _kDim, fontSize: 13),
+              ),
+            )
+          : Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final tag in tags)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: _kBg,
+                          border: Border.all(color: _kBorder),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.label_outline, size: 15, color: _kDim),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(tag,
+                                  style: const TextStyle(color: _kText2, fontSize: 13.5)),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: _kBorder,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                '${_tagCount(tag)} day${_tagCount(tag) == 1 ? '' : 's'}',
+                                style: const TextStyle(
+                                  color: _kMuted, fontSize: 11,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            IconButton(
+                              icon: const Icon(Icons.edit_outlined, size: 15, color: _kDim),
+                              visualDensity: VisualDensity.compact,
+                              tooltip: 'Rename',
+                              onPressed: () => _showRenameTagDialog(tag),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, size: 15, color: _kDim),
+                              visualDensity: VisualDensity.compact,
+                              tooltip: 'Delete from all days',
+                              onPressed: () => _deleteTag(tag),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
     );
   }
 
