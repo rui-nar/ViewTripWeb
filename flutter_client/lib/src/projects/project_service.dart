@@ -4,10 +4,19 @@ library;
 import '../api/client.dart';
 
 class ProjectService {
-  /// Fetches the full project dict for [name].
+  /// Fetches the full project dict for [name] including elevation_profile data.
   /// GET /api/projects/{name}
   Future<Map<String, dynamic>> getDetails(String name) async {
     final data = await api.get('/api/projects/$name');
+    return data as Map<String, dynamic>;
+  }
+
+  /// Lightweight project dict — no elevation_profile or summary_polyline.
+  /// Typically 10-15× smaller than getDetails(); use for initial load and
+  /// reloads that don't need the elevation chart to update.
+  /// GET /api/projects/{name}/meta
+  Future<Map<String, dynamic>> getDetailsMeta(String name) async {
+    final data = await api.get('/api/projects/$name/meta');
     return data as Map<String, dynamic>;
   }
 

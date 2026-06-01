@@ -283,9 +283,10 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
 
     try {
-      // Fire both simultaneously — low-res resolves at ~2.2s, details at ~17s.
-      // Awaiting low-res first lets the map render before the panel is ready.
-      final detailsFuture = _service.getDetails(name);
+      // Fire both simultaneously.  /meta omits elevation_profile (~12 MB) so
+      // the panel becomes interactive in ~1-2 s instead of ~17 s.  Elevation
+      // data is fetched separately in the background (see below).
+      final detailsFuture = _service.getDetailsMeta(name);
       final lowResFuture = _service.getLowResGeo(name);
 
       geo = await lowResFuture;
@@ -353,8 +354,9 @@ class ProjectNotifier extends ChangeNotifier
       notifyListeners();   // map appears here with low-res straight lines
     }
 
-    // Phase 2: fetch full-res geo in background; replace features progressively
+    // Phase 2: full-res GeoJSON + elevation data in background.
     _loadFullGeoProgressively(name);
+    _loadElevationData(name);
     // Background sync check — fires only for active trips with auto-sync on.
     // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
@@ -451,6 +453,31 @@ class ProjectNotifier extends ChangeNotifier
       // Non-fatal — low-res map is still shown
       error = _msg(e);
       notifyListeners();
+    }
+  }
+
+  /// Fetches the full project details (including elevation_profile) in the
+  /// background and merges them into the already-rendered activity list so the
+  /// elevation chart and cursor-to-map sync become available without blocking
+  /// the initial panel render.
+  Future<void> _loadElevationData(String name) async {
+    try {
+      final details = await _service.getDetails(name);
+      if (_loadKey != name) return;
+      final rawActivities = details['activities'];
+      if (rawActivities is List) {
+        final byId = <String, Map<String, dynamic>>{};
+        for (final a in rawActivities.cast<Map<String, dynamic>>()) {
+          byId[a['id']?.toString() ?? ''] = a;
+        }
+        activities = [
+          for (final a in activities) byId[a['id']?.toString()] ?? a,
+        ];
+        _buildFullTrack();
+        notifyListeners();
+      }
+    } on Exception catch (_) {
+      // Non-fatal — elevation chart simply stays empty.
     }
   }
 
@@ -1082,7 +1109,7 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _silentReload(String name) async {
     try {
       final results = await Future.wait([
-        _service.getDetails(name),
+        _service.getDetailsMeta(name),
         _service.getGeo(name),
       ]);
       final details = results[0];
@@ -1102,7 +1129,7 @@ class ProjectNotifier extends ChangeNotifier
   /// cannot change map geometry (reorder, trip-start, memory CRUD).
   Future<void> _silentReloadDetailsOnly(String name) async {
     try {
-      final details = await _service.getDetails(name);
+      final details = await _service.getDetailsMeta(name);
       _applyDetails(details, name);
       _autoFillDaysToToday();
       _updateStats();
