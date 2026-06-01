@@ -114,7 +114,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
       });
-      await reloadDetailsOnly(projectName);
+      // No reload needed — optimistic update already applied above.
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -139,7 +139,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       await api.delete('/api/memories/$memoryId');
-      await reloadDetailsOnly(projectName);
+      // No reload needed — memory already removed locally above.
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
