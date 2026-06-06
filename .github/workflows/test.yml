@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements-web.txt
+        run: pip install -r requirements.txt
 
       - name: Check migrations are in sync with models
         # Applies every migration to a fresh SQLite database, then asks Alembic
