@@ -214,9 +214,8 @@ class PolarstepsImportNotifier extends ChangeNotifier {
         ]);
       }
       return true;
-    } on Exception catch (e) {
-      error = e.toString().replaceFirst('Exception: ', '');
-      return false;
+    } on Exception catch (_) {
+      return false; // silently skip — server retried already, count will reflect actual imported
     }
   }
 
