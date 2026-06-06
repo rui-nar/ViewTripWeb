@@ -146,59 +146,23 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     notifyListeners();
 
     int created = 0;
+    const batchSize = 8;
+
     try {
-      for (final step in toImport) {
-        final date = step['date'] as String?;
-        if (date == null) {
-          importedCount++;
-          notifyListeners();
-          continue;
+      for (int start = 0; start < toImport.length; start += batchSize) {
+        final batch = toImport.sublist(
+          start,
+          (start + batchSize).clamp(0, toImport.length),
+        );
+
+        final results = await Future.wait(
+          batch.map((step) => _importStep(step, projectName)),
+        );
+
+        for (final ok in results) {
+          if (ok) created++;
         }
-
-        final name = (step['name'] as String?)?.isNotEmpty == true
-            ? step['name'] as String
-            : null;
-        final description = step['description'] as String?;
-        final lat = (step['lat'] as num?)?.toDouble();
-        final lon = (step['lon'] as num?)?.toDouble();
-        final stepId = step['id'] as int?;
-
-        final body = <String, dynamic>{
-          'project_name': projectName,
-          'date': date,
-          'geo_mode': (lat != null && lon != null) ? 'custom' : 'start_of_day',
-          if (name != null) 'name': name,
-          if (description != null) 'description': description,
-          if (lat != null) 'lat': lat,
-          if (lon != null) 'lon': lon,
-          if (stepId != null) 'polarsteps_step_id': stepId,
-        };
-
-        try {
-          final result = await _postWithRetry('/api/memories/', body);
-          final memId = result['id']?.toString();
-
-          // Upload photos for this step
-          if (memId != null) {
-            final photos = (step['photos'] as List?)
-                    ?.cast<Map<String, dynamic>>() ??
-                [];
-            for (final photo in photos) {
-              final url = photo['url'] as String?;
-              if (url == null || url.isEmpty) continue;
-              try {
-                await _uploadPhotoFromUrl(memId, url);
-              } catch (_) {
-                // Non-fatal — skip individual photo failures
-              }
-            }
-          }
-          created++;
-        } on Exception catch (e) {
-          error = e.toString().replaceFirst('Exception: ', '');
-        }
-
-        importedCount++;
+        importedCount += batch.length;
         notifyListeners();
       }
     } finally {
@@ -206,6 +170,54 @@ class PolarstepsImportNotifier extends ChangeNotifier {
       notifyListeners();
     }
     return created;
+  }
+
+  Future<bool> _importStep(
+    Map<String, dynamic> step,
+    String projectName,
+  ) async {
+    final date = step['date'] as String?;
+    if (date == null) return false;
+
+    final name = (step['name'] as String?)?.isNotEmpty == true
+        ? step['name'] as String
+        : null;
+    final description = step['description'] as String?;
+    final lat = (step['lat'] as num?)?.toDouble();
+    final lon = (step['lon'] as num?)?.toDouble();
+    final stepId = step['id'] as int?;
+
+    final body = <String, dynamic>{
+      'project_name': projectName,
+      'date': date,
+      'geo_mode': (lat != null && lon != null) ? 'custom' : 'start_of_day',
+      if (name != null) 'name': name,
+      if (description != null) 'description': description,
+      if (lat != null) 'lat': lat,
+      if (lon != null) 'lon': lon,
+      if (stepId != null) 'polarsteps_step_id': stepId,
+    };
+
+    try {
+      final result = await _postWithRetry('/api/memories/', body);
+      final memId = result['id']?.toString();
+      if (memId != null) {
+        // Photo uploads return 202 immediately (background download on server).
+        // Fire all in parallel — no need to await sequentially.
+        final photos =
+            (step['photos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+        await Future.wait([
+          for (final photo in photos)
+            if ((photo['url'] as String?)?.isNotEmpty == true)
+              _uploadPhotoFromUrl(memId, photo['url'] as String)
+                  .catchError((_) {}),
+        ]);
+      }
+      return true;
+    } on Exception catch (e) {
+      error = e.toString().replaceFirst('Exception: ', '');
+      return false;
+    }
   }
 
   Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
