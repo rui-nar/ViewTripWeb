@@ -8,14 +8,16 @@ import 'project_notifier.dart';
 
 class SegmentDialog extends StatefulWidget {
   final ProjectNotifier notifier;
-  final Map<String, dynamic>? editSegment; // non-null = edit mode
-  final int? insertAfterIndex;             // create mode: where to insert
+  final Map<String, dynamic>? editSegment;       // non-null = edit mode
+  final int? insertAfterIndex;                   // create mode: where to insert
+  final dynamic preselectedStartActivityId;      // pre-fill start from selected activity
 
   const SegmentDialog({
     super.key,
     required this.notifier,
     this.editSegment,
     this.insertAfterIndex,
+    this.preselectedStartActivityId,
   });
 
   @override
@@ -134,7 +136,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final items = widget.notifier.items;
     final activities = widget.notifier.activities;
     final insertAfter = widget.insertAfterIndex;
-    if (insertAfter == null || items.isEmpty) return;
 
     Map<String, dynamic>? actById(dynamic id) {
       if (id == null) return null;
@@ -144,6 +145,34 @@ class _SegmentDialogState extends State<SegmentDialog> {
         return null;
       }
     }
+
+    // If a selected activity was passed, use it as start and auto-advance end.
+    final preselected = widget.preselectedStartActivityId;
+    if (preselected != null) {
+      final a = actById(preselected);
+      final endLl = a?['end_latlng'];
+      if (endLl is List && endLl.length >= 2) {
+        _startLatCtrl.text = (endLl[0] as num).toStringAsFixed(6);
+        _startLonCtrl.text = (endLl[1] as num).toStringAsFixed(6);
+        _startActivityId = preselected;
+      }
+      final ds = a?['start_date_local'] as String?;
+      if (ds != null) _date = DateTime.tryParse(ds);
+      // Auto-advance end: list sorted descending, so next-in-time = idx - 1.
+      final idx = _activityList.indexWhere((x) => x['id'] == preselected);
+      if (idx > 0) {
+        final next = _activityList[idx - 1];
+        _endActivityId = next['id'];
+        final nll = next['start_latlng'];
+        if (nll is List && nll.length >= 2) {
+          _endLatCtrl.text = (nll[0] as num).toStringAsFixed(6);
+          _endLonCtrl.text = (nll[1] as num).toStringAsFixed(6);
+        }
+      }
+      return;
+    }
+
+    if (insertAfter == null || items.isEmpty) return;
 
     // Predecessor: item at insertAfter
     if (insertAfter >= 0 && insertAfter < items.length) {

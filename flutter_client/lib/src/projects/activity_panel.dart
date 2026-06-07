@@ -670,6 +670,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                   context,
                   notifier,
                   insertAfterIndex: insertAfterIndex,
+                  preselectedStartActivityId: notifier.selectedActivityId,
                 );
               },
             ),
@@ -1619,6 +1620,7 @@ Future<void> _showSegmentDialog(
   ProjectNotifier notifier, {
   Map<String, dynamic>? editSegment,
   int? insertAfterIndex,
+  dynamic preselectedStartActivityId,
 }) async {
   // Defer to a post-frame callback so the dialog is added to the overlay
   // after the current frame's layout pass completes. Without this, the
@@ -1633,6 +1635,7 @@ Future<void> _showSegmentDialog(
         notifier: notifier,
         editSegment: editSegment,
         insertAfterIndex: insertAfterIndex,
+        preselectedStartActivityId: preselectedStartActivityId,
       ),
     );
   });
