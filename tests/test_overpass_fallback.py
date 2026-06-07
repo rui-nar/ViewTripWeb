@@ -117,6 +117,41 @@ class TestFerryEndpointScoring:
             f"Expected result to end near Nynäshamn (lat {lat2}), got {result[-1]}"
         )
 
+    def test_rejects_relation_when_trimmed_endpoints_too_far(self):
+        """Regression for Degerby–Svinö (Åland): the ferry has no route=ferry OSM
+        relation.  Strategy A found a different Åland ferry relation whose trimmed
+        endpoints were 3–5 km from the query points (score ≈ 0.0047) and returned
+        wrong geometry.  The score threshold must reject that relation so strategy C
+        (ferry=yes Dijkstra) gets to run instead.
+        """
+        # Degerby–Svinö query coordinates
+        lat1, lon1 = 60.031261, 20.386155   # Degerby terminal
+        lat2, lon2 = 60.06677,  20.267276   # Svinö terminal
+
+        # Wrong relation: endpoints 3–5 km off — matches the actual bad data
+        # that was stored in production (polyline first/last from the bad DB).
+        wrong_relation = {
+            "type": "relation",
+            "members": [{
+                "type": "way",
+                "geometry": [
+                    {"lon": 20.4033434, "lat": 60.0637562},
+                    {"lon": 20.3494846, "lat": 60.0642322},
+                    {"lon": 20.3108515, "lat": 60.0287074},
+                ],
+            }],
+        }
+
+        def _overpass_wrong_only(*_args, **_kwargs):
+            return {"elements": [wrong_relation]}
+
+        # Strategy A must reject this relation (score >> threshold).
+        # Strategy B also returns nothing; strategy C raises (no ferry=yes ways).
+        # The whole call must raise OverpassError rather than return wrong geometry.
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_wrong_only):
+            with pytest.raises(OverpassError):
+                get_ferry_geometry(lat1, lon1, lat2, lon2)
+
 
 class TestBusFallbackRaisesOnMissingRoute:
     def test_no_ways_raises(self):

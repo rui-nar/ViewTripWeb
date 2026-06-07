@@ -368,6 +368,14 @@ out geom;
     data = _overpass(query)
     relations = data.get("elements", [])
 
+    # Maximum acceptable endpoint-proximity score (~0.002 ≈ both terminals
+    # within ~1-2 km of the query points).  Routes whose trimmed endpoints
+    # are further away are not actually connecting the requested terminals
+    # and should be rejected so strategy B/C can try ferry=yes ways instead.
+    # The Degerby–Svinö (Åland) ferry has no route=ferry OSM relation; without
+    # this threshold strategy A picks a wrong nearby relation (score ≈ 0.0047).
+    _MAX_SCORE = 0.002
+
     best: Optional[list[list[float]]] = None
     best_score = math.inf
     for rel in relations:
@@ -384,7 +392,7 @@ out geom;
                 best_score = score
                 best = geom
 
-    if best is None:
+    if best is None or best_score > _MAX_SCORE:
         raise OverpassError(f"No {route_tag} route relation found in bounding box")
     return best
 
