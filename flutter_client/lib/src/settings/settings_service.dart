@@ -64,6 +64,19 @@ class SettingsService {
   Future<void> disconnectPolarsteps() async =>
       api.delete('/api/polarsteps/disconnect');
 
+  Future<List<Map<String, dynamic>>> listBackups() async {
+    final data = await api.get('/api/backup/') as List<dynamic>;
+    return data.cast<Map<String, dynamic>>();
+  }
+
+  Future<void> restoreBackup(String date) async {
+    try {
+      await api.post('/api/backup/$date/restore', {});
+    } on ApiException catch (e) {
+      throw Exception(_detail(e.body));
+    }
+  }
+
   static String _detail(String body) {
     final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(body);
     return m?.group(1) ?? body;

@@ -2,6 +2,7 @@
 import os
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -9,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from scalar_fastapi import get_scalar_api_reference
 
 from api.auth import router as auth_router
+from api.backup import router as backup_router
 from api.geo import router as geo_router
 from api.journal import router as journal_router
 from api.memories import router as memories_router
@@ -19,6 +21,11 @@ from api.strava import router as strava_router
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from models.project_db import _check_schema_contract
+from src.backup.backup_service import backup_db
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
+_scheduler = AsyncIOScheduler()
 
 
 @asynccontextmanager
@@ -26,7 +33,11 @@ async def lifespan(_app: FastAPI):
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
+    _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
+    _scheduler.start()
+    _log.info("Backup scheduler started — daily at 02:00 UTC")
     yield
+    _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -51,6 +62,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(backup_router)
 app.include_router(geo_router)
 app.include_router(journal_router)
 app.include_router(memories_router)

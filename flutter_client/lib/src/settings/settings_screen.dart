@@ -34,6 +34,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _polarstepsConnecting = false;
   final _polarstepsTokenCtrl = TextEditingController();
 
+  // ── Backup state ──────────────────────────────────────────────────────────
+  List<Map<String, dynamic>> _backups = [];
+  bool _backupsLoading = false;
+  String? _restoringDate;
+
   // ── Account state ─────────────────────────────────────────────────────────
   final _displayNameCtrl = TextEditingController();
   String _email = '';
@@ -55,6 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _loadStravaStatus();
       _loadPolarstepsStatus();
       _loadProfile();
+      _loadBackups();
     });
   }
 
@@ -334,6 +340,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
         });
       }
     } catch (_) {}
+  }
+
+  // ── Backups ───────────────────────────────────────────────────────────────
+
+  Future<void> _loadBackups() async {
+    if (!mounted) return;
+    setState(() => _backupsLoading = true);
+    try {
+      final data = await _service.listBackups();
+      if (mounted) setState(() => _backups = data);
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _backupsLoading = false);
+    }
+  }
+
+  Future<void> _restoreBackup(String date) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restore backup?'),
+        content: Text(
+          'This will replace the entire database with the backup from $date. '
+          'The app will reload after the restore.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _restoringDate = date);
+    try {
+      await _service.restoreBackup(date);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Restore complete — reloading…')),
+        );
+        // Force a full page reload so Flutter re-fetches everything from the restored DB.
+        web.window.location.reload();
+      }
+    } on Exception catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Restore failed: ${e.toString().replaceFirst('Exception: ', '')}')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _restoringDate = null);
+    }
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -636,6 +702,70 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ],
                           ],
                         ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // ── Backups ────────────────────────────────────────────
+                _SectionCard(
+                  title: 'Backups',
+                  icon: Icons.history_outlined,
+                  child: _backupsLoading
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      : _backups.isEmpty
+                          ? Text(
+                              'No backups yet. The first backup will be created automatically at 02:00 UTC.',
+                              style: theme.textTheme.bodySmall,
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Text(
+                                  'Daily backups are kept for 30 days. Restoring replaces the entire database.',
+                                  style: theme.textTheme.bodySmall,
+                                ),
+                                const SizedBox(height: 12),
+                                ..._backups.map((b) {
+                                  final date = b['date'] as String;
+                                  final bytes = b['size_bytes'] as int;
+                                  final sizeLabel = bytes < 1024 * 1024
+                                      ? '${(bytes / 1024).toStringAsFixed(0)} KB'
+                                      : '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+                                  final isRestoring = _restoringDate == date;
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 6),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(date, style: theme.textTheme.bodyMedium),
+                                              Text(sizeLabel, style: theme.textTheme.bodySmall),
+                                            ],
+                                          ),
+                                        ),
+                                        isRestoring
+                                            ? const SizedBox(
+                                                width: 20,
+                                                height: 20,
+                                                child: CircularProgressIndicator(strokeWidth: 2),
+                                              )
+                                            : TextButton(
+                                                onPressed: _restoringDate != null
+                                                    ? null
+                                                    : () => _restoreBackup(date),
+                                                child: const Text('Restore'),
+                                              ),
+                                      ],
+                                    ),
+                                  );
+                                }),
+                              ],
+                            ),
                 ),
 
                 const SizedBox(height: 16),
