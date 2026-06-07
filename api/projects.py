@@ -440,6 +440,27 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
+def _merge_day_meta_preserve_counters(incoming: dict, existing_json: str | None) -> dict:
+    """Return incoming day_meta with existing per-day counter values preserved.
+
+    If a day in the stored row has counters but the incoming dict for that day
+    omits the "counters" key entirely, the stored counters are copied across.
+    Sending "counters": {} explicitly clears them (caller's intent wins).
+
+    This protects against a Flutter app saving settings from a session that
+    started before an enrichment script added counter values.
+    """
+    existing = json.loads(existing_json) if existing_json else {}
+    merged = dict(incoming)
+    for date_key, existing_day in existing.items():
+        existing_counters = existing_day.get("counters")
+        if existing_counters:
+            incoming_day = merged.get(date_key)
+            if incoming_day is not None and "counters" not in incoming_day:
+                incoming_day["counters"] = existing_counters
+    return merged
+
+
 @router.put("/{name}/day-meta", status_code=status.HTTP_204_NO_CONTENT,
             summary="Update day metadata")
 def update_day_meta(
@@ -459,7 +480,9 @@ def update_day_meta(
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        row.day_meta_json = json.dumps(body.day_meta)
+        row.day_meta_json = json.dumps(
+            _merge_day_meta_preserve_counters(body.day_meta, row.day_meta_json)
+        )
         if body.sleeping_options:  # ignore empty list — never wipe sleeping options
             groups = body.sleeping_option_groups or {}
             row.sleeping_options_json = json.dumps([

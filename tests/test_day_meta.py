@@ -391,3 +391,79 @@ class TestDayMetaRepoRoundTrip:
         assert loaded.day_meta["2025-06-01"].counters["climbing"] == pytest.approx(1500.0)
         assert "Camping" in loaded.sleeping_options
         assert "Hotel" in loaded.sleeping_options
+
+
+# ---------------------------------------------------------------------------
+# 5. Counter-preservation merge — _merge_day_meta_preserve_counters
+# ---------------------------------------------------------------------------
+
+from api.projects import _merge_day_meta_preserve_counters as _merge_counters
+
+
+class TestMergeDayMetaPreserveCounters:
+    """Guard the merge logic that prevents a stale Flutter-app save from wiping
+    per-day counter values written by an enrichment script after the app loaded."""
+
+    def test_counters_preserved_when_omitted_from_incoming(self):
+        existing = json.dumps({
+            "2026-06-07": {"sleeping": "Apartment", "counters": {"Chamallows": 1, "Rennes vues": 32}},
+        })
+        incoming = {"2026-06-07": {"sleeping": "Apartment"}}  # no "counters" key
+        result = _merge_counters(incoming, existing)
+        assert result["2026-06-07"]["counters"] == {"Chamallows": 1, "Rennes vues": 32}
+
+    def test_explicit_empty_counters_clears_them(self):
+        existing = json.dumps({
+            "2026-06-07": {"sleeping": "Apartment", "counters": {"Chamallows": 1}},
+        })
+        incoming = {"2026-06-07": {"sleeping": "Apartment", "counters": {}}}
+        result = _merge_counters(incoming, existing)
+        assert result["2026-06-07"]["counters"] == {}
+
+    def test_incoming_counters_take_priority(self):
+        existing = json.dumps({
+            "2026-06-07": {"counters": {"Chamallows": 1}},
+        })
+        incoming = {"2026-06-07": {"counters": {"Chamallows": 5}}}
+        result = _merge_counters(incoming, existing)
+        assert result["2026-06-07"]["counters"] == {"Chamallows": 5}
+
+    def test_other_fields_not_affected(self):
+        existing = json.dumps({
+            "2026-06-07": {"sleeping": "Camping", "tags": ["EV10"], "counters": {"km": 80}},
+        })
+        incoming = {"2026-06-07": {"sleeping": "Apartment", "tags": ["EV10 - North Cape"]}}
+        result = _merge_counters(incoming, existing)
+        assert result["2026-06-07"]["sleeping"] == "Apartment"
+        assert result["2026-06-07"]["tags"] == ["EV10 - North Cape"]
+        assert result["2026-06-07"]["counters"] == {"km": 80}
+
+    def test_date_absent_in_incoming_not_added(self):
+        existing = json.dumps({
+            "2026-06-07": {"counters": {"Chamallows": 1}},
+            "2026-06-06": {"counters": {"Rennes vues": 14}},
+        })
+        incoming = {"2026-06-07": {"sleeping": "Apartment"}}  # 2026-06-06 absent
+        result = _merge_counters(incoming, existing)
+        assert "2026-06-06" not in result  # not re-injected
+
+    def test_no_existing_json_returns_incoming_unchanged(self):
+        incoming = {"2026-06-07": {"sleeping": "Apartment"}}
+        result = _merge_counters(incoming, None)
+        assert result == incoming
+
+    def test_multiple_days_only_missing_counters_backfilled(self):
+        existing = json.dumps({
+            "2026-06-05": {"counters": {"Rennes vues": 3}},
+            "2026-06-06": {"counters": {"Rennes vues": 14}},
+            "2026-06-07": {"counters": {"Rennes vues": 32}},
+        })
+        incoming = {
+            "2026-06-05": {"sleeping": "Bivouac"},                      # no counters → backfill
+            "2026-06-06": {"sleeping": "Camping", "counters": {}},      # explicit empty → clear
+            "2026-06-07": {"sleeping": "Apartment", "counters": {"Rennes vues": 99}},  # override
+        }
+        result = _merge_counters(incoming, existing)
+        assert result["2026-06-05"]["counters"] == {"Rennes vues": 3}
+        assert result["2026-06-06"]["counters"] == {}
+        assert result["2026-06-07"]["counters"] == {"Rennes vues": 99}
