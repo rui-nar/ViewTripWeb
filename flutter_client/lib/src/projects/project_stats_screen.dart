@@ -8,6 +8,7 @@ import 'project_service.dart';
 
 part 'project_stats_body.dart';
 part 'project_stats_counters.dart';
+part 'project_stats_timeseries.dart';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

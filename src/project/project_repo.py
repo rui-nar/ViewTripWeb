@@ -988,6 +988,7 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
     activity_counts: Dict[str, int] = defaultdict(int)     # type → count
     ride_day_dist: Dict[str, float] = defaultdict(float)   # date → metres
     ride_day_elev: Dict[str, float] = defaultdict(float)   # date → metres
+    ride_day_time_s: Dict[str, int] = defaultdict(int)     # date → moving seconds
     ride_total_elev_m = 0.0
 
     for a in project.activities:
@@ -1020,6 +1021,7 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
             if date_key:
                 ride_day_dist[date_key] += a.distance or 0.0
                 ride_day_elev[date_key] += a.total_elevation_gain or 0.0
+                ride_day_time_s[date_key] += a.moving_time or 0
 
     ride_days = len(ride_day_dist)
     ride_dist_m = sum(ride_day_dist.values())
@@ -1100,4 +1102,14 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
         "tag_options": tag_options,
         "distance_per_tag": dist_per_tag,
         "counters": _compute_counter_stats(project, allowed_dates),
+        "ride_time_series": [
+            {
+                "date": d,
+                "distance_m": ride_day_dist[d],
+                "moving_time_s": ride_day_time_s[d],
+                "avg_speed_ms": ride_day_dist[d] / ride_day_time_s[d] if ride_day_time_s[d] else 0.0,
+                "elevation_m": ride_day_elev[d],
+            }
+            for d in sorted(ride_day_dist)
+        ],
     }

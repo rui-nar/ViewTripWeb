@@ -41,6 +41,10 @@ class _StatsBody extends StatelessWidget {
             ?.cast<Map<String, dynamic>>() ??
         const <Map<String, dynamic>>[];
 
+    final rideSeries = (stats['ride_time_series'] as List?)
+            ?.cast<Map<String, dynamic>>() ??
+        const <Map<String, dynamic>>[];
+
     final sleepingCounts =
         (stats['sleeping_counts'] as Map<String, dynamic>?) ?? {};
     final sleepingEntries = sleepingCounts.entries
@@ -282,6 +286,12 @@ class _StatsBody extends StatelessWidget {
                 ],
               ),
             ),
+          ],
+
+          // ── Ride progression chart ────────────────────────────────────
+          if (rideSeries.isNotEmpty) ...[
+            _SectionHeader('Progression'),
+            _RideTimeSeriesSection(rawSeries: rideSeries),
           ],
 
           // ── Distance by mode pie chart ─────────────────────────────────
