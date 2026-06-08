@@ -472,10 +472,16 @@ class _SegmentDialogState extends State<SegmentDialog> {
                     final prev = _segmentType;
                     _segmentType = s.first;
                     const modeForType = {'train': 'rail', 'boat': 'ferry', 'bus': 'bus'};
+                    // Leaving a mode-aware type → reset to great circle.
                     if (modeForType[prev] != null &&
                         _routeMode == modeForType[prev] &&
                         s.first != prev) {
                       _routeMode = 'great_circle';
+                    }
+                    // Entering a mode-aware type → auto-enable its route mode.
+                    final newMode = modeForType[_segmentType];
+                    if (newMode != null && _routeMode == 'great_circle') {
+                      _routeMode = newMode;
                     }
                   }),
                   multiSelectionEnabled: false,
