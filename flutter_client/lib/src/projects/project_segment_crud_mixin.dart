@@ -153,6 +153,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
                 'date': date,
                 'start': {'lat': startLat, 'lon': startLon},
                 'end': {'lat': endLat, 'lon': endLon},
+                if (routeMode != null) 'route_mode': routeMode,
               },
             };
           }()

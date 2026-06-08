@@ -104,6 +104,7 @@ class ProjectService {
     final data = await api.post(
       '/api/projects/$enc/segments/$sid/resolve-route',
       body,
+      timeout: const Duration(minutes: 3),
     );
     return data as Map<String, dynamic>;
   }

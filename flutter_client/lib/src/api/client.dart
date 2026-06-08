@@ -31,31 +31,45 @@ class ApiClient {
     if (_token != null) 'Authorization': 'Bearer $_token',
   };
 
-  Future<dynamic> get(String path) async {
-    final res = await _client.get(Uri.parse('$baseUrl$path'), headers: _headers);
+  static const _kDefaultTimeout = Duration(seconds: 30);
+
+  Future<dynamic> get(String path, {Duration timeout = _kDefaultTimeout}) async {
+    final res = await _client
+        .get(Uri.parse('$baseUrl$path'), headers: _headers)
+        .timeout(timeout);
     return _handle(res);
   }
 
-  Future<dynamic> post(String path, Map<String, dynamic> body) async {
-    final res = await _client.post(
-      Uri.parse('$baseUrl$path'),
-      headers: _headers,
-      body: jsonEncode(body),
-    );
+  Future<dynamic> post(
+    String path,
+    Map<String, dynamic> body, {
+    Duration timeout = _kDefaultTimeout,
+  }) async {
+    final res = await _client
+        .post(
+          Uri.parse('$baseUrl$path'),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(timeout);
     return _handle(res);
   }
 
-  Future<dynamic> put(String path, Map<String, dynamic> body) async {
-    final res = await _client.put(
-      Uri.parse('$baseUrl$path'),
-      headers: _headers,
-      body: jsonEncode(body),
-    );
+  Future<dynamic> put(String path, Map<String, dynamic> body, {Duration timeout = _kDefaultTimeout}) async {
+    final res = await _client
+        .put(
+          Uri.parse('$baseUrl$path'),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(timeout);
     return _handle(res);
   }
 
-  Future<dynamic> delete(String path) async {
-    final res = await _client.delete(Uri.parse('$baseUrl$path'), headers: _headers);
+  Future<dynamic> delete(String path, {Duration timeout = _kDefaultTimeout}) async {
+    final res = await _client
+        .delete(Uri.parse('$baseUrl$path'), headers: _headers)
+        .timeout(timeout);
     return _handle(res);
   }
 

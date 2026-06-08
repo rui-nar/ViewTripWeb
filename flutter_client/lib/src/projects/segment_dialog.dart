@@ -288,6 +288,21 @@ class _SegmentDialogState extends State<SegmentDialog> {
       return;
     }
     setState(() => _saving = true);
+    try {
+      await _saveBody(startLat, startLon, endLat, endLon);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  Future<void> _saveBody(
+    double startLat, double startLon,
+    double endLat, double endLon,
+  ) async {
     final dateStr = _toIso(_date!);
 
     // Default label: "Day N - Type M" when user leaves the field empty.
@@ -725,7 +740,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
           children: [
             Expanded(
               child: FilledButton.tonal(
-                onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                onPressed: () => Navigator.of(context).pop(),
                 child: const Text('Cancel'),
               ),
             ),
