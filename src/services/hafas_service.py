@@ -26,7 +26,13 @@ _ENDPOINTS: dict[str, str] = {
 # Rejseplanen legacy HAFAS XML-Open API (DSB / Denmark)
 _REJSEPLANEN_BASE = "https://xmlopen.rejseplanen.dk/bin/rest.exe"
 
+# rata.digitraffic.fi open-data API (VR / Finland)
+_VR_BASE = "https://rata.digitraffic.fi/api/v1"
+
 _TIMEOUT = 12  # seconds per request
+
+# Module-level cache for VR station metadata (fetched once per process).
+_vr_stations_cache: Optional[list[dict]] = None
 
 
 class HafasError(Exception):
@@ -49,6 +55,10 @@ def get_stop_sequence(
     p = provider.lower()
     if p == "dsb":
         return _rp_get_stop_sequence(
+            train_number, date, start_lat, start_lon, end_lat, end_lon
+        )
+    if p == "vr":
+        return _vr_get_stop_sequence(
             train_number, date, start_lat, start_lon, end_lat, end_lon
         )
 
@@ -81,6 +91,87 @@ def get_stop_sequence(
         raise
     except Exception as exc:
         raise HafasError(f"HAFAS request failed: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# rata.digitraffic.fi  (VR / Finland) — open government API, no key required
+# ---------------------------------------------------------------------------
+
+def _vr_stations() -> list[dict]:
+    """Fetch and cache VR station metadata from rata.digitraffic.fi."""
+    global _vr_stations_cache
+    if _vr_stations_cache is None:
+        resp = requests.get(
+            f"{_VR_BASE}/metadata/stations",
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        _vr_stations_cache = [
+            s for s in resp.json()
+            if s.get("latitude") and s.get("longitude")
+        ]
+    return _vr_stations_cache
+
+
+def _vr_nearest_station(lat: float, lon: float) -> Optional[dict]:
+    stations = _vr_stations()
+    if not stations:
+        return None
+    return min(
+        stations,
+        key=lambda s: (s["latitude"] - lat) ** 2 + (s["longitude"] - lon) ** 2,
+    )
+
+
+def _vr_get_stop_sequence(
+    train_number: str,
+    date: str,
+    start_lat: float, start_lon: float,
+    end_lat: float, end_lon: float,
+) -> list[dict]:
+    """Return an ordered stop list using the rata.digitraffic.fi open API."""
+    # Station code → metadata map
+    stations = _vr_stations()
+    by_code = {s["stationShortCode"]: s for s in stations}
+
+    # Numeric-only train numbers are used as-is; strip common VR prefixes
+    # (e.g. "IC 3" → "3", "S 17" → "17").
+    number = re.sub(r"^[A-Za-z\s]+", "", train_number.strip()) or train_number.strip()
+
+    try:
+        resp = requests.get(
+            f"{_VR_BASE}/trains/{date}/{number}",
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        trains = resp.json()
+    except Exception as exc:
+        raise HafasError(f"VR train lookup failed: {exc}") from exc
+
+    if not trains:
+        raise HafasError(f"VR train {train_number!r} not found for date {date}")
+
+    # Build deduplicated stop list from the first matching train.
+    seen: set[str] = set()
+    stops: list[dict] = []
+    for row in trains[0].get("timeTableRows", []):
+        code = row.get("stationShortCode", "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        s = by_code.get(code)
+        if s:
+            stops.append({
+                "name": s.get("stationName", code),
+                "lat":  s["latitude"],
+                "lon":  s["longitude"],
+                "uic":  "",  # enriched later by overpass_service
+            })
+
+    if len(stops) < 2:
+        raise HafasError("VR schedule returned fewer than 2 stops")
+
+    return _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
 
 
 # ---------------------------------------------------------------------------

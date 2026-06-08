@@ -38,8 +38,12 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
     Return [[lon, lat], …] polyline from stops[0] to stops[-1].
 
     *stops* is a list of dicts with keys lat, lon, and optionally uic.
-    Route-relation strategy is tried first (requires UIC codes — discovered
-    from OSM if not already present). Falls back to coordinate Dijkstra.
+
+    Strategies tried in order:
+      A  UIC-based route relations (most precise; requires UIC enrichment).
+      B  Two-endpoint route-relation intersection — finds relations that pass
+         through both endpoint areas without needing UIC codes.
+      C  Coordinate Dijkstra on bounding-box railway ways (last resort).
     """
     if len(stops) < 2:
         raise OverpassError("Need at least 2 stops")
@@ -47,12 +51,20 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
     # Enrich stops with UIC codes from OSM if not already present
     enriched = [_enrich_uic(s) for s in stops]
 
+    # Strategy A: UIC-based route relations
     if all(s.get("uic") for s in enriched):
         try:
             return _via_route_relations(enriched)
         except OverpassError:
-            pass  # fall through to coordinate fallback
+            pass
 
+    # Strategy B: two-endpoint route-relation intersection (works without UIC)
+    try:
+        return _via_train_relations_endpoints(enriched)
+    except OverpassError:
+        pass
+
+    # Strategy C: coordinate Dijkstra
     return _via_coordinate_fallback(enriched)
 
 
@@ -78,34 +90,47 @@ def _enrich_uic(stop: dict) -> dict:
     return {**stop, "uic": ""}
 
 
-def _find_station_near(lat: float, lon: float, radius_m: int = 2000) -> Optional[dict]:
+def _find_station_near(lat: float, lon: float, radius_m: int = 5000) -> Optional[dict]:
     """
-    Nearest OSM railway station within radius_m metres.
-    Returns {lat, lon, uic} or None.
+    Nearest OSM railway station with a uic_ref within radius_m metres.
+    Queries nodes, ways, and relations so that stations mapped as polygons
+    (common in some countries) are also found.  Returns {lat, lon, uic} or None.
     """
     query = f"""
 [out:json][timeout:15];
-node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
-out body;
+(
+  node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+  way["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+  rel["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+);
+out center body;
 """
     try:
         data = _overpass(query)
         elements = data.get("elements", [])
         if not elements:
             return None
+
+        def _coords(e: dict) -> tuple[float, float]:
+            if e.get("type") == "node":
+                return e.get("lat", 0.0), e.get("lon", 0.0)
+            c = e.get("center", {})
+            return c.get("lat", 0.0), c.get("lon", 0.0)
+
         nearest = min(
             elements,
-            key=lambda e: (e.get("lat", 0) - lat) ** 2 + (e.get("lon", 0) - lon) ** 2,
+            key=lambda e: (_coords(e)[0] - lat) ** 2 + (_coords(e)[1] - lon) ** 2,
         )
         uic = nearest.get("tags", {}).get("uic_ref")
         if not uic:
             return None
-        return {"lat": nearest["lat"], "lon": nearest["lon"], "uic": uic}
+        elat, elon = _coords(nearest)
+        return {"lat": elat, "lon": elon, "uic": uic}
     except OverpassError:
         return None
 
 
-def _find_uic_near(lat: float, lon: float, radius_m: int = 2000) -> Optional[str]:
+def _find_uic_near(lat: float, lon: float, radius_m: int = 5000) -> Optional[str]:
     """Return the uic_ref of the nearest OSM railway station, or None."""
     result = _find_station_near(lat, lon, radius_m)
     return result["uic"] if result else None
@@ -196,7 +221,90 @@ def _trim(
 
 
 # ---------------------------------------------------------------------------
-# Strategy 3b — coordinate fallback (bounding-box Dijkstra)
+# Strategy 3b — two-endpoint route-relation intersection
+# ---------------------------------------------------------------------------
+
+def _via_train_relations_endpoints(stops: list[dict]) -> list[list[float]]:
+    """
+    Find OSM route=train/railway relations that pass through *both* endpoint
+    areas (25 km radius each), then fetch and score their geometry.
+
+    Works without UIC codes.  Avoids the large-bbox timeout that would occur
+    if we queried a single bounding box for a long route (e.g. Helsinki–Oulu).
+    Falls through to Strategy C if no common relation is found or the best
+    match's endpoints are too far from the query points.
+    """
+    lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
+    lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
+
+    _RADIUS = 25_000  # metres
+    _ROUTE_TAGS = '"route"~"^(train|railway|light_rail)$"'
+
+    # Step 1: IDs of train relations near the start point.
+    q_start = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel[{_ROUTE_TAGS}](around:{_RADIUS},{lat1},{lon1});
+out ids;
+"""
+    d_start = _overpass(q_start)
+    start_ids = {e["id"] for e in d_start.get("elements", [])}
+    if not start_ids:
+        raise OverpassError("No train route relations near start point")
+
+    # Step 2: IDs near the end point.
+    q_end = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel[{_ROUTE_TAGS}](around:{_RADIUS},{lat2},{lon2});
+out ids;
+"""
+    d_end = _overpass(q_end)
+    end_ids = {e["id"] for e in d_end.get("elements", [])}
+    if not end_ids:
+        raise OverpassError("No train route relations near end point")
+
+    # Step 3: Intersection — relations present near BOTH endpoints.
+    common = start_ids & end_ids
+    if not common:
+        raise OverpassError("No train route relation serves both endpoints")
+
+    # Fetch geometry for at most 10 candidates (lowest IDs first to be
+    # deterministic; we score them all and pick the best).
+    ids_str = ",".join(str(i) for i in sorted(common)[:10])
+    q_geom = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel(id:{ids_str});
+._ out geom;
+"""
+    d_geom = _overpass(q_geom)
+    relations = d_geom.get("elements", [])
+    if not relations:
+        raise OverpassError("Could not fetch geometry for candidate relations")
+
+    # Score by endpoint proximity (same logic as ferry Strategy A).
+    # More lenient threshold: train activity endpoints can be several km from
+    # the exact station node (parking lots, adjacent streets, etc.).
+    _MAX_SCORE = 0.05  # ≈ both endpoints within ~5 km
+
+    best: Optional[list[list[float]]] = None
+    best_score = math.inf
+    for rel in relations:
+        geom = _extract_geometry(rel, lat1, lon1, lat2, lon2)
+        if geom and len(geom) >= 2:
+            score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
+            if score < best_score:
+                best_score = score
+                best = geom
+
+    if best is None or best_score > _MAX_SCORE:
+        raise OverpassError(
+            f"Train route relations found but none has endpoints close enough "
+            f"(best score {best_score:.4f} > threshold {_MAX_SCORE})"
+        )
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3c — coordinate fallback (bounding-box Dijkstra)
 # ---------------------------------------------------------------------------
 
 def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
