@@ -1,5 +1,4 @@
 ## graphify
-
 This project has a graphify knowledge graph at graphify-out/.
 
 Rules:
@@ -15,3 +14,6 @@ version are standard x.y.z where y is for features and z is for patches. unless 
 
 ## current stack
 current stack is compoesed of a sever in python FastAPI serving clients written in flutter for  web, android and iOS. any architecutre decision shall keep this structure in mind.
+
+## approach
+Go for the long game, don't take the easy solution, the easy fix or the short-term win. If in doubt ask what the user prefers.
