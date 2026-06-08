@@ -150,26 +150,29 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final preselected = widget.preselectedStartActivityId;
     if (preselected != null) {
       final a = actById(preselected);
-      final endLl = a?['end_latlng'];
-      if (endLl is List && endLl.length >= 2) {
-        _startLatCtrl.text = (endLl[0] as num).toStringAsFixed(6);
-        _startLonCtrl.text = (endLl[1] as num).toStringAsFixed(6);
+      if (a != null) {
         _startActivityId = preselected;
-      }
-      final ds = a?['start_date_local'] as String?;
-      if (ds != null) _date = DateTime.tryParse(ds);
-      // Auto-advance end: list sorted descending, so next-in-time = idx - 1.
-      final idx = _activityList.indexWhere((x) => x['id'] == preselected);
-      if (idx > 0) {
-        final next = _activityList[idx - 1];
-        _endActivityId = next['id'];
-        final nll = next['start_latlng'];
-        if (nll is List && nll.length >= 2) {
-          _endLatCtrl.text = (nll[0] as num).toStringAsFixed(6);
-          _endLonCtrl.text = (nll[1] as num).toStringAsFixed(6);
+        final endLl = a['end_latlng'];
+        if (endLl is List && endLl.length >= 2) {
+          _startLatCtrl.text = (endLl[0] as num).toStringAsFixed(6);
+          _startLonCtrl.text = (endLl[1] as num).toStringAsFixed(6);
         }
+        final ds = a['start_date_local'] as String?;
+        if (ds != null) _date = DateTime.tryParse(ds);
+        // Auto-advance end: list sorted descending, so next-in-time = idx - 1.
+        final idx = _activityList.indexWhere((x) => x['id'] == preselected);
+        if (idx > 0) {
+          final next = _activityList[idx - 1];
+          _endActivityId = next['id'];
+          final nll = next['start_latlng'];
+          if (nll is List && nll.length >= 2) {
+            _endLatCtrl.text = (nll[0] as num).toStringAsFixed(6);
+            _endLonCtrl.text = (nll[1] as num).toStringAsFixed(6);
+          }
+        }
+        return;
       }
-      return;
+      // a == null: activity not in list — fall through to insertAfterIndex logic.
     }
 
     if (insertAfter == null || items.isEmpty) return;
