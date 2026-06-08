@@ -55,13 +55,13 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
     if all(s.get("uic") for s in enriched):
         try:
             return _via_route_relations(enriched)
-        except OverpassError:
+        except Exception:
             pass
 
     # Strategy B: two-endpoint route-relation intersection (works without UIC)
     try:
         return _via_train_relations_endpoints(enriched)
-    except OverpassError:
+    except Exception:
         pass
 
     # Strategy C: coordinate Dijkstra

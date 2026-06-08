@@ -429,16 +429,29 @@ class ProjectNotifier extends ChangeNotifier
             if (fullFeature != null) features[i] = fullFeature;
           }
         }
-        // Safety net: add any non-activity features (segments) from fullGeo that
-        // are absent from the current geo snapshot — e.g. if a CRUD operation
-        // occurred mid-load.  Low-res already includes segment arcs, so this
-        // block normally does nothing.
-        final alreadyHasNonAct = features.any(
-            (f) => f is Map && (f['properties'] as Map? ?? {})['activity_id'] == null);
-        if (!alreadyHasNonAct) {
-          for (final f in (fullGeo['features'] as List? ?? [])) {
-            if (f is! Map) continue;
-            if ((f['properties'] as Map? ?? {})['activity_id'] != null) continue;
+        // Safety net: add segment features from fullGeo that are absent from the
+        // current snapshot AND still exist in items — covers the case where a
+        // segment was added on another client mid-load.
+        // Intentionally does NOT add back segments the user just deleted (even
+        // though fullGeo was fetched before the deletion), because the stale
+        // fullGeo would otherwise ghost-restore them after a delete-then-add.
+        final existingSegIds = features
+            .whereType<Map>()
+            .where((f) => (f['properties'] as Map? ?? {})['activity_id'] == null)
+            .map((f) => (f['properties'] as Map? ?? {})['segment_id']?.toString())
+            .whereType<String>()
+            .toSet();
+        final liveSegIds = items
+            .where((i) => i['item_type'] == 'segment')
+            .map((i) => i['segment']?['id']?.toString())
+            .whereType<String>()
+            .toSet();
+        for (final f in (fullGeo['features'] as List? ?? [])) {
+          if (f is! Map) continue;
+          if ((f['properties'] as Map? ?? {})['activity_id'] != null) continue;
+          final segId = (f['properties'] as Map? ?? {})['segment_id']?.toString();
+          if (segId == null) continue;
+          if (!existingSegIds.contains(segId) && liveSegIds.contains(segId)) {
             features.add(f);
           }
         }
