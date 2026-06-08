@@ -907,6 +907,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     List<Map<String, dynamic>> items,
     dynamic selectedMemoryId,
     bool hasSelection,
+    Set<String> effectiveDays,
     BuildContext context,
   ) {
     final markers = <Marker>[];
@@ -921,10 +922,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final memId = mem['id']?.toString() ?? '';
       final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
       final isSelected = selectedMemoryId?.toString() == memId;
+      final memDate = mem['date'] as String?;
+      final isDayHighlighted = effectiveDays.isEmpty ||
+          (memDate != null && effectiveDays.contains(memDate));
       final size = isSelected ? 34.0 : 28.0;
       final bgColor = isSelected
           ? const Color(0xFF333333)
-          : hasSelection
+          : (hasSelection && !isDayHighlighted)
               ? const Color(0xA0000000)
               : Colors.black;
 
@@ -1380,7 +1384,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
           : [];
       _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, context);
+          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId2, hasSelection, context);
 
