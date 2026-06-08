@@ -447,12 +447,31 @@ class _SegmentDialogState extends State<SegmentDialog> {
         duration: const Duration(seconds: 5),
       ));
     } catch (e) {
-      final msg = e.toString().replaceFirst('Exception: ', '');
       messenger.showSnackBar(SnackBar(
-        content: Text('Route unavailable: $msg'),
+        content: Text('Route unavailable: ${_resolveErrMsg(e)}'),
         duration: const Duration(seconds: 6),
       ));
     }
+  }
+
+  /// Converts a resolve-route exception into a short human-readable string.
+  /// Strips nginx HTML error pages that would otherwise flood the snackbar.
+  static String _resolveErrMsg(Object e) {
+    final s = e.toString();
+    final detail = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(s)?.group(1);
+    if (detail != null) return detail;
+    final codeMatch = RegExp(r'ApiException\((\d+)\)').firstMatch(s);
+    if (codeMatch != null) {
+      final code = codeMatch.group(1)!;
+      final body = s.substring(codeMatch.end).replaceFirst(RegExp(r'^:\s*'), '');
+      if (body.trimLeft().startsWith('<')) {
+        if (code == '504') return 'Server timeout — route calculation took too long, please try again';
+        if (code == '502' || code == '503') return 'Server unreachable ($code)';
+        return 'Server error ($code)';
+      }
+      return body;
+    }
+    return s.replaceFirst('Exception: ', '');
   }
 
   @override

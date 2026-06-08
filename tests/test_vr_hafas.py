@@ -258,3 +258,36 @@ class TestTrainRelationsEndpoints:
             ])
 
         assert len(result) >= 3
+
+    def test_get_rail_geometry_only_enriches_endpoints(self):
+        """With N>2 stops, only first and last are enriched — not all N stops.
+
+        VR returns uic='' for every stop; enriching all N triggers O(N) Overpass
+        calls that cumulatively exceed the nginx proxy timeout on long routes
+        like Helsinki→Rovaniemi.
+        """
+        good_rel = _make_relation(_LON1, _LAT1, _LON2, _LAT2, mid_count=3)
+        good_rel["id"] = 42
+        enrich_calls: list[str] = []
+
+        def _overpass_side_effect(query):
+            if "railway" in query and "uic_ref" in query:
+                enrich_calls.append(query)
+                return {"elements": []}  # no UIC found → falls through to B
+            if "out ids" in query:
+                return {"elements": [{"id": 42}]}
+            return {"elements": [good_rel]}
+
+        many_stops = [
+            {"lat": _LAT1, "lon": _LON1},
+            {"lat": 62.0,  "lon": 25.0},   # intermediate — must NOT be enriched
+            {"lat": 63.5,  "lon": 25.2},   # intermediate — must NOT be enriched
+            {"lat": _LAT2, "lon": _LON2},
+        ]
+
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
+            result = get_rail_geometry(many_stops)
+
+        # Exactly 2 enrichment calls (first + last), not 4.
+        assert len(enrich_calls) == 2, f"Expected 2 enrichment calls, got {len(enrich_calls)}"
+        assert len(result) >= 3

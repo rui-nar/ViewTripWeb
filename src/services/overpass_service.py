@@ -48,13 +48,19 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
     if len(stops) < 2:
         raise OverpassError("Need at least 2 stops")
 
-    # Enrich stops with UIC codes from OSM if not already present
-    enriched = [_enrich_uic(s) for s in stops]
+    # Only enrich the first and last stop to avoid O(N) Overpass calls on long
+    # routes (e.g. VR Helsinki→Rovaniemi has ~8 stops and returns uic="" for
+    # all of them, which previously triggered a _find_station_near HTTP call per
+    # stop plus N-1 pairwise route-relation queries = ~15 calls = nginx 504).
+    enriched = list(stops)
+    enriched[0]  = _enrich_uic(stops[0])
+    enriched[-1] = _enrich_uic(stops[-1])
 
-    # Strategy A: UIC-based route relations
-    if all(s.get("uic") for s in enriched):
+    # Strategy A: try a direct start→end route-relation lookup using the two
+    # endpoint UIC codes.  One Overpass query; covers most long-haul trains.
+    if enriched[0].get("uic") and enriched[-1].get("uic"):
         try:
-            return _via_route_relations(enriched)
+            return _via_route_relations([enriched[0], enriched[-1]])
         except Exception:
             pass
 
