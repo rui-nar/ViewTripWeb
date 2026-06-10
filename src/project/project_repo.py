@@ -197,7 +197,12 @@ class ProjectRepo:
             # Atomic compare-and-swap on lock_version. rowcount 0 → another
             # writer committed since this project was loaded → conflict.
             expected = project.lock_version
-            result = sess.exec(
+            # Use sess.execute (SQLAlchemy native), NOT sess.exec: the latter is
+            # SQLModel's SELECT-oriented wrapper and, depending on the installed
+            # SQLModel version, may not return a CursorResult with a usable
+            # .rowcount for a Core UPDATE — which surfaced as a 500 in production
+            # (where the unpinned dependency resolved to a different version).
+            result = sess.execute(
                 update(DBProject)
                 .where(DBProject.id == row.id, DBProject.lock_version == expected)
                 .values(lock_version=expected + 1)
@@ -702,7 +707,7 @@ class ProjectRepo:
         individual ORM calls — reduces 400 SQL statements to 2 for a 200-item
         project.
         """
-        sess.exec(delete(DBProjectItem).where(DBProjectItem.project_id == project_id))
+        sess.execute(delete(DBProjectItem).where(DBProjectItem.project_id == project_id))
 
         if not items:
             return
@@ -730,7 +735,7 @@ class ProjectRepo:
                 ),
             })
 
-        sess.exec(insert(DBProjectItem).values(rows))
+        sess.execute(insert(DBProjectItem).values(rows))
 
     def _upsert_activity(
         self, sess: Session, user_info_id: int, act: Activity
