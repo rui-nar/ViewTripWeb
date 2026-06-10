@@ -33,9 +33,14 @@ class ProjectService {
   /// a cold-cache build of a large trip can take a while on NAS storage.
   Future<Map<String, dynamic>> getGeo(String name) async {
     final encoded = Uri.encodeComponent(name);
-    // encoded=1 opts into the compact payload (activity tracks as Google-encoded
-    // polylines); expandEncodedActivities decodes them back to coordinates.
-    final data = await api.get('/api/geo/project?name=$encoded&encoded=1',
+    // NOTE: the compact `&encoded=1` payload (activity tracks as Google-encoded
+    // polylines, decoded by expandEncodedActivities) is temporarily disabled —
+    // it correlated with a paint-pipeline exception in the web release build
+    // that couldn't be diagnosed from minified symbols. The server still
+    // expands coordinates by default, the proven-working path. Re-enable by
+    // appending '&encoded=1' once the render issue is reproduced in a debug
+    // build. The generous timeout covers a cold-cache build of a large trip.
+    final data = await api.get('/api/geo/project?name=$encoded',
         timeout: const Duration(seconds: 90));
     return expandEncodedActivities(data as Map<String, dynamic>);
   }

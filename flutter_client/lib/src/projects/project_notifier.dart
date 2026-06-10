@@ -386,10 +386,13 @@ class ProjectNotifier extends ChangeNotifier
       try {
         fullGeo = await _service.getGeo(name);
         break;
-      } on Exception catch (e) {
+      } on Object catch (e) {
+        // Catch Object (not just Exception): a decode failure can throw an
+        // Error (RangeError/TypeError), which would otherwise escape as an
+        // unhandled async exception and never surface here.
         if (_loadKey != name) return;
         if (attempt == 1) {
-          error = 'Could not load full-resolution tracks: ${_msg(e)}';
+          error = 'Could not load full-resolution tracks: $e';
           isGeoLoaded = false;
           notifyListeners();
           return;
@@ -456,9 +459,10 @@ class ProjectNotifier extends ChangeNotifier
       _buildFullTrack();
       isGeoLoaded = true;
       notifyListeners();
-    } on Exception catch (e) {
-      // Non-fatal — low-res map is still shown
-      error = _msg(e);
+    } on Object catch (e) {
+      // Non-fatal — low-res map is still shown. Catch Object so an Error in the
+      // apply path can't escape as a recurring unhandled exception.
+      error = e is Exception ? _msg(e) : e.toString();
       notifyListeners();
     }
   }

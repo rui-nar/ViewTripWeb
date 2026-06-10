@@ -250,7 +250,9 @@ class _MapPanelState extends State<MapPanel> {
           points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
         }
       }
-      if (points.isEmpty) continue;
+      // A LineString needs ≥2 points; a single-point polyline can throw deep in
+      // flutter_map's paint path, so skip it (and empty ones) defensively.
+      if (points.length < 2) continue;
 
       final isSegment = props['type'] == 'segment';
       final actId = props['activity_id']?.toString();
