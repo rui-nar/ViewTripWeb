@@ -33,14 +33,13 @@ class ProjectService {
   /// a cold-cache build of a large trip can take a while on NAS storage.
   Future<Map<String, dynamic>> getGeo(String name) async {
     final encoded = Uri.encodeComponent(name);
-    // Expanded coordinates only (no `&encoded=1`). The compact encoded-polyline
-    // payload is decoded server-side instead, because decoding it on the *web*
-    // client produced out-of-range coordinates (a latitude of ~42e6 that tripped
-    // flutter_map's `north <= 90` assertion and crashed the map). The decode is
-    // correct under the Dart VM (mobile/desktop, 64-bit int) but the web int /
-    // bitwise semantics diverge, so client-side decode can't be trusted here.
-    // The generous timeout covers a cold-cache build of a large trip.
-    final data = await api.get('/api/geo/project?name=$encoded',
+    // Compact payload: activity tracks as Google-encoded polylines, decoded by
+    // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
+    // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
+    // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
+    // (see polyline_decoder.dart). The generous timeout covers a cold-cache
+    // build of a large trip.
+    final data = await api.get('/api/geo/project?name=$encoded&encoded=1',
         timeout: const Duration(seconds: 90));
     return expandEncodedActivities(data as Map<String, dynamic>);
   }

@@ -6,25 +6,35 @@ import 'dart:math' as math;
 import 'geo_point.dart';
 
 /// Decode a Google-encoded polyline string to a list of [GeoPoint] values.
+///
+/// Web-safe: avoids `<<`, `|`, `>>` and `~` on accumulated values. When Dart is
+/// compiled to JavaScript, bitwise/shift operators run as 32-bit ops and `~`
+/// returns an *unsigned* complement (`4294967295 - x`) rather than the VM's
+/// signed `-x - 1`. The classic decoder (`r |= (b & 0x1f) << shift;` then
+/// `~(r >> 1)`) therefore turned every negative delta into a ~4.29e9 value on
+/// the web, accumulating into out-of-range coordinates (a latitude of ~42e6
+/// that crashed flutter_map's bounds assertion). Using multiplication for the
+/// shift, addition for the OR (the 5-bit groups never overlap), and integer
+/// division for the zig-zag keeps the maths exact and identical on the VM,
+/// dart2js and DDC. See https://dart.dev/resources/language/number-representation
 List<GeoPoint> decodePolyline(String encoded) {
   final result = <GeoPoint>[];
   int index = 0, lat = 0, lng = 0;
+
+  int readDelta() {
+    int shift = 0, r = 0, b;
+    do {
+      b = encoded.codeUnitAt(index++) - 63;
+      r += (b & 0x1f) * (1 << shift); // shift ≤ 25 here, so 1<<shift fits 32 bits
+      shift += 5;
+    } while (b >= 0x20);
+    // Zig-zag inverse without ~ or >> on a possibly-large value.
+    return (r & 1) != 0 ? -((r + 1) ~/ 2) : (r ~/ 2);
+  }
+
   while (index < encoded.length) {
-    int b, shift = 0, r = 0;
-    do {
-      b = encoded.codeUnitAt(index++) - 63;
-      r |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-    lat += (r & 1) != 0 ? ~(r >> 1) : (r >> 1);
-    shift = 0;
-    r = 0;
-    do {
-      b = encoded.codeUnitAt(index++) - 63;
-      r |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-    lng += (r & 1) != 0 ? ~(r >> 1) : (r >> 1);
+    lat += readDelta();
+    lng += readDelta();
     result.add((lat: lat / 1e5, lon: lng / 1e5));
   }
   return result;
