@@ -85,6 +85,7 @@ class ProjectRepo:
         name: str,
         legacy_path: Optional[str] = None,
         include_heavy: bool = True,
+        include_elevation: bool = True,
     ) -> Optional[Project]:
         """Load a project from DB.
 
@@ -94,6 +95,12 @@ class ProjectRepo:
 
         include_heavy=False defers summary_polyline and elevation_profile_json (see
         _row_to_project for details).  The legacy-ingest path always uses full loading.
+
+        include_elevation=False (with include_heavy=True) keeps summary_polyline but
+        defers the large elevation_profile_json column — used by the full-res geo
+        endpoint, which needs track geometry but never the elevation series. On
+        spinning-disk NAS storage this avoids the overflow-page reads that made a
+        cold geo load time out.
         """
         row = sess.exec(
             select(DBProject).where(
@@ -115,7 +122,8 @@ class ProjectRepo:
             if row is None:
                 return None
 
-        return self._row_to_project(sess, row, include_heavy=include_heavy)
+        return self._row_to_project(
+            sess, row, include_heavy=include_heavy, include_elevation=include_elevation)
 
     def get_project_by_id(self, sess: Session, project_id: int) -> Optional[Project]:
         """Load a project directly by its primary key (used for shared-link access)."""
@@ -511,12 +519,16 @@ class ProjectRepo:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _row_to_project(self, sess: Session, row: DBProject, include_heavy: bool = True) -> Project:
+    def _row_to_project(self, sess: Session, row: DBProject, include_heavy: bool = True,
+                        include_elevation: bool = True) -> Project:
         """Reconstruct an in-memory Project from DB rows.
 
         include_heavy=False defers summary_polyline and elevation_profile_json from
         the SQL query, avoiding overflow-page reads on large activities.  Activities
         will have summary_polyline=None and elevation_profile=None.
+
+        include_elevation=False (with include_heavy=True) defers only
+        elevation_profile_json: summary_polyline is loaded, elevation_profile is None.
         """
         fs_raw = json.loads(row.filter_state_json or "{}")
         filter_state = ProjectFilterState(
@@ -542,8 +554,16 @@ class ProjectRepo:
                 _sa_defer(DBActivity.summary_polyline),
                 _sa_defer(DBActivity.elevation_profile_json),
             )
+        elif not include_elevation:
+            _act_query = _act_query.options(
+                _sa_defer(DBActivity.elevation_profile_json),
+            )
         act_rows = sess.exec(_act_query).all() if activity_ids else []
-        act_by_id = {r.id: self._row_to_activity(r, include_heavy=include_heavy) for r in act_rows}
+        act_by_id = {
+            r.id: self._row_to_activity(
+                r, include_heavy=include_heavy, include_elevation=include_elevation)
+            for r in act_rows
+        }
 
         # Load memory rows for this project
         memory_rows = sess.exec(
@@ -820,12 +840,16 @@ class ProjectRepo:
         )
 
     @staticmethod
-    def _row_to_activity(row: DBActivity, include_heavy: bool = True) -> Activity:
+    def _row_to_activity(row: DBActivity, include_heavy: bool = True,
+                         include_elevation: bool = True) -> Activity:
         """Reconstruct the domain Activity dataclass from a DB row.
 
         include_heavy=False skips accessing deferred columns summary_polyline and
         elevation_profile_json (both returned as None).  The caller must have queried
         with those columns deferred so that no lazy-load round-trip is triggered.
+
+        include_elevation=False skips only elevation_profile_json (summary_polyline
+        is still read); the caller must have deferred that column.
         """
         from datetime import datetime
 
@@ -876,7 +900,7 @@ class ProjectRepo:
                     ep["distances_km"],
                     ep["elevations_m"],
                 )
-                if include_heavy and (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
+                if include_heavy and include_elevation and (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
                 else None
             ),
         )

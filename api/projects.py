@@ -40,7 +40,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from api.geo import bust_geo_cache
+from api.geo import bust_geo_cache, warm_geo_cache
 from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta, DBShareVisit
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
@@ -259,6 +259,9 @@ def _enrich_activities_background(
 
     if any_enriched:
         bust_geo_cache(user_info_id, project_name)
+        # Recompute now (still in the background task) so the user's next geo
+        # load is a fast cache HIT rather than a cold recompute.
+        warm_geo_cache(user_info_id, project_name)
 
 
 def _enrich_pending_background(
@@ -395,6 +398,10 @@ def _resolve_route_job(
                 continue
     finally:
         bust_geo_cache(user_info_id, name)
+        # Warm the cache while still off the request path so returning to the
+        # project after a resolve is a fast HIT, not a cold recompute that can
+        # time out and leave activities as low-res straight lines.
+        warm_geo_cache(user_info_id, name)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

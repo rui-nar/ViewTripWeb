@@ -375,10 +375,32 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _loadFullGeoProgressively(String name) async {
     // Guard: abort if the user navigated away before we finish
     if (_loadKey != name) return;
-    try {
-      final fullGeo = await _service.getGeo(name);
-      if (_loadKey != name) return;
 
+    // Fetch the full-res geo with one retry. A cold-cache miss can be slow
+    // enough to time out, but the server finishes computing and caches the
+    // result regardless — so a brief pause then retry usually lands on the now
+    // warm cache. A persistent failure is surfaced (not swallowed) so the user
+    // isn't left silently looking at low-res straight lines.
+    Map<String, dynamic>? fullGeo;
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        fullGeo = await _service.getGeo(name);
+        break;
+      } on Exception catch (e) {
+        if (_loadKey != name) return;
+        if (attempt == 1) {
+          error = 'Could not load full-resolution tracks: ${_msg(e)}';
+          isGeoLoaded = false;
+          notifyListeners();
+          return;
+        }
+        await Future.delayed(const Duration(seconds: 2));
+        if (_loadKey != name) return;
+      }
+    }
+    if (fullGeo == null || _loadKey != name) return;
+
+    try {
       // Drop overlay entries the server geo already reflects, so the durable
       // overlay self-cleans once the backend has caught up.
       reconcileSegmentOverlay(fullGeo);

@@ -1,7 +1,10 @@
 /// Single-project service — wraps /api/projects/{name} and /api/geo/* endpoints.
 library;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../api/client.dart';
+import '../map/polyline_decoder.dart';
 
 class ProjectService {
   /// Fetches the full project dict for [name] including elevation_profile data.
@@ -22,10 +25,41 @@ class ProjectService {
 
   /// Fetches the GeoJSON FeatureCollection for [name].
   /// GET /api/geo/project?name={name}
+  ///
+  /// The full-res endpoint sends activity tracks as Google-encoded polylines
+  /// (in `properties.polyline`, with empty `coordinates`) to keep the payload
+  /// small; [_expandEncodedActivities] decodes them back to `coordinates` so
+  /// the rest of the app sees standard GeoJSON. The timeout is generous because
+  /// a cold-cache build of a large trip can take a while on NAS storage.
   Future<Map<String, dynamic>> getGeo(String name) async {
     final encoded = Uri.encodeComponent(name);
-    final data = await api.get('/api/geo/project?name=$encoded');
-    return data as Map<String, dynamic>;
+    final data = await api.get('/api/geo/project?name=$encoded',
+        timeout: const Duration(seconds: 90));
+    return expandEncodedActivities(data as Map<String, dynamic>);
+  }
+
+  /// Expand any activity feature carrying a Google-encoded `polyline` property
+  /// into a standard GeoJSON `coordinates` array (`[[lon, lat], …]`). No-op for
+  /// features that already have coordinates (segments, straight-line fallbacks,
+  /// and the share endpoint's expanded responses).
+  @visibleForTesting
+  static Map<String, dynamic> expandEncodedActivities(Map<String, dynamic> geo) {
+    final features = geo['features'];
+    if (features is! List) return geo;
+    for (final f in features) {
+      if (f is! Map) continue;
+      final props = f['properties'];
+      if (props is! Map) continue;
+      final enc = props['polyline'];
+      if (enc is! String || enc.isEmpty) continue;
+      final geom = f['geometry'];
+      if (geom is! Map) continue;
+      final existing = geom['coordinates'];
+      if (existing is List && existing.isNotEmpty) continue; // already expanded
+      final pts = decodePolyline(enc);
+      geom['coordinates'] = [for (final p in pts) [p.lon, p.lat]];
+    }
+    return geo;
   }
 
   /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [name].
