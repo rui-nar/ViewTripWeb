@@ -274,6 +274,7 @@ class ProjectNotifier extends ChangeNotifier
     activities = [];
     items = [];
     geo = null;
+    clearSegmentOverlay();  // discard any prior project's pending segment patches
     selectedActivityId = null;
     selectedSegmentId = null;
     selectedMemoryId = null;
@@ -357,6 +358,9 @@ class ProjectNotifier extends ChangeNotifier
     // Phase 2: full-res GeoJSON + elevation data in background.
     _loadFullGeoProgressively(name);
     _loadElevationData(name);
+    // Recover any segment left "pending" by a resolve job that never finished
+    // (e.g. the server restarted mid-resolve). Owner-editable loads only.
+    if (loadOwnerExtras) recoverStalePendingSegments(name);
     // Background sync check — fires only for active trips with auto-sync on.
     // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
@@ -374,6 +378,10 @@ class ProjectNotifier extends ChangeNotifier
     try {
       final fullGeo = await _service.getGeo(name);
       if (_loadKey != name) return;
+
+      // Drop overlay entries the server geo already reflects, so the durable
+      // overlay self-cleans once the backend has caught up.
+      reconcileSegmentOverlay(fullGeo);
 
       // Index full-res features by activity_id
       final fullFeatures = <String, Map<String, dynamic>>{};
@@ -415,50 +423,14 @@ class ProjectNotifier extends ChangeNotifier
       }
 
       if (_loadKey != name) return;
-      // Final pass: ensure every activity feature is at full resolution.
-      // Only activity features are replaced — segment features stay as-is in
-      // the current geo so any concurrent add/update/delete is preserved.
-      final latestGeo = geo;
-      if (latestGeo != null) {
-        final features = List<dynamic>.from(latestGeo['features'] as List? ?? []);
-        for (int i = 0; i < features.length; i++) {
-          final actId =
-              (features[i] as Map)['properties']?['activity_id']?.toString();
-          if (actId != null) {
-            final fullFeature = fullFeatures[actId];
-            if (fullFeature != null) features[i] = fullFeature;
-          }
-        }
-        // Safety net: add segment features from fullGeo that are absent from the
-        // current snapshot AND still exist in items — covers the case where a
-        // segment was added on another client mid-load.
-        // Intentionally does NOT add back segments the user just deleted (even
-        // though fullGeo was fetched before the deletion), because the stale
-        // fullGeo would otherwise ghost-restore them after a delete-then-add.
-        final existingSegIds = features
-            .whereType<Map>()
-            .where((f) => (f['properties'] as Map? ?? {})['activity_id'] == null)
-            .map((f) => (f['properties'] as Map? ?? {})['segment_id']?.toString())
-            .whereType<String>()
-            .toSet();
-        final liveSegIds = items
-            .where((i) => i['item_type'] == 'segment')
-            .map((i) => i['segment']?['id']?.toString())
-            .whereType<String>()
-            .toSet();
-        for (final f in (fullGeo['features'] as List? ?? [])) {
-          if (f is! Map) continue;
-          if ((f['properties'] as Map? ?? {})['activity_id'] != null) continue;
-          final segId = (f['properties'] as Map? ?? {})['segment_id']?.toString();
-          if (segId == null) continue;
-          if (!existingSegIds.contains(segId) && liveSegIds.contains(segId)) {
-            features.add(f);
-          }
-        }
-        geo = {'type': 'FeatureCollection', 'features': features};
-      } else {
-        geo = fullGeo;
-      }
+      // Final pass: rebuild authoritatively from the server geo (activities at
+      // full resolution + the server's segment features), then re-apply the
+      // durable segment overlay so any local add/update/delete that happened
+      // during this background load wins over the stale server snapshot. This
+      // single deterministic merge replaces the old ad-hoc "safety net".
+      final features = mergePendingSegmentPatches(
+          List<dynamic>.from(fullGeo['features'] as List? ?? []));
+      geo = {'type': 'FeatureCollection', 'features': features};
       _buildFullTrack();
       isGeoLoaded = true;
       notifyListeners();
@@ -922,6 +894,11 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   bool _isDisposed = false;
+
+  /// Whether this notifier is still mounted (not disposed). Background tasks
+  /// (e.g. segment route polling) check this before touching captured UI such
+  /// as a ScaffoldMessenger.
+  bool get isAlive => !_isDisposed;
 
   @override
   void notifyListeners() {

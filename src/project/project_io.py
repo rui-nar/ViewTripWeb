@@ -228,6 +228,9 @@ class ProjectIO:
                 "train_number": seg.train_number,
                 "hafas_provider": seg.hafas_provider,
                 "route_polyline": seg.route_polyline,
+                "route_status": seg.route_status,
+                "route_error": seg.route_error,
+                "route_started_at": seg.route_started_at,
             }
         return d
 
@@ -283,5 +286,8 @@ class ProjectIO:
             train_number=sd.get("train_number"),
             hafas_provider=sd.get("hafas_provider"),
             route_polyline=sd.get("route_polyline"),
+            route_status=sd.get("route_status", "idle"),
+            route_error=sd.get("route_error"),
+            route_started_at=sd.get("route_started_at"),
         )
         return ProjectItem(item_type="segment", segment=seg)

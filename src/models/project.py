@@ -67,6 +67,10 @@ class ConnectingSegment:
     train_number: Optional[str] = None      # e.g. "ICE 596"
     hafas_provider: Optional[str] = None    # e.g. "db"
     route_polyline: Optional[str] = None    # JSON-encoded [[lon,lat],…], stored once
+    # Async route-resolution status — see api.projects._resolve_route_job
+    route_status: Literal["idle", "pending", "resolved", "failed"] = "idle"
+    route_error: Optional[str] = None       # short message shown in the UI on failure
+    route_started_at: Optional[str] = None  # ISO timestamp the pending job began (stale-recovery)
 
 
 @dataclass
@@ -92,6 +96,9 @@ class Project:
     """In-memory representation of a .viewtrip project file."""
     name: str
     version: int = 1
+    # Optimistic-lock value captured at load time (DBProject.lock_version); not
+    # part of the .viewtrip file format — used only to detect concurrent writes.
+    lock_version: int = 0
     items: List[ProjectItem] = field(default_factory=list)
     filter_state: ProjectFilterState = field(default_factory=ProjectFilterState)
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date

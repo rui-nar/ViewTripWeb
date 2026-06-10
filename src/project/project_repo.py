@@ -19,7 +19,7 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete, func, insert
+from sqlalchemy import delete, func, insert, update
 
 from models.db import get_session
 from sqlalchemy.orm import defer as _sa_defer
@@ -44,6 +44,12 @@ from src.models.project import (
     SegmentEndpoint,
 )
 from src.project.project_io import ProjectIO
+
+
+class StaleWriteError(Exception):
+    """Raised by save_project when another writer committed since this project
+    was loaded (optimistic-lock conflict). Callers should reload and retry, or
+    surface a 409 to the client."""
 
 
 class ProjectRepo:
@@ -147,10 +153,25 @@ class ProjectRepo:
         sess.commit()
         return empty_project
 
-    def save_project(self, sess: Session, user_info_id: int, project: Project) -> None:
+    def save_project(
+        self,
+        sess: Session,
+        user_info_id: int,
+        project: Project,
+        *,
+        check_version: bool = False,
+    ) -> None:
         """Persist all changes to an in-memory Project back to the DB.
 
         This is a full replace of the project's item list and activity upserts.
+
+        Pass ``check_version=True`` for load-then-mutate-then-save flows that
+        must not clobber a concurrent write (e.g. the segment endpoints and the
+        background route-resolve job): the row's ``lock_version`` is bumped only
+        if it still matches the value captured at load time, otherwise a
+        ``StaleWriteError`` is raised. The default (``False``) is a blind
+        overwrite that simply advances the counter — used by importers and other
+        callers that intentionally replace the whole project.
         """
         row = sess.exec(
             select(DBProject).where(
@@ -162,6 +183,29 @@ class ProjectRepo:
             row = DBProject(user_info_id=user_info_id, name=project.name)
             sess.add(row)
             sess.flush()
+
+        if check_version:
+            # Atomic compare-and-swap on lock_version. rowcount 0 → another
+            # writer committed since this project was loaded → conflict.
+            expected = project.lock_version
+            result = sess.exec(
+                update(DBProject)
+                .where(DBProject.id == row.id, DBProject.lock_version == expected)
+                .values(lock_version=expected + 1)
+            )
+            if result.rowcount == 0:
+                sess.rollback()
+                raise StaleWriteError(
+                    f"Project '{project.name}' was modified concurrently "
+                    f"(expected lock_version {expected})"
+                )
+            sess.refresh(row)          # sync the ORM identity map to the new value
+            project.lock_version = expected + 1
+        else:
+            # Blind overwrite — advance the counter so concurrent version-checked
+            # savers can still detect that a write happened.
+            row.lock_version = (getattr(row, "lock_version", 0) or 0) + 1
+            project.lock_version = row.lock_version
 
         row.version = project.version
         row.trip_start = project.trip_start
@@ -604,6 +648,7 @@ class ProjectRepo:
         project = Project(
             name=row.name,
             version=row.version,
+            lock_version=getattr(row, 'lock_version', 0) or 0,
             trip_start=getattr(row, 'trip_start', None),
             trip_end=getattr(row, 'trip_end', None),
             items=items,
@@ -856,6 +901,9 @@ class ProjectRepo:
             train_number=sd.get("train_number"),
             hafas_provider=sd.get("hafas_provider"),
             route_polyline=sd.get("route_polyline"),
+            route_status=sd.get("route_status", "idle"),
+            route_error=sd.get("route_error"),
+            route_started_at=sd.get("route_started_at"),
         )
 
     @staticmethod

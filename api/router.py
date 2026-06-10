@@ -6,8 +6,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
+
+from src.project.project_repo import StaleWriteError
 
 from api.auth import router as auth_router
 from api.backup import router as backup_router
@@ -70,6 +72,12 @@ app.include_router(polarsteps_router)
 app.include_router(projects_router)
 app.include_router(share_router)
 app.include_router(strava_router)
+
+
+@app.exception_handler(StaleWriteError)
+async def _stale_write_handler(_request, exc: StaleWriteError):
+    """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.get("/scalar", include_in_schema=False)

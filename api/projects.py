@@ -25,7 +25,7 @@ import re
 import time
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
@@ -50,7 +50,7 @@ from src.models.activity import Activity
 from src.models.great_circle import great_circle_points
 from src.models.project import ConnectingSegment, DEFAULT_SLEEPING_GROUPS, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
-from src.project.project_repo import ProjectRepo, _compute_stats
+from src.project.project_repo import ProjectRepo, StaleWriteError, _compute_stats
 
 _cfg = Config("config/config.json")
 if os.environ.get("STRAVA_CLIENT_ID"):
@@ -101,6 +101,12 @@ class ActivitiesAddedOut(BaseModel):
 class RouteResolvedOut(BaseModel):
     polyline: List[List[float]] = Field(description="Resolved route as [[lon, lat], …] coordinates")
     stop_count: int = Field(description="Number of intermediate stops on the route")
+
+
+class RouteResolveTriggered(BaseModel):
+    """Returned by the async resolve-route trigger (HTTP 202)."""
+    status: str = Field(description="Always 'pending' — resolution runs in the background")
+    route_status: str = Field(description="Segment route_status after scheduling: 'pending'")
 
 class ImportedOut(BaseModel):
     name: str = Field(description="Name of the imported project")
@@ -269,6 +275,126 @@ def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
     """Background task: open a fresh session and recompute project stats."""
     with get_session() as sess:
         _repo.compute_and_cache_stats(sess, user_info_id, project_name)
+
+
+def _compute_segment_geometry(seg: ConnectingSegment, params: Dict[str, Any]) -> tuple[list, int]:
+    """Run the (slow) HAFAS + Overpass lookups for a segment.
+
+    Returns ``(polyline, stop_count)``.  Raises ``OverpassError`` (ferry/bus) or a
+    generic ``Exception`` on unrecoverable failure.  ``get_rail_geometry`` itself
+    never raises — it falls back to a straight line — so train resolution always
+    yields *some* geometry.
+    """
+    from src.services.overpass_service import (
+        OverpassError,  # noqa: F401 — re-exported for callers' except clauses
+        get_bus_geometry,
+        get_ferry_geometry,
+        get_rail_geometry,
+    )
+
+    if seg.segment_type == "train":
+        from src.services.hafas_service import HafasError, get_stop_sequence
+
+        use_date = params.get("date") or seg.date
+        stops: list[dict] = [
+            {"lat": seg.start.lat, "lon": seg.start.lon},
+            {"lat": seg.end.lat,   "lon": seg.end.lon},
+        ]
+        if params.get("hafas_provider") and params.get("train_number"):
+            try:
+                stops = get_stop_sequence(
+                    provider=params["hafas_provider"],
+                    train_number=params["train_number"],
+                    date=use_date or "",
+                    start_lat=seg.start.lat, start_lon=seg.start.lon,
+                    end_lat=seg.end.lat,     end_lon=seg.end.lon,
+                )
+            except HafasError:
+                pass  # fall back to two-point geometry
+        return get_rail_geometry(stops), len(stops)
+
+    if seg.segment_type == "boat":
+        polyline = get_ferry_geometry(
+            seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
+        return polyline, 2
+
+    if seg.segment_type == "bus":
+        polyline = get_bus_geometry(
+            seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
+        return polyline, 2
+
+    raise ValueError("Route resolution only supported for train, boat, and bus segments")
+
+
+def _find_segment(project, seg_id: str):
+    return next(
+        (i.segment for i in project.items
+         if i.item_type == "segment" and i.segment and i.segment.id == seg_id),
+        None,
+    )
+
+
+def _resolve_route_job(
+    user_info_id: int, name: str, seg_id: str, params: Dict[str, Any]
+) -> None:
+    """Background task: resolve a segment's real-world route geometry.
+
+    Runs the long HAFAS + Overpass lookups off the request path (holding no DB
+    session during the slow work), then persists the result with an
+    optimistic-lock retry so a concurrent user edit can't be silently clobbered.
+    Mirrors the fire-and-forget pattern of :func:`_refresh_share_tiles`.
+    """
+    _mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
+    try:
+        # 1. Load the segment (cheap) and compute geometry with no session held.
+        with get_session() as sess:
+            project = _repo.get_project(sess, user_info_id, name)
+        if project is None:
+            return
+        seg = _find_segment(project, seg_id)
+        if seg is None:
+            return
+        try:
+            polyline, _stops = _compute_segment_geometry(seg, params)
+            outcome = ("resolved", json.dumps(polyline),
+                       _mode_for_type.get(seg.segment_type, "great_circle"), None)
+        except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
+            outcome = ("failed", None, None, str(exc)[:200] or "Route resolution failed")
+
+        # 2. Persist, retrying once if a concurrent write bumped the lock_version.
+        for attempt in range(2):
+            try:
+                with get_session() as sess:
+                    project = _repo.get_project(sess, user_info_id, name)
+                    if project is None:
+                        return
+                    seg = _find_segment(project, seg_id)
+                    if seg is None:
+                        return  # deleted mid-resolve — nothing to write
+                    status, poly_json, rmode, err = outcome
+                    if status == "resolved":
+                        seg.route_mode = rmode
+                        seg.route_polyline = poly_json
+                        seg.route_status = "resolved"
+                        seg.route_error = None
+                        if params.get("train_number"):
+                            seg.train_number = params["train_number"]
+                        if params.get("hafas_provider"):
+                            seg.hafas_provider = params["hafas_provider"]
+                    else:
+                        # Leave route_mode/route_polyline so geo still renders the
+                        # great-circle arc; surface a short error for the UI.
+                        seg.route_status = "failed"
+                        seg.route_error = err
+                    seg.route_started_at = None
+                    _repo.save_project(sess, user_info_id, project, check_version=True)
+                break
+            except StaleWriteError:
+                if attempt == 1:
+                    break  # give up — a later edit/poll will reflect reality
+                continue
+    finally:
+        bust_geo_cache(user_info_id, name)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -1335,7 +1461,7 @@ def create_segment(
         if body.insert_after_index is not None:
             insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
         project.items.insert(insert_at, item)
-        _repo.save_project(sess, user_info_id, project)
+        _repo.save_project(sess, user_info_id, project, check_version=True)
     bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
@@ -1378,7 +1504,7 @@ def update_segment(
                     seg.route_polyline = None
                 elif body.route_mode == "rail":
                     seg.route_mode = "rail"
-                _repo.save_project(sess, user_info_id, project)
+                _repo.save_project(sess, user_info_id, project, check_version=True)
                 bust_geo_cache(user_info_id, name)
                 background_tasks.add_task(_refresh_stats_background, user_info_id, name)
                 background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
@@ -1409,7 +1535,7 @@ def delete_segment(
         ]
         if len(project.items) == original_len:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
-        _repo.save_project(sess, user_info_id, project)
+        _repo.save_project(sess, user_info_id, project, check_version=True)
     bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
@@ -1447,26 +1573,27 @@ class ResolveRouteRequest(BaseModel):
     date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
 
 
-@router.post("/{name}/segments/{seg_id}/resolve-route", response_model=RouteResolvedOut,
-             summary="Resolve route geometry for train, ferry, or bus segment")
+@router.post("/{name}/segments/{seg_id}/resolve-route", response_model=RouteResolveTriggered,
+             status_code=status.HTTP_202_ACCEPTED,
+             summary="Trigger async route resolution for a train, ferry, or bus segment")
 def resolve_segment_route(
     name: str,
     seg_id: str,
     body: ResolveRouteRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """
-    Resolve OSM-based route geometry for a train, boat, or bus segment.
+    Schedule OSM-based route resolution for a train, boat, or bus segment.
 
-    Train: calls the HAFAS schedule API (optional) for the stop sequence, then
-    queries Overpass for rail track geometry.
-    Boat/ferry and bus: query Overpass for route=ferry / route=bus relations.
+    Resolution (HAFAS stop sequence + Overpass track geometry) can take tens of
+    seconds, so it runs as a background task rather than blocking the request —
+    this is what previously caused proxy 504s on long routes.
 
-    Returns {"polyline": [[lon,lat],…], "stop_count": N}.
-    On any unrecoverable error returns 422 and leaves the segment unchanged.
+    The segment is marked ``route_status="pending"`` synchronously and a 202 is
+    returned immediately.  The client polls ``/meta`` until the segment flips to
+    ``resolved`` or ``failed``.  See :func:`_resolve_route_job`.
     """
-    from src.services.overpass_service import OverpassError
-
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project = _repo.get_project(
@@ -1483,92 +1610,26 @@ def resolve_segment_route(
         )
         if seg is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
-
-        if seg.segment_type == "train":
-            from src.services.hafas_service import HafasError, get_stop_sequence
-            from src.services.overpass_service import get_rail_geometry
-
-            use_date = body.date or seg.date
-            stops: list[dict] = [
-                {"lat": seg.start.lat, "lon": seg.start.lon},
-                {"lat": seg.end.lat,   "lon": seg.end.lon},
-            ]
-
-            if body.hafas_provider and body.train_number:
-                try:
-                    stops = get_stop_sequence(
-                        provider=body.hafas_provider,
-                        train_number=body.train_number,
-                        date=use_date or "",
-                        start_lat=seg.start.lat,
-                        start_lon=seg.start.lon,
-                        end_lat=seg.end.lat,
-                        end_lon=seg.end.lon,
-                    )
-                except HafasError:
-                    pass
-
-            try:
-                polyline = get_rail_geometry(stops)
-            except OverpassError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Could not resolve rail geometry: {exc}",
-                )
-
-            seg.route_mode     = "rail"
-            seg.route_polyline = json.dumps(polyline)
-            if body.train_number:
-                seg.train_number = body.train_number
-            if body.hafas_provider:
-                seg.hafas_provider = body.hafas_provider
-
-        elif seg.segment_type == "boat":
-            from src.services.overpass_service import get_ferry_geometry
-
-            try:
-                polyline = get_ferry_geometry(
-                    seg.start.lat, seg.start.lon,
-                    seg.end.lat,   seg.end.lon,
-                )
-            except OverpassError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Could not resolve ferry geometry: {exc}",
-                )
-            stops = [{"lat": seg.start.lat, "lon": seg.start.lon},
-                     {"lat": seg.end.lat,   "lon": seg.end.lon}]
-            seg.route_mode     = "ferry"
-            seg.route_polyline = json.dumps(polyline)
-
-        elif seg.segment_type == "bus":
-            from src.services.overpass_service import get_bus_geometry
-
-            try:
-                polyline = get_bus_geometry(
-                    seg.start.lat, seg.start.lon,
-                    seg.end.lat,   seg.end.lon,
-                )
-            except OverpassError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Could not resolve bus geometry: {exc}",
-                )
-            stops = [{"lat": seg.start.lat, "lon": seg.start.lon},
-                     {"lat": seg.end.lat,   "lon": seg.end.lon}]
-            seg.route_mode     = "bus"
-            seg.route_polyline = json.dumps(polyline)
-
-        else:
+        if seg.segment_type not in ("train", "boat", "bus"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Route resolution only supported for train, boat, and bus segments",
             )
 
-        _repo.save_project(sess, user_info_id, project)
+        seg.route_status = "pending"
+        seg.route_error = None
+        seg.route_started_at = datetime.now(timezone.utc).isoformat()
+        if body.train_number:
+            seg.train_number = body.train_number
+        if body.hafas_provider:
+            seg.hafas_provider = body.hafas_provider
+        _repo.save_project(sess, user_info_id, project, check_version=True)
     bust_geo_cache(user_info_id, name)
 
-    return {"polyline": polyline, "stop_count": len(stops)}
+    background_tasks.add_task(
+        _resolve_route_job, user_info_id, name, seg_id, body.model_dump()
+    )
+    return {"status": "pending", "route_status": "pending"}
 
 
 @router.delete("/{name}/share", status_code=status.HTTP_204_NO_CONTENT)

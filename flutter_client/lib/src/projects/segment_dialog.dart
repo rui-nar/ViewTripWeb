@@ -436,6 +436,17 @@ class _SegmentDialogState extends State<SegmentDialog> {
         trainNumber:   routeMode == 'rail' ? trainNumber   : null,
         date: date,
       );
+      final status = result['route_status'] as String? ?? 'resolved';
+      if (status == 'cancelled') return; // navigated away / deleted — stay silent
+      if (!notifier.isAlive) return;     // page gone — don't touch the messenger
+      if (status == 'pending') {
+        // Background job still running past the poll window — it'll appear later.
+        messenger.showSnackBar(const SnackBar(
+          content: Text('Still resolving route — it will appear shortly'),
+          duration: Duration(seconds: 5),
+        ));
+        return;
+      }
       final stopCount = result['stop_count'] as int? ?? 0;
       final msg = switch (routeMode) {
         'ferry' => 'Ferry route resolved',
@@ -447,6 +458,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         duration: const Duration(seconds: 5),
       ));
     } catch (e) {
+      if (!notifier.isAlive) return;
       messenger.showSnackBar(SnackBar(
         content: Text('Route unavailable: ${_resolveErrMsg(e)}'),
         duration: const Duration(seconds: 6),

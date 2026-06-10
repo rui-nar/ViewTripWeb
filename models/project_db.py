@@ -25,6 +25,9 @@ class DBProject(sqlmodel.SQLModel, table=True):
     user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
     name: str = sqlmodel.Field(index=True)
     version: int = sqlmodel.Field(default=1)
+    # Optimistic-lock counter, bumped on every save_project; distinct from the
+    # user-facing `version` (project schema version). Detects concurrent writes.
+    lock_version: int = sqlmodel.Field(default=0)
     # JSON-serialised ProjectFilterState: {"start_date": …, "end_date": …, "activity_types": …}
     filter_state_json: str = sqlmodel.Field(default="{}")
     created_at: float = sqlmodel.Field(default_factory=time.time)
@@ -93,6 +96,7 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
 _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({
     "id",
     "user_info_id",
+    "lock_version",
     "created_at",
     "updated_at",
     "share_token",

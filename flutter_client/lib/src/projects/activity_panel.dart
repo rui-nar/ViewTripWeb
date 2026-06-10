@@ -511,6 +511,85 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return '${m}m';
   }
 
+  static const _segmentRouteModeForType = {
+    'train': 'rail', 'boat': 'ferry', 'bus': 'bus',
+  };
+
+  /// Status line shown under a segment tile while its route resolves
+  /// asynchronously, or a tap-to-retry affordance if it failed.
+  /// Returns null when there is nothing to show (idle/resolved).
+  Widget? _segmentStatusLine(
+    BuildContext context,
+    ProjectNotifier notifier,
+    Map<String, dynamic> seg,
+    String segId,
+    String? segType,
+    ThemeData theme,
+  ) {
+    final status = seg['route_status'] as String?;
+    if (status == 'pending') {
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        const SizedBox(
+          width: 11, height: 11,
+          child: CircularProgressIndicator(strokeWidth: 1.6),
+        ),
+        const SizedBox(width: 6),
+        Text('Resolving route…',
+            style: theme.textTheme.labelSmall
+                ?.copyWith(color: theme.colorScheme.primary)),
+      ]);
+    }
+    if (status == 'failed') {
+      final err = seg['route_error'] as String?;
+      return InkWell(
+        onTap: () => _retrySegmentResolve(context, notifier, seg, segId, segType),
+        child: Tooltip(
+          message: err == null || err.isEmpty ? 'Tap to retry' : err,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.error_outline,
+                size: 12, color: theme.colorScheme.error),
+            const SizedBox(width: 4),
+            Text('Route failed — tap to retry',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.error)),
+          ]),
+        ),
+      );
+    }
+    return null;
+  }
+
+  void _retrySegmentResolve(
+    BuildContext context,
+    ProjectNotifier notifier,
+    Map<String, dynamic> seg,
+    String segId,
+    String? segType,
+  ) {
+    final routeMode = _segmentRouteModeForType[segType] ??
+        (seg['route_mode'] as String? ?? 'rail');
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+      content: Text('Retrying route resolution…'),
+      duration: Duration(seconds: 3),
+    ));
+    () async {
+      try {
+        await notifier.resolveTrainRoute(
+          segId,
+          routeMode: routeMode,
+          hafasProvider:
+              routeMode == 'rail' ? seg['hafas_provider'] as String? : null,
+          trainNumber:
+              routeMode == 'rail' ? seg['train_number'] as String? : null,
+          date: seg['date'] as String?,
+        );
+      } catch (_) {
+        // Failure is reflected on the tile via route_status; no extra toast.
+      }
+    }();
+  }
+
   static String _fmtMemDate(String date, String? time) {
     final d = DateTime.tryParse(date);
     if (d == null) return date;
@@ -1553,6 +1632,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       style: _segmentTitleStyle),
                                 ),
                               ]),
+                              subtitle: _segmentStatusLine(
+                                  context, notifier, seg, segId, segType, theme),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
