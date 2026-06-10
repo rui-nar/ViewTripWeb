@@ -77,9 +77,9 @@ def _decode_geo(resp) -> dict:
     return resp.json()
 
 
-def test_activity_sent_as_encoded_polyline(env):
+def test_activity_sent_as_encoded_polyline_when_opted_in(env):
     client, uid, name, enc = env
-    resp = client.get(f"/api/geo/project?name={name}")
+    resp = client.get(f"/api/geo/project?name={name}&encoded=1")
     assert resp.status_code == 200
     geo = _decode_geo(resp)
     feats = [f for f in geo["features"] if f["properties"]["type"] == "activity"]
@@ -94,28 +94,50 @@ def test_activity_sent_as_encoded_polyline(env):
     assert decoded[-1] == pytest.approx(_LINE[-1])
 
 
+def test_default_expands_coordinates_for_backward_compat(env):
+    """Without ?encoded=1 the server expands activity polylines to full
+    coordinates so a client that doesn't decode encoded polylines still renders
+    them (no vanishing tracks on version skew)."""
+    client, uid, name, _ = env
+    resp = client.get(f"/api/geo/project?name={name}")
+    assert resp.status_code == 200
+    geo = _decode_geo(resp)
+    feats = [f for f in geo["features"] if f["properties"]["type"] == "activity"]
+    assert len(feats) == 1
+    # No polyline property; coordinates expanded server-side.
+    assert "polyline" not in feats[0]["properties"]
+    coords = feats[0]["geometry"]["coordinates"]
+    assert len(coords) == len(_LINE)
+    assert coords[0] == pytest.approx([_LINE[0][1], _LINE[0][0]])  # [lon, lat]
+
+
 def test_response_is_gzipped(env):
     client, *_ = env
-    resp = client.get("/api/geo/project?name=Trip")
+    resp = client.get("/api/geo/project?name=Trip&encoded=1")
     assert resp.headers.get("content-encoding") == "gzip"
 
 
-def test_second_request_is_cache_hit(env):
+def test_cache_keys_per_format(env):
     client, *_ = env
-    r1 = client.get("/api/geo/project?name=Trip")
-    r2 = client.get("/api/geo/project?name=Trip")
+    # Same project, two formats → independent cache entries.
+    r1 = client.get("/api/geo/project?name=Trip&encoded=1")
+    r2 = client.get("/api/geo/project?name=Trip&encoded=1")
+    r3 = client.get("/api/geo/project?name=Trip")  # expanded — distinct key
     assert r1.headers["x-cache"] == "MISS"
     assert r2.headers["x-cache"] == "HIT"
+    assert r3.headers["x-cache"] == "MISS"
 
 
-def test_warm_geo_cache_populates_hit(env):
+def test_warm_geo_cache_populates_both_variants(env):
     client, uid, name, _ = env
-    assert (uid, name) not in _geo_cache
+    assert (uid, name, True) not in _geo_cache
     warm_geo_cache(uid, name)
-    assert (uid, name) in _geo_cache
-    # A subsequent endpoint call now serves the warmed bytes.
-    resp = client.get(f"/api/geo/project?name={name}")
-    assert resp.headers["x-cache"] == "HIT"
+    # Both the encoded and expanded payloads are warmed.
+    assert (uid, name, True) in _geo_cache
+    assert (uid, name, False) in _geo_cache
+    # Subsequent endpoint calls on either format serve the warmed bytes.
+    assert client.get(f"/api/geo/project?name={name}&encoded=1").headers["x-cache"] == "HIT"
+    assert client.get(f"/api/geo/project?name={name}").headers["x-cache"] == "HIT"
 
 
 def test_warm_geo_cache_defers_elevation(env, monkeypatch):

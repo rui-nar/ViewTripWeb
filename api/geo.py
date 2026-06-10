@@ -11,6 +11,7 @@ import os
 from threading import Lock
 from typing import Annotated, Any, Dict, List
 
+import polyline as polyline_lib
 from models.db import get_session
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -32,9 +33,14 @@ _geo_cache_lock = Lock()
 
 
 def bust_geo_cache(user_info_id: int, project_name: str) -> None:
-    """Invalidate the full-res GeoJSON cache entry for this project."""
+    """Invalidate every full-res GeoJSON cache entry for this project.
+
+    The cache keys on (user_info_id, name, encoded) so both the expanded and
+    encoded payload variants are dropped.
+    """
     with _geo_cache_lock:
-        _geo_cache.pop((user_info_id, project_name), None)
+        for key in [k for k in _geo_cache if k[0] == user_info_id and k[1] == project_name]:
+            _geo_cache.pop(key, None)
 
 
 def _legacy_path(user_id: str, name: str) -> str:
@@ -79,17 +85,24 @@ def project_geo_low_res(
     return json.loads(_compute_low_res_geo(project))
 
 
-def _build_full_geo_features(project: Project) -> List[Dict[str, Any]]:
+def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Dict[str, Any]]:
     """Build the full-resolution GeoJSON features for *project*.
 
-    Activities with a GPS track carry their Google-encoded ``summary_polyline``
-    verbatim in ``properties.polyline`` with an empty ``coordinates`` array; the
-    client decodes it back to ``[[lon, lat], …]``. This keeps the payload an
-    order of magnitude smaller than expanding every point server-side (a
-    120-activity trip drops from ~17.7 MB to a couple of MB) and skips the
-    server-side decode entirely. Activities without a polyline (GPX/private)
-    fall back to a two-point straight line in ``coordinates``. Segments always
-    use expanded coordinates (their polylines are already short).
+    When ``encoded`` is True, activities with a GPS track carry their
+    Google-encoded ``summary_polyline`` verbatim in ``properties.polyline`` with
+    an empty ``coordinates`` array; the client decodes it back to
+    ``[[lon, lat], …]``. This keeps the payload an order of magnitude smaller
+    than expanding every point server-side (a 120-activity trip drops from
+    ~17.7 MB to a couple of MB) and skips the server-side decode.
+
+    When ``encoded`` is False (the default), activity polylines are expanded to
+    full ``coordinates`` server-side. This is the backward-compatible format any
+    client renders directly; a client that doesn't decode encoded polylines (an
+    older build) would otherwise show nothing for those activities. Only clients
+    that opt in via ``?encoded=1`` receive the compact form.
+
+    Activities without a polyline (GPX/private) fall back to a two-point
+    straight line. Segments always use expanded coordinates (already short).
     """
     features: List[Dict[str, Any]] = []
     for item in project.items:
@@ -98,7 +111,7 @@ def _build_full_geo_features(project: Project) -> List[Dict[str, Any]]:
             if activity is None:
                 continue
 
-            if activity.summary_polyline:
+            if activity.summary_polyline and encoded:
                 # Pass the Google-encoded polyline through untouched; the client
                 # decodes it. No server-side decode, tiny payload.
                 features.append({
@@ -112,6 +125,18 @@ def _build_full_geo_features(project: Project) -> List[Dict[str, Any]]:
                         "polyline": activity.summary_polyline,
                     },
                 })
+            elif activity.summary_polyline:
+                # Expanded form — decode server-side so any client renders it.
+                decoded = polyline_lib.decode(activity.summary_polyline)
+                coords = [[lon, lat] for lat, lon in decoded]
+                if len(coords) < 2:
+                    continue
+                features.append(_linestring(coords, {
+                    "type": "activity",
+                    "activity_id": activity.id,
+                    "name": activity.name,
+                    "sport_type": activity.type,
+                }))
             elif activity.start_latlng and activity.end_latlng:
                 # No polyline (GPX import / private activity) — straight line fallback
                 coords = [
@@ -158,22 +183,24 @@ def _gzip_geo(features: List[Dict[str, Any]]) -> bytes:
 
 
 def warm_geo_cache(user_info_id: int, name: str) -> None:
-    """Recompute and cache the full-res GeoJSON for a project.
+    """Recompute and cache both full-res GeoJSON variants for a project.
 
     Called from background tasks right after ``bust_geo_cache`` so that the next
     edit-mode load is a fast cache HIT instead of a cold recompute (which, on a
     spinning-disk NAS, can exceed the client timeout and leave activities as
-    low-res straight lines). Best-effort: any failure is swallowed since the
-    endpoint will simply recompute on demand.
+    low-res straight lines). Warms both the encoded and expanded payloads so a
+    client on either format gets a HIT. Best-effort: any failure is swallowed
+    since the endpoint will simply recompute on demand.
     """
     try:
         with get_session() as sess:
             project = _repo.get_project(sess, user_info_id, name, include_elevation=False)
         if project is None:
             return
-        gz_bytes = _gzip_geo(_build_full_geo_features(project))
         with _geo_cache_lock:
-            _geo_cache[(user_info_id, name)] = gz_bytes
+            for enc in (True, False):
+                _geo_cache[(user_info_id, name, enc)] = _gzip_geo(
+                    _build_full_geo_features(project, encoded=enc))
     except Exception:
         pass
 
@@ -182,18 +209,20 @@ def warm_geo_cache(user_info_id: int, name: str) -> None:
 def project_geo(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    encoded: bool = False,
 ):
     """Return a GeoJSON FeatureCollection for *name*.
 
-    Each activity feature has properties ``{"type": "activity", …}``; activities
-    with a GPS track carry a Google-encoded ``polyline`` property (empty
-    ``coordinates``) that the client decodes, while GPX/private activities use a
-    two-point ``coordinates`` line. Each connecting segment has expanded
-    ``coordinates`` with properties ``{"type": "segment", …}``. GeoJSON
-    coordinates are [longitude, latitude] as per the spec.
+    Pass ``encoded=1`` to receive activity tracks as Google-encoded ``polyline``
+    properties (empty ``coordinates``) for a much smaller payload — the client
+    decodes them. The default (``encoded=0``) expands every activity polyline to
+    full ``coordinates`` server-side so any client renders it directly. GPX/
+    private activities always use a two-point ``coordinates`` line; segments
+    always use expanded ``coordinates``. GeoJSON coordinates are
+    [longitude, latitude] as per the spec.
     """
     user_info_id = int(current_user["sub"])
-    cache_key = (user_info_id, name)
+    cache_key = (user_info_id, name, encoded)
     with _geo_cache_lock:
         cached_bytes = _geo_cache.get(cache_key)
     if cached_bytes is not None:
@@ -212,7 +241,7 @@ def project_geo(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    gz_bytes = _gzip_geo(_build_full_geo_features(project))
+    gz_bytes = _gzip_geo(_build_full_geo_features(project, encoded=encoded))
     with _geo_cache_lock:
         _geo_cache[cache_key] = gz_bytes
     return Response(

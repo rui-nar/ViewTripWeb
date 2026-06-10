@@ -33,7 +33,9 @@ class ProjectService {
   /// a cold-cache build of a large trip can take a while on NAS storage.
   Future<Map<String, dynamic>> getGeo(String name) async {
     final encoded = Uri.encodeComponent(name);
-    final data = await api.get('/api/geo/project?name=$encoded',
+    // encoded=1 opts into the compact payload (activity tracks as Google-encoded
+    // polylines); expandEncodedActivities decodes them back to coordinates.
+    final data = await api.get('/api/geo/project?name=$encoded&encoded=1',
         timeout: const Duration(seconds: 90));
     return expandEncodedActivities(data as Map<String, dynamic>);
   }
