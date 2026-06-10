@@ -33,13 +33,13 @@ class ProjectService {
   /// a cold-cache build of a large trip can take a while on NAS storage.
   Future<Map<String, dynamic>> getGeo(String name) async {
     final encoded = Uri.encodeComponent(name);
-    // NOTE: the compact `&encoded=1` payload (activity tracks as Google-encoded
-    // polylines, decoded by expandEncodedActivities) is temporarily disabled —
-    // it correlated with a paint-pipeline exception in the web release build
-    // that couldn't be diagnosed from minified symbols. The server still
-    // expands coordinates by default, the proven-working path. Re-enable by
-    // appending '&encoded=1' once the render issue is reproduced in a debug
-    // build. The generous timeout covers a cold-cache build of a large trip.
+    // Expanded coordinates only (no `&encoded=1`). The compact encoded-polyline
+    // payload is decoded server-side instead, because decoding it on the *web*
+    // client produced out-of-range coordinates (a latitude of ~42e6 that tripped
+    // flutter_map's `north <= 90` assertion and crashed the map). The decode is
+    // correct under the Dart VM (mobile/desktop, 64-bit int) but the web int /
+    // bitwise semantics diverge, so client-side decode can't be trusted here.
+    // The generous timeout covers a cold-cache build of a large trip.
     final data = await api.get('/api/geo/project?name=$encoded',
         timeout: const Duration(seconds: 90));
     return expandEncodedActivities(data as Map<String, dynamic>);
@@ -63,8 +63,19 @@ class ProjectService {
       if (geom is! Map) continue;
       final existing = geom['coordinates'];
       if (existing is List && existing.isNotEmpty) continue; // already expanded
-      final pts = decodePolyline(enc);
-      geom['coordinates'] = [for (final p in pts) [p.lon, p.lat]];
+      // Validate every decoded point: on the web the polyline decode can yield
+      // out-of-range values, and a single bad latitude crashes flutter_map's
+      // bounds assertion. Drop non-finite / out-of-range points rather than
+      // ever handing them to the map. (Client-side decode is disabled for web in
+      // getGeo; this is a defensive backstop for any other caller/platform.)
+      final coords = <List<double>>[];
+      for (final p in decodePolyline(enc)) {
+        if (p.lat.isFinite && p.lon.isFinite &&
+            p.lat >= -90 && p.lat <= 90 && p.lon >= -180 && p.lon <= 180) {
+          coords.add([p.lon, p.lat]);
+        }
+      }
+      if (coords.length >= 2) geom['coordinates'] = coords;
     }
     return geo;
   }

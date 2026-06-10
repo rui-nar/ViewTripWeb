@@ -34,6 +34,26 @@ void main() {
       expect((coords.last[1] as num).toDouble(), closeTo(65.01, 1e-4));
     });
 
+    test('drops out-of-range decoded points (no flutter_map bounds crash)', () {
+      // A validly-encoded polyline whose points are out of geographic range
+      // (the web-decode failure mode) must never reach the map as coordinates.
+      final encoded = _encode([(200.0, 0.0), (200.0, 5.0)]); // lat 200 = invalid
+      final geo = {
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'geometry': {'type': 'LineString', 'coordinates': []},
+            'properties': {'type': 'activity', 'activity_id': 7, 'polyline': encoded},
+          },
+        ],
+      };
+      final out = ProjectService.expandEncodedActivities(geo);
+      final coords = out['features'][0]['geometry']['coordinates'] as List;
+      // Out-of-range points are dropped, so coordinates stay empty here.
+      expect(coords, isEmpty);
+    });
+
     test('leaves features that already have coordinates untouched', () {
       final geo = {
         'type': 'FeatureCollection',
