@@ -50,9 +50,8 @@ class ViewProjectNotifier extends ProjectNotifier {
   final _ViewProjectService _viewSvc;
   bool _disposed = false;
 
-  ViewProjectNotifier._internal(_ViewProjectService svc)
-      : _viewSvc = svc,
-        super(svc);
+  ViewProjectNotifier._internal(_ViewProjectService super.svc)
+      : _viewSvc = svc;
 
   factory ViewProjectNotifier(String projectName) {
     final svc = _ViewProjectService(projectName);
