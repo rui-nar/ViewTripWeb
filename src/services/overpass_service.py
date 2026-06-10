@@ -3,8 +3,10 @@ Overpass API service — extracts railway geometry from OpenStreetMap.
 
 Two strategies (tried in order):
   3a  Route-relation strategy: query OSM train route relations containing
-      both station nodes (matched by uic_ref tag).  Returns the ordered
-      way geometry directly.
+      both station nodes (matched by uic_ref tag).  The relation's member
+      ways are routed start→end through a node graph (Dijkstra) rather than
+      naively chained — train relations include double-track ways, sidings
+      and station tracks that would otherwise produce a self-overlapping line.
   3b  Coordinate fallback: query railway ways inside the bounding box,
       build a node graph, and route with Dijkstra between the two nearest
       nodes to start/end coords.
@@ -177,7 +179,7 @@ node["uic_ref"="{uic2}"]->.b;
     elements = data.get("elements", [])
     if not elements:
         return None
-    return _extract_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
+    return _extract_train_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
 
 
 def _clean_uic(uic: str) -> str:
@@ -202,6 +204,42 @@ def _extract_geometry(
 
     polyline = _chain(segments)
     return _trim(polyline, lat1, lon1, lat2, lon2) if len(polyline) >= 2 else None
+
+
+def _extract_train_geometry(
+    rel: dict,
+    lat1: float, lon1: float, lat2: float, lon2: float,
+) -> Optional[list[list[float]]]:
+    """Extract a single clean start→end polyline from a train route relation.
+
+    Train relations are not simple ordered polylines: they routinely include
+    parallel double-track ways, passing loops, sidings and station tracks.
+    Greedily chaining their member ways (:func:`_chain`) walks into and back out
+    of every stub and alternates between the up/down tracks, producing a
+    self-overlapping line several times longer than the real route (observed:
+    Helsinki→Rovaniemi rendered at 3031 km vs ~970 km of actual track, 66% of
+    points re-treading the same ground).
+
+    Routing start→end through the relation's own member-way node graph instead
+    yields a shortest on-track path that visits each node at most once — no
+    backtracking, no double-track duplication. Falls back to the chain/trim
+    extraction only when the member ways don't form a connected graph between
+    the two endpoints (rare; e.g. a relation with a genuine gap).
+    """
+    ways = [
+        m for m in rel.get("members", [])
+        if m.get("type") == "way" and len(m.get("geometry", [])) >= 2
+    ]
+    if ways:
+        nodes, adj = _build_rail_graph(ways)
+        if nodes:
+            start = _nearest_node(nodes, lat1, lon1)
+            end = _nearest_node(nodes, lat2, lon2)
+            path = _dijkstra(nodes, adj, start, end)
+            if path and len(path) >= 2:
+                return [nodes[n] for n in path]
+    # Disconnected relation graph — fall back to greedy chaining + trim.
+    return _extract_geometry(rel, lat1, lon1, lat2, lon2)
 
 
 def _chain(segs: list[list[list[float]]]) -> list[list[float]]:
@@ -294,7 +332,7 @@ rel(id:{ids_str});
     best: Optional[list[list[float]]] = None
     best_score = math.inf
     for rel in relations:
-        geom = _extract_geometry(rel, lat1, lon1, lat2, lon2)
+        geom = _extract_train_geometry(rel, lat1, lon1, lat2, lon2)
         if geom and len(geom) >= 2:
             score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
             if score < best_score:

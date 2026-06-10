@@ -8,6 +8,8 @@ import pytest
 from src.services.hafas_service import HafasError, get_stop_sequence
 from src.services.overpass_service import (
     OverpassError,
+    _extract_geometry,
+    _extract_train_geometry,
     _via_train_relations_endpoints,
     get_rail_geometry,
 )
@@ -362,3 +364,67 @@ class TestCoordinateFallbackBoundedCalls:
 
         assert calls["rail"] == 0, "Oversized bbox must not issue a rail query"
         assert result == [[0.0, 0.0], [5.0, 40.0]]
+
+
+class TestTrainRelationGraphExtraction:
+    """Regression for the Helsinki→Rovaniemi self-overlapping polyline.
+
+    A train route relation contains parallel double-track ways, sidings and
+    station tracks. Greedily chaining its member ways walks up one track and
+    back down the other, producing a line several times longer than the real
+    route that re-treads the same ground (observed: 3031 km rendered for a
+    ~970 km line, 66% of points sharing grid cells). The graph-routed
+    extraction must return a single clean start→end path instead.
+    """
+
+    @staticmethod
+    def _way(points):
+        return {"type": "way", "geometry": [{"lon": lon, "lat": lat} for lon, lat in points]}
+
+    @staticmethod
+    def _path_len(poly):
+        return sum(
+            ((poly[i + 1][0] - poly[i][0]) ** 2 + (poly[i + 1][1] - poly[i][1]) ** 2) ** 0.5
+            for i in range(len(poly) - 1)
+        )
+
+    def _siding_relation(self):
+        """A 1.0°-long north-bound main line with a dead-end siding branching
+        east from the midpoint — the shape of a real station/passing track.
+
+        Members are ordered so the greedy chain walks the south half, out along
+        the siding, back, then the north half: an interior out-and-back that
+        ``_trim`` cannot clip because it lies between the two endpoints.
+        """
+        south = [(0.0, 0.0), (0.0, 0.5)]
+        siding = [(0.0, 0.5), (0.3, 0.5)]      # dead-end stub
+        north = [(0.0, 0.5), (0.0, 1.0)]
+        return {
+            "type": "relation",
+            "id": 1,
+            "members": [self._way(south), self._way(siding), self._way(north)],
+        }
+
+    def test_graph_extraction_does_not_backtrack(self):
+        rel = self._siding_relation()
+        # Start at the south end, finish at the north end.
+        geom = _extract_train_geometry(rel, 0.0, 0.0, 1.0, 0.0)
+
+        assert geom is not None and len(geom) >= 2
+        # Net north span is 1.0°; the clean path is ~1.0 long. The siding
+        # detour (out-and-back to lon 0.3) must be excluded entirely.
+        assert self._path_len(geom) < 1.05, f"path too long: {self._path_len(geom)}"
+        # No point wanders east onto the siding.
+        assert max(pt[0] for pt in geom) < 0.01, "path entered the siding"
+        # Latitude increases monotonically — no folding back south.
+        lats = [pt[1] for pt in geom]
+        assert lats == sorted(lats), "path folds back on itself"
+
+    def test_chain_extraction_would_backtrack(self):
+        """Documents the old behaviour the graph path fixes: naive chain+trim of
+        the same relation keeps the siding out-and-back, inflating the line."""
+        chained = _extract_geometry(self._siding_relation(), 0.0, 0.0, 1.0, 0.0)
+        assert chained is not None
+        # Main line is 1.0 long; the retained siding detour adds ~0.6 (0.3 out
+        # + 0.3 back), so the chained path is markedly longer.
+        assert self._path_len(chained) > 1.5
