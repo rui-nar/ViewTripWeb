@@ -144,6 +144,7 @@ def _resolve_geo(
 def _row_to_memory(row: DBMemory) -> Memory:
     return Memory(
         id=row.id,
+        public_id=row.public_id,
         project_id=row.project_id,
         name=row.name,
         date=row.date,

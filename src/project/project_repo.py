@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -476,6 +477,7 @@ class ProjectRepo:
                 mem = item.memory
                 mem_row = DBMemory(
                     project_id=row.id,
+                    public_id=mem.public_id or uuid.uuid4().hex,
                     name=mem.name,
                     date=mem.date,
                     time=mem.time,
@@ -805,6 +807,7 @@ class ProjectRepo:
     def _row_to_memory(row: DBMemory) -> Memory:
         return Memory(
             id=row.id,
+            public_id=row.public_id,
             project_id=row.project_id,
             name=row.name,
             date=row.date,

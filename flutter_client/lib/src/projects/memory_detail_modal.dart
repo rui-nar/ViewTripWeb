@@ -5,6 +5,7 @@ import '../api/client.dart';
 import '../shared/shared_memory_service.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
+import 'social_share_dialog.dart';
 
 /// Shows a detail view for a memory — photo mosaic, date, description,
 /// likes, comments, prev/next navigation and edit/delete controls.
@@ -380,6 +381,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
       await widget.notifier.deleteMemory(_current['id']?.toString() ?? '');
       if (mounted) Navigator.of(context, rootNavigator: true).pop();
     }
+  }
+
+  void _shareToSocial() {
+    final pid = _current['public_id'] as String?;
+    final notifier = widget.notifier;
+    // Capture the (root) navigator's stable context, then close this modal and
+    // open the share composer on top of the underlying screen.
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final hostContext = navigator.context;
+    navigator.pop();
+    showSocialShareDialog(hostContext, notifier, initialMemoryPublicId: pid);
   }
 
   String _photoThumbUrl(String uuid) {
@@ -892,6 +904,15 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (widget.shareToken == null) ...[
+                IconButton(
+                  icon: const Icon(Icons.share_outlined,
+                      size: 18, color: _kText2),
+                  tooltip: 'Share to social media',
+                  onPressed: _shareToSocial,
+                ),
+                const SizedBox(width: 4),
+              ],
               _likesBar(),
               if (!widget.readOnly && widget.shareToken == null) ...[
                 const SizedBox(width: 12),

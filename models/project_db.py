@@ -10,6 +10,7 @@ Table names are kept short and lowercase to match SQLite conventions:
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Optional
 
 import sqlmodel
@@ -219,6 +220,11 @@ class DBMemory(sqlmodel.SQLModel, table=True):
     __tablename__ = "memory"
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    # Stable public identifier used in durable share URLs. Generated once at
+    # creation and never changed — decoupled from the reassignable primary key
+    # so a delete+recreate or full re-import never breaks an existing link.
+    public_id: str = sqlmodel.Field(
+        default_factory=lambda: uuid.uuid4().hex, index=True, unique=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     name: Optional[str] = sqlmodel.Field(default=None)
     date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"

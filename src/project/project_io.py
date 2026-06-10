@@ -184,6 +184,7 @@ class ProjectIO:
             mem = item.memory
             d["memory"] = {
                 "id": mem.id,
+                "public_id": mem.public_id,
                 "name": mem.name,
                 "date": mem.date,
                 "time": mem.time,
@@ -242,6 +243,7 @@ class ProjectIO:
             md = d.get("memory", {})
             mem = Memory(
                 id=md.get("id"),
+                public_id=md.get("public_id"),
                 name=md.get("name"),
                 date=md.get("date", ""),
                 time=md.get("time"),

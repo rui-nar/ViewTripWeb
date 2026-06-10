@@ -8,6 +8,7 @@ from typing import List, Optional
 @dataclass
 class Memory:
     id: Optional[int] = None
+    public_id: Optional[str] = None         # stable UUID for durable share links
     project_id: Optional[int] = None
     name: Optional[str] = None
     date: str = ""                          # "YYYY-MM-DD" — mandatory

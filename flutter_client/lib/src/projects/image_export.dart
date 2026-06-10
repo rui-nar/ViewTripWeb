@@ -1,9 +1,6 @@
 library;
 
-import 'dart:js_interop';
 import 'dart:ui' as ui;
-
-import 'package:web/web.dart' as web;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -110,15 +107,21 @@ bool isThumbnailBlank(Uint8List bytes) {
 }
 
 /// Renders an offscreen map + optional elevation chart, polls until tiles
-/// settle, then triggers a PNG download.
-Future<void> performOffscreenExport({
+/// settle, then returns the composited PNG bytes (or null if rendering could
+/// not complete). The byte-capture path is platform-agnostic; callers that
+/// want a browser download pass the result to `downloadPng` (web-only).
+///
+/// [boundsOverride] fits the camera to a specific region (e.g. one day's
+/// route); when null the whole trip's bounds are used.
+Future<Uint8List?> performOffscreenExport({
   required BuildContext context,
   required ProjectNotifier notifier,
   required String projectName,
   required ImageExportOptions opts,
+  LatLngBounds? boundsOverride,
 }) async {
   final geo = notifier.geo;
-  if (geo == null) return;
+  if (geo == null) return null;
 
   final allPoints = <LatLng>[];
   final polylines = <Polyline>[];
@@ -184,9 +187,11 @@ Future<void> performOffscreenExport({
                     child: FlutterMap(
                       mapController: exportCtrl,
                       options: MapOptions(
-                        initialCameraFit: allPoints.isNotEmpty
+                        initialCameraFit: (boundsOverride != null ||
+                                allPoints.isNotEmpty)
                             ? CameraFit.bounds(
-                                bounds: LatLngBounds.fromPoints(allPoints),
+                                bounds: boundsOverride ??
+                                    LatLngBounds.fromPoints(allPoints),
                                 padding: const EdgeInsets.all(48))
                             : null,
                         interactionOptions: const InteractionOptions(
@@ -273,7 +278,7 @@ Future<void> performOffscreenExport({
   try {
     final boundary = exportKey.currentContext?.findRenderObject()
         as RenderRepaintBoundary?;
-    if (boundary == null) return;
+    if (boundary == null) return null;
 
     ui.Image image = await boundary.toImage(pixelRatio: captureRatio);
 
@@ -305,23 +310,10 @@ Future<void> performOffscreenExport({
     }
 
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null) return;
-    final bytes = byteData.buffer.asUint8List();
-    final blob = web.Blob(
-      [bytes.toJS as JSAny].toJS,
-      web.BlobPropertyBag(type: 'image/png'),
-    );
-    final url = web.URL.createObjectURL(blob);
-    (web.document.createElement('a') as web.HTMLAnchorElement)
-      ..href = url
-      ..download = '$projectName.png'
-      ..click();
-    web.URL.revokeObjectURL(url);
-
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(const SnackBar(
-        content: Text('Export complete'), duration: Duration(seconds: 3)));
+    if (byteData == null) return null;
+    return byteData.buffer.asUint8List();
   } finally {
+    messenger.hideCurrentSnackBar();
     overlay.remove();
     exportCtrl.dispose();
   }

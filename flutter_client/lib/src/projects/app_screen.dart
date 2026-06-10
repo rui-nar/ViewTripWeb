@@ -9,14 +9,14 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
-import 'package:flutter/services.dart';
-
 import 'basemaps.dart';
 import 'elevation_chart.dart';
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'map_panel.dart';
 import 'image_export.dart';
+import 'image_download.dart';
+import 'social_share_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
 
@@ -187,13 +187,20 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   Future<void> _startExport(ImageExportOptions opts) async {
     if (!mounted) return;
     setState(() => _isExporting = true);
+    final messenger = ScaffoldMessenger.of(context);
     try {
-      await performOffscreenExport(
+      final png = await performOffscreenExport(
         context: context,
         notifier: context.read<ProjectNotifier>(),
         projectName: widget.projectName,
         opts: opts,
       );
+      if (png != null) {
+        downloadPng(png, '${widget.projectName}.png');
+        messenger.showSnackBar(const SnackBar(
+            content: Text('Export complete'),
+            duration: Duration(seconds: 3)));
+      }
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
@@ -230,64 +237,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     );
   }
 
-  Future<void> _showShareDialog() async {
-    final notifier = context.read<ProjectNotifier>();
-    // Capture before any await so the messenger is available inside the dialog.
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await notifier.createShareToken();
-      if (!mounted) return;
-
-      final token = notifier.shareToken ?? '';
-      final shareUrl = '${Uri.base.origin}/share/$token';
-
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Share project'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text('Anyone with this link can view the project read-only:'),
-              const SizedBox(height: 12),
-              SelectableText(shareUrl),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: shareUrl));
-                messenger.showSnackBar(
-                  const SnackBar(content: Text('Link copied to clipboard')),
-                );
-              },
-              child: const Text('Copy link'),
-            ),
-            TextButton(
-              onPressed: () async {
-                Navigator.of(ctx).pop();
-                await notifier.revokeShareToken();
-                messenger.showSnackBar(
-                  const SnackBar(content: Text('Share link revoked')),
-                );
-              },
-              child: const Text('Revoke'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-    } on Exception catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text(
-            'Share failed: ${e.toString().replaceFirst('Exception: ', '')}')),
-      );
-    }
+  void _showShareDialog() {
+    // Repurposed: the top-bar share button now opens the social-share composer.
+    // Read-only link management lives in the project settings "Share" section.
+    showSocialShareDialog(context, context.read<ProjectNotifier>());
   }
 
   @override

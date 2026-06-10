@@ -11,6 +11,7 @@ import '../auth/auth_notifier.dart';
 import '../projects/basemaps.dart';
 import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingPlaceholder;
 import '../projects/map_panel.dart';
+import '../projects/memory_detail_modal.dart';
 import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
 import '../projects/project_stats_screen.dart';
@@ -143,7 +144,16 @@ class SharedProjectNotifier extends ProjectNotifier {
 
 class SharedProjectScreen extends StatefulWidget {
   final String token;
-  const SharedProjectScreen({super.key, required this.token});
+
+  /// When set, the memory with this stable public_id is opened automatically
+  /// once the project has loaded (deep link `/share/<token>?memory=<id>`).
+  final String? initialMemoryPublicId;
+
+  const SharedProjectScreen({
+    super.key,
+    required this.token,
+    this.initialMemoryPublicId,
+  });
 
   @override
   State<SharedProjectScreen> createState() => _SharedProjectScreenState();
@@ -181,14 +191,18 @@ class _SharedProjectScreenState extends State<SharedProjectScreen> {
     }
     return ChangeNotifierProvider.value(
       value: _notifier!,
-      child: _SharedProjectView(token: widget.token),
+      child: _SharedProjectView(
+        token: widget.token,
+        initialMemoryPublicId: widget.initialMemoryPublicId,
+      ),
     );
   }
 }
 
 class _SharedProjectView extends StatefulWidget {
   final String token;
-  const _SharedProjectView({required this.token});
+  final String? initialMemoryPublicId;
+  const _SharedProjectView({required this.token, this.initialMemoryPublicId});
 
   @override
   State<_SharedProjectView> createState() => _SharedProjectViewState();
@@ -199,16 +213,48 @@ class _SharedProjectViewState extends State<_SharedProjectView>
   late final AnimatedMapController _mapController =
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
 
+  bool _deepLinkHandled = false;
+
   @override
   void dispose() {
     _mapController.dispose();
     super.dispose();
   }
 
+  /// Opens the deep-linked memory once the project has loaded. Matches on the
+  /// stable public_id; if not found (e.g. the memory was removed), it silently
+  /// leaves the reader at the trip root.
+  void _maybeOpenDeepLinkedMemory(ProjectNotifier pn) {
+    if (_deepLinkHandled || widget.initialMemoryPublicId == null) return;
+    if (!pn.isMetaLoaded) return;
+    _deepLinkHandled = true;
+
+    final match = pn.items.firstWhere(
+      (i) =>
+          i['item_type'] == 'memory' &&
+          (i['memory'] as Map?)?['public_id'] == widget.initialMemoryPublicId,
+      orElse: () => const <String, dynamic>{},
+    );
+    final mem = match['memory'];
+    if (mem is! Map) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showMemoryDetail(
+        context,
+        pn,
+        mem.cast<String, dynamic>(),
+        readOnly: true,
+        shareToken: widget.token,
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = context.watch<SharedProjectNotifier>();
     final pn = notifier as ProjectNotifier;
+    _maybeOpenDeepLinkedMemory(pn);
     final theme = Theme.of(context);
     final authUser = context.watch<AuthNotifier>().user;
     final isAnonymous = authUser == null;

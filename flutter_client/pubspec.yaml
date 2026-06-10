@@ -37,6 +37,9 @@ dependencies:
   url_launcher_web: ^2.3.3
   web: ^1.1.0
 
+  # Native / Web Share API hand-off for social sharing
+  share_plus: ^10.0.0
+
   # Persist user preferences (theme mode)
   shared_preferences: ^2.3.2
 

@@ -149,7 +149,12 @@ GoRouter buildRouter(BuildContext context) {
         path: '/share/:token',
         builder: (context, state) {
           final token = state.pathParameters['token']!;
-          return SharedProjectScreen(token: token);
+          // Optional deep link to a specific memory by its stable public_id.
+          final memoryPublicId = state.uri.queryParameters['memory'];
+          return SharedProjectScreen(
+            token: token,
+            initialMemoryPublicId: memoryPublicId,
+          );
         },
       ),
     ],
