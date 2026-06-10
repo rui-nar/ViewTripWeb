@@ -291,3 +291,74 @@ class TestTrainRelationsEndpoints:
         # Exactly 2 enrichment calls (first + last), not 4.
         assert len(enrich_calls) == 2, f"Expected 2 enrichment calls, got {len(enrich_calls)}"
         assert len(result) >= 3
+
+
+class TestCoordinateFallbackBoundedCalls:
+    """Regression for the Helsinki–Rovaniemi multi-minute hang.
+
+    When strategies A/B fail (no UIC, no covering route relation — common in
+    Finland), resolution falls to the coordinate Dijkstra fallback. That used
+    to issue one Overpass request *per consecutive stop pair*, so a ~20-stop
+    route fired ~20 sequential 45 s-timeout requests. The fallback must now make
+    a single whole-route query regardless of stop count.
+    """
+
+    def test_strategy_c_makes_single_overpass_query_for_long_route(self):
+        n = 12
+        stops = [
+            {
+                "lat": _LAT1 + (i / (n - 1)) * (_LAT2 - _LAT1),
+                "lon": _LON1 + (i / (n - 1)) * (_LON2 - _LON1),
+            }
+            for i in range(n)
+        ]
+
+        # One fake railway way through every stop, so the shared-graph Dijkstra
+        # connects each consecutive pair.
+        rail_way = {
+            "type": "way",
+            "geometry": [{"lon": s["lon"], "lat": s["lat"]} for s in stops],
+        }
+        calls = {"enrich": 0, "ids": 0, "rail": 0, "total": 0}
+
+        def _overpass_side_effect(query):
+            calls["total"] += 1
+            if "uic_ref" in query:        # endpoint UIC enrichment
+                calls["enrich"] += 1
+                return {"elements": []}   # no station → no UIC → skip Strategy A
+            if "out ids" in query:        # Strategy B relation-id lookup
+                calls["ids"] += 1
+                return {"elements": []}   # none → Strategy B fails → Strategy C
+            calls["rail"] += 1            # the single coordinate-fallback query
+            return {"elements": [rail_way]}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
+            result = get_rail_geometry(stops)
+
+        # Exactly one whole-route query, regardless of the 12 stops.
+        assert calls["rail"] == 1, f"Expected 1 rail query, got {calls['rail']}"
+        # Whole resolution stays bounded (2 enrich + 1 Strategy-B id + 1 rail).
+        assert calls["total"] <= 4, f"Expected <=4 Overpass calls, got {calls['total']}"
+        assert len(result) >= 2
+
+    def test_oversized_bbox_straight_lines_without_query(self):
+        """A pathologically long span skips the query and returns a chord."""
+        stops = [
+            {"lat": 0.0, "lon": 0.0},
+            {"lat": 40.0, "lon": 5.0},   # >12° span
+        ]
+        calls = {"rail": 0}
+
+        def _overpass_side_effect(query):
+            if "uic_ref" in query:
+                return {"elements": []}
+            if "out ids" in query:
+                return {"elements": []}
+            calls["rail"] += 1
+            return {"elements": []}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
+            result = get_rail_geometry(stops)
+
+        assert calls["rail"] == 0, "Oversized bbox must not issue a rail query"
+        assert result == [[0.0, 0.0], [5.0, 40.0]]

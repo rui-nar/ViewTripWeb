@@ -313,28 +313,37 @@ rel(id:{ids_str});
 # Strategy 3c — coordinate fallback (bounding-box Dijkstra)
 # ---------------------------------------------------------------------------
 
+# Maximum bounding-box span (degrees) for the single coordinate-fallback query.
+# Beyond this the Overpass response risks being huge/slow, so we straight-line
+# instead. Comfortably covers any real single train leg (Helsinki–Rovaniemi is
+# ~6.3°); guards only against pathological cross-continent inputs.
+_RAIL_BBOX_MAX_SPAN = 12.0
+
+
 def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
-    full: list[list[float]] = []
-    for i in range(len(stops) - 1):
-        seg = _coord_segment(
-            stops[i]["lat"], stops[i]["lon"],
-            stops[i + 1]["lat"], stops[i + 1]["lon"],
-        )
-        full = full + (seg[1:] if full else seg)
-    return full if len(full) >= 2 else _straight(
-        stops[0]["lat"], stops[0]["lon"], stops[-1]["lat"], stops[-1]["lon"]
-    )
+    """Single whole-route Overpass query, then sequential Dijkstra between
+    consecutive stops on the shared railway graph.
 
+    This previously issued one Overpass HTTP request *per consecutive stop
+    pair*. A long route reaching this last-resort fallback (e.g. VR
+    Helsinki–Rovaniemi returns ~20 stops, and Finnish ``route=train`` relations
+    are too sparse for strategies A/B) therefore fired ~20 sequential requests,
+    each with a 45 s timeout, and the resolve job appeared to hang for several
+    minutes. One query bounds the network cost to a single round-trip; the
+    per-pair Dijkstra stays cheap because consecutive stations are close, so
+    each search only explores a small local frontier of the shared graph.
+    """
+    lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
+    lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
 
-def _coord_segment(
-    lat1: float, lon1: float,
-    lat2: float, lon2: float,
-) -> list[list[float]]:
+    lats = [s["lat"] for s in stops]
+    lons = [s["lon"] for s in stops]
+    if (max(lats) - min(lats) > _RAIL_BBOX_MAX_SPAN or
+            max(lons) - min(lons) > _RAIL_BBOX_MAX_SPAN):
+        return _straight(lat1, lon1, lat2, lon2)
+
     buf = 0.25
-    bbox = (
-        min(lat1, lat2) - buf, min(lon1, lon2) - buf,
-        max(lat1, lat2) + buf, max(lon1, lon2) + buf,
-    )
+    bbox = (min(lats) - buf, min(lons) - buf, max(lats) + buf, max(lons) + buf)
     # No usage filter — OSM tagging conventions vary by country (Germany uses
     # usage=main/branch; France often uses usage=main_line or omits it entirely).
     # The railway type filter is restrictive enough to avoid excessive data.
@@ -350,11 +359,38 @@ def _coord_segment(
     except OverpassError:
         return _straight(lat1, lon1, lat2, lon2)
 
-    ways = data.get("elements", [])
-    if not ways:
+    nodes, adj = _build_rail_graph(data.get("elements", []))
+    if not nodes:
         return _straight(lat1, lon1, lat2, lon2)
 
-    # Build adjacency graph
+    # Route each consecutive stop pair on the shared graph. Anchoring on the
+    # intermediate stops keeps the polyline on the correct line where several
+    # railways share the corridor.
+    full: list[list[float]] = []
+    for i in range(len(stops) - 1):
+        a = _nearest_node(nodes, stops[i]["lat"], stops[i]["lon"])
+        b = _nearest_node(nodes, stops[i + 1]["lat"], stops[i + 1]["lon"])
+        path = _dijkstra(nodes, adj, a, b)
+        if path:
+            seg = [nodes[n] for n in path]
+        else:
+            seg = [
+                [stops[i]["lon"], stops[i]["lat"]],
+                [stops[i + 1]["lon"], stops[i + 1]["lat"]],
+            ]
+        full = full + (seg[1:] if full else seg)
+
+    return full if len(full) >= 2 else _straight(lat1, lon1, lat2, lon2)
+
+
+def _build_rail_graph(
+    ways: list[dict],
+) -> tuple[dict[str, list[float]], dict[str, list[str]]]:
+    """Build an undirected node graph from Overpass way geometry.
+
+    Node IDs are rounded "lat,lon" strings so ways sharing a vertex connect.
+    Returns (nodes: id→[lon, lat], adjacency: id→[neighbour ids]).
+    """
     nodes: dict[str, list[float]] = {}
     adj:   dict[str, list[str]]   = {}
     for way in ways:
@@ -366,17 +402,7 @@ def _coord_segment(
                 adj.setdefault(prev, []).append(nid)
                 adj.setdefault(nid,  []).append(prev)
             prev = nid
-
-    if not nodes:
-        return _straight(lat1, lon1, lat2, lon2)
-
-    start_node = _nearest_node(nodes, lat1, lon1)
-    end_node   = _nearest_node(nodes, lat2, lon2)
-    path = _dijkstra(nodes, adj, start_node, end_node)
-
-    if path:
-        return [[lon1, lat1]] + [nodes[n] for n in path] + [[lon2, lat2]]
-    return _straight(lat1, lon1, lat2, lon2)
+    return nodes, adj
 
 
 def _nearest_node(nodes: dict[str, list[float]], lat: float, lon: float) -> str:
@@ -536,18 +562,7 @@ def _via_way_type_fallback(
     if not ways:
         raise OverpassError(f"No {route_tag} ways found in bounding box")
 
-    nodes: dict[str, list[float]] = {}
-    adj:   dict[str, list[str]]   = {}
-    for way in ways:
-        prev: Optional[str] = None
-        for pt in way.get("geometry", []):
-            nid = f"{pt['lat']:.6f},{pt['lon']:.6f}"
-            nodes[nid] = [pt["lon"], pt["lat"]]
-            if prev is not None:
-                adj.setdefault(prev, []).append(nid)
-                adj.setdefault(nid,  []).append(prev)
-            prev = nid
-
+    nodes, adj = _build_rail_graph(ways)
     if not nodes:
         raise OverpassError(f"No {route_tag} nodes found in bounding box")
 
@@ -590,18 +605,7 @@ def _via_ferry_yes_fallback(
     if not ways:
         raise OverpassError("No ferry=yes ways found in bounding box")
 
-    nodes: dict[str, list[float]] = {}
-    adj:   dict[str, list[str]]   = {}
-    for way in ways:
-        prev: Optional[str] = None
-        for pt in way.get("geometry", []):
-            nid = f"{pt['lat']:.6f},{pt['lon']:.6f}"
-            nodes[nid] = [pt["lon"], pt["lat"]]
-            if prev is not None:
-                adj.setdefault(prev, []).append(nid)
-                adj.setdefault(nid,  []).append(prev)
-            prev = nid
-
+    nodes, adj = _build_rail_graph(ways)
     if not nodes:
         raise OverpassError("No ferry=yes nodes found in bounding box")
 
