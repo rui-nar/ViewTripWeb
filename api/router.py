@@ -29,6 +29,11 @@ from src.utils.logging import get_logger
 _log = get_logger(__name__)
 _scheduler = AsyncIOScheduler()
 
+# Single source of truth for the running version: the git tag baked in at build
+# time (Dockerfile ARG/ENV APP_VERSION, set from the tag by CI). Defaults to
+# "dev" locally. Used for both the OpenAPI `version` and the /api/version probe.
+_APP_VERSION = os.environ.get("APP_VERSION", "dev")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -46,10 +51,11 @@ app = FastAPI(
     title="ViewTrip API",
     description=(
         "REST API consumed by the ViewTrip Flutter client (web, Android, iOS).\n\n"
-        "Authentication uses JWT bearer tokens obtained via `/api/auth/login` or OAuth.\n\n"
+        "Authentication uses JWT bearer tokens obtained via `/api/auth/token` "
+        "(email + password), `/api/auth/register`, or `/api/auth/google`.\n\n"
         "Interactive docs: [`/docs`](/docs) (Swagger) · [`/scalar`](/scalar) (Scalar)"
     ),
-    version="0.14.1",
+    version=_APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -87,6 +93,18 @@ async def scalar_docs() -> HTMLResponse:
         openapi_url="/openapi.json",
         title="ViewTrip API",
     )
+
+
+@app.get("/api/version", include_in_schema=False)
+async def app_version():
+    """Version this image was built from (the git tag baked in at build time).
+
+    The web client compares its own baked APP_VERSION against this and prompts a
+    reload when they differ, so a returning user never stays stuck on a stale
+    cached bundle. Defaults to "dev" locally (matching the client default) so the
+    check never fires outside a real deployment.
+    """
+    return {"version": _APP_VERSION}
 
 
 # ── Flutter web SPA — must be registered last so /api/... routes take priority ─

@@ -14,6 +14,7 @@ import 'src/projects/project_notifier.dart';
 import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
 import 'src/core/theme.dart';
+import 'src/core/version_gate.dart';
 
 // Server client ID used on Android/iOS to receive an idToken.
 // On web, GIS reads the client ID from <meta name="google-signin-client_id">
@@ -78,6 +79,10 @@ class _ViewTripAppState extends State<ViewTripApp> {
       darkTheme: darkTheme,
       themeMode: themeMode,
       routerConfig: _router!,
+      // Wraps every page: detects a stale cached web bundle (client APP_VERSION
+      // != deployed /api/version) and surfaces a Reload prompt.
+      builder: (context, child) =>
+          VersionGate(child: child ?? const SizedBox.shrink()),
       debugShowCheckedModeBanner: false,
     );
   }
