@@ -93,11 +93,28 @@ async def scalar_docs() -> HTMLResponse:
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web_client")
 
 _NO_CACHE = "no-cache"
-_IMMUTABLE = "public, max-age=31536000, immutable"
 _LONG_CACHE = "public, max-age=86400"
-# flutter_service_worker.js and flutter_bootstrap.js must not be cached so
-# browsers always pick up a new build on next visit.
-_NEVER_CACHE = {"flutter_service_worker.js", "flutter_bootstrap.js", "index.html", "manifest.json"}
+
+
+def _cache_control_for(full_path: str) -> str:
+    """Cache-Control policy for a Flutter-web asset path.
+
+    Flutter does NOT content-hash its entry-point filenames (``main.dart.js``,
+    ``flutter.js``, ``flutter_bootstrap.js``, deferred ``*.part.js``, the service
+    worker, ``index.html``, ``manifest.json``, ``version.json``). If any of those
+    is allowed to sit in the browser cache, a returning user keeps running the
+    *old* build after a deploy — including a stale ``main.dart.js`` that may carry
+    a wrong baked API URL — until the cache expires. So every entry point is
+    served ``no-cache`` (the browser must revalidate each load; a 304 keeps it
+    cheap), guaranteeing the latest build is picked up immediately.
+
+    Only the large, rarely-changing static trees (``assets/`` bundle data,
+    ``canvaskit/`` runtime, tied to the Flutter SDK version) get a day of caching.
+    """
+    if full_path.startswith(("assets/", "canvaskit/")):
+        return _LONG_CACHE
+    return _NO_CACHE
+
 
 if os.path.isdir(_web_dir):
     @app.get("/{full_path:path}", include_in_schema=False)
@@ -106,17 +123,7 @@ if os.path.isdir(_web_dir):
         candidate = os.path.join(_web_dir, full_path)
         if full_path and os.path.isfile(candidate):
             resp = FileResponse(candidate)
-            name = os.path.basename(full_path)
-            if name in _NEVER_CACHE:
-                resp.headers["Cache-Control"] = _NO_CACHE
-            elif full_path.startswith("assets/"):
-                # Flutter content-hashes everything under assets/ — safe to cache forever.
-                resp.headers["Cache-Control"] = _IMMUTABLE
-            elif name.endswith((".js", ".wasm")):
-                # main.dart.js / canvaskit.wasm aren't hashed but rarely change mid-session.
-                resp.headers["Cache-Control"] = _LONG_CACHE
-            else:
-                resp.headers["Cache-Control"] = _NO_CACHE
+            resp.headers["Cache-Control"] = _cache_control_for(full_path)
             return resp
         resp = FileResponse(os.path.join(_web_dir, "index.html"))
         resp.headers["Cache-Control"] = _NO_CACHE
