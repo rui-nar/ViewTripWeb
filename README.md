@@ -1,10 +1,10 @@
 # ViewTripWeb
 
-> Build multi-sport GPS journey files from your Strava activities — with connecting transport segments, elevation profiles, and one-click GPX export.
+> Build multi-sport GPS journey files from your Strava (and Polarsteps) activities — with connecting transport segments, memories, journals, statistics, sharing, and one-click GPX export.
 
-A self-hostable web application. Authenticate with Google or email/password, connect Strava, and assemble your trips from activities with flight/train/bus/boat connecting segments.
+A self-hostable web application. Authenticate with Google or email/password, connect Strava and/or Polarsteps, and assemble your trips from activities with flight/train/bus/boat connecting segments. Annotate days with memories (photos, text, likes & comments) and journals, view rich statistics, and share a read-only public link to social media.
 
-**Current release: v0.8.2** · Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend
+Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend. The running version is exposed at `/api/version` and tagged on the published image (set from the git tag at build time — never hardcoded).
 
 ---
 
@@ -15,13 +15,21 @@ A self-hostable web application. Authenticate with Google or email/password, con
 | Frontend | Flutter Web / Android / iOS |
 | Backend | FastAPI · Python 3.11 |
 | Database | SQLite via SQLModel / Alembic |
+| Scheduling | APScheduler (daily DB backup at 02:00 UTC) |
 | Auth | Google OAuth + local email/password · JWT (PyJWT) |
 | Strava | OAuth 2.0 · per-user token storage in DB |
-| Maps | flutter_map (OpenStreetMap) |
+| Polarsteps | per-user token storage · trip/step import |
+| Maps | flutter_map · Mapbox / Esri raster + vector tiles |
+| Routing | OSM Overpass (rail/ferry/bus geometry) · HAFAS / digitraffic (train schedules) |
+| Translation | Google Translate v2 (optional, memory translations) |
 
 ---
 
 ## Quick Start (Docker)
+
+CI publishes the image to `ghcr.io/rui-nar/viewtripweb`. Provide your own
+`docker-compose.yml` (not committed — it carries host-specific volume paths and
+env) referencing that image, or build locally from the bundled `Dockerfile`.
 
 ```bash
 # 1. Create your config
@@ -29,11 +37,14 @@ mkdir -p config
 cp config/config.example.json config/config.json
 # Edit config.json — add your Strava + Google credentials
 
-# 2. Run
+# 2. Run (with your docker-compose.yml present)
 docker compose up -d
 ```
 
-The API is available at `http://localhost:8000`. Point the Flutter app at that origin.
+The API (and the bundled Flutter web build, when present) is served at `http://localhost:8000`.
+Interactive API docs: `http://localhost:8000/docs` (Swagger) and `http://localhost:8000/scalar` (Scalar).
+
+Database migrations run automatically on startup (`alembic upgrade head`).
 
 ---
 
@@ -46,7 +57,7 @@ python -m venv .venv
 .venv/Scripts/activate          # Windows
 # source .venv/bin/activate     # Linux/macOS
 
-pip install -r requirements-web.txt
+pip install -r requirements.txt
 alembic upgrade head
 uvicorn api.router:app --host 0.0.0.0 --port 8000 --reload
 ```
@@ -58,10 +69,13 @@ Backend API available at `http://localhost:8000/api/...`.
 ```bash
 cd flutter_client
 flutter pub get
-flutter run -d chrome --web-port 5500
+flutter run -d chrome --web-port 5500 \
+  --dart-define=API_BASE_URL=http://localhost:8000 \
+  --dart-define=MAPBOX_TOKEN=YOUR_MAPBOX_PUBLIC_TOKEN
 ```
 
-Or use `launch.bat` (Windows) which starts both together.
+Windows helper scripts: `dev-client.ps1` (Flutter client), `deploy.ps1` (build
++ push image + deploy to NAS), `bump_version_and_release.ps1` (tag a release).
 
 ---
 
@@ -84,49 +98,56 @@ Or use `launch.bat` (Windows) which starts both together.
 - Register a Strava application at <https://www.strava.com/settings/api>. Set the **Authorization Callback Domain** to your server's hostname.
 - Register a Google OAuth app at <https://console.developers.google.com>. Add your origin to the allowed origins.
 
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | SQLAlchemy URL for the DB (defaults to local `viewtripweb.db`) |
+| `GOOGLE_TRANSLATE_API_KEY` | Enables memory translation endpoints (optional) |
+
+### Flutter build-time defines (`--dart-define`)
+
+| Define | Purpose |
+|---|---|
+| `API_BASE_URL` | Backend origin; empty = same-origin (production) |
+| `MAPBOX_TOKEN` | Mapbox public token for map tiles |
+| `APP_VERSION` | Version string shown in the app |
+
+---
+
+## Features
+
+- **Projects** — assemble trips from Strava/Polarsteps activities; reorder, sort chronologically, add flight/train/bus/boat connecting segments with real-world route geometry resolved from OSM/HAFAS.
+- **Memories** — photo + text annotations per day, with likes, threaded comments, and optional translation.
+- **Journals** — private day notes with photos.
+- **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.
+- **Sharing** — read-only public links (with or without memories); social-media composer that posts a memory's photos, a trip map image, and a durable deep link via the OS share sheet / WhatsApp / Facebook.
+- **Export** — GPX, `.viewtrip` (JSON), or ZIP (`.viewtrip` + photos).
+- **Backups** — automatic daily SQLite backup (30-day retention) with user-initiated restore from settings.
+
 ---
 
 ## API Reference
 
-### Auth
+The **authoritative, always-current** reference is the interactive OpenAPI UI:
 
-| Method | Endpoint | Description |
+- Swagger UI — `/docs`
+- Scalar — `/scalar`
+- Raw schema — `/openapi.json`
+
+Routes are grouped by tag (router prefix):
+
+| Tag | Prefix | Covers |
 |---|---|---|
-| POST | `/api/auth/token` | Email + password login → JWT |
-| POST | `/api/auth/register` | Create local account → JWT |
-| POST | `/api/auth/google` | Google id_token → JWT |
-| GET | `/api/auth/me` | Current user profile |
-| PUT | `/api/auth/me` | Update display name |
-| POST | `/api/auth/change-password` | Change password (local accounts) |
-| DELETE | `/api/auth/me` | Delete account + all data |
-
-### Projects
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/projects/` | List projects |
-| POST | `/api/projects/` | Create project |
-| GET | `/api/projects/{name}` | Get project data |
-| DELETE | `/api/projects/{name}` | Delete project |
-| POST | `/api/projects/import` | Upload `.gettracks` file |
-| POST | `/api/projects/{name}/activities` | Add activities to project |
-| DELETE | `/api/projects/{name}/items/{index}` | Remove item at index |
-| PUT | `/api/projects/{name}/items/reorder` | Reorder items |
-| POST | `/api/projects/{name}/segments` | Create connecting segment |
-| PUT | `/api/projects/{name}/segments/{id}` | Update segment |
-| DELETE | `/api/projects/{name}/segments/{id}` | Delete segment |
-
-### Geo / Strava
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/geo/project?name=` | GeoJSON FeatureCollection for map |
-| GET | `/api/strava/connect` | Get Strava OAuth URL |
-| GET | `/api/strava/callback` | OAuth redirect handler |
-| GET | `/api/strava/status` | Strava connection status |
-| DELETE | `/api/strava/disconnect` | Remove Strava token |
-| GET | `/api/strava/activities` | Browse Strava activities (with filters) |
-| POST | `/api/projects/{name}/strava/sync` | Sync all Strava activities to project |
+| `auth` | `/api/auth` | login (`/token`), register, Google login, profile, change/delete account |
+| `projects` | `/api/projects` | project + item + segment CRUD, import/export, stats, day-meta, track style, share-token management, async route resolution |
+| `geo` | `/api/geo` | full + low-res GeoJSON FeatureCollections for the map |
+| `memories` | `/api/memories` | memory CRUD, photos, comments, likes, translations |
+| `journal` | `/api/journal` | journal entry CRUD + photos |
+| `share` | `/api/share` | public read-only project access, tiles, shared-memory comments/likes |
+| `strava` | `/api/strava` | OAuth connect/callback/status, activity browsing, project sync |
+| `polarsteps` | `/api/polarsteps` | connect/disconnect, trip + step listing |
+| `backup` | `/api/backup` | list + restore database backups |
 
 ---
 
