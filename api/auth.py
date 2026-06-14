@@ -28,6 +28,21 @@ from api.deps import create_access_token, get_current_user
 import os
 
 from src.config.settings import Config
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
+
+# Local/dev builds leave APP_VERSION unset (defaults to "dev"); real deployments
+# bake in the git tag. On dev we expose verification failure reasons to the
+# client to aid debugging — never in production, where they could leak detail.
+_IS_DEV = os.environ.get("APP_VERSION", "dev") == "dev"
+
+# Google mints id_tokens against its own clock. Without a tolerance, a server
+# whose clock lags by even a second rejects fresh tokens as "used too early".
+# A small skew window absorbs normal NTP drift on any host (dev or deployed)
+# without meaningfully weakening verification. Google's libraries support this
+# exact knob for this exact reason.
+_GOOGLE_CLOCK_SKEW_SECONDS = 10
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -162,12 +177,23 @@ def google_login(body: GoogleTokenRequest):
         )
     try:
         id_info = verify_oauth2_token(
-            body.id_token, google_requests.Request(), _google_client_id
+            body.id_token,
+            google_requests.Request(),
+            _google_client_id,
+            clock_skew_in_seconds=_GOOGLE_CLOCK_SKEW_SECONDS,
         )
-    except Exception:
+    except Exception as exc:
+        # google-auth raises ValueError with a specific reason (expired token,
+        # clock skew "used too early", wrong issuer/audience, bad signature).
+        # The client only ever sees a generic 401, so log the real reason here —
+        # without it every Google auth failure is undiagnosable.
+        _log.warning("Google id_token verification failed: %s", exc)
+        detail = "Invalid Google id_token"
+        if _IS_DEV:
+            detail = f"Invalid Google id_token: {exc}"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google id_token",
+            detail=detail,
         )
 
     google_sub = id_info["sub"]
