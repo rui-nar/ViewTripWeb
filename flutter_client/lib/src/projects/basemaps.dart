@@ -1,6 +1,18 @@
 /// Basemap tile URL constants shared between manage, view, and share screens.
 library;
 
+// ── Zoom bounds ──────────────────────────────────────────────────────────────
+/// Hard upper bound for the interactive map camera zoom.
+///
+/// vector_map_tiles' internal `_ZoomScaler` precomputes a scale table for zoom
+/// levels 0..23 (a fixed 24-entry list) and indexes it directly by tile zoom,
+/// with no clamping. In vector mode the layer's `maximumZoom` is NOT applied to
+/// the camera, so without a `MapOptions.maxZoom` a pinch gesture can drive the
+/// camera (hence the tile zoom = floor(cameraZoom + offset)) past 23 and crash
+/// with a RangeError. Capping the camera below that limit prevents it.
+/// Must stay < 24; 22 also matches our raster `maxNativeZoom`.
+const double kMaxMapZoom = 22;
+
 // ── Provider flag ──────────────────────────────────────────────────────────────
 // Toggle via --dart-define=BASEMAP_PROVIDER=ESRI (default MAPBOX).
 const _kProvider =

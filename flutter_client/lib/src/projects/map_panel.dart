@@ -653,6 +653,7 @@ class _MapPanelState extends State<MapPanel> {
           options: MapOptions(
             initialCenter: const LatLng(0, 0),
             initialZoom: 2,
+            maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
             ),
@@ -666,7 +667,7 @@ class _MapPanelState extends State<MapPanel> {
                 sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
                 layerMode: VectorTileLayerMode.vector,
-                maximumZoom: 22,
+                maximumZoom: kMaxMapZoom,
               )
             else if (_tileProvider != null) ...[
               TileLayer(
@@ -1449,6 +1450,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           options: MapOptions(
             initialCenter: const LatLng(48.0, 10.0),
             initialZoom: 4,
+            maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
             ),
@@ -1462,7 +1464,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
                 layerMode: VectorTileLayerMode.vector,
-                maximumZoom: 22,
+                maximumZoom: kMaxMapZoom,
               )
             else if (_tileProvider != null)
               TileLayer(
