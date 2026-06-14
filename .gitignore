@@ -29,6 +29,7 @@ logs/
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # Config with secrets — use config/config.example.json as template
 config/config.json

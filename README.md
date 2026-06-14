@@ -100,10 +100,25 @@ Windows helper scripts: `dev-client.ps1` (Flutter client), `deploy.ps1` (build
 
 ### Environment variables
 
+These are read by the backend at **runtime** (`os.getenv`) — a value passed to
+`docker build` or `flutter build` does **not** reach the running server. Copy
+[`.env.example`](.env.example) to `.env` and fill it in.
+
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | SQLAlchemy URL for the DB (defaults to local `viewtripweb.db`) |
 | `GOOGLE_TRANSLATE_API_KEY` | Enables memory translation endpoints (optional) |
+| `GOOGLE_CLIENT_ID` | Google OAuth client id; takes priority over `config.json` (optional) |
+| `APP_VERSION` | Running version; set automatically from the git tag at image build |
+
+**Local dev:** export the vars before launching (`export $(grep -v '^#' .env | xargs)`),
+or use `dev.ps1` / `dev-server.ps1`, which inject them for you.
+
+**Docker / NAS:** load them into the container at runtime via your
+`docker-compose.yml` — either an `environment:` block or `env_file: .env` — then
+`docker compose up -d` to recreate the container so it picks up the values
+(a plain `restart` does not apply env changes). Do **not** bake secrets into the
+image with a Dockerfile `ENV`; the published image is public.
 
 ### Flutter build-time defines (`--dart-define`)
 
