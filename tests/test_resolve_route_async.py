@@ -157,8 +157,9 @@ def test_job_success_writes_resolved(env, monkeypatch):
     _add_segment(engine, project_id, _train_segment())
 
     fake_line = [[24.94, 60.17], [25.0, 62.0], [25.73, 66.50]]
+    # (polyline, stop_count, degraded, strategy)
     monkeypatch.setattr(projects_mod, "_compute_segment_geometry",
-                        lambda seg, params: (fake_line, 3))
+                        lambda seg, params: (fake_line, 3, False, "relation_endpoints"))
 
     _resolve_route_job(user_id, "My Trip", "seg-1",
                        {"hafas_provider": "vr", "train_number": "273"})
@@ -169,6 +170,7 @@ def test_job_success_writes_resolved(env, monkeypatch):
     assert json.loads(seg.route_polyline) == fake_line
     assert seg.route_error is None
     assert seg.route_started_at is None
+    assert seg.route_degraded is False
 
 
 # ── 3. Background job failure ────────────────────────────────────────────────────
@@ -191,6 +193,28 @@ def test_job_failure_marks_failed_and_keeps_great_circle(env, monkeypatch):
     assert seg.route_mode == "great_circle"
     assert seg.route_polyline is None
     assert seg.route_started_at is None
+    assert seg.route_degraded is False
+
+
+def test_job_degraded_straight_line_is_flagged(env, monkeypatch):
+    """A rail resolve that fell back to a straight chord persists resolved BUT
+    route_degraded=True — so the UI can tell it apart from a real route instead
+    of the old silent 'looks resolved' behaviour."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _train_segment())
+
+    straight = [[24.94, 60.17], [25.73, 66.50]]
+    # (polyline, stop_count, degraded, strategy)
+    monkeypatch.setattr(projects_mod, "_compute_segment_geometry",
+                        lambda seg, params: (straight, 2, True, "straight"))
+
+    _resolve_route_job(user_id, "My Trip", "seg-1",
+                       {"hafas_provider": "vr", "train_number": "273"})
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_status == "resolved"
+    assert seg.route_degraded is True
+    assert json.loads(seg.route_polyline) == straight
 
 
 # ── 4. Optimistic concurrency lock ───────────────────────────────────────────────

@@ -294,9 +294,15 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       if (seg == null) return {'route_status': 'cancelled'}; // deleted mid-resolve
       final stat = (seg['route_status'] as String?) ?? 'idle';
       if (stat == 'resolved') {
-        _applyResolvedSegment(segId, seg);
+        applyResolvedSegment(segId, seg);
         notifyListeners();
-        return {'route_status': 'resolved', 'stop_count': _polylineLength(seg)};
+        return {
+          'route_status': 'resolved',
+          'stop_count': _polylineLength(seg),
+          // True when the server fell back to a straight endpoint chord (no real
+          // track found) — surfaced so the UI doesn't claim a detailed route.
+          'degraded': seg['route_degraded'] == true,
+        };
       }
       if (stat == 'failed') {
         _patchSegmentFields(segId, {
@@ -404,12 +410,15 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   }
 
   /// Apply a resolved segment from `/meta` into [items] and [geo].
-  void _applyResolvedSegment(String segId, Map<String, dynamic> segMeta) {
+  @visibleForTesting
+  void applyResolvedSegment(String segId, Map<String, dynamic> segMeta) {
     final routeMode = segMeta['route_mode'] as String? ?? 'rail';
+    final degraded = segMeta['route_degraded'] == true;
     _patchSegmentFields(segId, {
       'route_mode': routeMode,
       'route_status': 'resolved',
       'route_error': null,
+      'route_degraded': degraded,
       'route_polyline': segMeta['route_polyline'],
       if (segMeta['train_number'] != null) 'train_number': segMeta['train_number'],
       if (segMeta['hafas_provider'] != null) 'hafas_provider': segMeta['hafas_provider'],
@@ -423,6 +432,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
         'type': 'segment',
         'segment_id': segId,
         'route_mode': routeMode,
+        'route_degraded': degraded,
         if (segMeta['segment_type'] != null) 'segment_type': segMeta['segment_type'],
       },
     });

@@ -936,6 +936,7 @@ class ProjectRepo:
             route_status=sd.get("route_status", "idle"),
             route_error=sd.get("route_error"),
             route_started_at=sd.get("route_started_at"),
+            route_degraded=sd.get("route_degraded", False),
         )
 
     @staticmethod
@@ -1003,6 +1004,7 @@ def _compute_low_res_geo(project: Project) -> str:
                     "segment_type": seg.segment_type,
                     "label": seg.label,
                     "route_mode": seg.route_mode,
+                    "route_degraded": seg.route_degraded,
                 },
             })
 

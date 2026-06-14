@@ -117,6 +117,45 @@ void main() {
     });
   });
 
+  group('resolved-segment degraded flag', () {
+    Map<String, dynamic> resolvedMeta({required bool degraded}) => {
+          'route_mode': 'rail',
+          'segment_type': 'train',
+          'route_degraded': degraded,
+          'route_polyline': '[[0,0],[1,1]]',
+        };
+
+    test('degraded resolve marks the item and geo feature degraded', () {
+      final h = _Host()..geo = {'type': 'FeatureCollection', 'features': []};
+      h.items = [
+        {'item_type': 'segment', 'segment': {'id': 's1', 'route_status': 'pending'}},
+      ];
+
+      h.applyResolvedSegment('s1', resolvedMeta(degraded: true));
+
+      final seg = h.items.single['segment'] as Map;
+      expect(seg['route_status'], 'resolved');
+      expect(seg['route_degraded'], isTrue);
+
+      final feature = (h.geo!['features'] as List).single as Map;
+      expect((feature['properties'] as Map)['route_degraded'], isTrue);
+    });
+
+    test('real resolve leaves degraded false', () {
+      final h = _Host()..geo = {'type': 'FeatureCollection', 'features': []};
+      h.items = [
+        {'item_type': 'segment', 'segment': {'id': 's1', 'route_status': 'pending'}},
+      ];
+
+      h.applyResolvedSegment('s1', resolvedMeta(degraded: false));
+
+      final seg = h.items.single['segment'] as Map;
+      expect(seg['route_degraded'], isFalse);
+      final feature = (h.geo!['features'] as List).single as Map;
+      expect((feature['properties'] as Map)['route_degraded'], isFalse);
+    });
+  });
+
   group('stale pending-segment recovery', () {
     final now = DateTime.parse('2026-06-10T12:00:00Z');
 

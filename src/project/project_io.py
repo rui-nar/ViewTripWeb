@@ -232,6 +232,7 @@ class ProjectIO:
                 "route_status": seg.route_status,
                 "route_error": seg.route_error,
                 "route_started_at": seg.route_started_at,
+                "route_degraded": seg.route_degraded,
             }
         return d
 

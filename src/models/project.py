@@ -71,6 +71,9 @@ class ConnectingSegment:
     route_status: Literal["idle", "pending", "resolved", "failed"] = "idle"
     route_error: Optional[str] = None       # short message shown in the UI on failure
     route_started_at: Optional[str] = None  # ISO timestamp the pending job began (stale-recovery)
+    route_degraded: bool = False            # rail only: resolved to a straight endpoint-chord, not
+    #   real track (Overpass found no usable geometry). Surfaced to the UI so a straight segment
+    #   isn't silently mistaken for a real resolved route.
 
 
 @dataclass

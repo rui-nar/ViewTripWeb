@@ -17,9 +17,30 @@ import heapq
 import json
 import math
 import re
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 import requests
+
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
+
+
+@dataclass
+class RailGeometry:
+    """Result of a rail-geometry resolution.
+
+    Carries *how* the polyline was obtained, not just the points, so callers can
+    log it and surface degradation to the user. ``degraded`` is True when every
+    strategy failed and we fell back to a straight endpoint-to-endpoint chord —
+    i.e. the line is approximate, not real track. Ferry/bus resolution doesn't
+    use this: those raise ``OverpassError`` on failure instead of degrading.
+    """
+    polyline: list[list[float]]
+    strategy: str          # relation_uic | relation_endpoints | coordinate_dijkstra | straight
+    degraded: bool
 
 # ÖBB and some HAFAS providers return compound location IDs like
 # "A=1@O=Linz Hbf@X=14280@Y=48290@U=81@L=8100013@…"
@@ -35,9 +56,9 @@ class OverpassError(Exception):
     pass
 
 
-def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
+def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     """
-    Return [[lon, lat], …] polyline from stops[0] to stops[-1].
+    Resolve [[lon, lat], …] rail geometry from stops[0] to stops[-1].
 
     *stops* is a list of dicts with keys lat, lon, and optionally uic.
 
@@ -46,9 +67,18 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
       B  Two-endpoint route-relation intersection — finds relations that pass
          through both endpoint areas without needing UIC codes.
       C  Coordinate Dijkstra on bounding-box railway ways (last resort).
+
+    Never raises (beyond the <2-stop guard): when all strategies fail, Strategy C
+    returns a straight endpoint chord. The return value records which strategy
+    won and whether the result is that degraded straight line, and every outcome
+    is logged — so a silent straight line in production is now observable.
     """
+    t0 = time.monotonic()
     if len(stops) < 2:
         raise OverpassError("Need at least 2 stops")
+
+    lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
+    lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
 
     # Only enrich the first and last stop to avoid O(N) Overpass calls on long
     # routes (e.g. VR Helsinki→Rovaniemi has ~8 stops and returns uic="" for
@@ -58,22 +88,38 @@ def get_rail_geometry(stops: list[dict]) -> list[list[float]]:
     enriched[0]  = _enrich_uic(stops[0])
     enriched[-1] = _enrich_uic(stops[-1])
 
+    result: Optional[RailGeometry] = None
+
     # Strategy A: try a direct start→end route-relation lookup using the two
     # endpoint UIC codes.  One Overpass query; covers most long-haul trains.
     if enriched[0].get("uic") and enriched[-1].get("uic"):
         try:
-            return _via_route_relations([enriched[0], enriched[-1]])
-        except Exception:
-            pass
+            result = RailGeometry(
+                _via_route_relations([enriched[0], enriched[-1]]),
+                "relation_uic", False)
+        except Exception as exc:  # noqa: BLE001 — fall through to the next strategy
+            _log.info("rail strategy A (uic relations) failed: %s", exc)
 
     # Strategy B: two-endpoint route-relation intersection (works without UIC)
-    try:
-        return _via_train_relations_endpoints(enriched)
-    except Exception:
-        pass
+    if result is None:
+        try:
+            result = RailGeometry(
+                _via_train_relations_endpoints(enriched),
+                "relation_endpoints", False)
+        except Exception as exc:  # noqa: BLE001 — fall through to the last resort
+            _log.info("rail strategy B (endpoint relations) failed: %s", exc)
 
-    # Strategy C: coordinate Dijkstra
-    return _via_coordinate_fallback(enriched)
+    # Strategy C: coordinate Dijkstra — may return a straight chord (degraded).
+    if result is None:
+        poly = _via_coordinate_fallback(enriched)
+        degraded = poly == _straight(lat1, lon1, lat2, lon2)
+        result = RailGeometry(
+            poly, "straight" if degraded else "coordinate_dijkstra", degraded)
+
+    log = _log.warning if result.degraded else _log.info
+    log("rail geometry resolved: strategy=%s points=%d degraded=%s elapsed=%.1fs",
+        result.strategy, len(result.polyline), result.degraded, time.monotonic() - t0)
+    return result
 
 
 def _enrich_uic(stop: dict) -> dict:
@@ -511,17 +557,29 @@ def _get_route_geometry(
       C  ferry=yes way fallback (ferry only): Dijkstra on ways tagged ferry=yes.
          Many short island-hopper crossings use this tag instead of route=ferry.
     """
+    t0 = time.monotonic()
+    strategy = poly = None
     try:
-        return _via_route_relation_type(route_tag, lat1, lon1, lat2, lon2)
-    except OverpassError:
-        pass
-    try:
-        return _via_way_type_fallback(route_tag, lat1, lon1, lat2, lon2)
-    except OverpassError:
-        pass
-    if route_tag == "ferry":
-        return _via_ferry_yes_fallback(lat1, lon1, lat2, lon2)
-    raise OverpassError(f"No {route_tag} route found between the two endpoints")
+        poly, strategy = _via_route_relation_type(route_tag, lat1, lon1, lat2, lon2), "relation"
+    except OverpassError as exc:
+        _log.info("%s strategy A (route relation) failed: %s", route_tag, exc)
+    if poly is None:
+        try:
+            poly, strategy = _via_way_type_fallback(route_tag, lat1, lon1, lat2, lon2), "way_dijkstra"
+        except OverpassError as exc:
+            _log.info("%s strategy B (way dijkstra) failed: %s", route_tag, exc)
+    if poly is None and route_tag == "ferry":
+        try:
+            poly, strategy = _via_ferry_yes_fallback(lat1, lon1, lat2, lon2), "ferry_yes_dijkstra"
+        except OverpassError as exc:
+            _log.info("ferry strategy C (ferry=yes dijkstra) failed: %s", exc)
+    if poly is None:
+        _log.warning("%s geometry unresolved: no route found, elapsed=%.1fs",
+                     route_tag, time.monotonic() - t0)
+        raise OverpassError(f"No {route_tag} route found between the two endpoints")
+    _log.info("%s geometry resolved: strategy=%s points=%d elapsed=%.1fs",
+              route_tag, strategy, len(poly), time.monotonic() - t0)
+    return poly
 
 
 def _via_route_relation_type(

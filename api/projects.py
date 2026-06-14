@@ -51,6 +51,9 @@ from src.models.great_circle import great_circle_points
 from src.models.project import ConnectingSegment, DEFAULT_SLEEPING_GROUPS, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, StaleWriteError, _compute_stats
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
 
 _cfg = Config("config/config.json")
 if os.environ.get("STRAVA_CLIENT_ID"):
@@ -280,13 +283,16 @@ def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
         _repo.compute_and_cache_stats(sess, user_info_id, project_name)
 
 
-def _compute_segment_geometry(seg: ConnectingSegment, params: Dict[str, Any]) -> tuple[list, int]:
+def _compute_segment_geometry(
+    seg: ConnectingSegment, params: Dict[str, Any]
+) -> tuple[list, int, bool, str]:
     """Run the (slow) HAFAS + Overpass lookups for a segment.
 
-    Returns ``(polyline, stop_count)``.  Raises ``OverpassError`` (ferry/bus) or a
-    generic ``Exception`` on unrecoverable failure.  ``get_rail_geometry`` itself
-    never raises — it falls back to a straight line — so train resolution always
-    yields *some* geometry.
+    Returns ``(polyline, stop_count, degraded, strategy)``.  ``degraded`` is True
+    only for rail when every Overpass strategy failed and the result is a straight
+    endpoint chord — the line is approximate, not real track.  Ferry/bus raise
+    ``OverpassError`` on failure (never degrade), so their ``degraded`` is always
+    False.  ``strategy`` names how the geometry was obtained (for logging).
     """
     from src.services.overpass_service import (
         OverpassError,  # noqa: F401 — re-exported for callers' except clauses
@@ -314,17 +320,18 @@ def _compute_segment_geometry(seg: ConnectingSegment, params: Dict[str, Any]) ->
                 )
             except HafasError:
                 pass  # fall back to two-point geometry
-        return get_rail_geometry(stops), len(stops)
+        rail = get_rail_geometry(stops)
+        return rail.polyline, len(stops), rail.degraded, rail.strategy
 
     if seg.segment_type == "boat":
         polyline = get_ferry_geometry(
             seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
-        return polyline, 2
+        return polyline, 2, False, "ferry"
 
     if seg.segment_type == "bus":
         polyline = get_bus_geometry(
             seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
-        return polyline, 2
+        return polyline, 2, False, "bus"
 
     raise ValueError("Route resolution only supported for train, boat, and bus segments")
 
@@ -358,11 +365,16 @@ def _resolve_route_job(
         if seg is None:
             return
         try:
-            polyline, _stops = _compute_segment_geometry(seg, params)
+            polyline, _stops, degraded, strategy = _compute_segment_geometry(seg, params)
             outcome = ("resolved", json.dumps(polyline),
-                       _mode_for_type.get(seg.segment_type, "great_circle"), None)
+                       _mode_for_type.get(seg.segment_type, "great_circle"), None, degraded)
+            _log.info(
+                "resolve seg=%s type=%s strategy=%s points=%d degraded=%s status=resolved",
+                seg_id, seg.segment_type, strategy, len(polyline), degraded)
         except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
-            outcome = ("failed", None, None, str(exc)[:200] or "Route resolution failed")
+            outcome = ("failed", None, None, str(exc)[:200] or "Route resolution failed", False)
+            _log.warning("resolve seg=%s type=%s status=failed: %s",
+                         seg_id, seg.segment_type, exc)
 
         # 2. Persist, retrying once if a concurrent write bumped the lock_version.
         for attempt in range(2):
@@ -374,12 +386,13 @@ def _resolve_route_job(
                     seg = _find_segment(project, seg_id)
                     if seg is None:
                         return  # deleted mid-resolve — nothing to write
-                    status, poly_json, rmode, err = outcome
+                    status, poly_json, rmode, err, degraded = outcome
                     if status == "resolved":
                         seg.route_mode = rmode
                         seg.route_polyline = poly_json
                         seg.route_status = "resolved"
                         seg.route_error = None
+                        seg.route_degraded = degraded
                         if params.get("train_number"):
                             seg.train_number = params["train_number"]
                         if params.get("hafas_provider"):
@@ -389,6 +402,7 @@ def _resolve_route_job(
                         # great-circle arc; surface a short error for the UI.
                         seg.route_status = "failed"
                         seg.route_error = err
+                        seg.route_degraded = False
                     seg.route_started_at = None
                     _repo.save_project(sess, user_info_id, project, check_version=True)
                 break
@@ -1625,6 +1639,7 @@ def resolve_segment_route(
 
         seg.route_status = "pending"
         seg.route_error = None
+        seg.route_degraded = False
         seg.route_started_at = datetime.now(timezone.utc).isoformat()
         if body.train_number:
             seg.train_number = body.train_number

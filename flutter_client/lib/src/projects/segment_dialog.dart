@@ -448,6 +448,17 @@ class _SegmentDialogState extends State<SegmentDialog> {
         return;
       }
       final stopCount = result['stop_count'] as int? ?? 0;
+      // Rail can "resolve" to a straight endpoint chord when OSM has no usable
+      // track (e.g. Overpass returned nothing). Say so plainly instead of
+      // claiming a detailed route the user can see isn't there.
+      if (result['degraded'] == true) {
+        messenger.showSnackBar(const SnackBar(
+          content: Text(
+              'Approximate route shown — no detailed track found for this segment'),
+          duration: Duration(seconds: 6),
+        ));
+        return;
+      }
       final msg = switch (routeMode) {
         'ferry' => 'Ferry route resolved',
         'bus'   => 'Bus route resolved',

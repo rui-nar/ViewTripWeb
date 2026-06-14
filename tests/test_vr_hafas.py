@@ -8,6 +8,7 @@ import pytest
 from src.services.hafas_service import HafasError, get_stop_sequence
 from src.services.overpass_service import (
     OverpassError,
+    RailGeometry,
     _extract_geometry,
     _extract_train_geometry,
     _via_train_relations_endpoints,
@@ -259,7 +260,9 @@ class TestTrainRelationsEndpoints:
                 {"lat": _LAT2, "lon": _LON2},
             ])
 
-        assert len(result) >= 3
+        assert len(result.polyline) >= 3
+        assert result.strategy == "relation_endpoints"
+        assert result.degraded is False
 
     def test_get_rail_geometry_only_enriches_endpoints(self):
         """With N>2 stops, only first and last are enriched — not all N stops.
@@ -292,7 +295,7 @@ class TestTrainRelationsEndpoints:
 
         # Exactly 2 enrichment calls (first + last), not 4.
         assert len(enrich_calls) == 2, f"Expected 2 enrichment calls, got {len(enrich_calls)}"
-        assert len(result) >= 3
+        assert len(result.polyline) >= 3
 
 
 class TestCoordinateFallbackBoundedCalls:
@@ -341,7 +344,9 @@ class TestCoordinateFallbackBoundedCalls:
         assert calls["rail"] == 1, f"Expected 1 rail query, got {calls['rail']}"
         # Whole resolution stays bounded (2 enrich + 1 Strategy-B id + 1 rail).
         assert calls["total"] <= 4, f"Expected <=4 Overpass calls, got {calls['total']}"
-        assert len(result) >= 2
+        assert len(result.polyline) >= 2
+        assert result.strategy == "coordinate_dijkstra"
+        assert result.degraded is False
 
     def test_oversized_bbox_straight_lines_without_query(self):
         """A pathologically long span skips the query and returns a chord."""
@@ -363,7 +368,11 @@ class TestCoordinateFallbackBoundedCalls:
             result = get_rail_geometry(stops)
 
         assert calls["rail"] == 0, "Oversized bbox must not issue a rail query"
-        assert result == [[0.0, 0.0], [5.0, 40.0]]
+        assert result.polyline == [[0.0, 0.0], [5.0, 40.0]]
+        # This is the silent-straight-line case the observability work surfaces:
+        # the result must self-report as a degraded straight chord.
+        assert result.degraded is True
+        assert result.strategy == "straight"
 
 
 class TestTrainRelationGraphExtraction:
@@ -428,3 +437,59 @@ class TestTrainRelationGraphExtraction:
         # Main line is 1.0 long; the retained siding detour adds ~0.6 (0.3 out
         # + 0.3 back), so the chained path is markedly longer.
         assert self._path_len(chained) > 1.5
+
+
+class TestRailDegradedReporting:
+    """Point-1 observability: rail must self-report when it silently fell back to
+    a straight endpoint chord, so the UI/logs can tell an approximate line from a
+    real resolved route. These are the exact production conditions (Overpass
+    failing or returning nothing for the NAS) that previously looked like success.
+    """
+
+    _STOPS = [
+        {"lat": _LAT1, "lon": _LON1},
+        {"lat": _LAT2, "lon": _LON2},
+    ]
+
+    def test_overpass_failure_reports_degraded_straight_line(self):
+        """Every Overpass call raises (network down/blocked) → strategies A/B/C
+        all fail → straight chord, flagged degraded (not a silent 'resolved')."""
+        def _boom(_query):
+            raise OverpassError("Overpass timeout")
+
+        with patch("src.services.overpass_service._overpass", side_effect=_boom):
+            result = get_rail_geometry(self._STOPS)
+
+        assert isinstance(result, RailGeometry)
+        assert result.degraded is True
+        assert result.strategy == "straight"
+        assert result.polyline == [[_LON1, _LAT1], [_LON2, _LAT2]]
+
+    def test_empty_overpass_reports_degraded_straight_line(self):
+        """Overpass reachable but returns no rail elements → no graph → straight
+        chord, flagged degraded."""
+        with patch("src.services.overpass_service._overpass",
+                   side_effect=lambda _q: {"elements": []}):
+            result = get_rail_geometry(self._STOPS)
+
+        assert result.degraded is True
+        assert result.strategy == "straight"
+
+    def test_successful_relation_is_not_degraded(self):
+        """A real relation result must NOT be flagged degraded."""
+        good_rel = _make_relation(_LON1, _LAT1, _LON2, _LAT2, mid_count=3)
+        good_rel["id"] = 7
+
+        def _side_effect(query):
+            if "uic_ref" in query:
+                return {"elements": []}           # skip Strategy A
+            if "out ids" in query:
+                return {"elements": [{"id": 7}]}  # Strategy B candidate
+            return {"elements": [good_rel]}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_side_effect):
+            result = get_rail_geometry(self._STOPS)
+
+        assert result.degraded is False
+        assert result.strategy == "relation_endpoints"
+        assert len(result.polyline) >= 3
