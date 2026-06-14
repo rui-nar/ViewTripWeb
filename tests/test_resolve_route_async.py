@@ -196,6 +196,74 @@ def test_job_failure_marks_failed_and_keeps_great_circle(env, monkeypatch):
     assert seg.route_degraded is False
 
 
+# ── 3b. Crash safety net — never leave a segment stuck "pending" ─────────────────
+
+def _pending_segment(seg_id: str = "seg-1") -> ConnectingSegment:
+    seg = _train_segment(seg_id)
+    seg.route_status = "pending"
+    seg.route_started_at = "2026-06-14T10:00:00Z"
+    return seg
+
+
+def test_mark_segment_failed_flips_pending(env):
+    """The safety-net helper flips a still-pending segment to failed."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _pending_segment())
+
+    projects_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "db boom")
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_status == "failed"
+    assert seg.route_error == "db boom"
+    assert seg.route_started_at is None
+
+
+def test_mark_segment_failed_leaves_terminal_state_untouched(env):
+    """It must not clobber a segment that already resolved (e.g. a late crash
+    after a successful persist)."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_status = "resolved"
+    seg.route_mode = "rail"
+    seg.route_polyline = json.dumps([[24.9, 60.1], [25.7, 66.5]])
+    _add_segment(engine, project_id, seg)
+
+    projects_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "boom")
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_status == "resolved"  # unchanged
+    assert seg.route_error is None
+
+
+def test_job_crash_marks_failed_not_stuck_pending(env, monkeypatch):
+    """If the job crashes before persisting a verdict, the segment must end up
+    "failed" (with the error) — never frozen on "pending" forever."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _pending_segment())
+
+    # The job's first get_project (its load step) raises once; the retry inside
+    # _mark_segment_failed then succeeds and flips the segment to failed.
+    real_get = projects_mod._repo.get_project
+    state = {"n": 0}
+
+    def flaky_get(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("transient load crash")
+        return real_get(*a, **k)
+
+    monkeypatch.setattr(projects_mod._repo, "get_project", flaky_get)
+    monkeypatch.setattr(projects_mod, "warm_geo_cache", lambda *a, **k: None)
+
+    _resolve_route_job(user_id, "My Trip", "seg-1",
+                       {"hafas_provider": "vr", "train_number": "273"})
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_status == "failed"          # NOT stuck on "pending"
+    assert "transient load crash" in (seg.route_error or "")
+    assert seg.route_started_at is None
+
+
 def test_job_degraded_straight_line_is_flagged(env, monkeypatch):
     """A rail resolve that fell back to a straight chord persists resolved BUT
     route_degraded=True — so the UI can tell it apart from a real route instead

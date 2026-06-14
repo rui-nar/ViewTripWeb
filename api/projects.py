@@ -410,12 +410,46 @@ def _resolve_route_job(
                 if attempt == 1:
                     break  # give up — a later edit/poll will reflect reality
                 continue
+    except Exception as exc:  # noqa: BLE001
+        # The segment was marked "pending" synchronously by the trigger. If the
+        # job crashes anywhere above (a load/save error, an unexpected raise),
+        # nothing writes a terminal status and the segment stays "pending"
+        # forever — a frozen spinner the client's stale-recovery only re-triggers
+        # into the same crash. Best-effort flip it to "failed" so the user sees an
+        # error they can retry, and log the cause (the prod 500/stuck-pending bug).
+        _log.exception("resolve seg=%s crashed before persisting a verdict", seg_id)
+        _mark_segment_failed(user_info_id, name, seg_id, str(exc)[:200])
     finally:
         bust_geo_cache(user_info_id, name)
         # Warm the cache while still off the request path so returning to the
         # project after a resolve is a fast HIT, not a cold recompute that can
         # time out and leave activities as low-res straight lines.
         warm_geo_cache(user_info_id, name)
+
+
+def _mark_segment_failed(user_info_id: int, name: str, seg_id: str, err: str) -> None:
+    """Best-effort: flip a still-``pending`` segment to ``failed`` after a crash.
+
+    Wrapped so it can never raise out of the job's except handler. If the segment
+    is gone or already terminal, it's a no-op; if the save itself fails (e.g. the
+    very DB error that crashed the job), we log and give up — the client's
+    stale-pending recovery remains the last line of defence.
+    """
+    try:
+        with get_session() as sess:
+            project = _repo.get_project(sess, user_info_id, name)
+            if project is None:
+                return
+            seg = _find_segment(project, seg_id)
+            if seg is None or seg.route_status != "pending":
+                return
+            seg.route_status = "failed"
+            seg.route_error = err or "Route resolution failed"
+            seg.route_started_at = None
+            seg.route_degraded = False
+            _repo.save_project(sess, user_info_id, project, check_version=True)
+    except Exception:  # noqa: BLE001
+        _log.exception("could not mark seg=%s failed after a crashed resolve", seg_id)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
