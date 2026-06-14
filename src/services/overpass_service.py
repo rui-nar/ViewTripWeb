@@ -48,6 +48,17 @@ class RailGeometry:
 _HAFAS_L_RE = re.compile(r'@L=(\d+)@')
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Mirror endpoints tried in order — the primary (overpass-api.de) rate-limits per
+# IP (429) under repeated use; the mirrors carry independent quotas so a transient
+# 429/5xx no longer sinks a whole resolve to a straight line.
+_OVERPASS_ENDPOINTS = [
+    _OVERPASS_URL,
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+_OVERPASS_RETRYABLE = {429, 502, 503, 504}
+_OVERPASS_RETRIES = 2     # attempts per endpoint before failing over to the next
+_OVERPASS_BACKOFF_S = 2.0  # base backoff between retries on the same endpoint
 _TIMEOUT_QUERY = 30   # seconds for the Overpass QL timeout directive
 _TIMEOUT_HTTP  = 45   # HTTP socket timeout
 
@@ -131,7 +142,11 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     # line, so straight-line it (flagged degraded) rather than ship garbage.
     if result is None:
         poly = _via_coordinate_fallback(enriched)
-        degraded = poly == _straight(lat1, lon1, lat2, lon2)
+        # A 2-point result is the straight endpoint chord (no real track found) —
+        # detect it by length, not by comparing coords: _enrich_uic may have
+        # snapped the endpoints to nearby stations, so the chord won't equal a
+        # _straight() built from the original stop coords.
+        degraded = len(poly) <= 2
         if not degraded and not _rail_length_ok(poly, stops):
             _log.info("rail strategy C rejected (%.0f km implausible) — straight-lining",
                       _polyline_km(poly))
@@ -782,14 +797,35 @@ _HEADERS = {"User-Agent": "ViewTripWeb/1.0 (https://github.com/viewtrip; route g
 
 
 def _overpass(query: str) -> dict:
-    try:
-        resp = requests.post(
-            _OVERPASS_URL,
-            data={"data": query},
-            headers=_HEADERS,
-            timeout=_TIMEOUT_HTTP,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        raise OverpassError(f"Overpass query failed: {exc}") from exc
+    """POST a query to Overpass, with retry + mirror fallback.
+
+    The public ``overpass-api.de`` rate-limits per IP and returns 429/504 under
+    load (which previously sank a whole resolve to a straight line). On a
+    retryable status we briefly back off and retry, then fail over to mirror
+    endpoints — each has its own independent quota — before giving up.
+    """
+    last_err: Optional[str] = None
+    for url in _OVERPASS_ENDPOINTS:
+        for attempt in range(_OVERPASS_RETRIES):
+            try:
+                resp = requests.post(
+                    url, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT_HTTP,
+                )
+            except Exception as exc:  # noqa: BLE001 — network error → try next mirror
+                last_err = f"{url}: {exc}"
+                break
+            if resp.status_code in _OVERPASS_RETRYABLE:
+                last_err = f"{url}: {resp.status_code}"
+                if attempt + 1 < _OVERPASS_RETRIES:
+                    time.sleep(_OVERPASS_BACKOFF_S * (attempt + 1))
+                    continue
+                break  # exhausted retries on this endpoint → next mirror
+            if not resp.ok:
+                last_err = f"{url}: {resp.status_code}"
+                break  # non-retryable HTTP error → next mirror
+            try:
+                return resp.json()
+            except ValueError as exc:
+                last_err = f"{url}: bad JSON ({exc})"
+                break
+    raise OverpassError(f"Overpass query failed (all endpoints): {last_err}")

@@ -558,3 +558,62 @@ class TestRailDegradedReporting:
         assert result.degraded is False
         assert result.strategy == "relation_endpoints"
         assert len(result.polyline) >= 3
+
+    def test_two_point_chord_is_degraded_even_when_endpoints_snapped(self):
+        """Regression for the `points=2 degraded=False strategy=coordinate_dijkstra`
+        mislabel: _enrich_uic snaps endpoints to nearby stations, so the straight
+        chord won't equal _straight(original coords). A 2-point result must still
+        be reported as a degraded straight line, not a real route.
+        """
+        # Chord whose coords differ from the original stops (i.e. "snapped").
+        snapped_chord = [[_LON1 + 0.02, _LAT1 + 0.02], [_LON2 + 0.02, _LAT2 + 0.02]]
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+             patch("src.services.overpass_service._via_train_relations_endpoints",
+                   side_effect=OverpassError("429")), \
+             patch("src.services.overpass_service._via_coordinate_fallback",
+                   return_value=snapped_chord):
+            result = get_rail_geometry(self._STOPS)
+        assert result.degraded is True
+        assert result.strategy == "straight"
+
+
+class TestOverpassMirrorFallback:
+    """_overpass retries and fails over to mirror endpoints on 429/5xx so a
+    rate-limited primary no longer sinks the whole resolve (the Helsinki→
+    Rovaniemi 429 that fell to a 2-point straight line)."""
+
+    class _Resp:
+        def __init__(self, status, data=None):
+            self.status_code = status
+            self.ok = status < 400
+            self._data = data
+
+        def json(self):
+            return self._data
+
+    def test_fails_over_to_mirror_on_429(self):
+        import src.services.overpass_service as ov
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            if "overpass-api.de" in url:
+                return self._Resp(429)
+            return self._Resp(200, {"elements": [{"ok": 1}]})
+
+        with patch("src.services.overpass_service.requests.post", side_effect=fake_post), \
+             patch("src.services.overpass_service.time.sleep", lambda *_: None):
+            data = ov._overpass("[out:json];")
+
+        assert data == {"elements": [{"ok": 1}]}
+        assert any("overpass-api.de" in u for u in calls)   # tried primary first
+        assert any("overpass-api.de" not in u for u in calls)  # then a mirror
+
+    def test_all_endpoints_429_raises_overpass_error(self):
+        import src.services.overpass_service as ov
+
+        with patch("src.services.overpass_service.requests.post",
+                   side_effect=lambda url, **k: self._Resp(429)), \
+             patch("src.services.overpass_service.time.sleep", lambda *_: None):
+            with pytest.raises(OverpassError):
+                ov._overpass("[out:json];")
