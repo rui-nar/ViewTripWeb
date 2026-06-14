@@ -29,6 +29,37 @@ class ActivityPanel extends StatefulWidget {
 
   @override
   State<ActivityPanel> createState() => _ActivityPanelState();
+
+  /// Effective day-bucket date for the segment [segIdStr], mirroring the forward
+  /// date-propagation in `_buildDisplayList`: a dateless segment inherits the
+  /// date of the most recent preceding *activity* (only activities advance the
+  /// running date there). Returns null if the segment isn't found or nothing
+  /// dated precedes it.
+  ///
+  /// Bucketing keys a dateless segment under this *inherited* date, while its
+  /// raw `segment['date']` is null — so matching on the raw date (as the old
+  /// reveal code did) never located the collapsed day it actually renders under,
+  /// and a just-created segment stayed hidden.
+  @visibleForTesting
+  static String? effectiveSegmentDate(
+    List<Map<String, dynamic>> items,
+    Map<dynamic, Map<String, dynamic>> activityById,
+    String segIdStr,
+  ) {
+    String? lastDate;
+    for (final item in items) {
+      final type = item['item_type'];
+      if (type == 'activity') {
+        final a = activityById[item['activity_id']];
+        final d = (a?['start_date_local'] as String?)?.split('T').first;
+        if (d != null) lastDate = d;
+      } else if (type == 'segment' &&
+          item['segment']?['id']?.toString() == segIdStr) {
+        return item['segment']?['date'] as String? ?? lastDate;
+      }
+    }
+    return null;
+  }
 }
 
 // ── Day-grouping display list helpers ─────────────────────────────────────────
@@ -417,37 +448,37 @@ class _ActivityPanelState extends State<ActivityPanel> {
   }
 
   void _expandAndScrollToSegment(String segIdStr) {
-    // Walk _lastItems (raw list) to find the segment's date — the _PanelItem
-    // for this segment may not be in _displayList yet if its day is collapsed.
-    String? targetDateKey;
-    if (_lastItems != null) {
-      for (final item in _lastItems!) {
-        if (item['item_type'] != 'segment') continue;
-        if (item['segment']?['id']?.toString() != segIdStr) continue;
-        targetDateKey = item['segment']?['date'] as String?;
-        break;
-      }
-    }
+    // This runs synchronously from the notifier listener — i.e. *before* the
+    // panel rebuilds — so for a just-created segment _lastItems/_displayList are
+    // still stale and don't contain it yet. Defer past the next frame so the
+    // reveal sees the new item and the (collapsed) day it was bucketed into.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final items = _lastItems;
+      final targetDateKey = items == null
+          ? null
+          : ActivityPanel.effectiveSegmentDate(items, _activityById, segIdStr);
 
-    // DayHeaders are always in _displayList (even for collapsed days).
-    if (targetDateKey != null) {
-      int? targetDayNumber;
-      for (final e in _displayList) {
-        if (e is _DayHeader && e.dateKey == targetDateKey) {
-          targetDayNumber = e.dayNumber;
-          break;
+      // DayHeaders are always in _displayList (even for collapsed days).
+      if (targetDateKey != null) {
+        int? targetDayNumber;
+        for (final e in _displayList) {
+          if (e is _DayHeader && e.dateKey == targetDateKey) {
+            targetDayNumber = e.dayNumber;
+            break;
+          }
+        }
+        if (targetDayNumber != null && _collapsedDays.contains(targetDayNumber)) {
+          setState(() {
+            _collapsedDays.remove(targetDayNumber);
+            _lastItems = null; // force display list rebuild so segment is visible
+          });
         }
       }
-      if (targetDayNumber != null && _collapsedDays.contains(targetDayNumber)) {
-        setState(() {
-          _collapsedDays.remove(targetDayNumber);
-          _lastItems = null; // force display list rebuild so segment is visible
-        });
-      }
-    }
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _scrollToSegment(segIdStr);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scrollToSegment(segIdStr);
+      });
     });
   }
 
