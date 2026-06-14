@@ -57,8 +57,6 @@ _OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",
 ]
 _OVERPASS_RETRYABLE = {429, 502, 503, 504}
-_OVERPASS_RETRIES = 2     # attempts per endpoint before failing over to the next
-_OVERPASS_BACKOFF_S = 2.0  # base backoff between retries on the same endpoint
 _TIMEOUT_QUERY = 30   # seconds for the Overpass QL timeout directive
 _TIMEOUT_HTTP  = 45   # HTTP socket timeout
 
@@ -797,35 +795,31 @@ _HEADERS = {"User-Agent": "ViewTripWeb/1.0 (https://github.com/viewtrip; route g
 
 
 def _overpass(query: str) -> dict:
-    """POST a query to Overpass, with retry + mirror fallback.
+    """POST a query to Overpass, failing over across mirror endpoints.
 
     The public ``overpass-api.de`` rate-limits per IP and returns 429/504 under
-    load (which previously sank a whole resolve to a straight line). On a
-    retryable status we briefly back off and retry, then fail over to mirror
-    endpoints — each has its own independent quota — before giving up.
+    load (which previously sank a whole resolve to a straight line). On any
+    failure we move straight to the next mirror — each has its own independent
+    quota. One attempt per endpoint keeps total latency bounded: a full resolve
+    makes several queries, so retry/backoff per query would balloon well past the
+    client's poll window; trying a fresh mirror is both faster and more likely to
+    succeed than waiting out a 429 on the same host.
     """
     last_err: Optional[str] = None
     for url in _OVERPASS_ENDPOINTS:
-        for attempt in range(_OVERPASS_RETRIES):
-            try:
-                resp = requests.post(
-                    url, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT_HTTP,
-                )
-            except Exception as exc:  # noqa: BLE001 — network error → try next mirror
-                last_err = f"{url}: {exc}"
-                break
-            if resp.status_code in _OVERPASS_RETRYABLE:
-                last_err = f"{url}: {resp.status_code}"
-                if attempt + 1 < _OVERPASS_RETRIES:
-                    time.sleep(_OVERPASS_BACKOFF_S * (attempt + 1))
-                    continue
-                break  # exhausted retries on this endpoint → next mirror
-            if not resp.ok:
-                last_err = f"{url}: {resp.status_code}"
-                break  # non-retryable HTTP error → next mirror
-            try:
-                return resp.json()
-            except ValueError as exc:
-                last_err = f"{url}: bad JSON ({exc})"
-                break
+        try:
+            resp = requests.post(
+                url, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT_HTTP,
+            )
+        except Exception as exc:  # noqa: BLE001 — network error → try next mirror
+            last_err = f"{url}: {exc}"
+            continue
+        if resp.status_code in _OVERPASS_RETRYABLE or not resp.ok:
+            last_err = f"{url}: {resp.status_code}"
+            continue  # rate-limited / server error → next mirror
+        try:
+            return resp.json()
+        except ValueError as exc:
+            last_err = f"{url}: bad JSON ({exc})"
+            continue
     raise OverpassError(f"Overpass query failed (all endpoints): {last_err}")
