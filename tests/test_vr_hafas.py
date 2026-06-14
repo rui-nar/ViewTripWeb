@@ -11,6 +11,7 @@ from src.services.overpass_service import (
     RailGeometry,
     _extract_geometry,
     _extract_train_geometry,
+    _rail_length_ok,
     _via_train_relations_endpoints,
     get_rail_geometry,
 )
@@ -437,6 +438,70 @@ class TestTrainRelationGraphExtraction:
         # Main line is 1.0 long; the retained siding detour adds ~0.6 (0.3 out
         # + 0.3 back), so the chained path is markedly longer.
         assert self._path_len(chained) > 1.5
+
+    def test_disconnected_relation_returns_none_not_chain(self):
+        """When the relation's ways don't connect start→end, graph routing fails.
+        It must return None (so a cleaner strategy runs), NOT fall back to the
+        self-overlapping chain — the Hanko→Salo garbage (116 km teleport, 6.2x)
+        came from that old fallback.
+        """
+        # Two ways with no shared node: one near the start, one near the end.
+        rel = {"members": [
+            self._way([(0.0, 0.0), (0.1, 0.0)]),   # component near start
+            self._way([(5.0, 5.0), (5.1, 5.0)]),   # disconnected, near end
+        ]}
+        assert _extract_train_geometry(rel, 0.0, 0.0, 5.0, 5.0) is None
+
+
+class TestRailGeometryPlausibilityGate:
+    """Reject self-overlapping / wrong-relation geometry that is implausibly long
+    for the trip, so it never ships as 'resolved'. Regression for Hanko→Salo
+    (strategy B routed via Helsinki: 291 km for a 47 km crow / 6.2x)."""
+
+    # Hanko → Salo
+    _STOPS = [
+        {"lat": 59.827043, "lon": 22.968801},
+        {"lat": 60.069381, "lon": 23.664059},
+    ]
+    # Path that detours to Helsinki (lon 24.93) and back — ~280 km, the bug shape.
+    _GARBAGE = [[22.97, 59.83], [24.93, 60.20], [22.97, 59.83], [23.66, 60.07]]
+    # A clean ~50 km corridor path.
+    _CLEAN = [[22.97, 59.83], [23.20, 59.90], [23.66, 60.07]]
+
+    def test_rail_length_ok_rejects_overlong_and_accepts_clean(self):
+        assert _rail_length_ok(self._CLEAN, self._STOPS) is True
+        assert _rail_length_ok(self._GARBAGE, self._STOPS) is False
+
+    def test_strategy_b_garbage_is_rejected_and_falls_through_to_c(self):
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+             patch("src.services.overpass_service._via_train_relations_endpoints",
+                   return_value=self._GARBAGE), \
+             patch("src.services.overpass_service._via_coordinate_fallback",
+                   return_value=self._CLEAN):
+            result = get_rail_geometry(self._STOPS)
+        assert result.strategy == "coordinate_dijkstra"  # B rejected → fell to C
+        assert result.polyline == self._CLEAN
+        assert result.degraded is False
+
+    def test_plausible_strategy_b_is_accepted(self):
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+             patch("src.services.overpass_service._via_train_relations_endpoints",
+                   return_value=self._CLEAN):
+            result = get_rail_geometry(self._STOPS)
+        assert result.strategy == "relation_endpoints"
+        assert result.degraded is False
+
+    def test_garbage_strategy_c_is_straight_lined_and_flagged_degraded(self):
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+             patch("src.services.overpass_service._via_train_relations_endpoints",
+                   side_effect=OverpassError("no relation")), \
+             patch("src.services.overpass_service._via_coordinate_fallback",
+                   return_value=self._GARBAGE):
+            result = get_rail_geometry(self._STOPS)
+        # A self-overlapping last resort is worse than an honest straight line.
+        assert result.strategy == "straight"
+        assert result.degraded is True
+        assert result.polyline == [[22.968801, 59.827043], [23.664059, 60.069381]]
 
 
 class TestRailDegradedReporting:

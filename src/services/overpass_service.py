@@ -51,6 +51,14 @@ _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _TIMEOUT_QUERY = 30   # seconds for the Overpass QL timeout directive
 _TIMEOUT_HTTP  = 45   # HTTP socket timeout
 
+# A real rail leg between two endpoints is at most a few times the straight-line
+# distance through its stops. A resolved polyline far longer than that has
+# self-overlapped or stitched the wrong ways (e.g. a relation routed via Helsinki
+# for a Hanko→Salo trip: observed 291 km / 47 km crow = 6.2x). Such a result is
+# rejected so a cleaner relation/strategy is used instead of shipping garbage.
+_MAX_RAIL_DETOUR_RATIO = 4.0
+_MIN_PLAUSIBLE_KM = 5.0   # floor so very short legs (noisy ratio) aren't rejected
+
 
 class OverpassError(Exception):
     pass
@@ -90,29 +98,45 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
 
     result: Optional[RailGeometry] = None
 
+    def _accept(poly: list[list[float]], strategy: str) -> Optional[RailGeometry]:
+        """Accept a strategy's geometry only if it's a plausible-length rail path;
+        otherwise reject (None) so resolution falls through instead of shipping a
+        self-overlapping / wrong-relation line."""
+        if not _rail_length_ok(poly, stops):
+            _log.info("rail strategy %s rejected: %.0f km path is implausibly long "
+                      "(self-overlap/wrong relation) — falling through",
+                      strategy, _polyline_km(poly))
+            return None
+        return RailGeometry(poly, strategy, False)
+
     # Strategy A: try a direct start→end route-relation lookup using the two
     # endpoint UIC codes.  One Overpass query; covers most long-haul trains.
     if enriched[0].get("uic") and enriched[-1].get("uic"):
         try:
-            result = RailGeometry(
-                _via_route_relations([enriched[0], enriched[-1]]),
-                "relation_uic", False)
+            result = _accept(
+                _via_route_relations([enriched[0], enriched[-1]]), "relation_uic")
         except Exception as exc:  # noqa: BLE001 — fall through to the next strategy
             _log.info("rail strategy A (uic relations) failed: %s", exc)
 
     # Strategy B: two-endpoint route-relation intersection (works without UIC)
     if result is None:
         try:
-            result = RailGeometry(
-                _via_train_relations_endpoints(enriched),
-                "relation_endpoints", False)
+            result = _accept(
+                _via_train_relations_endpoints(enriched), "relation_endpoints")
         except Exception as exc:  # noqa: BLE001 — fall through to the last resort
             _log.info("rail strategy B (endpoint relations) failed: %s", exc)
 
-    # Strategy C: coordinate Dijkstra — may return a straight chord (degraded).
+    # Strategy C: coordinate Dijkstra — last resort. May return a straight chord
+    # (degraded). A self-overlapping C result is worse than an honest straight
+    # line, so straight-line it (flagged degraded) rather than ship garbage.
     if result is None:
         poly = _via_coordinate_fallback(enriched)
         degraded = poly == _straight(lat1, lon1, lat2, lon2)
+        if not degraded and not _rail_length_ok(poly, stops):
+            _log.info("rail strategy C rejected (%.0f km implausible) — straight-lining",
+                      _polyline_km(poly))
+            poly = _straight(lat1, lon1, lat2, lon2)
+            degraded = True
         result = RailGeometry(
             poly, "straight" if degraded else "coordinate_dijkstra", degraded)
 
@@ -268,9 +292,12 @@ def _extract_train_geometry(
 
     Routing start→end through the relation's own member-way node graph instead
     yields a shortest on-track path that visits each node at most once — no
-    backtracking, no double-track duplication. Falls back to the chain/trim
-    extraction only when the member ways don't form a connected graph between
-    the two endpoints (rare; e.g. a relation with a genuine gap).
+    backtracking, no double-track duplication. Returns None when the member ways
+    don't form a connected graph between the two endpoints, so the caller falls
+    through to another relation or strategy C — rather than emitting the greedy
+    chain/trim, which is the very self-overlapping garbage this routing exists to
+    avoid (observed on Hanko→Salo: a 116 km teleport mid-line, 96% of points
+    re-treading the same ground, 6.2x the real distance).
     """
     ways = [
         m for m in rel.get("members", [])
@@ -284,8 +311,8 @@ def _extract_train_geometry(
             path = _dijkstra(nodes, adj, start, end)
             if path and len(path) >= 2:
                 return [nodes[n] for n in path]
-    # Disconnected relation graph — fall back to greedy chaining + trim.
-    return _extract_geometry(rel, lat1, lon1, lat2, lon2)
+    # Disconnected relation graph — reject (None) rather than chain into garbage.
+    return None
 
 
 def _chain(segs: list[list[list[float]]]) -> list[list[float]]:
@@ -722,6 +749,29 @@ def _via_ferry_yes_fallback(
 
 def _straight(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
     return [[lon1, lat1], [lon2, lat2]]
+
+
+def _crow_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Straight-line distance in km (equirectangular; same approx as _dijkstra)."""
+    dlat = (lat1 - lat2) * 111.0
+    dlon = (lon1 - lon2) * 111.0 * math.cos(math.radians((lat1 + lat2) / 2))
+    return math.hypot(dlat, dlon)
+
+
+def _polyline_km(poly: list[list[float]]) -> float:
+    """Total length in km of a [[lon, lat], …] polyline."""
+    return sum(_crow_km(a[1], a[0], b[1], b[0]) for a, b in zip(poly, poly[1:]))
+
+
+def _rail_length_ok(poly: list[list[float]], stops: list[dict]) -> bool:
+    """True if *poly* is a plausible rail path for *stops* — i.e. not a
+    self-overlapping / wrong-relation result far longer than the straight-line
+    distance through the stops. See _MAX_RAIL_DETOUR_RATIO."""
+    baseline = sum(
+        _crow_km(stops[i]["lat"], stops[i]["lon"], stops[i + 1]["lat"], stops[i + 1]["lon"])
+        for i in range(len(stops) - 1)
+    )
+    return _polyline_km(poly) <= max(_MIN_PLAUSIBLE_KM, baseline * _MAX_RAIL_DETOUR_RATIO)
 
 
 def _sq(a: list[float], b: list[float]) -> float:
