@@ -25,7 +25,7 @@ jobs:
         working-directory: flutter_client
         run: |
           flutter pub get
-          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=MAPBOX_TOKEN=${{ secrets.MAPBOX_TOKEN }} --dart-define=GOOGLE_TRANSLATE_API_KEY=${{ secrets.GOOGLE_TRANSLATE_API_KEY }}
+          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=MAPBOX_TOKEN=${{ secrets.MAPBOX_TOKEN }}
 
       - name: Stage Flutter build output for Docker
         run: cp -r flutter_client/build/web web_client
