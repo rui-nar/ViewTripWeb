@@ -31,33 +31,23 @@ def test_google_login_forwards_clock_skew_tolerance():
     assert kwargs.get("clock_skew_in_seconds") == auth._GOOGLE_CLOCK_SKEW_SECONDS
 
 
-def test_google_login_surfaces_reason_on_dev():
-    """Dev builds append the real verification error to aid debugging."""
+def test_google_login_keeps_response_generic_and_logs_reason(caplog):
+    """The client only ever sees a generic 401; the real reason is logged
+    server-side (never leaked in the response body)."""
+    import logging
+
     import api.auth as auth
 
     with patch.object(
         auth, "verify_oauth2_token", side_effect=ValueError("boom-reason"),
     ), patch.object(auth, "_google_client_id", "client-123"), \
-            patch.object(auth, "_IS_DEV", True):
-        resp = _client().post("/api/auth/google", json={"id_token": "x"})
-
-    assert resp.status_code == 401
-    assert "boom-reason" in resp.json()["detail"]
-
-
-def test_google_login_hides_reason_in_production():
-    """Real deployments keep the generic message — no detail leakage."""
-    import api.auth as auth
-
-    with patch.object(
-        auth, "verify_oauth2_token", side_effect=ValueError("boom-reason"),
-    ), patch.object(auth, "_google_client_id", "client-123"), \
-            patch.object(auth, "_IS_DEV", False):
+            caplog.at_level(logging.WARNING, logger="api.auth"):
         resp = _client().post("/api/auth/google", json={"id_token": "x"})
 
     assert resp.status_code == 401
     assert resp.json()["detail"] == "Invalid Google id_token"
     assert "boom-reason" not in resp.json()["detail"]
+    assert "boom-reason" in caplog.text
 
 
 def test_google_login_unconfigured_returns_503():

@@ -32,11 +32,6 @@ from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
 
-# Local/dev builds leave APP_VERSION unset (defaults to "dev"); real deployments
-# bake in the git tag. On dev we expose verification failure reasons to the
-# client to aid debugging — never in production, where they could leak detail.
-_IS_DEV = os.environ.get("APP_VERSION", "dev") == "dev"
-
 # Google mints id_tokens against its own clock. Without a tolerance, a server
 # whose clock lags by even a second rejects fresh tokens as "used too early".
 # A small skew window absorbs normal NTP drift on any host (dev or deployed)
@@ -188,12 +183,9 @@ def google_login(body: GoogleTokenRequest):
         # The client only ever sees a generic 401, so log the real reason here —
         # without it every Google auth failure is undiagnosable.
         _log.warning("Google id_token verification failed: %s", exc)
-        detail = "Invalid Google id_token"
-        if _IS_DEV:
-            detail = f"Invalid Google id_token: {exc}"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=detail,
+            detail="Invalid Google id_token",
         )
 
     google_sub = id_info["sub"]
