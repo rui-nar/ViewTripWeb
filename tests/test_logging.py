@@ -6,7 +6,53 @@ from pathlib import Path
 
 import pytest
 
-from src.utils.logging import get_logger, setup_logging
+from src.utils.logging import (
+    _APP_HANDLER_MARK,
+    _APP_LOGGER_NAMES,
+    configure_logging,
+    get_logger,
+    setup_logging,
+)
+
+
+def _app_handlers(logger):
+    return [h for h in logger.handlers if getattr(h, _APP_HANDLER_MARK, False)]
+
+
+class TestConfigureLogging:
+    """configure_logging wires app namespaces to a console handler."""
+
+    def setup_method(self):
+        # Start each test from a clean slate on the app namespaces.
+        for name in _APP_LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            for h in _app_handlers(logger):
+                logger.removeHandler(h)
+
+    teardown_method = setup_method
+
+    def test_attaches_handler_to_each_app_namespace(self):
+        configure_logging()
+        for name in _APP_LOGGER_NAMES:
+            assert len(_app_handlers(logging.getLogger(name))) == 1
+
+    def test_is_idempotent(self):
+        configure_logging()
+        configure_logging()
+        configure_logging()
+        for name in _APP_LOGGER_NAMES:
+            assert len(_app_handlers(logging.getLogger(name))) == 1
+
+    def test_app_logger_emits_info(self, caplog):
+        configure_logging()
+        with caplog.at_level(logging.INFO, logger="api"):
+            get_logger("api.test").info("hello-info")
+        assert "hello-info" in caplog.text
+
+    def test_does_not_touch_uvicorn_loggers(self):
+        configure_logging()
+        uvicorn_logger = logging.getLogger("uvicorn.access")
+        assert _app_handlers(uvicorn_logger) == []
 
 
 class TestSetupLogging:

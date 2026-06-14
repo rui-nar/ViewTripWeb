@@ -24,7 +24,12 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from models.project_db import _check_schema_contract
 from src.backup.backup_service import backup_db
-from src.utils.logging import get_logger
+from src.utils.logging import configure_logging, get_logger
+
+# Wire app loggers (api.*, src.*) to a console handler as early as possible —
+# this is the process entry point (uvicorn api.router:app), so configuring here
+# means INFO+ logs surface from import time onward, not just inside the lifespan.
+configure_logging()
 
 _log = get_logger(__name__)
 _scheduler = AsyncIOScheduler()
