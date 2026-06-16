@@ -11,9 +11,12 @@ from alembic import context
 config = context.config
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# disable_existing_loggers=False is critical: `alembic upgrade head` runs inside
+# the live API process (lifespan), and the default (True) would DISABLE the app's
+# own `api.*`/`src.*` loggers configured at import — silently killing all app logs
+# in production (the long-standing "no logs on the NAS" bug).
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Import all SQLModel table models so they register with the shared metadata
 # before autogenerate inspects it.

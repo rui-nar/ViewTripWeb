@@ -54,6 +54,33 @@ class TestConfigureLogging:
         uvicorn_logger = logging.getLogger("uvicorn.access")
         assert _app_handlers(uvicorn_logger) == []
 
+    def test_alembic_fileconfig_keeps_app_loggers_enabled(self):
+        """Regression for the "no logs in production" bug. `alembic upgrade head`
+        runs inside the live API process (lifespan) and loads alembic/env.py,
+        which calls fileConfig. With the default disable_existing_loggers=True it
+        DISABLED the app's api.*/src.* loggers (configured at import) — silently
+        killing every app log on the NAS. env.py now passes
+        disable_existing_loggers=False, and alembic.ini puts no handler on root
+        (so app logs don't double via propagation)."""
+        import os
+        from logging.config import fileConfig
+
+        configure_logging()
+        ini = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+        root = logging.getLogger()
+        saved_root = root.handlers[:]
+        try:
+            fileConfig(ini, disable_existing_loggers=False)  # mirrors alembic/env.py
+            # App loggers survive alembic's reconfiguration.
+            assert logging.getLogger("src").disabled is False
+            assert logging.getLogger("api").disabled is False
+            assert len(_app_handlers(logging.getLogger("src"))) == 1
+            # alembic.ini must not hang a handler on root, or every app log would
+            # print twice (own handler + propagation to root).
+            assert root.handlers == []
+        finally:
+            root.handlers[:] = saved_root
+
 
 class TestSetupLogging:
     """Test logging setup functions."""
