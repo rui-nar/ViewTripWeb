@@ -153,6 +153,74 @@ class TestFerryEndpointScoring:
                 get_ferry_geometry(lat1, lon1, lat2, lon2)
 
 
+class TestFerryRelationGraphRouting:
+    """Regression for the far-north Norway boat (Kirkenes→Honningsvåg, 2026-06-15).
+
+    Strategy A matched a route=ferry relation whose member ways are NOT
+    physically connected. The old extractor greedily *chained* those ways,
+    teleporting across the gaps — the resolved line had 80 km + 50 km straight
+    jumps mid-route (580 km for a 207 km crossing). Graph routing must instead
+    refuse a disconnected relation (so a cleaner strategy / honest fallback runs)
+    and route a connected multi-way relation continuously.
+    """
+
+    def test_disconnected_relation_is_refused_not_teleported(self):
+        # Endpoints sit right on the requested ports (the relation would pass the
+        # endpoint-proximity score), but the two ways share no node — chaining
+        # them would teleport across the gap between them.
+        disconnected_relation = {
+            "type": "relation",
+            "members": [
+                {"type": "way", "geometry": [
+                    {"lon": _LON1, "lat": _LAT1},
+                    {"lon": _LON1 + 0.05, "lat": _LAT1 + 0.05},
+                ]},
+                {"type": "way", "geometry": [          # disconnected component
+                    {"lon": _LON2 - 0.05, "lat": _LAT2 - 0.05},
+                    {"lon": _LON2, "lat": _LAT2},
+                ]},
+            ],
+        }
+
+        def _overpass_disconnected(*_args, **_kwargs):
+            return {"elements": [disconnected_relation]}
+
+        # No connected path through the relation, and the way/ferry=yes fallbacks
+        # find nothing → refuse with OverpassError rather than ship a teleport.
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_disconnected):
+            with pytest.raises(OverpassError):
+                get_ferry_geometry(_LAT1, _LON1, _LAT2, _LON2)
+
+    def test_connected_multiway_relation_routes_continuously(self):
+        # Two ways that share an exact mid node → one connected graph.
+        mid_lon, mid_lat = (_LON1 + _LON2) / 2, (_LAT1 + _LAT2) / 2
+        connected_relation = {
+            "type": "relation",
+            "members": [
+                {"type": "way", "geometry": [
+                    {"lon": _LON1, "lat": _LAT1},
+                    {"lon": mid_lon, "lat": mid_lat},
+                ]},
+                {"type": "way", "geometry": [
+                    {"lon": mid_lon, "lat": mid_lat},
+                    {"lon": _LON2, "lat": _LAT2},
+                ]},
+            ],
+        }
+
+        def _overpass_connected(*_args, **_kwargs):
+            return {"elements": [connected_relation]}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_connected):
+            result = get_ferry_geometry(_LAT1, _LON1, _LAT2, _LON2)
+
+        # Full continuous path start → mid → end, no teleport: every hop is a real
+        # edge, so the largest hop is one of the two legs, not a stitched gap.
+        assert len(result) == 3
+        assert abs(result[0][1] - _LAT1) < 1e-6 and abs(result[-1][1] - _LAT2) < 1e-6
+        assert [round(c, 6) for c in result[1]] == [round(mid_lon, 6), round(mid_lat, 6)]
+
+
 class TestBusFallbackRaisesOnMissingRoute:
     def test_no_ways_raises(self):
         with patch("src.services.overpass_service._overpass", side_effect=_empty_overpass):

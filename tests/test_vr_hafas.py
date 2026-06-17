@@ -9,8 +9,7 @@ from src.services.hafas_service import HafasError, get_stop_sequence
 from src.services.overpass_service import (
     OverpassError,
     RailGeometry,
-    _extract_geometry,
-    _extract_train_geometry,
+    _extract_relation_geometry,
     _rail_length_ok,
     _via_train_relations_endpoints,
     get_rail_geometry,
@@ -418,7 +417,7 @@ class TestTrainRelationGraphExtraction:
     def test_graph_extraction_does_not_backtrack(self):
         rel = self._siding_relation()
         # Start at the south end, finish at the north end.
-        geom = _extract_train_geometry(rel, 0.0, 0.0, 1.0, 0.0)
+        geom = _extract_relation_geometry(rel, 0.0, 0.0, 1.0, 0.0)
 
         assert geom is not None and len(geom) >= 2
         # Net north span is 1.0°; the clean path is ~1.0 long. The siding
@@ -429,15 +428,6 @@ class TestTrainRelationGraphExtraction:
         # Latitude increases monotonically — no folding back south.
         lats = [pt[1] for pt in geom]
         assert lats == sorted(lats), "path folds back on itself"
-
-    def test_chain_extraction_would_backtrack(self):
-        """Documents the old behaviour the graph path fixes: naive chain+trim of
-        the same relation keeps the siding out-and-back, inflating the line."""
-        chained = _extract_geometry(self._siding_relation(), 0.0, 0.0, 1.0, 0.0)
-        assert chained is not None
-        # Main line is 1.0 long; the retained siding detour adds ~0.6 (0.3 out
-        # + 0.3 back), so the chained path is markedly longer.
-        assert self._path_len(chained) > 1.5
 
     def test_disconnected_relation_returns_none_not_chain(self):
         """When the relation's ways don't connect start→end, graph routing fails.
@@ -450,7 +440,7 @@ class TestTrainRelationGraphExtraction:
             self._way([(0.0, 0.0), (0.1, 0.0)]),   # component near start
             self._way([(5.0, 5.0), (5.1, 5.0)]),   # disconnected, near end
         ]}
-        assert _extract_train_geometry(rel, 0.0, 0.0, 5.0, 5.0) is None
+        assert _extract_relation_geometry(rel, 0.0, 0.0, 5.0, 5.0) is None
 
 
 class TestRailGeometryPlausibilityGate:

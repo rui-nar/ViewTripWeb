@@ -262,55 +262,37 @@ node["uic_ref"="{uic2}"]->.b;
     elements = data.get("elements", [])
     if not elements:
         return None
-    return _extract_train_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
+    return _extract_relation_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
 
 
 def _clean_uic(uic: str) -> str:
     return uic.lstrip("0") or uic
 
 
-def _extract_geometry(
+def _extract_relation_geometry(
     rel: dict,
     lat1: float, lon1: float, lat2: float, lon2: float,
 ) -> Optional[list[list[float]]]:
-    segments: list[list[list[float]]] = []
-    for m in rel.get("members", []):
-        if m.get("type") != "way":
-            continue
-        geom = m.get("geometry", [])
-        if len(geom) < 2:
-            continue
-        segments.append([[pt["lon"], pt["lat"]] for pt in geom])
+    """Extract a single clean start→end polyline from a route relation.
 
-    if not segments:
-        return None
+    Route relations (train, ferry, bus) are not simple ordered polylines. Train
+    relations bundle parallel double-track ways, passing loops, sidings and
+    station tracks; ferry/bus relations bundle several legs that may not be
+    physically connected. Greedily chaining their member ways walks into and out
+    of every stub *and teleports across any gap between disconnected ways* —
+    producing a self-overlapping or jumping line (observed: Helsinki→Rovaniemi
+    rail at 3031 km vs ~970 km of real track; a far-north Norway ferry rendered
+    with 80 km + 50 km mid-route straight jumps where chaining stitched
+    disconnected coastal ferry ways together).
 
-    polyline = _chain(segments)
-    return _trim(polyline, lat1, lon1, lat2, lon2) if len(polyline) >= 2 else None
-
-
-def _extract_train_geometry(
-    rel: dict,
-    lat1: float, lon1: float, lat2: float, lon2: float,
-) -> Optional[list[list[float]]]:
-    """Extract a single clean start→end polyline from a train route relation.
-
-    Train relations are not simple ordered polylines: they routinely include
-    parallel double-track ways, passing loops, sidings and station tracks.
-    Greedily chaining their member ways (:func:`_chain`) walks into and back out
-    of every stub and alternates between the up/down tracks, producing a
-    self-overlapping line several times longer than the real route (observed:
-    Helsinki→Rovaniemi rendered at 3031 km vs ~970 km of actual track, 66% of
-    points re-treading the same ground).
-
-    Routing start→end through the relation's own member-way node graph instead
-    yields a shortest on-track path that visits each node at most once — no
-    backtracking, no double-track duplication. Returns None when the member ways
-    don't form a connected graph between the two endpoints, so the caller falls
-    through to another relation or strategy C — rather than emitting the greedy
-    chain/trim, which is the very self-overlapping garbage this routing exists to
-    avoid (observed on Hanko→Salo: a 116 km teleport mid-line, 96% of points
-    re-treading the same ground, 6.2x the real distance).
+    Routing start→end through the relation's own member-way node graph (Dijkstra)
+    instead yields a shortest on-graph path that visits each node at most once —
+    no backtracking, no double-track duplication, and structurally no teleports
+    (an edge exists only between vertices actually adjacent within a way).
+    Returns None when the member ways don't form a connected graph between the
+    two endpoints, so the caller falls through to another relation or strategy
+    rather than emitting a teleporting / self-overlapping line (observed on
+    Hanko→Salo: a 116 km teleport mid-line, 6.2x the real distance).
     """
     ways = [
         m for m in rel.get("members", [])
@@ -326,28 +308,6 @@ def _extract_train_geometry(
                 return [nodes[n] for n in path]
     # Disconnected relation graph — reject (None) rather than chain into garbage.
     return None
-
-
-def _chain(segs: list[list[list[float]]]) -> list[list[float]]:
-    result = list(segs[0])
-    for seg in segs[1:]:
-        if not seg:
-            continue
-        if _sq(result[-1], seg[-1]) < _sq(result[-1], seg[0]):
-            seg = list(reversed(seg))
-        result += seg[1:] if _sq(result[-1], seg[0]) < 1e-12 else seg
-    return result
-
-
-def _trim(
-    poly: list[list[float]],
-    lat1: float, lon1: float, lat2: float, lon2: float,
-) -> list[list[float]]:
-    si = min(range(len(poly)), key=lambda i: _sq(poly[i], [lon1, lat1]))
-    ei = min(range(len(poly)), key=lambda i: _sq(poly[i], [lon2, lat2]))
-    if si <= ei:
-        return poly[si : ei + 1]
-    return list(reversed(poly[ei : si + 1]))
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +378,7 @@ rel(id:{ids_str});
     best: Optional[list[list[float]]] = None
     best_score = math.inf
     for rel in relations:
-        geom = _extract_train_geometry(rel, lat1, lon1, lat2, lon2)
+        geom = _extract_relation_geometry(rel, lat1, lon1, lat2, lon2)
         if geom and len(geom) >= 2:
             score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
             if score < best_score:
@@ -655,12 +615,12 @@ out geom;
     best: Optional[list[list[float]]] = None
     best_score = math.inf
     for rel in relations:
-        geom = _extract_geometry(rel, lat1, lon1, lat2, lon2)
+        geom = _extract_relation_geometry(rel, lat1, lon1, lat2, lon2)
         if geom and len(geom) >= 2:
-            # Score by endpoint proximity: _trim guarantees geom[0] is the
-            # point in the relation nearest (lon1,lat1) and geom[-1] nearest
-            # (lon2,lat2), so a low score means the route actually connects
-            # the requested ports. Scoring by total path length (the previous
+            # Score by endpoint proximity: graph routing anchors geom[0] at the
+            # relation node nearest (lon1,lat1) and geom[-1] at the node nearest
+            # (lon2,lat2), so a low score means the route actually connects the
+            # requested ports. Scoring by total path length (the previous
             # approach) caused long open-sea crossings to lose to short coastal
             # hops that happened to fall inside the same bounding box.
             score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
