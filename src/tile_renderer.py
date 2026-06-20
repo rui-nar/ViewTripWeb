@@ -24,6 +24,7 @@ import concurrent.futures
 import io
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -53,6 +54,37 @@ _prerender_pool = concurrent.futures.ThreadPoolExecutor(
 # running) jobs when the project is edited again before rendering completes.
 _pending_futures: Dict[str, concurrent.futures.Future] = {}
 _pending_lock = threading.Lock()
+
+# Per-token lock serialising the destructive rmtree against the bulk pre-render
+# writer for the SAME token. Without it, refreshing a project's tiles
+# (shutil.rmtree) raced a still-running pre-render writing tiles into the same
+# dir → "OSError: Directory not empty" (ENOTEMPTY) as rmtree's walk hit files
+# that appeared mid-delete.
+_token_locks: Dict[str, threading.Lock] = {}
+_token_locks_guard = threading.Lock()
+
+
+def _token_lock(token: str) -> threading.Lock:
+    with _token_locks_guard:
+        return _token_locks.setdefault(token, threading.Lock())
+
+
+def _safe_rmtree(d: Path) -> None:
+    """Remove a tile dir, tolerating a concurrent writer recreating entries.
+
+    Even with per-token locking, an on-demand single-tile write can briefly race
+    a clear; retry a few times, then fall back to ignore_errors so a stray file
+    can never crash a background refresh.
+    """
+    for _ in range(3):
+        if not d.exists():
+            return
+        try:
+            shutil.rmtree(d)
+            return
+        except OSError:
+            time.sleep(0.05)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 # ── Rendering helpers ─────────────────────────────────────────────────────────
@@ -194,16 +226,19 @@ def _do_prerender(token: str, features: List[Dict[str, Any]]) -> None:
     """Render and cache only tiles that intersect track segments, zoom 0–max."""
     if not _bbox_from_features(features):
         return
-    for z in range(_PRERENDER_MAX_ZOOM + 1):
-        for tile in _tiles_for_features(features, z):
-            path = _CACHE_ROOT / token / str(tile.z) / str(tile.x) / f"{tile.y}.png"
-            if path.exists():
-                continue
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(render_tile(features, tile.z, tile.x, tile.y))
-            except Exception:
-                pass  # best-effort; never crash the background thread
+    # Hold the token lock for the whole write loop so a concurrent refresh's
+    # rmtree can't delete the dir out from under us mid-render (and vice versa).
+    with _token_lock(token):
+        for z in range(_PRERENDER_MAX_ZOOM + 1):
+            for tile in _tiles_for_features(features, z):
+                path = _CACHE_ROOT / token / str(tile.z) / str(tile.x) / f"{tile.y}.png"
+                if path.exists():
+                    continue
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(render_tile(features, tile.z, tile.x, tile.y))
+                except Exception:
+                    pass  # best-effort; never crash the background thread
 
 
 def _submit_prerender(token: str, features: List[Dict[str, Any]]) -> None:
@@ -281,8 +316,8 @@ def refresh_tile_cache(
     called inside the background thread, so the API response returns immediately.
     """
     d = _CACHE_ROOT / token
-    if d.exists():
-        shutil.rmtree(d)
+    with _token_lock(token):
+        _safe_rmtree(d)
     with _feature_cache_lock:
         _feature_cache.pop(token, None)
 
@@ -308,8 +343,8 @@ def invalidate_tile_cache(token: str) -> None:
     Use this when a share token is revoked rather than when a project is edited.
     """
     d = _CACHE_ROOT / token
-    if d.exists():
-        shutil.rmtree(d)
+    with _token_lock(token):
+        _safe_rmtree(d)
     with _feature_cache_lock:
         _feature_cache.pop(token, None)
     with _pending_lock:

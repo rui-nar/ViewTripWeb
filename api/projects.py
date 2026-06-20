@@ -805,12 +805,16 @@ def update_sync_meta(
             meta.last_ps_sync_at = body.last_ps_sync_at
         sess.add(meta)
         sess.commit()
-    return {
-        "auto_sync_enabled": meta.auto_sync_enabled,
-        "linked_ps_trip_id": meta.linked_ps_trip_id,
-        "last_strava_sync_at": meta.last_strava_sync_at,
-        "last_ps_sync_at": meta.last_ps_sync_at,
-    }
+        # Read attributes BEFORE the session closes. After commit the instance is
+        # expired (expire_on_commit=True), so touching meta.* outside the `with`
+        # block raises DetachedInstanceError.
+        result = {
+            "auto_sync_enabled": meta.auto_sync_enabled,
+            "linked_ps_trip_id": meta.linked_ps_trip_id,
+            "last_strava_sync_at": meta.last_strava_sync_at,
+            "last_ps_sync_at": meta.last_ps_sync_at,
+        }
+    return result
 
 
 @router.get("/{name}/sync/check", summary="Check for new activities to sync")

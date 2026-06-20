@@ -9,6 +9,17 @@ from pathlib import Path
 _MAX_BACKUPS = 30
 
 
+def _connect(path: Path) -> sqlite3.Connection:
+    """Open a sqlite3 connection for backup/restore.
+
+    ``timeout`` is SQLite's busy handler: with the app now running in WAL mode,
+    backup/restore must WAIT for concurrent writers rather than immediately
+    raising "database is locked" (these raw connections don't go through the
+    engine's PRAGMA listener, so we set the timeout explicitly).
+    """
+    return sqlite3.connect(str(path), timeout=30)
+
+
 def _db_path() -> Path:
     db_url = os.environ.get("DATABASE_URL", "sqlite:///viewtripweb.db")
     if db_url.startswith("sqlite:///"):
@@ -34,11 +45,16 @@ def backup_db() -> Path:
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     dest = _backup_dir() / f"{_stem()}_{date_str}.db"
 
-    src_conn = sqlite3.connect(str(src))
+    # .backup() captures a consistent snapshot including data still in the live
+    # WAL, so it is safe to run while the app is serving.
+    src_conn = _connect(src)
     try:
-        dest_conn = sqlite3.connect(str(dest))
+        dest_conn = _connect(dest)
         try:
             src_conn.backup(dest_conn)
+            # Fold any WAL frames into the backup's main file and drop its sidecar
+            # so each backup is a single self-contained .db (no orphan *-wal).
+            dest_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             dest_conn.close()
     finally:
@@ -59,18 +75,27 @@ def restore_db(date_str: str) -> None:
         raise FileNotFoundError(f"No backup found for {date_str}")
 
     live = _db_path()
-    src_conn = sqlite3.connect(str(backup_file))
+
+    # Drop pooled connections FIRST so no live WAL connection contends with the
+    # overwrite; the next access re-opens via the engine (WAL + busy_timeout).
+    from models.db import engine
+    engine.dispose()
+
+    src_conn = _connect(backup_file)
     try:
-        dest_conn = sqlite3.connect(str(live))
+        dest_conn = _connect(live)
         try:
             src_conn.backup(dest_conn)
+            # Fold the restored frames into the main file and truncate the live
+            # WAL, so no stale pre-restore frames can replay over the restored
+            # data on the next open.
+            dest_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             dest_conn.close()
     finally:
         src_conn.close()
 
-    # Drop all pooled connections so the next request reads the restored state.
-    from models.db import engine
+    # Drop again so any connection opened during the restore window is discarded.
     engine.dispose()
 
 
