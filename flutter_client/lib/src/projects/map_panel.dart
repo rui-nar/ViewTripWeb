@@ -1568,11 +1568,21 @@ class MobileActivityPanelOverlay extends StatelessWidget {
   final AnimatedMapController mapController;
   final double height;
 
+  /// Drives the panel's list scrolling. Without it the panel can't centre a
+  /// selection (issue #21) — `_scrollToSegment` no-ops on a null controller.
+  final ScrollController? scrollController;
+
+  /// Whether the overlay is currently open (slid on-screen). Forwarded to
+  /// [ActivityPanel.panelVisible] so it reveals the current selection on open.
+  final bool isVisible;
+
   const MobileActivityPanelOverlay({
     super.key,
     required this.notifier,
     required this.mapController,
     required this.height,
+    this.scrollController,
+    this.isVisible = true,
   });
 
   @override
@@ -1586,6 +1596,8 @@ class MobileActivityPanelOverlay extends StatelessWidget {
         child: ActivityPanel(
           notifier: notifier,
           mapController: mapController,
+          scrollController: scrollController,
+          panelVisible: isVisible,
         ),
       ),
     );

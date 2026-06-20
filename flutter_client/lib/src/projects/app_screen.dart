@@ -38,6 +38,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   final ValueNotifier<bool> _mapFitted = ValueNotifier(false);
   final ScrollController _activityScrollController = ScrollController();
+  // Separate controller for the narrow-layout overlay panel: wide and narrow
+  // are mutually-exclusive LayoutBuilder branches, and sharing one controller
+  // across them risks "attached to multiple scroll views" during a resize.
+  final ScrollController _mobileActivityScrollController = ScrollController();
   bool _panelOpen = false;
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
@@ -55,6 +59,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     _mapController.dispose();
     _mapFitted.dispose();
     _activityScrollController.dispose();
+    _mobileActivityScrollController.dispose();
     super.dispose();
   }
 
@@ -669,6 +674,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                         notifier: n,
                         mapController: _mapController,
                         height: mapHeight,
+                        scrollController: _mobileActivityScrollController,
+                        isVisible: _panelOpen,
                       ),
                     ),
                   ),

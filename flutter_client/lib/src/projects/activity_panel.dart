@@ -20,11 +20,20 @@ class ActivityPanel extends StatefulWidget {
   final ProjectNotifier notifier;
   final AnimatedMapController? mapController;
   final ScrollController? scrollController;
+
+  /// Whether the panel is currently on-screen. On the wide layout it is always
+  /// visible (default true). On narrow layouts the panel is built but slid
+  /// off-screen while closed, so a selection made on the map (e.g. tapping a
+  /// segment) can't be centered until the panel is opened. When this flips
+  /// false→true the panel reveals the current selection — see issue #21.
+  final bool panelVisible;
+
   const ActivityPanel({
     super.key,
     required this.notifier,
     this.mapController,
     this.scrollController,
+    this.panelVisible = true,
   });
 
   @override
@@ -366,6 +375,28 @@ class _ActivityPanelState extends State<ActivityPanel> {
     }
     _refreshActivityById(widget.notifier.activities);
     _rebuildDisplayList(widget.notifier.items, widget.notifier.tripStart, widget.notifier.dayMeta);
+
+    // Panel just became visible (narrow layout: opened after a selection was
+    // made on the map while it was hidden). Center the current selection now
+    // that the list can actually scroll — see issue #21.
+    if (!oldWidget.panelVisible && widget.panelVisible) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _revealCurrentSelection();
+      });
+    }
+  }
+
+  /// Expand + scroll-to-center whatever is currently selected (segment first,
+  /// then activity). No-op when nothing is selected. Used to reveal a selection
+  /// that was made while the panel was hidden on narrow layouts.
+  void _revealCurrentSelection() {
+    final segId = widget.notifier.selectedSegmentId?.toString();
+    if (segId != null) {
+      _expandAndScrollToSegment(segId);
+      return;
+    }
+    final actId = widget.notifier.selectedActivityId?.toString();
+    if (actId != null) _expandAndScrollToActivity(actId);
   }
 
   void _onNotifierChanged() {
@@ -1147,10 +1178,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
                               ),
                               Expanded(
                                 child: () {
-                                  final rawTags = notifier.dayMeta[h.dateKey]?['tags'];
-                                  final tags = rawTags is List
-                                      ? rawTags.cast<String>()
-                                      : <String>[];
+                                  // Effective tags include those inherited from
+                                  // an earlier day (issue #18); inherited ones
+                                  // render faded to mark them as a default.
+                                  final tags = notifier.effectiveTagsFor(h.dateKey);
+                                  final inherited =
+                                      !notifier.dayHasOwnTags(h.dateKey) &&
+                                          tags.isNotEmpty;
                                   return Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     mainAxisSize: MainAxisSize.min,
@@ -1177,7 +1211,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                                       horizontal: 4, vertical: 1),
                                                   decoration: BoxDecoration(
                                                     color: theme.colorScheme
-                                                        .secondaryContainer,
+                                                        .secondaryContainer
+                                                        .withValues(
+                                                            alpha: inherited
+                                                                ? 0.4
+                                                                : 1.0),
                                                     borderRadius:
                                                         BorderRadius.circular(4),
                                                   ),
@@ -1187,8 +1225,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                                         ?.copyWith(
                                                       fontSize: 8,
                                                       height: 1.1,
+                                                      fontStyle: inherited
+                                                          ? FontStyle.italic
+                                                          : null,
                                                       color: theme.colorScheme
-                                                          .onSecondaryContainer,
+                                                          .onSecondaryContainer
+                                                          .withValues(
+                                                              alpha: inherited
+                                                                  ? 0.7
+                                                                  : 1.0),
                                                     ),
                                                   ),
                                                 ),
