@@ -34,6 +34,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
   late TextEditingController _endLonCtrl;
   DateTime? _date;
   bool _saving = false;
+  // Pre-submit validation error, shown inline inside the dialog. Using the root
+  // ScaffoldMessenger here would render the SnackBar behind the modal, where the
+  // user never sees it (issue #20).
+  String? _formError;
   Timer? _previewDebounce;
 
   dynamic _startActivityId;
@@ -275,27 +279,26 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final endLat   = double.tryParse(_endLatCtrl.text.trim());
     final endLon   = double.tryParse(_endLonCtrl.text.trim());
     if (_date == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Set a date for the segment')),
-      );
+      setState(() => _formError = 'Set a date for the segment');
       return;
     }
     if (startLat == null || startLon == null ||
         endLat   == null || endLon   == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Set a start and end location')),
-      );
+      setState(() => _formError = 'Set a start and end location');
       return;
     }
-    setState(() => _saving = true);
+    setState(() {
+      _formError = null;
+      _saving = true;
+    });
     try {
       await _saveBody(startLat, startLon, endLat, endLon);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-      );
+      setState(() {
+        _saving = false;
+        _formError = e.toString().replaceFirst('Exception: ', '');
+      });
     }
   }
 
@@ -505,8 +508,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
       title: Text(isEdit ? 'Edit Segment' : 'Add Segment'),
       content: SizedBox(
         width: 420,
-        child: SingleChildScrollView(
-          child: Form(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: SingleChildScrollView(
+                child: Form(
           key: _formKey,
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -564,7 +571,12 @@ class _SegmentDialogState extends State<SegmentDialog> {
                     firstDate: DateTime(2000),
                     lastDate: DateTime(2100),
                   );
-                  if (picked != null) setState(() => _date = picked);
+                  if (picked != null) {
+                    setState(() {
+                      _date = picked;
+                      _formError = null;
+                    });
+                  }
                 },
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
@@ -773,7 +785,35 @@ class _SegmentDialogState extends State<SegmentDialog> {
               ],
             ],
           ),
-        ),
+                ),
+              ),
+            ),
+            if (_formError != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline, size: 18,
+                        color: theme.colorScheme.onErrorContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _formError!,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onErrorContainer),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
         ),
       ),
       actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
