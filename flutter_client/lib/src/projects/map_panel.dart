@@ -63,14 +63,89 @@ IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
   _                                      => Icons.map_outlined,
 };
 
+// Start (green) / end (red) markers for the selected activity (issue #19).
+const Color _kStartMarkerColor = Color(0xFF22C55E); // green-500
+const Color _kEndMarkerColor   = Color(0xFFEF4444); // red-500
+
+LatLng? _coordToLatLng(dynamic c) {
+  if (c is! List || c.length < 2) return null;
+  return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
+}
+
+/// Activity ids that begin a new day, in trip order: the first dated activity
+/// of each distinct consecutive `start_date_local` date. Used to drop a day
+/// breakpoint node at the start of each day on the map so days are visually
+/// separable (issue #19). Non-activity items and dateless activities are
+/// ignored; mirrors the activity panel's day-grouping (only activities advance
+/// the running date).
+@visibleForTesting
+Set<String> dayStartActivityIds(
+  List<Map<String, dynamic>> items,
+  Map<dynamic, Map<String, dynamic>> activityById,
+) {
+  final starts = <String>{};
+  String? lastDate;
+  for (final item in items) {
+    if (item['item_type'] != 'activity') continue;
+    final actId = item['activity_id'];
+    final date =
+        (activityById[actId]?['start_date_local'] as String?)?.split('T').first;
+    if (date == null) continue;
+    if (date != lastDate) {
+      final id = actId?.toString();
+      if (id != null) starts.add(id);
+      lastDate = date;
+    }
+  }
+  return starts;
+}
+
+/// A solid coloured disc with a white ring — used for the selected activity's
+/// start (green) / end (red) markers so they read on any basemap.
+Marker _dotMarker(LatLng point, Color color, {double size = 16}) => Marker(
+      point: point,
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+      ),
+    );
+
+/// A white "bead" with a thick coloured ring — the day breakpoint node. The
+/// inverse fill (vs the solid sport-icon markers) makes it read as a joint that
+/// breaks the line between days rather than another activity marker (#19).
+Marker _dayNodeMarker(LatLng point, Color ringColor, {double size = 15}) =>
+    Marker(
+      point: point,
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(color: ringColor, width: 3),
+        ),
+      ),
+    );
+
 List<Marker> _buildActivityMarkersFromGeo(
   Map<String, dynamic> geo,
   dynamic selectedActivityId,
   bool hasSelection,
-  Color trackColor,
-) {
+  Color trackColor, {
+  Set<String> dayStartActivityIds = const {},
+}) {
   final features = geo['features'];
   if (features is! List) return const [];
+  // Day breakpoints sit above the line but below the sport icons / selected
+  // endpoints, so collect them separately and prepend.
+  final dayMarkers = <Marker>[];
   final markers = <Marker>[];
   for (final feature in features) {
     if (feature is! Map) continue;
@@ -93,6 +168,13 @@ List<Marker> _buildActivityMarkersFromGeo(
             ? trackColor.withAlpha(0x60)
             : trackColor;
 
+    // Day breakpoint node at the start of each day's first activity — always
+    // shown so days are visually separable regardless of selection (#19).
+    if (actId != null && dayStartActivityIds.contains(actId)) {
+      final start = _coordToLatLng(coords.first);
+      if (start != null) dayMarkers.add(_dayNodeMarker(start, trackColor));
+    }
+
     markers.add(Marker(
       point: point,
       width: 22,
@@ -103,8 +185,16 @@ List<Marker> _buildActivityMarkersFromGeo(
         child: Icon(_iconForActivityType(sportType), color: Colors.white, size: 13),
       ),
     ));
+
+    // Start (green) / end (red) markers for the selected activity (#19).
+    if (isSelected) {
+      final start = _coordToLatLng(coords.first);
+      final end = _coordToLatLng(coords.last);
+      if (start != null) markers.add(_dotMarker(start, _kStartMarkerColor, size: 18));
+      if (end != null) markers.add(_dotMarker(end, _kEndMarkerColor, size: 18));
+    }
   }
-  return markers;
+  return [...dayMarkers, ...markers];
 }
 
 // ── MapPanel ──────────────────────────────────────────────────────────────────
@@ -621,8 +711,11 @@ class _MapPanelState extends State<MapPanel> {
           : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
           selMemId != null || selJournalId != null;
+      final dayStartIds = dayStartActivityIds(
+          items, {for (final a in notifier.activities) a['id']: a});
       _cachedActivityMarkers = geo != null
-          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor)
+          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
+              dayStartActivityIds: dayStartIds)
           : [];
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
@@ -1381,7 +1474,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
       _cachedActivityMarkers = geo != null
-          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor)
+          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
+              dayStartActivityIds: dayStartActivityIds(items, actById))
           : [];
       _cachedSegmentMarkers = geo != null
           ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
