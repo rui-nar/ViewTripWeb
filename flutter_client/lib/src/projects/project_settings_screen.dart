@@ -724,10 +724,12 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
             padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
             child: _ColorPickerRow(
               label: 'Chart colour',
-              color: _elevationChartColor ?? Colors.black,
+              // "auto" mirrors the map track line (issue #22), so preview it
+              // with the track colour rather than a misleading black swatch.
+              color: _elevationChartColor ?? _trackColor,
               badge: _elevationChartColor == null ? 'auto' : null,
               onTap: () => _pickColor(
-                current: _elevationChartColor ?? Colors.black,
+                current: _elevationChartColor ?? _trackColor,
                 title: 'Chart colour',
                 onPicked: (c) => setState(() => _elevationChartColor = c),
               ),

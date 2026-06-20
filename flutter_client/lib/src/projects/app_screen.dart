@@ -590,7 +590,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                                 track: selActId != null
                                     ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
                                     : n.fullTrack,
-                                color: n.elevationChartColor,
+                                color: n.effectiveElevationChartColor,
                                 showLine: n.elevationChartShowLine,
                               );
                             },
@@ -656,6 +656,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           track: selActId != null
                               ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
                               : n.fullTrack,
+                          color: n.effectiveElevationChartColor,
                         );
                       },
                     ),

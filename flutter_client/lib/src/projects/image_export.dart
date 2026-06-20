@@ -228,6 +228,7 @@ Future<Uint8List?> performOffscreenExport({
                         activities: notifier.activities,
                         selectedActivityId: null,
                         track: notifier.fullTrack,
+                        color: notifier.effectiveElevationChartColor,
                       ),
                     ),
                 ],

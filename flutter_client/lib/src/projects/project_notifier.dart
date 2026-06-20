@@ -101,8 +101,13 @@ class ProjectNotifier extends ChangeNotifier
   Color? trackSecondaryColor; // null = auto-derive from primary
   double trackWidth = 2.5;
   bool alternatingTrackColors = false;
-  Color? elevationChartColor; // null = use black
+  Color? elevationChartColor; // null = "auto" → match the map track line (#22)
   bool elevationChartShowLine = true;
+
+  /// Colour the elevation chart actually renders with: the user's explicit
+  /// override, or — when unset ("auto") — the map track line colour, so the
+  /// chart matches the line on the map by default (issue #22).
+  Color get effectiveElevationChartColor => elevationChartColor ?? trackColor;
 
   // ── Translation languages ─────────────────────────────────────────────────
   List<String> languages = [];

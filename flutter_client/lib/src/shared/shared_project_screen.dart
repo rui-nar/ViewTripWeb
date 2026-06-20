@@ -350,6 +350,7 @@ class _SharedProjectViewState extends State<_SharedProjectView>
                               onCursorChanged: (pos) =>
                                   notifier.elevationCursorNotifier.value = pos,
                               mapCursorNotifier: notifier.mapCursorDistNotifier,
+                              color: pn.effectiveElevationChartColor,
                             )
                           : const ElevationLoadingPlaceholder();
 

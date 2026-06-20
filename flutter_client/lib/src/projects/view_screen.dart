@@ -347,6 +347,7 @@ class _ViewLayout extends StatelessWidget {
                 ? notifier.perActivityTracks[selActId.toString()] ??
                     notifier.fullTrack
                 : notifier.fullTrack,
+            color: notifier.effectiveElevationChartColor,
           )
         : const ElevationLoadingPlaceholder();
 
