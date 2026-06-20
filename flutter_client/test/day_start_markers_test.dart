@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/projects/map_panel.dart';
 
@@ -38,6 +39,35 @@ void main() {
 
     test('empty input yields no day starts', () {
       expect(dayStartActivityIds(const [], const {}), isEmpty);
+    });
+  });
+
+  group('buildDayBreakpointMarkers', () {
+    Map<String, dynamic> feat(int id) => {
+          'properties': {'type': 'activity', 'activity_id': id},
+          'geometry': {
+            'coordinates': [
+              [10.0, 60.0],
+              [10.1, 60.1],
+            ],
+          },
+        };
+
+    test('one marker per day-start activity', () {
+      final geo = {
+        'features': [feat(1), feat(2), feat(3)]
+      };
+      final markers =
+          buildDayBreakpointMarkers(geo, {'1', '3'}, const Color(0xFF000000));
+      expect(markers.length, 2);
+    });
+
+    test('empty day-start set yields no markers', () {
+      final geo = {
+        'features': [feat(1)]
+      };
+      expect(buildDayBreakpointMarkers(geo, const {}, const Color(0xFF000000)),
+          isEmpty);
     });
   });
 }

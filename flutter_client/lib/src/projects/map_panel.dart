@@ -78,7 +78,6 @@ LatLng? _coordToLatLng(dynamic c) {
 /// separable (issue #19). Non-activity items and dateless activities are
 /// ignored; mirrors the activity panel's day-grouping (only activities advance
 /// the running date).
-@visibleForTesting
 Set<String> dayStartActivityIds(
   List<Map<String, dynamic>> items,
   Map<dynamic, Map<String, dynamic>> activityById,
@@ -134,6 +133,33 @@ Marker _dayNodeMarker(LatLng point, Color ringColor, {double size = 15}) =>
       ),
     );
 
+/// Day breakpoint node markers for [geo] (#19): one bead at the start of each
+/// day-start activity (see [dayStartActivityIds]). Shared by the live map and
+/// the image export so both render days the same way. [ringColor] should match
+/// the colour the track line is drawn with in that context.
+List<Marker> buildDayBreakpointMarkers(
+  Map<String, dynamic> geo,
+  Set<String> dayStartIds,
+  Color ringColor,
+) {
+  if (dayStartIds.isEmpty) return const [];
+  final features = geo['features'];
+  if (features is! List) return const [];
+  final markers = <Marker>[];
+  for (final feature in features) {
+    if (feature is! Map) continue;
+    final props = feature['properties'] as Map? ?? {};
+    if (props['type'] != 'activity') continue;
+    final actId = props['activity_id']?.toString();
+    if (actId == null || !dayStartIds.contains(actId)) continue;
+    final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is! List || coords.isEmpty) continue;
+    final start = _coordToLatLng(coords.first);
+    if (start != null) markers.add(_dayNodeMarker(start, ringColor));
+  }
+  return markers;
+}
+
 List<Marker> _buildActivityMarkersFromGeo(
   Map<String, dynamic> geo,
   dynamic selectedActivityId,
@@ -143,9 +169,6 @@ List<Marker> _buildActivityMarkersFromGeo(
 }) {
   final features = geo['features'];
   if (features is! List) return const [];
-  // Day breakpoints sit above the line but below the sport icons / selected
-  // endpoints, so collect them separately and prepend.
-  final dayMarkers = <Marker>[];
   final markers = <Marker>[];
   for (final feature in features) {
     if (feature is! Map) continue;
@@ -168,13 +191,6 @@ List<Marker> _buildActivityMarkersFromGeo(
             ? trackColor.withAlpha(0x60)
             : trackColor;
 
-    // Day breakpoint node at the start of each day's first activity — always
-    // shown so days are visually separable regardless of selection (#19).
-    if (actId != null && dayStartActivityIds.contains(actId)) {
-      final start = _coordToLatLng(coords.first);
-      if (start != null) dayMarkers.add(_dayNodeMarker(start, trackColor));
-    }
-
     markers.add(Marker(
       point: point,
       width: 22,
@@ -194,7 +210,11 @@ List<Marker> _buildActivityMarkersFromGeo(
       if (end != null) markers.add(_dotMarker(end, _kEndMarkerColor, size: 18));
     }
   }
-  return [...dayMarkers, ...markers];
+  // Day breakpoints sit beneath the sport icons / selected endpoints (so prepend).
+  return [
+    ...buildDayBreakpointMarkers(geo, dayStartActivityIds, trackColor),
+    ...markers,
+  ];
 }
 
 // ── MapPanel ──────────────────────────────────────────────────────────────────

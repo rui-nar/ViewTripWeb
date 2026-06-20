@@ -10,6 +10,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
+import 'map_panel.dart' show buildDayBreakpointMarkers, dayStartActivityIds;
 import 'project_notifier.dart';
 
 const _kExportMapWidth    = 2400.0;
@@ -150,6 +151,15 @@ Future<Uint8List?> performOffscreenExport({
     }
   }
 
+  // Day breakpoint nodes (#19) — ring colour matches the exported track line
+  // (black) so they read as joints on it.
+  final dayMarkers = buildDayBreakpointMarkers(
+    geo,
+    dayStartActivityIds(
+        notifier.items, {for (final a in notifier.activities) a['id']: a}),
+    Colors.black,
+  );
+
   final exportKey  = GlobalKey();
   final exportCtrl = MapController();
 
@@ -218,6 +228,8 @@ Future<Uint8List?> performOffscreenExport({
                           PolylineLayer(
                               polylines: polylines,
                               simplificationTolerance: 0),
+                        if (dayMarkers.isNotEmpty)
+                          MarkerLayer(markers: dayMarkers),
                       ],
                     ),
                   ),
