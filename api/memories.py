@@ -38,6 +38,7 @@ from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
 from src.models.memory import Memory
+from src.project.memory_match import step_key
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
 
@@ -182,6 +183,62 @@ def _get_owned_memory(sess, memory_id: int, user_info_id: int) -> DBMemory:
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
+def _resolve_body_geo(sess, project_id: int, body: "MemoryBody") -> tuple[Optional[float], Optional[float]]:
+    """(lat, lon) for a memory body: explicit coords for 'custom', else derived
+    from the day's activities — the same resolution the insert path uses."""
+    if body.geo_mode == "custom":
+        return body.lat, body.lon
+    return _resolve_geo(sess, project_id, body.date, body.geo_mode)
+
+
+def _find_by_step_id(sess, project_id: int, step_id: int) -> Optional[DBMemory]:
+    """Existing memory already carrying this Polarsteps step id, if any."""
+    return sess.exec(
+        select(DBMemory).where(
+            DBMemory.project_id == project_id,
+            DBMemory.polarsteps_step_id == step_id,
+        )
+    ).first()
+
+
+def _find_namedate_match(sess, project_id: int, body: "MemoryBody") -> Optional[DBMemory]:
+    """A pre-step-id memory (``polarsteps_step_id`` NULL) whose normalized
+    name+date equals this step's — the duplicate the old write path couldn't see.
+    Filtered in Python so it shares ``step_key`` normalization with the read path
+    (trailing-space / empty-vs-NULL name); per-project memory counts are small."""
+    target = step_key(body.name, body.date)
+    candidates = sess.exec(
+        select(DBMemory).where(
+            DBMemory.project_id == project_id,
+            DBMemory.polarsteps_step_id.is_(None),
+        )
+    ).all()
+    for row in candidates:
+        if step_key(row.name, row.date) == target:
+            return row
+    return None
+
+
+def _adopt_and_refresh(sess, user_id: str, mem_row: DBMemory, body: "MemoryBody") -> int:
+    """Adopt an existing memory for a Polarsteps re-import: backfill the step id,
+    overwrite scalar fields from the step (Polarsteps is source of truth), and
+    clear photos so the client's re-upload repopulates a fresh set. Returns the
+    memory id; never creates a second row or project item."""
+    lat, lon = _resolve_body_geo(sess, mem_row.project_id, body)
+    mem_row.name = body.name
+    mem_row.date = body.date
+    mem_row.time = body.time
+    mem_row.description = body.description
+    mem_row.geo_mode = body.geo_mode
+    mem_row.lat = lat
+    mem_row.lon = lon
+    mem_row.polarsteps_step_id = body.polarsteps_step_id
+    _clear_memory_photos(sess, user_id, mem_row)
+    sess.add(mem_row)
+    sess.commit()
+    return mem_row.id
+
+
 class MemoryBody(BaseModel):
     project_name: str = Field(description="Project the memory belongs to")
     date: str = Field(description="Date of the memory (YYYY-MM-DD)")
@@ -207,18 +264,19 @@ def create_memory(
         project_id = _get_project_id(sess, user_info_id, body.project_name)
 
         if body.polarsteps_step_id is not None:
-            existing = sess.exec(
-                select(DBMemory).where(
-                    DBMemory.project_id == project_id,
-                    DBMemory.polarsteps_step_id == body.polarsteps_step_id,
-                )
-            ).first()
-            if existing:
-                return {"id": existing.id}
+            # Exact step-id re-import is idempotent: return the existing row
+            # untouched so retries never wipe already-uploaded photos.
+            by_id = _find_by_step_id(sess, project_id, body.polarsteps_step_id)
+            if by_id is not None:
+                return {"id": by_id.id}
+            # Pre-step-id duplicate (NULL step id, same name+date): adopt it —
+            # backfill the step id and refresh from the step — instead of
+            # creating a second copy. This is the split-brain fix.
+            adopt = _find_namedate_match(sess, project_id, body)
+            if adopt is not None:
+                return {"id": _adopt_and_refresh(sess, current_user["sub"], adopt, body)}
 
-        lat, lon = body.lat, body.lon
-        if body.geo_mode != "custom":
-            lat, lon = _resolve_geo(sess, project_id, body.date, body.geo_mode)
+        lat, lon = _resolve_body_geo(sess, project_id, body)
 
         mem_row = DBMemory(
             project_id=project_id,
@@ -344,6 +402,27 @@ def _save_photo_files(user_id: str, memory_id: int, uuid_str: str, raw: bytes) -
     img.save(str(photo_path / f"{uuid_str}_thumb.jpg"), "JPEG", quality=85)
 
 
+def _delete_photo_files(user_id: str, memory_id: int, photo_uuids: List[str]) -> None:
+    """Remove the on-disk full-res + thumbnail files for the given photo UUIDs."""
+    photo_path = _photo_dir(user_id, memory_id)
+    for photo_uuid in photo_uuids:
+        for suffix in ["", "_thumb"]:
+            (photo_path / f"{photo_uuid}{suffix}.jpg").unlink(missing_ok=True)
+
+
+def _clear_memory_photos(sess, user_id: str, mem_row: DBMemory) -> None:
+    """Drop all photos from *mem_row*: delete files and reset ``photos_json``.
+
+    Used when a Polarsteps re-import adopts an existing memory and refreshes it,
+    so the client's subsequent ``from-url`` uploads repopulate a clean set rather
+    than appending duplicates onto the previously imported photos.
+    """
+    existing: List[str] = json.loads(mem_row.photos_json or "[]")
+    if existing:
+        _delete_photo_files(user_id, mem_row.id, existing)
+    mem_row.photos_json = "[]"
+
+
 def _append_photo_to_memory(memory_id: int, uuid_str: str) -> None:
     with get_session() as sess:
         mem_row = sess.get(DBMemory, memory_id)
@@ -421,10 +500,7 @@ def delete_photo(
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-        photo_path = _photo_dir(current_user["sub"], memory_id)
-        for suffix in ["", "_thumb"]:
-            f = photo_path / f"{photo_uuid}{suffix}.jpg"
-            f.unlink(missing_ok=True)
+        _delete_photo_files(current_user["sub"], memory_id, [photo_uuid])
 
         photos.remove(photo_uuid)
         mem_row.photos_json = json.dumps(photos)

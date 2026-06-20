@@ -20,6 +20,7 @@ from models.db import get_session
 from models.project_db import DBMemory, DBProject
 from models.user import PolarstepsToken
 from src.api.polarsteps_client import PolarstepsClient, format_step, format_trip
+from src.project.memory_match import step_key
 
 router = APIRouter(prefix="/api/polarsteps", tags=["polarsteps"])
 
@@ -209,18 +210,20 @@ def polarsteps_trip_steps(
                 imported_ids = {r for r in rows}
 
                 # Fallback for memories imported before polarsteps_step_id existed:
-                # match by (name, date) so they're still recognised as already imported.
+                # match by normalized (name, date) so they're still recognised as
+                # already imported. step_key is shared with the write path so the
+                # two never disagree (the cause of duplicate imports).
                 name_date_rows = sess.exec(
                     select(DBMemory.name, DBMemory.date).where(
                         DBMemory.project_id == proj.id,
                         DBMemory.polarsteps_step_id.is_(None),
                     )
                 ).all()
-                existing_name_dates = {(r[0], r[1]) for r in name_date_rows}
+                existing_name_dates = {step_key(r[0], r[1]) for r in name_date_rows}
 
     steps = [format_step(s) for s in raw_steps]
     for s in steps:
         by_id = s.get('id') in imported_ids
-        by_name_date = (s.get('name'), s.get('date')) in existing_name_dates
+        by_name_date = step_key(s.get('name'), s.get('date')) in existing_name_dates
         s['already_imported'] = by_id or by_name_date
     return steps

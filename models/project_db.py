@@ -14,7 +14,7 @@ import uuid
 from typing import Optional
 
 import sqlmodel
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import Index, UniqueConstraint, text
 
 
 class DBProject(sqlmodel.SQLModel, table=True):
@@ -218,6 +218,19 @@ class DBMemory(sqlmodel.SQLModel, table=True):
     """A user-authored memory attached to a project and a specific date."""
 
     __tablename__ = "memory"
+    # A Polarsteps step may be imported at most once per project. Partial so the
+    # many NULL ids (non-Polarsteps memories) stay exempt. Mirrors migration
+    # c9d0e1f2a3b4. Kept here so the constraint travels with the model metadata.
+    __table_args__ = (
+        Index(
+            "uq_memory_project_polarsteps_step_id",
+            "project_id",
+            "polarsteps_step_id",
+            unique=True,
+            sqlite_where=text("polarsteps_step_id IS NOT NULL"),
+            postgresql_where=text("polarsteps_step_id IS NOT NULL"),
+        ),
+    )
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     # Stable public identifier used in durable share URLs. Generated once at
