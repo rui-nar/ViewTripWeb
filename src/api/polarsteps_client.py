@@ -10,6 +10,11 @@ from typing import Any
 import requests
 
 
+# A step's `type` marks publication state: 0 = draft (unpublished/offline),
+# 1 = published. Imports surface published steps only (issue #23).
+_STEP_TYPE_DRAFT = 0
+
+
 class PolarstepsClient:
     BASE_URL = "https://api.polarsteps.com"
     _API_VERSION = "61"
@@ -47,10 +52,23 @@ class PolarstepsClient:
         trips: list[dict[str, Any]] = data.get("trips") or []
         return list(reversed(trips))
 
-    def get_trip_steps(self, trip_id: int) -> list[dict[str, Any]]:
-        """Return steps for a trip, sorted chronologically."""
+    def get_trip_steps(
+        self, trip_id: int, *, include_drafts: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return steps for a trip, sorted chronologically.
+
+        Draft (unpublished) steps are excluded by default so the import only
+        surfaces published content. A step's ``type`` field marks publication
+        state — ``1`` = published, ``0`` = draft (an offline/unpublished step
+        still being written). Confirmed against the live API (issue #23).
+        Only an explicit ``type == 0`` is dropped; a missing/unknown type is
+        treated as published so a future step kind is never silently hidden.
+        Pass ``include_drafts=True`` to keep drafts (used by diagnostics).
+        """
         data = self._get(f"/trips/{trip_id}")
         raw_steps: list[dict[str, Any]] = data.get("steps", [])
+        if not include_drafts:
+            raw_steps = [s for s in raw_steps if s.get("type") != _STEP_TYPE_DRAFT]
         raw_steps.sort(key=lambda s: s.get("start_time") or s.get("creation_time") or "")
         return raw_steps
 
