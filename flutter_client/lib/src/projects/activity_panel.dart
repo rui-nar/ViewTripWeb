@@ -882,11 +882,42 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return result;
   }
 
+  /// Wrap a list row in swipe-to-dismiss only on narrow (touch) layouts.
+  ///
+  /// On wide/desktop the same edit/delete actions are available as the row's
+  /// trailing buttons, so the per-row [Dismissible] — a StatefulWidget that
+  /// spins up an animation controller + gesture recognisers for *every* row
+  /// scrolled into view — is pure scroll-jank cost there. Returning the bare
+  /// child (keyed so the sliver keeps element identity) keeps wide-screen
+  /// scrolling smooth.
+  Widget _rowDismissible({
+    required bool isWide,
+    required Key key,
+    required DismissDirection direction,
+    required Future<bool?> Function(DismissDirection) confirmDismiss,
+    Widget? background,
+    Widget? secondaryBackground,
+    required Widget child,
+  }) {
+    if (isWide) return KeyedSubtree(key: key, child: child);
+    return Dismissible(
+      key: key,
+      direction: direction,
+      confirmDismiss: confirmDismiss,
+      background: background,
+      secondaryBackground: secondaryBackground,
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final notifier = widget.notifier;
     final theme = Theme.of(context);
     final items = notifier.items;
+    // Layout class is invariant across the list — compute once here rather than
+    // calling MediaQuery.of() inside the item builder for every row.
+    final isWide = MediaQuery.of(context).size.width >= 720;
 
     final activityById = _activityById;
 
@@ -1030,8 +1061,6 @@ class _ActivityPanelState extends State<ActivityPanel> {
                     itemCount: displayList.length,
                     itemBuilder: (context, vi) {
                       final entry = displayList[vi];
-
-                      final isWide = MediaQuery.of(context).size.width >= 720;
 
                       // ── Day header ──────────────────────────────────────────
                       if (entry is _DayHeader) {
@@ -1256,7 +1285,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final distM = (a['distance'] as num? ?? 0).toDouble();
                         final movingSec = a['moving_time'];
                         final activityId = item['activity_id'];
-                        return Dismissible(
+                        return _rowDismissible(
+                          isWide: isWide,
                           key: ValueKey('act_$activityId'),
                           direction: DismissDirection.endToStart,
                           confirmDismiss: (_) async {
@@ -1331,7 +1361,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             (memDate != null
                                 ? _fmtMemDate(memDate, memTime)
                                 : 'Memory');
-                        return Dismissible(
+                        return _rowDismissible(
+                          isWide: isWide,
                           key: ValueKey('mem_$memId'),
                           direction: DismissDirection.horizontal,
                           background: Container(
@@ -1474,7 +1505,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final jTime = jMap['time'] as String?;
                         final jDesc = jMap['description'] as String?;
                         final label = jDate != null ? _fmtMemDate(jDate, jTime) : 'Journal';
-                        return Dismissible(
+                        return _rowDismissible(
+                          isWide: isWide,
                           key: ValueKey('journal_$jId'),
                           direction: DismissDirection.horizontal,
                           background: Container(
@@ -1598,7 +1630,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final segType = seg['segment_type'] as String?;
                         final label =
                             seg['label'] as String? ?? segType ?? 'Segment';
-                        return Dismissible(
+                        return _rowDismissible(
+                          isWide: isWide,
                           key: ValueKey('seg_$segId'),
                           direction: DismissDirection.horizontal,
                           background: Container(
