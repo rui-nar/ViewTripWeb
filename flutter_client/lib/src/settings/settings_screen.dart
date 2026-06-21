@@ -32,6 +32,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _polarstepsUsername;
   bool _polarstepsLoading = false;
   bool _polarstepsConnecting = false;
+  bool _polarstepsUpdating = false; // reveal token field while already connected
   final _polarstepsTokenCtrl = TextEditingController();
 
   // ── Backup state ──────────────────────────────────────────────────────────
@@ -312,6 +313,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (mounted) {
         setState(() {
           _polarstepsConnected = true;
+          _polarstepsUpdating = false;
           _polarstepsUsername = data['username'] as String?;
           _polarstepsTokenCtrl.clear();
         });
@@ -651,16 +653,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     ),
                                   ),
                                   TextButton(
+                                    onPressed: () => setState(() =>
+                                        _polarstepsUpdating = !_polarstepsUpdating),
+                                    child: Text(_polarstepsUpdating
+                                        ? 'Cancel'
+                                        : 'Update token'),
+                                  ),
+                                  TextButton(
                                     onPressed: _disconnectPolarsteps,
                                     child: const Text('Disconnect'),
                                   ),
                                 ],
                               ),
                               const SizedBox(height: 4),
-                              Text(
-                                'Open a project and use the Import button in the toolbar to import Polarsteps memories.',
-                                style: theme.textTheme.bodySmall,
-                              ),
+                              if (_polarstepsUpdating) ...[
+                                Text(
+                                  'Paste a fresh remember_token if your session expired '
+                                  '(no need to disconnect first).',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                TextField(
+                                  controller: _polarstepsTokenCtrl,
+                                  decoration: const InputDecoration(
+                                    labelText: 'remember_token',
+                                    hintText: 'Paste cookie value here…',
+                                    border: OutlineInputBorder(),
+                                    isDense: true,
+                                  ),
+                                  obscureText: true,
+                                ),
+                                const SizedBox(height: 12),
+                                FilledButton(
+                                  onPressed: _polarstepsConnecting
+                                      ? null
+                                      : _connectPolarsteps,
+                                  child: _polarstepsConnecting
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white),
+                                        )
+                                      : const Text('Update token'),
+                                ),
+                              ] else
+                                Text(
+                                  'Open a project and use the Import button in the toolbar to import Polarsteps memories.',
+                                  style: theme.textTheme.bodySmall,
+                                ),
                             ] else ...[
                               Text(
                                 'Connect your Polarsteps account to import steps as memories.',

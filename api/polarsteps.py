@@ -24,6 +24,11 @@ from src.project.memory_match import step_key
 
 router = APIRouter(prefix="/api/polarsteps", tags=["polarsteps"])
 
+# Single-sourced so the client can reliably distinguish a Polarsteps cookie
+# expiry from an app-JWT expiry (which uses "Token expired"). The substring
+# "polarsteps" is the marker the Flutter client keys off — keep it in here.
+POLARSTEPS_TOKEN_EXPIRED_DETAIL = "Polarsteps token expired"
+
 
 # ── Response schemas ──────────────────────────────────────────────────────────
 
@@ -58,6 +63,24 @@ def _require_client(user_info_id: int) -> PolarstepsClient:
             detail="Polarsteps not connected",
         )
     return PolarstepsClient(tok.remember_token)
+
+
+def _persist_rotated_token(user_info_id: int, client: PolarstepsClient) -> None:
+    """If Polarsteps refreshed the remember_token cookie, store the new value.
+
+    Best-effort session extension: Polarsteps has no refresh endpoint, so the
+    only way to keep a user connected is to capture any rotated cookie. No-op if
+    the token is unchanged or the row vanished (disconnected concurrently).
+    """
+    if not getattr(client, "token_rotated", False):
+        return
+    with get_session() as sess:
+        tok = sess.exec(
+            select(PolarstepsToken).where(PolarstepsToken.user_info_id == user_info_id)
+        ).first()
+        if tok is not None:
+            tok.remember_token = client.current_token
+            sess.commit()
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -161,9 +184,10 @@ def polarsteps_trips(
     try:
         raw_trips = client.get_trips(tok.polarsteps_user_id)
     except PermissionError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Polarsteps token expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+    _persist_rotated_token(user_info_id, client)
     return [format_trip(t) for t in raw_trips]
 
 
@@ -186,9 +210,10 @@ def polarsteps_trip_steps(
     try:
         raw_steps = client.get_trip_steps(trip_id)
     except PermissionError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Polarsteps token expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+    _persist_rotated_token(user_info_id, client)
 
     imported_ids: set[int] = set()
     existing_name_dates: set[tuple[str | None, str | None]] = set()

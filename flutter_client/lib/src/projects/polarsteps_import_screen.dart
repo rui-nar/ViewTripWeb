@@ -79,6 +79,10 @@ class _PolarstepsImportScreenState
 
   Widget _buildBody(
       BuildContext context, PolarstepsImportNotifier notifier) {
+    if (notifier.tokenExpired) {
+      return _ReconnectPanel(notifier: notifier);
+    }
+
     if (notifier.polarstepsNotConnected) {
       return Center(
         child: Padding(
@@ -178,6 +182,111 @@ class _PolarstepsImportScreenState
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Reconnect panel (token expired) ─────────────────────────────────────────────
+
+class _ReconnectPanel extends StatefulWidget {
+  final PolarstepsImportNotifier notifier;
+
+  const _ReconnectPanel({required this.notifier});
+
+  @override
+  State<_ReconnectPanel> createState() => _ReconnectPanelState();
+}
+
+class _ReconnectPanelState extends State<_ReconnectPanel> {
+  final _tokenCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _tokenCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    await widget.notifier.reconnect(_tokenCtrl.text);
+    // On success the notifier clears tokenExpired and resumes; this panel is
+    // then replaced by the trip/step list. On failure it stays with an error.
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final n = widget.notifier;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Icon(Icons.lock_clock_outlined,
+                  size: 48, color: theme.colorScheme.primary),
+              const SizedBox(height: 16),
+              Text(
+                'Your Polarsteps session expired',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Paste a fresh remember_token to reconnect — your selection is kept '
+                'and the import continues right where it left off.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'In your browser: DevTools → Application → Cookies → polarsteps.com → '
+                'copy the remember_token value.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _tokenCtrl,
+                obscureText: true,
+                enabled: !n.reconnecting,
+                onSubmitted: (_) => n.reconnecting ? null : _submit(),
+                decoration: const InputDecoration(
+                  labelText: 'remember_token',
+                  hintText: 'Paste cookie value here…',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              if (n.error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  n.error!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: theme.colorScheme.error, fontSize: 12),
+                ),
+              ],
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: n.reconnecting ? null : _submit,
+                child: n.reconnecting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Reconnect & resume'),
+              ),
+            ],
+          ),
         ),
       ),
     );

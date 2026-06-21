@@ -28,15 +28,46 @@ class PolarstepsClient:
         self._session = requests.Session()
         self._session.cookies.set("remember_token", remember_token, domain=".polarsteps.com")
         self._session.headers.update(self._HEADERS)
+        # Track the token so a rotated cookie (sliding-expiry "remember me") can be
+        # captured and persisted — Polarsteps has no refresh endpoint, so keeping
+        # the freshest cookie it hands back is the only way to extend the session.
+        self._initial_token = remember_token
+        self._current_token = remember_token
         # user_id is the numeric prefix before the "|" in the token
         try:
             self._user_id = int(remember_token.split("|")[0])
         except (ValueError, IndexError):
             self._user_id = 0
 
+    def _read_cookie(self) -> str | None:
+        """Return the current remember_token from the jar, or None.
+
+        Iterates rather than calling ``cookies.get`` because multiple cookies
+        with the same name (different domain/path) raise CookieConflictError.
+        """
+        for c in self._session.cookies:
+            if c.name == "remember_token" and c.value:
+                return c.value
+        return None
+
+    @property
+    def current_token(self) -> str:
+        """The latest remember_token seen — rotated value if Polarsteps refreshed it."""
+        return self._current_token
+
+    @property
+    def token_rotated(self) -> bool:
+        """True if Polarsteps handed back a different (non-empty) remember_token."""
+        return bool(self._current_token) and self._current_token != self._initial_token
+
     def _get(self, path: str, **params: Any) -> Any:
         url = f"{self.BASE_URL}{path}"
         resp = self._session.get(url, params=params or None, timeout=20)
+        # Capture any rotated cookie before raising, so even a final successful
+        # call's refreshed token is kept.
+        rotated = self._read_cookie()
+        if rotated:
+            self._current_token = rotated
         if resp.status_code == 401:
             raise PermissionError("Invalid or expired Polarsteps token")
         resp.raise_for_status()

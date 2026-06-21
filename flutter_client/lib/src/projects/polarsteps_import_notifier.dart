@@ -3,6 +3,11 @@ import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 
 class PolarstepsImportNotifier extends ChangeNotifier {
+  // Injectable so tests can supply an ApiClient backed by a MockClient.
+  final ApiClient _api;
+
+  PolarstepsImportNotifier({ApiClient? client}) : _api = client ?? api;
+
   // ── Project context ────────────────────────────────────────────────────────
   String? _projectName;
   set projectName(String value) => _projectName = value;
@@ -26,6 +31,24 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   String? error;
   bool polarstepsNotConnected = false;
 
+  // ── Token expiry / reconnect ─────────────────────────────────────────────────
+  /// True when a Polarsteps call failed because the remember_token expired.
+  /// The screen shows an inline reconnect panel instead of a raw error.
+  bool tokenExpired = false;
+
+  /// True while a reconnect (+ resume) is in flight.
+  bool reconnecting = false;
+
+  /// The operation to re-run after a successful reconnect (the call that hit
+  /// the 401), so the user resumes exactly where they were.
+  Future<void> Function()? _resumeAction;
+
+  /// A 401 from a Polarsteps endpoint (detail contains "polarsteps"), as
+  /// opposed to an app-JWT 401 (detail "Token expired"/"Invalid token") which
+  /// must NOT be treated as a Polarsteps reconnect.
+  bool _isPolarstepsAuth(ApiException e) =>
+      e.statusCode == 401 && e.body.toLowerCase().contains('polarsteps');
+
   // ── Load trips ─────────────────────────────────────────────────────────────
 
   Future<void> loadTrips() async {
@@ -35,10 +58,13 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     notifyListeners();
     try {
       final raw =
-          await api.get('/api/polarsteps/trips') as List<dynamic>;
+          await _api.get('/api/polarsteps/trips') as List<dynamic>;
       trips = raw.cast<Map<String, dynamic>>();
     } on ApiException catch (e) {
-      if (e.statusCode == 400 &&
+      if (_isPolarstepsAuth(e)) {
+        tokenExpired = true;
+        _resumeAction = loadTrips;
+      } else if (e.statusCode == 400 &&
           e.body.toLowerCase().contains('not connected')) {
         polarstepsNotConnected = true;
       } else {
@@ -67,7 +93,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
       final projectParam = _projectName != null
           ? '?project_name=${Uri.encodeComponent(_projectName!)}'
           : '';
-      final raw = await api.get(
+      final raw = await _api.get(
               '/api/polarsteps/trips/$tripId/steps$projectParam')
           as List<dynamic>;
       steps = raw.cast<Map<String, dynamic>>();
@@ -87,6 +113,14 @@ class PolarstepsImportNotifier extends ChangeNotifier {
           selectedStepIds.add(id);
         }
       }
+    } on ApiException catch (e) {
+      if (_isPolarstepsAuth(e)) {
+        // Keep selectedTrip so the reconnect resumes by reloading these steps.
+        tokenExpired = true;
+        _resumeAction = () => selectTrip(trip);
+      } else {
+        error = e.toString().replaceFirst('Exception: ', '');
+      }
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
     } finally {
@@ -101,6 +135,47 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     selectedStepIds.clear();
     alreadyImportedIds.clear();
     notifyListeners();
+  }
+
+  // ── Reconnect after token expiry ─────────────────────────────────────────────
+
+  /// Re-validate a freshly pasted remember_token, then resume the call that
+  /// hit the 401. Returns true on success. On failure (invalid token), keeps
+  /// the reconnect panel up and surfaces [error].
+  Future<bool> reconnect(String token) async {
+    final trimmed = token.trim();
+    if (trimmed.isEmpty) return false;
+    reconnecting = true;
+    error = null;
+    notifyListeners();
+    try {
+      await _api.post('/api/polarsteps/connect', {'remember_token': trimmed});
+    } on ApiException catch (e) {
+      error = _detail(e.body);
+      reconnecting = false;
+      notifyListeners();
+      return false;
+    } on Exception catch (e) {
+      error = e.toString().replaceFirst('Exception: ', '');
+      reconnecting = false;
+      notifyListeners();
+      return false;
+    }
+
+    // Token accepted — drop the expired state and resume where we left off.
+    tokenExpired = false;
+    final resume = _resumeAction;
+    _resumeAction = null;
+    notifyListeners();
+    if (resume != null) await resume();
+    reconnecting = false;
+    notifyListeners();
+    return true;
+  }
+
+  static String _detail(String body) {
+    final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(body);
+    return m?.group(1) ?? body;
   }
 
   // ── Selection ──────────────────────────────────────────────────────────────
@@ -220,7 +295,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   }
 
   Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
-    await api.post('/api/memories/$memId/photos/from-url', {'url': photoUrl});
+    await _api.post('/api/memories/$memId/photos/from-url', {'url': photoUrl});
   }
 
   /// POST with automatic retry on 5xx — handles transient server errors
@@ -232,7 +307,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   }) async {
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        return await api.post(url, body) as Map<String, dynamic>;
+        return await _api.post(url, body) as Map<String, dynamic>;
       } on ApiException catch (e) {
         if (e.statusCode >= 500 && attempt < maxAttempts - 1) {
           await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));

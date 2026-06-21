@@ -13,10 +13,13 @@ const _kApiBaseUrl = String.fromEnvironment('API_BASE_URL');
 
 class ApiClient {
   final String baseUrl;
-  final http.Client _client = http.Client();
+  final http.Client _client;
   String? _token;
 
-  ApiClient({this.baseUrl = _kApiBaseUrl});
+  // httpClient is injectable so tests can supply a MockClient
+  // (package:http/testing.dart); production uses the default.
+  ApiClient({this.baseUrl = _kApiBaseUrl, http.Client? httpClient})
+      : _client = httpClient ?? http.Client();
 
   void setToken(String token) => _token = token;
   void clearToken() => _token = null;
