@@ -13,6 +13,7 @@ import 'src/projects/project_service.dart';
 import 'src/projects/project_notifier.dart';
 import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
+import 'src/core/perf_timing.dart';
 import 'src/core/theme.dart';
 import 'src/core/version_gate.dart';
 
@@ -25,6 +26,8 @@ const _kGoogleServerClientId =
 void main() {
   if (kIsWeb) usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
+  // No-op unless built with --dart-define=PERF_TIMING=true (dev measurement).
+  PerfTiming.instance.start();
   // Fire-and-forget: login_screen.initState calls attemptLightweightAuthentication()
   // which handles ordering internally. Deferring unblocks the first frame.
   GoogleSignIn.instance.initialize(
@@ -83,6 +86,8 @@ class _ViewTripAppState extends State<ViewTripApp> {
       // != deployed /api/version) and surfaces a Reload prompt.
       builder: (context, child) =>
           VersionGate(child: child ?? const SizedBox.shrink()),
+      // Visual UI/raster bars alongside the console percentiles — dev only.
+      showPerformanceOverlay: kPerfTiming,
       debugShowCheckedModeBanner: false,
     );
   }
