@@ -82,17 +82,48 @@ class _DayContext {
     String dateKey,
     List<String> orderedDateKeys,
   ) {
-    final idx = orderedDateKeys.indexOf(dateKey);
     final stats = notifier.dayStats(dateKey);
+    final n = dayTripNumbering(dateKey, orderedDateKeys, notifier.tripStart);
     return _DayContext(
-      dayNumber: idx >= 0 ? idx + 1 : 1,
-      totalDays: orderedDateKeys.isNotEmpty ? orderedDateKeys.length : 1,
+      dayNumber: n.dayNumber,
+      totalDays: n.totalDays,
       date: DateTime.tryParse(dateKey) ?? DateTime.now(),
       effectiveTags: notifier.effectiveTagsFor(dateKey),
       distanceKm: stats.distanceKm,
       elevationM: stats.elevationM,
     );
   }
+}
+
+/// Calendar day-of-trip numbering for the hero, matching the activity-panel
+/// headers: day N = whole days from the trip start (gaps counted), total = span
+/// to the last day present. Sort-order independent (uses min/max, not index).
+/// [tripStart] is the optional explicit override (ISO `yyyy-MM-dd`); otherwise
+/// the earliest day in [orderedDateKeys] is the start.
+({int dayNumber, int totalDays}) dayTripNumbering(
+  String dateKey,
+  List<String> orderedDateKeys,
+  String? tripStart,
+) {
+  final thisDate = DateTime.tryParse(dateKey) ?? DateTime.now();
+  DateTime dayOnly(DateTime d) => DateTime.utc(d.year, d.month, d.day);
+  final keyDates = orderedDateKeys
+      .map(DateTime.tryParse)
+      .whereType<DateTime>()
+      .toList();
+  final earliest = keyDates.isEmpty
+      ? thisDate
+      : keyDates.reduce((a, b) => a.isBefore(b) ? a : b);
+  final latest = keyDates.isEmpty
+      ? thisDate
+      : keyDates.reduce((a, b) => a.isAfter(b) ? a : b);
+  final startOverride =
+      tripStart != null ? DateTime.tryParse(tripStart) : null;
+  final startUtc = dayOnly(startOverride ?? earliest);
+  return (
+    dayNumber: dayOnly(thisDate).difference(startUtc).inDays + 1,
+    totalDays: dayOnly(latest).difference(startUtc).inDays + 1,
+  );
 }
 
 // ── Dialog wrapper — stateful for prev/next navigation ─────────────────────
@@ -482,12 +513,14 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
 
   void _removeCounter(int i) => _markDirty(() => _counterMods.removeAt(i));
 
-  void _addCounter() {
-    final unused = widget.counters
-        .map((c) => c['name'] as String)
-        .where((n) => !_usedCounterNames.contains(n));
-    if (unused.isEmpty) return;
-    _markDirty(() => _counterMods.add((name: unused.first, value: 1)));
+  List<String> get _unusedCounterNames => widget.counters
+      .map((c) => c['name'] as String)
+      .where((n) => !_usedCounterNames.contains(n))
+      .toList();
+
+  void _addCounterNamed(String name) {
+    if (_usedCounterNames.contains(name)) return;
+    _markDirty(() => _counterMods.add((name: name, value: 1)));
   }
 
   Map<String, dynamic> _buildMeta() {
@@ -855,15 +888,37 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                       ?.copyWith(color: cs.onSurfaceVariant)),
             ),
           if (canAdd)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: OutlinedButton.icon(
-                onPressed: _addCounter,
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Add counter'),
-                style: OutlinedButton.styleFrom(
-                  shape: const StadiumBorder(),
-                  side: BorderSide(color: cs.outline),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: PopupMenuButton<String>(
+                  tooltip: 'Add counter',
+                  position: PopupMenuPosition.under,
+                  onSelected: _addCounterNamed,
+                  itemBuilder: (_) => [
+                    for (final name in _unusedCounterNames)
+                      PopupMenuItem<String>(value: name, child: Text(name)),
+                  ],
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 14, 8),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: cs.outline),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.add, size: 16, color: cs.onSurface),
+                        const SizedBox(width: 6),
+                        Text('Add counter',
+                            style: TextStyle(
+                                fontSize: 13.5, color: cs.onSurface)),
+                        Icon(Icons.arrow_drop_down, size: 18,
+                            color: cs.onSurfaceVariant),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),

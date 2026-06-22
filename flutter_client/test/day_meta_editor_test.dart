@@ -73,6 +73,33 @@ void main() {
   // Avoid network font fetches during tests — fall back to a bundled font.
   setUpAll(() => GoogleFonts.config.allowRuntimeFetching = false);
 
+  group('dayTripNumbering', () {
+    test('contiguous days number by calendar position', () {
+      final keys = ['2026-06-01', '2026-06-02', '2026-06-03'];
+      expect(dayTripNumbering('2026-06-02', keys, null),
+          (dayNumber: 2, totalDays: 3));
+    });
+
+    test('gaps are counted (matches the panel headers)', () {
+      final keys = ['2026-06-01', '2026-06-03', '2026-06-06']; // missing days
+      expect(dayTripNumbering('2026-06-03', keys, null).dayNumber, 3);
+      expect(dayTripNumbering('2026-06-06', keys, null),
+          (dayNumber: 6, totalDays: 6));
+    });
+
+    test('result is independent of list sort order', () {
+      final descending = ['2026-06-06', '2026-06-03', '2026-06-01'];
+      expect(dayTripNumbering('2026-06-03', descending, null),
+          (dayNumber: 3, totalDays: 6));
+    });
+
+    test('an explicit earlier trip start shifts the numbering', () {
+      final keys = ['2026-06-03', '2026-06-04'];
+      expect(dayTripNumbering('2026-06-03', keys, '2026-06-01'),
+          (dayNumber: 3, totalDays: 4));
+    });
+  });
+
   group('Edit Day hero', () {
     testWidgets('shows day number, progress and dist/climb', (tester) async {
       await _pump(tester,
@@ -175,11 +202,23 @@ void main() {
       expect((h.saved!['counters'] as Map)['Snacks'], 4.0);
     });
 
-    testWidgets('"Add counter" adds an unused vocabulary counter', (tester) async {
-      final h = await _pump(tester, counters: [{'name': 'Snacks'}]);
+    testWidgets('"Add counter" lets the user pick which counter to add',
+        (tester) async {
+      final h = await _pump(tester, counters: [
+        {'name': 'Snacks'},
+        {'name': 'Coffees'},
+      ]);
       await _tapVisible(tester, find.text('Add counter'));
+      await tester.pumpAndSettle(); // menu opens
+      // Both unused counters are offered; choose the second.
+      expect(find.text('Snacks'), findsWidgets);
+      expect(find.text('Coffees'), findsWidgets);
+      await tester.tap(find.text('Coffees').last);
+      await tester.pumpAndSettle();
       await _tapSave(tester);
-      expect((h.saved!['counters'] as Map).containsKey('Snacks'), isTrue);
+      final counters = h.saved!['counters'] as Map;
+      expect(counters.containsKey('Coffees'), isTrue);
+      expect(counters.containsKey('Snacks'), isFalse);
     });
 
     testWidgets('removing a counter drops it from saved meta', (tester) async {
