@@ -511,6 +511,27 @@ class ProjectNotifier extends ChangeNotifier
     totalElevationGainM = elev;
   }
 
+  /// Distance (km) and climb (m) summed over the activities on [dateKey]
+  /// ("YYYY-MM-DD"). An activity belongs to the day of its
+  /// `start_date_local` — the same rule the activity panel groups by — so the
+  /// totals match what the day header shows. Returns zeros for a day with no
+  /// activities (the Edit Day hero then hides its stat strip).
+  ({double distanceKm, double elevationM}) dayStats(String dateKey) {
+    final byId = {for (final a in activities) a['id']?.toString(): a};
+    double dist = 0;
+    double elev = 0;
+    for (final item in items) {
+      if (item['item_type'] != 'activity') continue;
+      final a = byId[item['activity_id']?.toString()];
+      if (a == null) continue;
+      final ds = (a['start_date_local'] as String?)?.split('T').first;
+      if (ds != dateKey) continue;
+      dist += (a['distance']             as num? ?? 0).toDouble();
+      elev += (a['total_elevation_gain'] as num? ?? 0).toDouble();
+    }
+    return (distanceKm: dist / 1000.0, elevationM: elev);
+  }
+
   /// Merges full activity data (with elevation_profile) returned by the
   /// background full-details request into the already-rendered activity list,
   /// then rebuilds tracks and notifies listeners.

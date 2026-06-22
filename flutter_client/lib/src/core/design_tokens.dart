@@ -1,6 +1,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 // ── Accent (crimson red) ─────────────────────────────────────────────────────
 const kAccent     = Color(0xFFDC2626);
@@ -31,3 +32,63 @@ Color iconBoxFg(Color c, {bool dark = false}) => dark
         .withLightness(
             (HSLColor.fromColor(c).lightness * 0.65).clamp(0.0, 1.0))
         .toColor();
+
+// ── Sleeping-category dots (Edit Day modal) ──────────────────────────────────
+// Maps a sleeping option's group (see ProjectNotifier.sleepingOptionGroups)
+// to the dot colour used on its chip, per the ViewTrip design system.
+const kSleepIndoors  = Color(0xFF3B82F6); // blue
+const kSleepOutdoors = Color(0xFF22C55E); // green
+const kSleepOther    = Color(0xFFA855F7); // purple
+
+/// Dot colour for a sleeping-option group label ("Indoors"/"Outdoors"/…).
+Color sleepingGroupColor(String? group) {
+  switch (group) {
+    case 'Indoors':
+      return kSleepIndoors;
+    case 'Outdoors':
+      return kSleepOutdoors;
+    default:
+      return kSleepOther;
+  }
+}
+
+// ── Metallic blue (primary action) ───────────────────────────────────────────
+/// The 135° cobalt→navy gradient used on primary "metallic" buttons.
+/// Tracks brightness so it matches the active Material theme.
+LinearGradient metallicBlue(Brightness b) => b == Brightness.dark
+    ? const LinearGradient(
+        begin: Alignment.topLeft, end: Alignment.bottomRight,
+        colors: [Color(0xFF60A5FA), Color(0xFF1D4ED8)])
+    : const LinearGradient(
+        begin: Alignment.topLeft, end: Alignment.bottomRight,
+        colors: [Color(0xFF0D6EFD), Color(0xFF1E40AF)]);
+
+/// Soft elevation shadow for floating cards / modals (design `--shadow-2`).
+List<BoxShadow> kShadow2(Brightness b) => [
+      BoxShadow(
+        color: b == Brightness.dark
+            ? const Color(0x99000000)
+            : const Color(0x2E0F2236),
+        blurRadius: 24,
+        offset: const Offset(0, 8),
+      ),
+    ];
+
+// ── Mono numerals (JetBrains Mono, tabular) ──────────────────────────────────
+/// Tabular monospaced style for instrument-grade numerals (day number,
+/// distances, counters). JetBrains Mono is already a bundled Google font.
+TextStyle monoStyle({
+  double? fontSize,
+  FontWeight? fontWeight,
+  Color? color,
+  double? letterSpacing,
+  double? height,
+}) =>
+    GoogleFonts.jetBrainsMono(
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      color: color,
+      letterSpacing: letterSpacing,
+      height: height,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
