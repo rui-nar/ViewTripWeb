@@ -45,5 +45,16 @@ void main() {
         ShareMethod.urlIntent,
       );
     });
+
+    test('copyLink → clipboard regardless of capability', () {
+      expect(
+        ShareStrategy.resolve(ShareTarget.copyLink, const _Caps(true)),
+        ShareMethod.clipboard,
+      );
+      expect(
+        ShareStrategy.resolve(ShareTarget.copyLink, const _Caps(false)),
+        ShareMethod.clipboard,
+      );
+    });
   });
 }

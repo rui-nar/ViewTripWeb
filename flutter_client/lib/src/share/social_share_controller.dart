@@ -35,8 +35,10 @@ class SocialShareController {
     required bool dayFocus,
     required List<String> selectedPhotoUuids,
   }) async {
+    // Copy link always needs the link, even when the user disabled it for posts.
+    final wantLink = includeLink || target == ShareTarget.copyLink;
     final link =
-        includeLink ? await links.resolveMemoryLink(memoryPublicId) : null;
+        wantLink ? await links.resolveMemoryLink(memoryPublicId) : null;
 
     final post = SocialPostComposer.compose(
       customText: customText,
@@ -47,6 +49,12 @@ class SocialShareController {
     );
 
     final method = ShareStrategy.resolve(target, caps);
+
+    // Copy link: put the bare deep link on the clipboard (fall back to the
+    // post text if no token could be resolved). Never fetches assets.
+    if (method == ShareMethod.clipboard) {
+      return transport.copyToClipboard(link ?? post.text);
+    }
 
     // URL intents carry text + link only — never fetch assets.
     if (method == ShareMethod.urlIntent) {
@@ -87,8 +95,9 @@ class SocialShareController {
           '?u=${_enc(u)}&quote=${_enc(post.text)}',
         );
       case ShareTarget.system:
-        // System target never resolves to a URL intent.
-        throw ArgumentError('system target is not a URL intent');
+      case ShareTarget.copyLink:
+        // These targets never resolve to a URL intent.
+        throw ArgumentError('$target is not a URL intent');
     }
   }
 

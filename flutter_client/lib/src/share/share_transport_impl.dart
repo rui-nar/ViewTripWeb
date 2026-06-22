@@ -2,6 +2,7 @@
 /// platform URL intents.
 library;
 
+import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -20,4 +21,8 @@ class ShareTransportImpl implements ShareTransport {
   @override
   Future<void> shareUrlIntent(Uri uri) =>
       launchUrl(uri, mode: LaunchMode.externalApplication);
+
+  @override
+  Future<void> copyToClipboard(String text) =>
+      Clipboard.setData(ClipboardData(text: text));
 }

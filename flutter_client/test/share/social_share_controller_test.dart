@@ -58,6 +58,7 @@ class _FakeTransport implements ShareTransport {
   String? sharedFilesText;
   String? textOnly;
   Uri? intentUri;
+  String? clipboard;
 
   @override
   Future<void> shareFiles(List<XFile> files, {required String text}) async {
@@ -70,6 +71,9 @@ class _FakeTransport implements ShareTransport {
 
   @override
   Future<void> shareUrlIntent(Uri uri) async => intentUri = uri;
+
+  @override
+  Future<void> copyToClipboard(String text) async => clipboard = text;
 }
 
 SocialShareController _make({
@@ -224,6 +228,57 @@ void main() {
       expect(links.calls, 0);
       expect(transport.sharedFilesText, 'Only body');
       expect(transport.sharedFilesText, isNot(contains('http')));
+    });
+
+    test('copyLink copies the resolved link and fetches no assets', () async {
+      final assets = _FakeAssets(mapBytes: Uint8List.fromList([1]));
+      final links = _FakeLinks('https://x/share/t?memory=pub9');
+      final transport = _FakeTransport();
+      final c = _make(
+          assets: assets, links: links, transport: transport, canShareFiles: true);
+
+      await c.share(
+        target: ShareTarget.copyLink,
+        memoryId: 3,
+        memoryPublicId: 'pub9',
+        memoryDate: '2026-06-05',
+        customText: 'ignored body',
+        includeLink: true,
+        includeMap: true,
+        dayFocus: false,
+        selectedPhotoUuids: const ['a'],
+      );
+
+      expect(transport.clipboard, 'https://x/share/t?memory=pub9');
+      expect(assets.mapCalls, 0); // no rendering for clipboard
+      expect(transport.sharedFiles, isNull);
+      expect(transport.intentUri, isNull);
+    });
+
+    test('copyLink resolves the link even when includeLink is false', () async {
+      final links = _FakeLinks('https://x/l9');
+      final transport = _FakeTransport();
+      final c = _make(
+        assets: _FakeAssets(),
+        links: links,
+        transport: transport,
+        canShareFiles: false,
+      );
+
+      await c.share(
+        target: ShareTarget.copyLink,
+        memoryId: 1,
+        memoryPublicId: 'p',
+        memoryDate: null,
+        customText: 'body',
+        includeLink: false,
+        includeMap: false,
+        dayFocus: false,
+        selectedPhotoUuids: const [],
+      );
+
+      expect(links.calls, 1); // forced for copy-link despite includeLink=false
+      expect(transport.clipboard, 'https://x/l9');
     });
 
     test('system target + no file capability → shareTextOnly', () async {

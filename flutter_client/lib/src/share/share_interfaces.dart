@@ -39,4 +39,5 @@ abstract class ShareTransport {
   Future<void> shareFiles(List<XFile> files, {required String text});
   Future<void> shareTextOnly(String text);
   Future<void> shareUrlIntent(Uri uri);
+  Future<void> copyToClipboard(String text);
 }

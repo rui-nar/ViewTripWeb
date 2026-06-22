@@ -11,6 +11,10 @@ const kAccentSoft = Color(0x1ADC2626);
 // ── Strava brand ─────────────────────────────────────────────────────────────
 const kStrava = Color(0xFFFC4C02);
 
+// ── Social share-target brands (Share memory modal) ──────────────────────────
+const kWhatsApp     = Color(0xFF25D366);
+const kFacebookBlue = Color(0xFF1877F2);
+
 // ── Semantic ─────────────────────────────────────────────────────────────────
 const kSuccess     = Color(0xFF16A34A);
 const kSuccessDark = Color(0xFF22C55E);

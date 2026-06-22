@@ -10,9 +10,10 @@ import 'share_interfaces.dart';
 ///
 /// Only [system] can carry image files (via the OS share sheet). [whatsapp]
 /// and [facebook] are text+link URL intents — no images, by platform design.
-/// Instagram is intentionally absent: it has no URL intent and is only
-/// reachable through the system sheet.
-enum ShareTarget { system, whatsapp, facebook }
+/// [copyLink] copies the durable deep link to the clipboard. Instagram is
+/// intentionally absent: it has no URL intent and is only reachable through
+/// the system sheet.
+enum ShareTarget { system, whatsapp, facebook, copyLink }
 
 /// The concrete dispatch method resolved from a target + capabilities.
 enum ShareMethod {
@@ -24,6 +25,9 @@ enum ShareMethod {
 
   /// Open a platform URL intent carrying text + link only.
   urlIntent,
+
+  /// Copy the deep link to the clipboard (no hand-off).
+  clipboard,
 }
 
 class ShareStrategy {
@@ -35,5 +39,6 @@ class ShareStrategy {
             ? ShareMethod.sheetWithFiles
             : ShareMethod.sheetTextOnly,
         ShareTarget.whatsapp || ShareTarget.facebook => ShareMethod.urlIntent,
+        ShareTarget.copyLink => ShareMethod.clipboard,
       };
 }
