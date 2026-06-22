@@ -8,6 +8,7 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
+import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
@@ -779,7 +780,7 @@ class _MapPanelState extends State<MapPanel> {
                 theme: _vectorStyle!.theme,
                 sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
-                layerMode: VectorTileLayerMode.vector,
+                layerMode: kVectorTileMode,
                 maximumZoom: kMaxMapZoom,
               )
             else if (_tileProvider != null) ...[
@@ -1440,6 +1441,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Dev-only build timer (PERF_TIMING) — pins whether map rebuilds are the
+    // source of the build-thread storms, and what triggers them.
+    final perfSw = kPerfTiming ? (Stopwatch()..start()) : null;
+    var perfRebuiltLayers = false;
     final notifier = widget.notifier;
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
@@ -1462,9 +1467,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         selJournalId2?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged2 = trackColor != _lastTrackColor ||
         trackWidth != _lastTrackWidth || alternating != _lastAlternating;
-    if (!identical(geo, _lastGeo) || selectionChanged2 ||
-        !identical(items, _lastItems) || styleChanged2 ||
-        showJournals2 != _lastShowJournals) {
+    final perfGeoChg = !identical(geo, _lastGeo);
+    final perfItemsChg = !identical(items, _lastItems);
+    final perfJournalsChg = showJournals2 != _lastShowJournals;
+    if (perfGeoChg || selectionChanged2 ||
+        perfItemsChg || styleChanged2 ||
+        perfJournalsChg) {
+      perfRebuiltLayers = true;
       if (selectionChanged2 && widget.autoZoom) widget.fittedNotifier.value = false;
       _lastGeo = geo;
       _lastSelectedId = selActId;
@@ -1527,7 +1536,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       }
     }
 
-    if (!notifier.isLoading) {
+    // Guard on fittedNotifier before flattening every polyline's points: once
+    // the map has been fitted, _fitBoundsOnce early-returns, so building this
+    // (potentially huge) point list on every build was pure waste/GC churn.
+    if (!notifier.isLoading && !widget.fittedNotifier.value) {
       _fitBoundsOnce(_cachedPolylines.expand((p) => p.points).toList());
     }
 
@@ -1557,7 +1569,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       });
     }
 
-    return Stack(
+    final perfBuilt = Stack(
       children: [
         FlutterMap(
           mapController: widget.mapController.mapController,
@@ -1577,7 +1589,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                 theme: _vectorStyle!.theme,
                 sprites: _vectorStyle!.sprites,
                 tileOffset: TileOffset.mapbox,
-                layerMode: VectorTileLayerMode.vector,
+                layerMode: kVectorTileMode,
                 maximumZoom: kMaxMapZoom,
               )
             else if (_tileProvider != null)
@@ -1668,6 +1680,21 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           ),
       ],
     );
+    if (perfSw != null) {
+      perfSw.stop();
+      final ms = perfSw.elapsedMilliseconds;
+      if (ms >= 16) {
+        final markers = _cachedActivityMarkers.length +
+            _cachedSegmentMarkers.length +
+            _cachedMemoryMarkers.length +
+            _cachedJournalMarkers.length;
+        debugPrint('[perf] ManageMapPanel.build ${ms}ms '
+            'rebuilt=$perfRebuiltLayers geoChg=$perfGeoChg selChg=$selectionChanged2 '
+            'itemsChg=$perfItemsChg styleChg=$styleChanged2 jrnChg=$perfJournalsChg '
+            'markers=$markers polys=${_cachedPolylines.length}');
+      }
+    }
+    return perfBuilt;
   }
 }
 

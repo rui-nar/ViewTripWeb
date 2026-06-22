@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
+import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'map_panel.dart';
@@ -537,7 +538,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 Expanded(
                   child: Stack(
                     children: [
-                      Consumer<ProjectNotifier>(
+                      // RepaintBoundary isolates the map's raster from the
+                      // activity panel's scroll. Without it, scrolling the
+                      // sibling list re-rasterizes the (expensive) map every
+                      // frame on web/CanvasKit — measured ~85ms/frame raster.
+                      RepaintBoundary(child: kPerfNoMap
+                          ? const ColoredBox(color: Color(0xFF334155))
+                          : Consumer<ProjectNotifier>(
                         builder: (_, n, __) => ManageMapPanel(
                           key: _mapPanelKey,
                           notifier: n,
@@ -548,7 +555,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           fittedNotifier: _mapFitted,
                           basemapStyleUri: kActiveManageStyleUri,
                         ),
-                      ),
+                      )),
                       Positioned(
                         bottom: 0, left: 0, right: 0,
                         child: Builder(builder: (ctx) => Container(
@@ -581,7 +588,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                                       effectiveDays.contains(
                                         (a['start_date_local'] as String? ?? '')
                                             .split('T').first)).toList();
-                              return ElevationChart(
+                              return RepaintBoundary(child: ElevationChart(
                                 activities: activities,
                                 selectedActivityId: selActId,
                                 onCursorChanged: (pos) =>
@@ -592,7 +599,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                                     : n.fullTrack,
                                 color: n.effectiveElevationChartColor,
                                 showLine: n.elevationChartShowLine,
-                              );
+                              ));
                             },
                           ),
                         )),
@@ -607,8 +614,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             final mapHeight = constraints.maxHeight;
             return Stack(
               children: [
-                // Base: full-height map
-                Consumer<ProjectNotifier>(
+                // Base: full-height map (RepaintBoundary — see wide layout).
+                RepaintBoundary(child: kPerfNoMap
+                    ? const ColoredBox(color: Color(0xFF334155))
+                    : Consumer<ProjectNotifier>(
                   builder: (_, n, __) => ManageMapPanel(
                     key: _mapPanelKey,
                     notifier: n,
@@ -619,7 +628,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     fittedNotifier: _mapFitted,
                     basemapStyleUri: kActiveManageStyleUri,
                   ),
-                ),
+                )),
 
                 // Elevation chart overlaid at bottom
                 Positioned(
@@ -647,7 +656,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                                 (a['start_date_local'] as String? ?? '')
                                     .split('T').first == selDay).toList()
                             : allActivities;
-                        return ElevationChart(
+                        return RepaintBoundary(child: ElevationChart(
                           activities: activities,
                           selectedActivityId: selActId,
                           onCursorChanged: (pos) =>
@@ -657,7 +666,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                               ? n.perActivityTracks[selActId.toString()] ?? n.fullTrack
                               : n.fullTrack,
                           color: n.effectiveElevationChartColor,
-                        );
+                        ));
                       },
                     ),
                   )),

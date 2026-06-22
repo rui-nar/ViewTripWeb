@@ -15,6 +15,17 @@ import 'project_memory_crud_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
+/// Activities to upgrade between progressive-geo repaints during the low-res →
+/// full-res background upgrade. Each repaint (`notifyListeners`) triggers a full
+/// map rebuild — every marker + polyline — so notifying per few activities made
+/// long trips repaint dozens of times (~50 on a 150-activity trip), each costing
+/// tens-to-hundreds of ms: seconds of jank on load (#4). Bounding to ~8 repaints
+/// regardless of trip size keeps the upgrade visibly progressive but O(1) in
+/// repaints.
+@visibleForTesting
+int progressiveGeoBatchSize(int activityCount) =>
+    activityCount <= 8 ? 1 : (activityCount / 8).ceil();
+
 class ProjectNotifier extends ChangeNotifier
     with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
@@ -429,24 +440,32 @@ class ProjectNotifier extends ChangeNotifier
           .reversed
           .toList();
 
-      // Read geo fresh on every iteration so concurrent CRUD patches (e.g. a
-      // segment deletion mid-load) are never overwritten by the snapshot we
-      // took at the start of this function.
-      const batchSize = 3;
+      // Mutate one working copy per batch rather than copying the whole feature
+      // list + reassigning geo on every activity. Intermediate reassignments are
+      // never read (no notify fires between them) and only churned GC, which
+      // inflated each progressive repaint (#4). geo is re-read at each batch
+      // boundary so concurrent CRUD (e.g. a segment deletion mid-load) between
+      // batches isn't clobbered; the authoritative final pass below re-applies
+      // the durable segment overlay regardless, so within-batch races self-heal.
+      final batchSize = progressiveGeoBatchSize(actIds.length);
       int batchCount = 0;
+      List<dynamic>? batchFeatures;
       for (final actId in actIds) {
         if (_loadKey != name) return;
         final full = fullFeatures[actId];
         if (full == null) continue;
-        final snapshot = geo;
-        if (snapshot == null) continue;
-        final features = List<dynamic>.from(snapshot['features'] as List? ?? []);
-        final idx = features.indexWhere(
+        if (batchFeatures == null) {
+          final snapshot = geo;
+          if (snapshot == null) continue;
+          batchFeatures = List<dynamic>.from(snapshot['features'] as List? ?? []);
+        }
+        final idx = batchFeatures.indexWhere(
             (f) => (f as Map)['properties']?['activity_id']?.toString() == actId);
-        if (idx >= 0) features[idx] = full;
-        geo = {'type': 'FeatureCollection', 'features': features};
+        if (idx >= 0) batchFeatures[idx] = full;
         batchCount++;
         if (batchCount % batchSize == 0) {
+          geo = {'type': 'FeatureCollection', 'features': batchFeatures};
+          batchFeatures = null; // re-read next batch so concurrent CRUD is picked up
           notifyListeners();
           await Future.delayed(const Duration(milliseconds: 80));
         }

@@ -1,6 +1,24 @@
 /// Basemap tile URL constants shared between manage, view, and share screens.
 library;
 
+import 'package:vector_map_tiles/vector_map_tiles.dart' show VectorTileLayerMode;
+
+// ── Vector tile render mode ──────────────────────────────────────────────────
+// `vector` re-paints the whole basemap on every pumped frame (smooth continuous
+// zoom, but ~70ms raster/frame on CanvasKit — it bleeds into unrelated frames
+// such as activity-panel scrolling and drops fps to single digits). `raster`
+// renders each tile to a cached bitmap once, so a static map composites in
+// ~1ms (smooth scroll, but tiles look briefly soft mid-zoom).
+//
+// PARKED on `vector` (the original behaviour) while we evaluate whether the
+// build-side fixes make vector scrolling acceptable. Opt into raster with:
+//   --dart-define=MAP_TILE_MODE=raster   (dev-client.ps1 -RasterMap)
+const String _kTileMode =
+    String.fromEnvironment('MAP_TILE_MODE', defaultValue: 'vector');
+const VectorTileLayerMode kVectorTileMode = _kTileMode == 'raster'
+    ? VectorTileLayerMode.raster
+    : VectorTileLayerMode.vector;
+
 // ── Zoom bounds ──────────────────────────────────────────────────────────────
 /// Hard upper bound for the interactive map camera zoom.
 ///

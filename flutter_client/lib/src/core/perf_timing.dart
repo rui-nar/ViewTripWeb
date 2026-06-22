@@ -17,6 +17,11 @@ import 'package:flutter/widgets.dart';
 /// jank ⇒ paint/compositing/renderer cost. See the activity-panel diagnosis.
 const bool kPerfTiming = bool.fromEnvironment('PERF_TIMING');
 
+/// Dev diagnostic: when true, AppScreen renders a flat placeholder instead of
+/// the map. Lets a scroll measurement isolate whether the raster cost is the
+/// map or the activity list. False (and dropped) in every normal build.
+const bool kPerfNoMap = bool.fromEnvironment('PERF_NO_MAP');
+
 /// 60 fps frame budget in milliseconds.
 const double kFrameBudgetMs = 1000.0 / 60.0; // 16.67
 
