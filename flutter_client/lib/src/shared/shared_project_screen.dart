@@ -121,7 +121,10 @@ class SharedProjectNotifier extends ProjectNotifier {
     await load(token);
     if (_disposed) return;
     isMetaLoaded = true;
-    notifyListeners(); // project name, activity list, memories now visible
+    // The /meta response now carries a downsampled (low-res) elevation profile,
+    // so the chart can render immediately; Phase 2 below upgrades it in place.
+    isElevationLoaded = true;
+    notifyListeners(); // project name, activity list, memories, elevation chart visible
 
     // Phase 2 (background): fetch the full ~3 MB response for elevation data.
     // Fired here — after load() has returned — so meta had exclusive bandwidth.

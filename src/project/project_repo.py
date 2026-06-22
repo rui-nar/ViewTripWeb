@@ -45,6 +45,25 @@ from src.models.project import (
     SegmentEndpoint,
 )
 from src.project.project_io import ProjectIO
+from src.project.elevation_downsample import downsample_elevation
+
+
+def _low_res_ep_json(ep_json: Optional[str]) -> Optional[str]:
+    """Downsample a full ``elevation_profile_json`` blob to the low-res form
+    stored in ``elevation_profile_low_res_json`` (~300 pts). Returns None when
+    the input is missing or unparseable."""
+    if not ep_json:
+        return None
+    try:
+        ep = json.loads(ep_json)
+        d = ep.get("distances_km") or []
+        e = ep.get("elevations_m") or []
+        if not d or not e:
+            return None
+        dd, ee = downsample_elevation(d, e)
+        return json.dumps({"distances_km": dd, "elevations_m": ee})
+    except Exception:
+        return None
 
 
 class StaleWriteError(Exception):
@@ -320,6 +339,7 @@ class ProjectRepo:
             row.summary_polyline = summary_polyline
         if elevation_profile_json is not None:
             row.elevation_profile_json = elevation_profile_json
+            row.elevation_profile_low_res_json = _low_res_ep_json(elevation_profile_json)
         sess.commit()
 
     def force_update_activity(
@@ -387,6 +407,7 @@ class ProjectRepo:
         existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
         existing.summary_polyline = act.summary_polyline
         existing.elevation_profile_json = ep_json
+        existing.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
         sess.commit()
 
     # ------------------------------------------------------------------
@@ -766,6 +787,14 @@ class ProjectRepo:
                 return ""
             return dt.isoformat().replace("+00:00", "Z")
 
+        _ep_json = (
+            json.dumps({
+                "distances_km": act.elevation_profile[0],
+                "elevations_m": act.elevation_profile[1],
+            })
+            if act.elevation_profile else None
+        )
+
         row = DBActivity(
             id=act.id,
             user_info_id=user_info_id,
@@ -804,13 +833,8 @@ class ProjectRepo:
             start_latlng_json=json.dumps(act.start_latlng) if act.start_latlng else None,
             end_latlng_json=json.dumps(act.end_latlng) if act.end_latlng else None,
             summary_polyline=act.summary_polyline,
-            elevation_profile_json=(
-                json.dumps({
-                    "distances_km": act.elevation_profile[0],
-                    "elevations_m": act.elevation_profile[1],
-                })
-                if act.elevation_profile else None
-            ),
+            elevation_profile_json=_ep_json,
+            elevation_profile_low_res_json=_low_res_ep_json(_ep_json),
         )
         sess.add(row)
 
@@ -906,6 +930,14 @@ class ProjectRepo:
                     ep["elevations_m"],
                 )
                 if include_heavy and include_elevation and (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
+                else None
+            ),
+            # Always loaded — lightweight, never deferred — so meta/low-res
+            # responses can render the chart before the full profile arrives.
+            elevation_profile_low_res=(
+                (lr["distances_km"], lr["elevations_m"])
+                if (lr := (json.loads(row.elevation_profile_low_res_json)
+                           if row.elevation_profile_low_res_json else None))
                 else None
             ),
         )

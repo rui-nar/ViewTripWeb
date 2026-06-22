@@ -74,7 +74,11 @@ class ViewProjectNotifier extends ProjectNotifier {
     await load(projectName);
     if (_disposed) return;
     isMetaLoaded = true;
-    notifyListeners(); // project name, map, activity panel visible
+    // The /meta response now carries a downsampled (low-res) elevation profile,
+    // so the chart can render immediately instead of waiting for the full
+    // profile; Phase 2 below upgrades it in place.
+    isElevationLoaded = true;
+    notifyListeners(); // project name, map, activity panel + elevation chart visible
 
     // Phase 2 (background): fetch full ~3 MB response for elevation data.
     // Fired here — after load() has returned — so meta had exclusive bandwidth.

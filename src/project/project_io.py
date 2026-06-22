@@ -74,9 +74,14 @@ class ProjectIO:
         iterate over them directly.
         """
         def _ep_pairs(a: Activity) -> Any:
-            if not a.elevation_profile:
+            # Prefer the full profile; fall back to the downsampled low-res copy
+            # so meta / low-res responses (where the full profile is deferred)
+            # still render the chart immediately. The client overwrites it when
+            # the full profile loads in the background.
+            ep = a.elevation_profile or getattr(a, "elevation_profile_low_res", None)
+            if not ep:
                 return None
-            return [list(pair) for pair in zip(a.elevation_profile[0], a.elevation_profile[1])]
+            return [list(pair) for pair in zip(ep[0], ep[1])]
 
         activities_out = []
         for a in project.activities:

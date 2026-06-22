@@ -209,6 +209,10 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     summary_polyline: Optional[str] = sqlmodel.Field(default=None)
     # {"distances_km": [...], "elevations_m": [...]}
     elevation_profile_json: Optional[str] = sqlmodel.Field(default=None)
+    # Downsampled copy of elevation_profile_json (~300 pts) for the low-res-first
+    # chart. Lightweight (never deferred) so meta/low-res loads stay fast without
+    # reading the multi-MB full profile. Derived; see elevation_downsample.py.
+    elevation_profile_low_res_json: Optional[str] = sqlmodel.Field(default=None)
 
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")

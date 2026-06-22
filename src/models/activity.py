@@ -50,6 +50,10 @@ class Activity:
     summary_polyline: Optional[str] = None       # Google-encoded polyline
     # Cached elevation profile — populated on first fetch and persisted in project file
     elevation_profile: Optional[Tuple[List[float], List[float]]] = None  # (distances_km, elevations_m)
+    # Downsampled profile for the low-res-first chart (DB-derived, not part of the
+    # .viewtrip file format). Same shape as elevation_profile. Served when the full
+    # profile is deferred (meta / low-res loads).
+    elevation_profile_low_res: Optional[Tuple[List[float], List[float]]] = None
 
     def to_strava_dict(self) -> dict:
         """Serialise to a dict that can be round-tripped via from_strava_api()."""
