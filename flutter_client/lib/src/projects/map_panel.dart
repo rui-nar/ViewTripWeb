@@ -73,6 +73,47 @@ LatLng? _coordToLatLng(dynamic c) {
   return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
 }
 
+// ── Per-feature geometry memoization ─────────────────────────────────────────
+//
+// The map rebuilds whenever `geo` is reassigned (notably the progressive
+// low-res→full-res upgrade on load). Reconstructing markers/polylines re-ran the
+// O(track-points) work — converting every coordinate to LatLng and recomputing
+// each activity's arc-midpoint — for *every* feature on *every* rebuild, which
+// dominated the build-thread cost and produced the load-time map jank.
+//
+// These memoize that work keyed by the *identity* of the raw coordinates list.
+// Only changed features get a new coords list (the upgrade replaces just the
+// upgraded activities), so unchanged features hit the cache — "rebuild only
+// changed features" without any signature/invalidation bookkeeping: the selection
+// /style-dependent bits (colour, dimming) are cheap and stay recomputed, and
+// entries auto-evict when their coords list is GC'd (Expando). Returned point
+// lists are shared — callers must treat them as read-only.
+final Expando<List<LatLng>> _coordsLatLngCache = Expando('coordsLatLng');
+final Expando<LatLng> _arcMidpointCache = Expando('arcMidpoint');
+
+@visibleForTesting
+List<LatLng> memoCoordsToLatLng(List coords) {
+  final cached = _coordsLatLngCache[coords];
+  if (cached != null) return cached;
+  final pts = <LatLng>[];
+  for (final c in coords) {
+    if (c is List && c.length >= 2) {
+      pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+    }
+  }
+  _coordsLatLngCache[coords] = pts;
+  return pts;
+}
+
+@visibleForTesting
+LatLng? memoArcMidpoint(List coords) {
+  final cached = _arcMidpointCache[coords];
+  if (cached != null) return cached;
+  final m = _arcMidpoint(coords);
+  if (m != null) _arcMidpointCache[coords] = m;
+  return m;
+}
+
 /// Activity ids that begin a new day, in trip order: the first dated activity
 /// of each distinct consecutive `start_date_local` date. Used to drop a day
 /// breakpoint node at the start of each day on the map so days are visually
@@ -178,7 +219,7 @@ List<Marker> _buildActivityMarkersFromGeo(
     final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
     if (coords is! List || coords.length < 2) continue;
 
-    final point = _arcMidpoint(coords);
+    final point = memoArcMidpoint(coords);
     if (point == null) continue;
 
     final actId = props['activity_id']?.toString();
@@ -312,11 +353,7 @@ class _MapPanelState extends State<MapPanel> {
       if (f is! Map) continue;
       final coords = (f['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List) continue;
-      for (final c in coords) {
-        if (c is List && c.length >= 2) {
-          pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-        }
-      }
+      pts.addAll(memoCoordsToLatLng(coords));
     }
     return pts;
   }
@@ -355,12 +392,7 @@ class _MapPanelState extends State<MapPanel> {
       final coords = geometry['coordinates'];
       if (coords is! List) continue;
 
-      final points = <LatLng>[];
-      for (final c in coords) {
-        if (c is List && c.length >= 2) {
-          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-        }
-      }
+      final points = memoCoordsToLatLng(coords);
       // A LineString needs ≥2 points; a single-point polyline can throw deep in
       // flutter_map's paint path, so skip it (and empty ones) defensively.
       if (points.length < 2) continue;
@@ -439,7 +471,7 @@ class _MapPanelState extends State<MapPanel> {
       final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List || coords.isEmpty) continue;
 
-      final point = _arcMidpoint(coords);
+      final point = memoArcMidpoint(coords);
       if (point == null) continue;
 
       final segId = props['segment_id']?.toString();
@@ -987,7 +1019,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List || coords.isEmpty) continue;
 
-      final point = _arcMidpoint(coords);
+      final point = memoArcMidpoint(coords);
       if (point == null) continue;
 
       final segId = props['segment_id']?.toString();
@@ -1316,11 +1348,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       if (!match) continue;
       final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
       if (coords is! List) continue;
-      for (final c in coords) {
-        if (c is List && c.length >= 2) {
-          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-        }
-      }
+      points.addAll(memoCoordsToLatLng(coords));
     }
     return points;
   }
@@ -1374,12 +1402,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final geometry = feature['geometry'] as Map? ?? {};
       final coords = geometry['coordinates'];
       if (coords is! List) continue;
-      final points = <LatLng>[];
-      for (final c in coords) {
-        if (c is List && c.length >= 2) {
-          points.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-        }
-      }
+      final points = memoCoordsToLatLng(coords);
       if (points.isEmpty) continue;
       final isSegment = props['type'] == 'segment';
       final featureId = isSegment
