@@ -14,14 +14,6 @@ const _difficultyOptions = [
   ('super_hard', 'Super hard'),
 ];
 
-const _weatherOptions = [
-  ('hot',        'Hot'),
-  ('clear',      'Clear'),
-  ('cloudy',     'Cloudy'),
-  ('some_rain',  'Some rain'),
-  ('heavy_rain', 'Heavy rain'),
-];
-
 const _weekdayShort = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const _monthLong = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -713,12 +705,6 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
           onChanged: (v) => _markDirty(() => _difficulty = v),
         ),
         _EDChipGroup(
-          label: 'Weather',
-          options: [for (final (v, l) in _weatherOptions) (v, l, null)],
-          value: _weather,
-          onChanged: (v) => _markDirty(() => _weather = v),
-        ),
-        _EDChipGroup(
           label: 'Sleeping',
           options: [
             for (final opt in widget.sleepingOptions)
@@ -728,8 +714,8 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
           onChanged: (v) => _markDirty(() => _sleeping = v),
         ),
         _buildTags(context),
-        _buildJournal(context),
         _buildCounters(context),
+        _buildJournal(context),
       ],
     );
   }
