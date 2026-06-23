@@ -278,7 +278,14 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
           _activeLang = langCode;
         });
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Translation failed for "$langCode": $e');
+      if (mounted) {
+        final detail = e is ApiException ? ' (${e.statusCode})' : '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Couldn\'t translate$detail. Please try again.')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _translating = false);
     }
