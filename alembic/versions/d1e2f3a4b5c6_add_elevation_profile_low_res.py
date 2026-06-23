@@ -26,7 +26,7 @@ def upgrade() -> None:
     # Native ADD COLUMN — fast on SQLite, no table rewrite.
     op.add_column(
         'activity',
-        sa.Column('elevation_profile_low_res_json', sa.Text(), nullable=True),
+        sa.Column('elevation_profile_low_res_json', sa.String(), nullable=True),
     )
     _backfill()
 
