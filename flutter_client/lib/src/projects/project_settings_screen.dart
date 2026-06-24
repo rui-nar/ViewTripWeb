@@ -418,7 +418,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   }
 
   static const _kSupportedLanguages = {
-    'en': '🇬🇧 English',   'pt': '🇵🇹 Portuguese', 'fr': '🇫🇷 French',
+    'en': '🇬🇧 English',   'pt-PT': '🇵🇹 Portuguese', 'fr': '🇫🇷 French',
     'de': '🇩🇪 German',    'es': '🇪🇸 Spanish',     'it': '🇮🇹 Italian',
     'nl': '🇳🇱 Dutch',     'ja': '🇯🇵 Japanese',    'zh': '🇨🇳 Chinese',
     'ru': '🇷🇺 Russian',   'ar': '🇸🇦 Arabic',      'ko': '🇰🇷 Korean',
