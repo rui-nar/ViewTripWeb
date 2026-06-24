@@ -71,6 +71,30 @@ class TestTranslateText:
         assert call_kwargs["params"]["source"] == "en"
 
     @pytest.mark.anyio
+    async def test_http_error_propagates(self):
+        """A non-2xx Google response must raise, so get_translation's except
+        fires, logs, and surfaces a 502 (the prod symptom in #24 / issue follow-up)."""
+        import httpx
+        from api.translations import translate_text
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "403 Forbidden", request=MagicMock(), response=MagicMock()
+            )
+        )
+
+        with patch("api.translations.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await translate_text("Hello", "pt")
+
+    @pytest.mark.anyio
     async def test_no_source_lang_omits_source_param(self):
         from api.translations import translate_text
 

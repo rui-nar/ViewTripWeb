@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import uuid as uuid_lib
 from datetime import datetime, timezone
@@ -41,6 +42,8 @@ from src.models.memory import Memory
 from src.project.memory_match import step_key
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
+
+_log = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
@@ -788,6 +791,9 @@ async def get_translation(
         translated_name = await translate_text(mem_row.name, lang_code) if mem_row.name else None
         translated_desc = await translate_text(mem_row.description, lang_code) if mem_row.description else None
     except Exception as exc:
+        _log.exception(
+            "Translation failed for memory %s -> %s", memory_id, lang_code
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Translation service error: {exc}") from exc
 
     with get_session() as sess:
