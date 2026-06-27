@@ -72,4 +72,42 @@ void main() {
     expect(find.textContaining("Couldn't translate"), findsOneWidget);
     expect(find.textContaining('502'), findsOneWidget);
   });
+
+  // The "show original" reset button reads "Original" rather than a bare "✕":
+  // there's no stored source language and a flag would misrepresent it, so the
+  // word is clearer than an icon. See language-bar reset button.
+  testWidgets('the original-language reset button is labelled "Original"',
+      (tester) async {
+    tester.view.physicalSize = const Size(1200, 1600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final notifier = _FailingNotifier()..languages = ['fr'];
+    final memory = {
+      'id': 1,
+      'date': '2025-06-01',
+      'name': 'A place',
+      'description': 'Some text',
+      'photos': <String>[],
+    };
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => Center(
+            child: ElevatedButton(
+              onPressed: () => showMemoryDetail(context, notifier, memory),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Original'), findsOneWidget);
+    expect(find.text('✕'), findsNothing);
+  });
 }

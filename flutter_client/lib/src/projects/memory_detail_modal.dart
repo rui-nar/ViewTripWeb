@@ -299,7 +299,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
         children: [
           // "original" reset button
           _LangButton(
-            label: '✕',
+            label: 'Original',
             active: _activeLang == null,
             loading: false,
             onTap: () => setState(() => _activeLang = null),
