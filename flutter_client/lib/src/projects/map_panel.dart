@@ -637,7 +637,10 @@ class _MapPanelState extends State<MapPanel> {
             LatLng(minLat, minLon),
             LatLng(maxLat, maxLon),
           ),
-          padding: const EdgeInsets.fromLTRB(32, 32, 32, 32 + 160),
+          // View mode lays the chart out as a sibling below the map (a Column),
+          // so the map viewport already excludes it — no chart-clearance inset
+          // here, unlike ManageMapPanel where the chart overlays the map.
+          padding: const EdgeInsets.all(32),
         ),
         curve: Curves.easeInOut,
       );
