@@ -1,0 +1,12 @@
+name: e2ee_spike
+description: Throwaway spike to de-risk the E2EE crypto stack (issue #26). NOT shipped.
+publish_to: "none"
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  cryptography_plus: ^2.7.0
+
+dev_dependencies:
+  test: ^1.25.0
