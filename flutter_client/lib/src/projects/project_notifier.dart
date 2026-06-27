@@ -551,6 +551,40 @@ class ProjectNotifier extends ChangeNotifier
     return (distanceKm: dist / 1000.0, elevationM: elev);
   }
 
+  static String _ymd(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-'
+      '${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+
+  /// Every day key ("YYYY-MM-DD") the project touches, ascending: the union of
+  /// day-meta days, activity dates and memory dates. This is the full-trip day
+  /// list regardless of any active filter (unlike the activity panel's
+  /// display-derived list), so it's safe to use from the add-FAB.
+  List<String> orderedDayKeys() {
+    final keys = <String>{...dayMeta.keys};
+    for (final a in activities) {
+      final ds = (a['start_date_local'] as String?)?.split('T').first;
+      if (ds != null && ds.isNotEmpty) keys.add(ds);
+    }
+    for (final item in items) {
+      if (item['item_type'] != 'memory') continue;
+      final m = item['memory'] as Map<String, dynamic>?;
+      final ds = (m?['date'] as String?)?.split('T').first;
+      if (ds != null && ds.isNotEmpty) keys.add(ds);
+    }
+    return keys.toList()..sort();
+  }
+
+  /// The day the add-FAB should default to: today while the trip is still
+  /// active (the day you're most likely adding to), otherwise the last day of
+  /// the trip. Null only when the project has no days at all and the trip has
+  /// ended.
+  String? activeDayKey() {
+    if (_tripIsActive) return _ymd(DateTime.now());
+    final keys = orderedDayKeys();
+    return keys.isEmpty ? null : keys.last;
+  }
+
   /// Merges full activity data (with elevation_profile) returned by the
   /// background full-details request into the already-rendered activity list,
   /// then rebuilds tracks and notifies listeners.

@@ -18,6 +18,7 @@ Future<_Harness> _pump(
   Map<String, String> sleepingOptionGroups = const {},
   List<String> availableTags = const [],
   List<Map<String, dynamic>> counters = const [],
+  bool countersOnly = false,
   int dayNumber = 21,
   int totalDays = 47,
   List<String> effectiveTags = const [],
@@ -35,6 +36,7 @@ Future<_Harness> _pump(
           sleepingOptionGroups: sleepingOptionGroups,
           availableTags: availableTags,
           counters: counters,
+          countersOnly: countersOnly,
           dayNumber: dayNumber,
           totalDays: totalDays,
           date: DateTime(2026, 6, 14),
@@ -278,6 +280,33 @@ void main() {
       await tester.pump();
       expect(find.text('Unsaved changes'), findsOneWidget);
       expect(_saveEnabled(tester), isTrue);
+    });
+  });
+
+  group('countersOnly variant (add-FAB counter shortcut)', () {
+    testWidgets('shows the hero and counters but hides the other sections',
+        (tester) async {
+      await _pump(
+        tester,
+        counters: [{'name': 'Coffees', 'start': 0}],
+        countersOnly: true,
+      );
+      // Hero retained (the day's ISO date is part of the header).
+      expect(find.text('2026-06-14'), findsWidgets);
+      // Counters section present (section labels render upper-cased)...
+      expect(find.text('COUNTERS'), findsOneWidget);
+      // ...and every other body section is gone.
+      expect(find.text('DIFFICULTY'), findsNothing);
+      expect(find.text('SLEEPING'), findsNothing);
+      expect(find.text('TAGS'), findsNothing);
+      expect(find.text('JOURNAL'), findsNothing);
+    });
+
+    testWidgets('guides the user when the project defines no counters',
+        (tester) async {
+      await _pump(tester, counters: const [], countersOnly: true);
+      expect(find.textContaining('no counters yet'), findsOneWidget);
+      expect(find.text('DIFFICULTY'), findsNothing);
     });
   });
 }

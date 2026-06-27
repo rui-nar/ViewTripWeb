@@ -15,6 +15,7 @@ import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'map_panel.dart';
+import 'project_add_fab.dart';
 import 'image_export.dart';
 import 'image_download.dart';
 import 'social_share_dialog.dart';
@@ -263,6 +264,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     final isNarrow = MediaQuery.sizeOf(context).width < 720;
 
     return Scaffold(
+      floatingActionButton:
+          buildProjectAddFab(context, context.read<ProjectNotifier>()),
       appBar: AppBar(
         automaticallyImplyLeading: false,
         title: Text(

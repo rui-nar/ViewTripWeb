@@ -15,6 +15,7 @@ import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
 import 'map_panel.dart';
+import 'project_add_fab.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
 import 'sync_import_dialog.dart';
@@ -170,6 +171,8 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     final isLoading = context.select<ViewProjectNotifier, bool>((n) => n.isLoading);
 
     return Scaffold(
+      floatingActionButton:
+          buildProjectAddFab(context, context.read<ViewProjectNotifier>()),
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
