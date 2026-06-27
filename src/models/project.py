@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from src.models.activity import Activity
 from src.models.journal import JournalEntry
@@ -36,6 +36,39 @@ class Counter:
 
 
 @dataclass
+class CounterEntry:
+    """A single per-day logged occurrence of a project counter.
+
+    The same counter may be logged several times in one day, so a day holds a
+    *list* of these entries rather than a name→value map.
+    """
+    name: str
+    value: float = 0.0
+
+
+def day_counters_to_json(entries: List["CounterEntry"]) -> List[Dict[str, Any]]:
+    """Serialise per-day counter entries to the stored list-of-dicts form."""
+    return [{"name": e.name, "value": e.value} for e in entries]
+
+
+def day_counters_from_json(raw: Any) -> List["CounterEntry"]:
+    """Parse per-day counters from stored JSON.
+
+    Accepts both the current list form ``[{"name", "value"}, …]`` and the
+    legacy ``{name: value}`` map written before counters could repeat in a day.
+    """
+    if isinstance(raw, dict):  # legacy map form
+        return [CounterEntry(name=k, value=float(v)) for k, v in raw.items()]
+    if isinstance(raw, list):
+        out: List[CounterEntry] = []
+        for e in raw:
+            if isinstance(e, dict) and "name" in e:
+                out.append(CounterEntry(name=e["name"], value=float(e.get("value", 0))))
+        return out
+    return []
+
+
+@dataclass
 class DayMeta:
     """User-authored metadata for a single trip day."""
     difficulty: Optional[DifficultyLevel] = None
@@ -43,7 +76,8 @@ class DayMeta:
     weather: Optional[WeatherCondition] = None
     journal: Optional[str] = None
     tags: List[str] = field(default_factory=list)
-    counters: Dict[str, float] = field(default_factory=dict)  # counter name → delta
+    # Per-day counter occurrences; the same counter name may appear more than once.
+    counters: List[CounterEntry] = field(default_factory=list)
 
 
 @dataclass

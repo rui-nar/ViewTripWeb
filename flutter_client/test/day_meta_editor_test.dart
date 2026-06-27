@@ -192,39 +192,71 @@ void main() {
     testWidgets('the + stepper increments the saved amount', (tester) async {
       final h = await _pump(tester,
           counters: [{'name': 'Snacks'}],
-          initialMeta: {'counters': {'Snacks': 3}});
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
 
       expect(find.text('3'), findsOneWidget);
-      await _tapVisible(tester, find.byKey(const ValueKey('ctr_inc_Snacks')));
+      await _tapVisible(tester, find.byKey(const ValueKey('ctr_inc_0_Snacks')));
       expect(find.text('4'), findsOneWidget);
 
       await _tapSave(tester);
-      expect((h.saved!['counters'] as Map)['Snacks'], 4.0);
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [{'name': 'Snacks', 'value': 4.0}]);
     });
 
-    testWidgets('"Add counter" lets the user pick which counter to add',
-        (tester) async {
+    testWidgets('legacy map counters still load', (tester) async {
+      final h = await _pump(tester,
+          counters: [{'name': 'Snacks'}],
+          initialMeta: {'counters': {'Snacks': 3}}); // legacy {name: value} form
+      expect(find.text('3'), findsOneWidget);
+      await _tapVisible(tester, find.byKey(const ValueKey('ctr_inc_0_Snacks')));
+      await _tapSave(tester);
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [{'name': 'Snacks', 'value': 4.0}]);
+    });
+
+    testWidgets('"Add counter" offers every defined counter', (tester) async {
       final h = await _pump(tester, counters: [
         {'name': 'Snacks'},
         {'name': 'Coffees'},
       ]);
       await _tapVisible(tester, find.text('Add counter'));
       await tester.pumpAndSettle(); // menu opens
-      // Both unused counters are offered; choose the second.
       expect(find.text('Snacks'), findsWidgets);
       expect(find.text('Coffees'), findsWidgets);
       await tester.tap(find.text('Coffees').last);
       await tester.pumpAndSettle();
       await _tapSave(tester);
-      final counters = h.saved!['counters'] as Map;
-      expect(counters.containsKey('Coffees'), isTrue);
-      expect(counters.containsKey('Snacks'), isFalse);
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [{'name': 'Coffees', 'value': 1.0}]);
+    });
+
+    testWidgets('the same counter can be added several times in one day',
+        (tester) async {
+      final h = await _pump(tester, counters: [{'name': 'Coffees'}]);
+      // Add "Coffees" twice — it stays addable after the first add.
+      await _tapVisible(tester, find.text('Add counter'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Coffees').last);
+      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Add counter'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Coffees').last);
+      await tester.pumpAndSettle();
+      // Bump the second row to 2 so the entries differ.
+      await _tapVisible(tester, find.byKey(const ValueKey('ctr_inc_1_Coffees')));
+      await _tapSave(tester);
+
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [
+        {'name': 'Coffees', 'value': 1.0},
+        {'name': 'Coffees', 'value': 2.0},
+      ]);
     });
 
     testWidgets('removing a counter drops it from saved meta', (tester) async {
       final h = await _pump(tester,
           counters: [{'name': 'Snacks'}],
-          initialMeta: {'counters': {'Snacks': 3}});
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
       await _tapVisible(tester, find.byTooltip('Remove counter'));
       await _tapSave(tester);
       expect(h.saved!.containsKey('counters'), isFalse);

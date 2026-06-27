@@ -27,6 +27,7 @@ void showDayMetaDialog(
   ProjectNotifier notifier,
   String dateKey, {
   List<String> orderedDateKeys = const [],
+  bool countersOnly = false,
 }) {
   showDialog(
     context: context,
@@ -36,6 +37,7 @@ void showDayMetaDialog(
       notifier: notifier,
       dateKey: dateKey,
       orderedDateKeys: orderedDateKeys,
+      countersOnly: countersOnly,
     ),
   );
 }
@@ -45,6 +47,7 @@ void showDayMetaSheet(
   ProjectNotifier notifier,
   String dateKey, {
   List<String> orderedDateKeys = const [],
+  bool countersOnly = false,
 }) {
   showModalBottomSheet(
     context: context,
@@ -54,6 +57,7 @@ void showDayMetaSheet(
       notifier: notifier,
       dateKey: dateKey,
       orderedDateKeys: orderedDateKeys,
+      countersOnly: countersOnly,
     ),
   );
 }
@@ -132,11 +136,13 @@ class _DayMetaDialogWrapper extends StatefulWidget {
   final ProjectNotifier notifier;
   final String dateKey;
   final List<String> orderedDateKeys;
+  final bool countersOnly;
 
   const _DayMetaDialogWrapper({
     required this.notifier,
     required this.dateKey,
     this.orderedDateKeys = const [],
+    this.countersOnly = false,
   });
 
   @override
@@ -197,6 +203,7 @@ class _DayMetaDialogWrapperState extends State<_DayMetaDialogWrapper> {
             sleepingOptionGroups: widget.notifier.sleepingOptionGroups,
             availableTags: widget.notifier.availableTags,
             counters: widget.notifier.counters,
+            countersOnly: widget.countersOnly,
             dayNumber: ctx.dayNumber,
             totalDays: ctx.totalDays,
             date: ctx.date,
@@ -226,11 +233,13 @@ class _DayMetaSheetWrapper extends StatefulWidget {
   final ProjectNotifier notifier;
   final String dateKey;
   final List<String> orderedDateKeys;
+  final bool countersOnly;
 
   const _DayMetaSheetWrapper({
     required this.notifier,
     required this.dateKey,
     this.orderedDateKeys = const [],
+    this.countersOnly = false,
   });
 
   @override
@@ -295,6 +304,7 @@ class _DayMetaSheetWrapperState extends State<_DayMetaSheetWrapper> {
               sleepingOptionGroups: widget.notifier.sleepingOptionGroups,
               availableTags: widget.notifier.availableTags,
               counters: widget.notifier.counters,
+              countersOnly: widget.countersOnly,
               dayNumber: ctx.dayNumber,
               totalDays: ctx.totalDays,
               date: ctx.date,
@@ -385,6 +395,11 @@ class DayMetaEditor extends StatefulWidget {
   final List<String> availableTags;
   final List<Map<String, dynamic>> counters;
 
+  /// When true, the body shows only the counters section (the hero, footer and
+  /// day navigation are kept). Used by the add-FAB's "add counter to a day"
+  /// shortcut, which reuses this editor rather than duplicating it.
+  final bool countersOnly;
+
   // Hero context
   final int dayNumber;
   final int totalDays;
@@ -415,6 +430,7 @@ class DayMetaEditor extends StatefulWidget {
     this.sleepingOptionGroups = const {},
     this.availableTags = const [],
     this.counters = const [],
+    this.countersOnly = false,
     this.dayNumber = 1,
     this.totalDays = 1,
     required this.date,
@@ -477,11 +493,20 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     final rawTags = m['tags'];
     _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
     final rawC = m['counters'];
-    _counterMods = rawC is Map
-        ? rawC.entries
-            .map((e) => (name: e.key as String, value: (e.value as num).toDouble()))
-            .toList()
-        : [];
+    if (rawC is List) {
+      // Current form: a list of {name, value} entries — same counter may repeat.
+      _counterMods = rawC
+          .whereType<Map>()
+          .map((e) => (name: e['name'] as String, value: (e['value'] as num).toDouble()))
+          .toList();
+    } else if (rawC is Map) {
+      // Legacy form: a {name: value} map.
+      _counterMods = rawC.entries
+          .map((e) => (name: e.key as String, value: (e.value as num).toDouble()))
+          .toList();
+    } else {
+      _counterMods = [];
+    }
   }
 
   @override
@@ -491,8 +516,6 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _tagInputCtrl.dispose();
     super.dispose();
   }
-
-  Set<String> get _usedCounterNames => _counterMods.map((m) => m.name).toSet();
 
   void _markDirty(VoidCallback fn) => setState(() {
         fn();
@@ -513,15 +536,11 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
 
   void _removeCounter(int i) => _markDirty(() => _counterMods.removeAt(i));
 
-  List<String> get _unusedCounterNames => widget.counters
-      .map((c) => c['name'] as String)
-      .where((n) => !_usedCounterNames.contains(n))
-      .toList();
+  List<String> get _definedCounterNames =>
+      widget.counters.map((c) => c['name'] as String).toList();
 
-  void _addCounterNamed(String name) {
-    if (_usedCounterNames.contains(name)) return;
-    _markDirty(() => _counterMods.add((name: name, value: 1)));
-  }
+  void _addCounterNamed(String name) =>
+      _markDirty(() => _counterMods.add((name: name, value: 1)));
 
   Map<String, dynamic> _buildMeta() {
     final result = <String, dynamic>{};
@@ -532,7 +551,9 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     if (j.isNotEmpty) result['journal'] = j;
     if (_tags.isNotEmpty) result['tags'] = List<String>.from(_tags);
     if (_counterMods.isNotEmpty) {
-      result['counters'] = {for (final m in _counterMods) m.name: m.value};
+      result['counters'] = [
+        for (final m in _counterMods) {'name': m.name, 'value': m.value},
+      ];
     }
     return result;
   }
@@ -727,6 +748,12 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
   // ── Body ───────────────────────────────────────────────────────────────────
 
   Widget _buildBody(BuildContext context) {
+    if (widget.countersOnly) {
+      // No counters defined for the project → the section would collapse to
+      // nothing, so guide the user to define one first.
+      if (widget.counters.isEmpty) return _buildNoCountersDefined(context);
+      return _buildCounters(context);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -852,9 +879,33 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     );
   }
 
+  Widget _buildNoCountersDefined(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return _EDSection(
+      label: 'Counters',
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          border: Border.all(color: cs.outlineVariant),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(
+          'This project has no counters yet. Add a counter in project '
+          'settings, then you can record its value per day here.',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.bodySmall
+              ?.copyWith(color: cs.onSurfaceVariant),
+        ),
+      ),
+    );
+  }
+
   Widget _buildCounters(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final canAdd = _usedCounterNames.length < widget.counters.length;
+    // A counter may be logged several times per day, so it stays addable as
+    // long as the project defines at least one counter.
+    final canAdd = widget.counters.isNotEmpty;
     if (widget.counters.isEmpty && _counterMods.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -868,6 +919,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: _EDCounterRow(
+                index: i,
                 name: _counterMods[i].name,
                 value: _counterMods[i].value,
                 onChanged: (v) => _setCounter(i, v),
@@ -897,7 +949,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                   position: PopupMenuPosition.under,
                   onSelected: _addCounterNamed,
                   itemBuilder: (_) => [
-                    for (final name in _unusedCounterNames)
+                    for (final name in _definedCounterNames)
                       PopupMenuItem<String>(value: name, child: Text(name)),
                   ],
                   child: Container(
@@ -1269,12 +1321,14 @@ class _EDNotSetChip extends StatelessWidget {
 }
 
 class _EDCounterRow extends StatelessWidget {
+  final int index;
   final String name;
   final double value;
   final ValueChanged<double> onChanged;
   final VoidCallback onRemove;
 
   const _EDCounterRow({
+    required this.index,
     required this.name,
     required this.value,
     required this.onChanged,
@@ -1311,7 +1365,7 @@ class _EDCounterRow extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _stepBtn(context, Icons.remove, ValueKey('ctr_dec_$name'),
+                _stepBtn(context, Icons.remove, ValueKey('ctr_dec_${index}_$name'),
                     value <= 0 ? null : () => onChanged((value - 1).clamp(0, double.infinity))),
                 SizedBox(
                   width: 30,
@@ -1322,7 +1376,7 @@ class _EDCounterRow extends StatelessWidget {
                         color: value == 0 ? cs.onSurfaceVariant : cs.onSurface,
                       )),
                 ),
-                _stepBtn(context, Icons.add, ValueKey('ctr_inc_$name'),
+                _stepBtn(context, Icons.add, ValueKey('ctr_inc_${index}_$name'),
                     () => onChanged(value + 1)),
               ],
             ),

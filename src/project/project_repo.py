@@ -37,6 +37,8 @@ from src.models.project import (
     ConnectingSegment,
     Counter,
     DayMeta,
+    day_counters_from_json,
+    day_counters_to_json,
     DEFAULT_SLEEPING_GROUPS,
     DEFAULT_SLEEPING_OPTIONS,
     Project,
@@ -251,7 +253,7 @@ class ProjectRepo:
         row.day_meta_json = json.dumps({
             dk: {"difficulty": dm.difficulty, "sleeping": dm.sleeping,
                  "weather": dm.weather, "journal": dm.journal,
-                 "tags": dm.tags, "counters": dm.counters}
+                 "tags": dm.tags, "counters": day_counters_to_json(dm.counters)}
             for dk, dm in project.day_meta.items()
         })
         opts = project.sleeping_options if project.sleeping_options else DEFAULT_SLEEPING_OPTIONS
@@ -671,7 +673,7 @@ class ProjectRepo:
                 weather=v.get("weather"),
                 journal=v.get("journal"),
                 tags=v.get("tags") or [],
-                counters={k: float(cv) for k, cv in (v.get("counters") or {}).items()},
+                counters=day_counters_from_json(v.get("counters")),
             )
             for dk, v in raw_dm.items()
         }
@@ -1052,11 +1054,11 @@ def _compute_counter_stats(
 ) -> List[Dict[str, Any]]:
     result = []
     for ctr in project.counters:
-        deltas = {
-            dk: dm.counters[ctr.name]
-            for dk, dm in project.day_meta.items()
-            if ctr.name in dm.counters
-        }
+        deltas = {}
+        for dk, dm in project.day_meta.items():
+            day_total = sum(e.value for e in dm.counters if e.name == ctr.name)
+            if any(e.name == ctr.name for e in dm.counters):
+                deltas[dk] = day_total
         if allowed_dates is not None:
             deltas = {dk: v for dk, v in deltas.items() if dk in allowed_dates}
         cumulative = ctr.start

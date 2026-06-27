@@ -11,6 +11,7 @@ from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
     DayMeta,
+    day_counters_to_json,
     DEFAULT_SLEEPING_OPTIONS,
     Project,
     ProjectFilterState,
@@ -108,7 +109,7 @@ class ProjectIO:
                         "weather": dm.weather, "journal": dm.journal,
                     }.items() if v is not None},
                     **({"tags": dm.tags} if dm.tags else {}),
-                    **({"counters": dm.counters} if dm.counters else {}),
+                    **({"counters": day_counters_to_json(dm.counters)} if dm.counters else {}),
                 }
                 for dk, dm in project.day_meta.items()
             },

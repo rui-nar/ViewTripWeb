@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from src.models.project import DayMeta, Project
+from src.models.project import CounterEntry, DayMeta, Project, day_counters_from_json
 from src.project.project_io import ProjectIO
 
 
@@ -51,7 +51,7 @@ class TestDayMetaModel:
         assert dm.weather is None
         assert dm.journal is None
         assert dm.tags == []
-        assert dm.counters == {}
+        assert dm.counters == []
 
     def test_full_construction(self):
         dm = DayMeta(
@@ -60,15 +60,18 @@ class TestDayMetaModel:
             weather="heavy_rain",
             journal="Col du Galibier in a storm.",
             tags=["alpine", "snow"],
-            counters={"km": 145.0, "ascent": 4200.0},
+            counters=[CounterEntry("km", 145.0), CounterEntry("ascent", 4200.0)],
         )
         assert dm.difficulty == "hard"
         assert dm.sleeping == "tent"
         assert dm.weather == "heavy_rain"
         assert dm.journal == "Col du Galibier in a storm."
         assert dm.tags == ["alpine", "snow"]
-        assert dm.counters["km"] == pytest.approx(145.0)
-        assert dm.counters["ascent"] == pytest.approx(4200.0)
+        assert dm.counters == [CounterEntry("km", 145.0), CounterEntry("ascent", 4200.0)]
+
+    def test_same_counter_can_repeat_in_a_day(self):
+        dm = DayMeta(counters=[CounterEntry("Coffee", 1.0), CounterEntry("Coffee", 2.0)])
+        assert [e.value for e in dm.counters if e.name == "Coffee"] == [1.0, 2.0]
 
 
 # ---------------------------------------------------------------------------
@@ -115,14 +118,14 @@ class TestProjectIODayMeta:
 
     def test_counters_included_when_non_empty(self):
         d = _to_dict_day(
-            _project_with_day("2025-06-01", counters={"km": 95.5}),
+            _project_with_day("2025-06-01", counters=[CounterEntry("km", 95.5)]),
             "2025-06-01",
         )
-        assert d["counters"] == {"km": pytest.approx(95.5)}
+        assert d["counters"] == [{"name": "km", "value": pytest.approx(95.5)}]
 
     def test_counters_excluded_when_empty(self):
         d = _to_dict_day(
-            _project_with_day("2025-06-01", counters={}),
+            _project_with_day("2025-06-01", counters=[]),
             "2025-06-01",
         )
         assert "counters" not in d
@@ -179,7 +182,7 @@ class TestDayMetaParsing:
                 weather=v.get("weather"),
                 journal=v.get("journal"),
                 tags=v.get("tags") or [],
-                counters={k: float(cv) for k, cv in (v.get("counters") or {}).items()},
+                counters=day_counters_from_json(v.get("counters")),
             )
             for dk, v in raw_dm.items()
         }
@@ -192,7 +195,10 @@ class TestDayMetaParsing:
                 "weather": "heavy_rain",
                 "journal": "Brutal day.",
                 "tags": ["snow", "heatwave"],
-                "counters": {"km": 120.5, "ascent": 3200.0},
+                "counters": [
+                    {"name": "km", "value": 120.5},
+                    {"name": "ascent", "value": 3200.0},
+                ],
             }
         })
         result = self._parse(raw)
@@ -202,8 +208,23 @@ class TestDayMetaParsing:
         assert dm.weather == "heavy_rain"
         assert dm.journal == "Brutal day."
         assert dm.tags == ["snow", "heatwave"]
-        assert dm.counters["km"] == pytest.approx(120.5)
-        assert dm.counters["ascent"] == pytest.approx(3200.0)
+        assert dm.counters == [CounterEntry("km", 120.5), CounterEntry("ascent", 3200.0)]
+
+    def test_legacy_map_counters_parse_to_entries(self):
+        """Counters stored in the old {name: value} map form still load."""
+        raw = json.dumps({"2025-06-01": {"counters": {"km": 120.5, "ascent": 3200.0}}})
+        dm = self._parse(raw)["2025-06-01"]
+        assert dm.counters == [CounterEntry("km", 120.5), CounterEntry("ascent", 3200.0)]
+
+    def test_repeated_counter_entries_preserved(self):
+        raw = json.dumps({
+            "2025-06-01": {"counters": [
+                {"name": "Coffee", "value": 1},
+                {"name": "Coffee", "value": 2},
+            ]}
+        })
+        dm = self._parse(raw)["2025-06-01"]
+        assert dm.counters == [CounterEntry("Coffee", 1.0), CounterEntry("Coffee", 2.0)]
 
     def test_empty_dict_entry_gives_all_none(self):
         """The {} entries that _autoFillDaysToToday used to persist
@@ -215,7 +236,7 @@ class TestDayMetaParsing:
         assert dm.weather is None
         assert dm.journal is None
         assert dm.tags == []
-        assert dm.counters == {}
+        assert dm.counters == []
 
     def test_missing_fields_default_to_none(self):
         result = self._parse(json.dumps({"2025-06-01": {"difficulty": "easy"}}))
@@ -278,7 +299,7 @@ class TestDayMetaRepoRoundTrip:
                 weather="clear",
                 journal="Bastille Day on the road.",
                 tags=["rest-day", "market"],
-                counters={"km": 142.0},
+                counters=[CounterEntry("km", 142.0)],
             ),
         }
         repo.save_project(sess, uid, p)
@@ -291,7 +312,7 @@ class TestDayMetaRepoRoundTrip:
         assert dm.weather == "clear"
         assert dm.journal == "Bastille Day on the road."
         assert dm.tags == ["rest-day", "market"]
-        assert dm.counters["km"] == pytest.approx(142.0)
+        assert dm.counters == [CounterEntry("km", 142.0)]
 
     def test_multiple_dates_all_preserved(self, repo_db):
         repo, sess, uid = repo_db
@@ -382,13 +403,18 @@ class TestDayMetaRepoRoundTrip:
         repo.create_project(sess, uid, "trip")  # creates with defaults
 
         p = repo.get_project(sess, uid, "trip")
-        p.day_meta = {"2025-06-01": DayMeta(counters={"km": 80.0, "climbing": 1500.0})}
+        p.day_meta = {
+            "2025-06-01": DayMeta(
+                counters=[CounterEntry("km", 80.0), CounterEntry("climbing", 1500.0)]
+            )
+        }
         p.sleeping_options = ["Camping", "Hotel", "Friend"]
         repo.save_project(sess, uid, p)
 
         loaded = repo.get_project(sess, uid, "trip")
-        assert loaded.day_meta["2025-06-01"].counters["km"] == pytest.approx(80.0)
-        assert loaded.day_meta["2025-06-01"].counters["climbing"] == pytest.approx(1500.0)
+        assert loaded.day_meta["2025-06-01"].counters == [
+            CounterEntry("km", 80.0), CounterEntry("climbing", 1500.0)
+        ]
         assert "Camping" in loaded.sleeping_options
         assert "Hotel" in loaded.sleeping_options
 
@@ -467,3 +493,34 @@ class TestMergeDayMetaPreserveCounters:
         assert result["2026-06-05"]["counters"] == {"Rennes vues": 3}
         assert result["2026-06-06"]["counters"] == {}
         assert result["2026-06-07"]["counters"] == {"Rennes vues": 99}
+
+
+# ---------------------------------------------------------------------------
+# 6. Counter stats aggregation — _compute_counter_stats
+# ---------------------------------------------------------------------------
+
+from src.models.project import Counter
+from src.project.project_repo import _compute_counter_stats
+
+
+class TestComputeCounterStats:
+    def test_repeated_entries_sum_per_day(self):
+        """Several entries of the same counter in one day sum into that day."""
+        p = Project(name="t")
+        p.counters = [Counter(name="Coffee", start=0.0)]
+        p.day_meta = {
+            "2025-06-01": DayMeta(counters=[CounterEntry("Coffee", 1), CounterEntry("Coffee", 2)]),
+            "2025-06-02": DayMeta(counters=[CounterEntry("Coffee", 1)]),
+        }
+        stats = _compute_counter_stats(p)
+        coffee = next(c for c in stats if c["name"] == "Coffee")
+        # Day 1 sums to 3 (cumulative 3), day 2 adds 1 (cumulative 4).
+        assert [pt["value"] for pt in coffee["series"]] == [3.0, 4.0]
+        assert coffee["total"] == pytest.approx(4.0)
+
+    def test_start_offset_included_in_cumulative(self):
+        p = Project(name="t")
+        p.counters = [Counter(name="Pages", start=10.0)]
+        p.day_meta = {"2025-06-01": DayMeta(counters=[CounterEntry("Pages", 5)])}
+        stats = _compute_counter_stats(p)
+        assert stats[0]["total"] == pytest.approx(15.0)
