@@ -176,6 +176,23 @@ class EncryptionService {
     return true;
   }
 
+  /// Prepare encryption for a freshly-authenticated session: unlock on a trusted
+  /// device; or, if encryption is enabled but this device isn't approved yet,
+  /// register it as pending so a trusted device can approve it. Returns whether
+  /// the CMK is now unlocked.
+  Future<bool> prepareForSession() async {
+    if (await unlock()) return true;
+    final keyPair = await _store.load();
+    final pubB64 = keyPair == null
+        ? null
+        : base64.encode((await keyPair.extractPublicKey()).bytes);
+    final status = await _api.fetchStatus(pubB64);
+    if (status.enabled && !status.deviceApproved) {
+      await registerThisDevice();
+    }
+    return false;
+  }
+
   // ── Cross-device approval (trusted-device model) ──────────────────────────
 
   /// Register THIS device for approval: ensure a device key pair exists locally,

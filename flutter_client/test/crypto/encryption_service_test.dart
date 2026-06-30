@@ -179,6 +179,17 @@ void main() {
       final svc = EncryptionService(FakeDeviceKeyStore(), api); // never unlocked
       expect(() => svc.approveDevice('SOME_PUBKEY'), throwsStateError);
     });
+
+    test('prepareForSession registers a new device as pending when enabled',
+        () async {
+      final api = FakeEncryptionApi();
+      await EncryptionService(FakeDeviceKeyStore(), api)
+          .enable(const RecoveryKeyChoice());
+
+      final svcB = EncryptionService(FakeDeviceKeyStore(), api);
+      expect(await svcB.prepareForSession(), isFalse); // not approved yet
+      expect((await api.pendingDevices()).length, 1); // auto-registered
+    });
   });
 
   test('encrypt/decrypt throws while locked', () async {

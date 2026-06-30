@@ -159,7 +159,7 @@ class AuthNotifier extends ChangeNotifier {
   /// approved yet (those fall through to device approval / recovery). Never throws.
   Future<void> _unlockEncryption() async {
     try {
-      await encryption.unlock();
+      await encryption.prepareForSession();
     } catch (_) {}
   }
 

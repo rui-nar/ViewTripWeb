@@ -11,6 +11,7 @@ import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
 import '../crypto/enable_encryption_screen.dart';
 import '../crypto/encryption.dart';
+import '../crypto/manage_devices_screen.dart';
 import 'settings_service.dart';
 import 'theme_notifier.dart';
 
@@ -838,6 +839,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         },
                         icon: const Icon(Icons.lock_outline),
                         label: const Text('Set up encryption'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) =>
+                                ManageDevicesScreen(service: encryption),
+                          ));
+                        },
+                        icon: const Icon(Icons.devices_other),
+                        label: const Text('Approve another device'),
                       ),
                     ],
                   ),
