@@ -14,37 +14,59 @@ class FakeDeviceKeyStore implements DeviceKeyStore {
   Future<void> save(SimpleKeyPair keyPair) async => _kp = keyPair;
 }
 
-/// Fake server that records the enable payload and serves it back from /status,
-/// so the device enable -> later-session unlock path is exercised end to end.
+class _FakeDev {
+  final bool approved;
+  final String? wrappedCmk;
+  final String? ephemeral;
+  _FakeDev(this.approved, this.wrappedCmk, this.ephemeral);
+}
+
+/// In-memory fake server: tracks devices (pubkey -> state) so the full
+/// enable / register / approve / unlock lifecycle runs end to end.
 class FakeEncryptionApi implements EncryptionApi {
   Map<String, dynamic>? enablePayload;
-  bool deviceApproved = true; // emulate the enabling device being trusted
+  bool _enabled = false;
+  final _devices = <String, _FakeDev>{};
+  final _recovery = <String>[];
 
   @override
   Future<void> enable(Map<String, dynamic> payload) async {
     enablePayload = payload;
+    _enabled = true;
+    final d = payload['device'] as Map<String, dynamic>;
+    _devices[d['public_key'] as String] = _FakeDev(
+        true, d['wrapped_cmk'] as String, d['ephemeral_public_key'] as String);
+    _recovery.add((payload['recovery'] as Map)['method'] as String);
   }
 
   @override
   Future<EncryptionStatus> fetchStatus(String? devicePublicKeyB64) async {
-    final p = enablePayload;
-    if (p == null) {
-      return const EncryptionStatus(
-        enabled: false, recoveryMethods: [],
-        deviceRegistered: false, deviceApproved: false,
-      );
-    }
-    final device = p['device'] as Map<String, dynamic>;
-    final isThisDevice = device['public_key'] == devicePublicKeyB64;
+    final dev = devicePublicKeyB64 == null ? null : _devices[devicePublicKeyB64];
     return EncryptionStatus(
-      enabled: true,
-      recoveryMethods: [(p['recovery'] as Map<String, dynamic>)['method'] as String],
-      deviceRegistered: isThisDevice,
-      deviceApproved: isThisDevice && deviceApproved,
-      wrappedCmkB64: isThisDevice ? device['wrapped_cmk'] as String : null,
-      ephemeralPublicKeyB64:
-          isThisDevice ? device['ephemeral_public_key'] as String : null,
+      enabled: _enabled,
+      recoveryMethods: List.of(_recovery),
+      deviceRegistered: dev != null,
+      deviceApproved: dev?.approved ?? false,
+      wrappedCmkB64: dev?.wrappedCmk,
+      ephemeralPublicKeyB64: dev?.ephemeral,
     );
+  }
+
+  @override
+  Future<void> registerDevice(String publicKeyB64, String label) async {
+    _devices.putIfAbsent(publicKeyB64, () => _FakeDev(false, null, null));
+  }
+
+  @override
+  Future<List<PendingDevice>> pendingDevices() async => _devices.entries
+      .where((e) => !e.value.approved)
+      .map((e) => PendingDevice(e.key, ''))
+      .toList();
+
+  @override
+  Future<void> approveDevice(
+      String publicKeyB64, String wrappedCmkB64, String ephemeralPublicKeyB64) async {
+    _devices[publicKeyB64] = _FakeDev(true, wrappedCmkB64, ephemeralPublicKeyB64);
   }
 }
 
@@ -121,14 +143,41 @@ void main() {
       expect(await svc.unlock(), isFalse);
     });
 
-    test('device present but not yet approved -> cannot unlock', () async {
+    test('registered but not yet approved -> cannot unlock', () async {
       final api = FakeEncryptionApi();
-      final store = FakeDeviceKeyStore();
-      await EncryptionService(store, api).enable(const RecoveryKeyChoice());
-      api.deviceApproved = false; // server has not approved this device
+      // Device A enables encryption (different store).
+      await EncryptionService(FakeDeviceKeyStore(), api)
+          .enable(const RecoveryKeyChoice());
+      // Device B registers and stays pending.
+      final svcB = EncryptionService(FakeDeviceKeyStore(), api);
+      await svcB.registerThisDevice();
+      expect(await svcB.unlock(), isFalse);
+    });
+  });
 
-      final svc = EncryptionService(store, api);
-      expect(await svc.unlock(), isFalse);
+  group('cross-device approval', () {
+    test('B registers, A approves, B unlocks and reads A\'s ciphertext', () async {
+      final api = FakeEncryptionApi();
+      final svcA = EncryptionService(FakeDeviceKeyStore(), api);
+      await svcA.enable(const RecoveryKeyChoice());
+      final envelope = await svcA.encryptText('Trip to Japan');
+
+      final svcB = EncryptionService(FakeDeviceKeyStore(), api);
+      await svcB.registerThisDevice();
+      expect(await svcB.unlock(), isFalse); // pending
+
+      final pending = await svcA.pendingDevices();
+      expect(pending.length, 1);
+      await svcA.approveDevice(pending.first.publicKeyB64); // re-wrap CMK to B
+
+      expect(await svcB.unlock(), isTrue);
+      expect(await svcB.decryptText(envelope), 'Trip to Japan');
+    });
+
+    test('approving requires an unlocked CMK', () async {
+      final api = FakeEncryptionApi();
+      final svc = EncryptionService(FakeDeviceKeyStore(), api); // never unlocked
+      expect(() => svc.approveDevice('SOME_PUBKEY'), throwsStateError);
     });
   });
 

@@ -29,4 +29,27 @@ class HttpEncryptionApi implements EncryptionApi {
       ephemeralPublicKeyB64: device['ephemeral_public_key'] as String?,
     );
   }
+
+  @override
+  Future<void> registerDevice(String publicKeyB64, String label) =>
+      _api.post('/api/encryption/devices/register',
+          {'public_key': publicKeyB64, 'label': label});
+
+  @override
+  Future<List<PendingDevice>> pendingDevices() async {
+    final list = await _api.get('/api/encryption/devices/pending') as List;
+    return list
+        .map((e) => PendingDevice(
+            e['public_key'] as String, e['label'] as String? ?? ''))
+        .toList();
+  }
+
+  @override
+  Future<void> approveDevice(String publicKeyB64, String wrappedCmkB64,
+          String ephemeralPublicKeyB64) =>
+      _api.post('/api/encryption/devices/approve', {
+        'public_key': publicKeyB64,
+        'wrapped_cmk': wrappedCmkB64,
+        'ephemeral_public_key': ephemeralPublicKeyB64,
+      });
 }

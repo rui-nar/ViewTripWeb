@@ -136,3 +136,66 @@ def test_status_before_enable_is_disabled(enc_env):
     assert body["enabled"] is False
     assert body["recovery_methods"] == []
     assert body["device"]["registered"] is False
+
+
+# ── Cross-device approval lifecycle ─────────────────────────────────────────────
+
+def test_register_pending_then_approve(enc_env):
+    client, _, _ = enc_env
+    client.post("/api/encryption/enable", json=_enable_body())  # device A trusted
+
+    # Device B registers, lands pending (not approved, no wrapped CMK).
+    reg = client.post("/api/encryption/devices/register",
+                      json={"public_key": "DEVPUB_B", "label": "Phone"})
+    assert reg.status_code == 200
+    assert reg.json() == {
+        "registered": True, "approved": False,
+        "wrapped_cmk": None, "ephemeral_public_key": None,
+    }
+
+    # It shows up in the pending list.
+    pending = client.get("/api/encryption/devices/pending").json()
+    assert [p["public_key"] for p in pending] == ["DEVPUB_B"]
+
+    # A trusted device approves it by uploading a wrap.
+    appr = client.post("/api/encryption/devices/approve", json={
+        "public_key": "DEVPUB_B",
+        "wrapped_cmk": "WRAP_DEV_B",
+        "ephemeral_public_key": "EPH_B",
+    })
+    assert appr.status_code == 200
+    assert appr.json()["approved"] is True
+
+    # Pending list is now empty; device B's status returns its wrapped CMK.
+    assert client.get("/api/encryption/devices/pending").json() == []
+    st = client.get("/api/encryption/status",
+                    params={"device_public_key": "DEVPUB_B"}).json()
+    assert st["device"]["approved"] is True
+    assert st["device"]["wrapped_cmk"] == "WRAP_DEV_B"
+
+
+def test_register_requires_encryption_enabled(enc_env):
+    client, _, _ = enc_env
+    resp = client.post("/api/encryption/devices/register",
+                       json={"public_key": "DEVPUB_B", "label": ""})
+    assert resp.status_code == 409
+
+
+def test_register_is_idempotent(enc_env):
+    client, _, _ = enc_env
+    client.post("/api/encryption/enable", json=_enable_body())
+    a = client.post("/api/encryption/devices/register",
+                    json={"public_key": "DEVPUB_B", "label": "Phone"})
+    b = client.post("/api/encryption/devices/register",
+                    json={"public_key": "DEVPUB_B", "label": "Phone again"})
+    assert a.status_code == 200 and b.status_code == 200
+    assert len(client.get("/api/encryption/devices/pending").json()) == 1
+
+
+def test_approve_unknown_device_404(enc_env):
+    client, _, _ = enc_env
+    client.post("/api/encryption/enable", json=_enable_body())
+    resp = client.post("/api/encryption/devices/approve", json={
+        "public_key": "NOPE", "wrapped_cmk": "X", "ephemeral_public_key": "Y",
+    })
+    assert resp.status_code == 404

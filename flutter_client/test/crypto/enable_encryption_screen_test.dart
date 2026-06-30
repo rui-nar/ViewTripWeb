@@ -20,6 +20,12 @@ class _FakeApi implements EncryptionApi {
         enabled: false, recoveryMethods: [],
         deviceRegistered: false, deviceApproved: false,
       );
+  @override
+  Future<void> registerDevice(String publicKeyB64, String label) async {}
+  @override
+  Future<List<PendingDevice>> pendingDevices() async => [];
+  @override
+  Future<void> approveDevice(String a, String b, String c) async {}
 }
 
 Widget _wrap() => MaterialApp(

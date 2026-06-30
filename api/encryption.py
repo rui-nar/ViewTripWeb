@@ -65,6 +65,23 @@ class StatusOut(BaseModel):
     device: DeviceStateOut
 
 
+class DeviceRegisterIn(BaseModel):
+    public_key: str = Field(description="base64 X25519 public key of the new device")
+    label: str = Field(default="", description="human label for the device")
+
+
+class PendingDeviceOut(BaseModel):
+    public_key: str
+    label: str
+    created_at: float
+
+
+class DeviceApproveIn(BaseModel):
+    public_key: str = Field(description="the pending device's public key")
+    wrapped_cmk: str = Field(description="base64 AEAD blob: CMK wrapped to that device")
+    ephemeral_public_key: str = Field(description="base64 X25519 ephemeral pubkey")
+
+
 # ── Endpoints ───────────────────────────────────────────────────────────────────
 
 @router.post("/enable", response_model=StatusOut,
@@ -146,4 +163,92 @@ def get_status(
             enabled=bool(ui and ui.encryption_enabled),
             recovery_methods=methods,
             device=device,
+        )
+
+
+# ── Cross-device approval (Bitwarden trusted-device model) ──────────────────────
+
+@router.post("/devices/register", response_model=DeviceStateOut,
+             summary="Register a new device as pending approval")
+def register_device(body: DeviceRegisterIn,
+                    user: dict = Depends(get_current_user)) -> DeviceStateOut:
+    """A new device posts its public key; it stays unapproved until a trusted
+    device wraps the CMK to it. Idempotent — re-registering returns current state."""
+    uid = _uid(user)
+    with get_session() as sess:
+        ui = sess.get(UserInfo, uid)
+        if ui is None or not ui.encryption_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Encryption is not enabled for this account",
+            )
+        row = sess.exec(
+            select(DBDeviceKey).where(
+                DBDeviceKey.user_info_id == uid,
+                DBDeviceKey.public_key == body.public_key,
+            )
+        ).first()
+        if row is None:
+            row = DBDeviceKey(
+                user_info_id=uid,
+                public_key=body.public_key,
+                label=body.label,
+                approved=False,
+            )
+            sess.add(row)
+            sess.commit()
+            sess.refresh(row)
+        return DeviceStateOut(
+            registered=True,
+            approved=row.approved,
+            wrapped_cmk=row.wrapped_cmk,
+            ephemeral_public_key=row.ephemeral_public_key,
+        )
+
+
+@router.get("/devices/pending", response_model=List[PendingDeviceOut],
+            summary="List this account's devices awaiting approval")
+def list_pending_devices(
+        user: dict = Depends(get_current_user)) -> List[PendingDeviceOut]:
+    uid = _uid(user)
+    with get_session() as sess:
+        rows = sess.exec(
+            select(DBDeviceKey).where(
+                DBDeviceKey.user_info_id == uid,
+                DBDeviceKey.approved == False,  # noqa: E712 (SQL boolean)
+            )
+        ).all()
+        return [
+            PendingDeviceOut(
+                public_key=r.public_key, label=r.label, created_at=r.created_at)
+            for r in rows
+        ]
+
+
+@router.post("/devices/approve", response_model=DeviceStateOut,
+             summary="Approve a pending device by wrapping the CMK to it")
+def approve_device(body: DeviceApproveIn,
+                   user: dict = Depends(get_current_user)) -> DeviceStateOut:
+    """Called by an already-trusted device (the only kind that holds the CMK and
+    can produce a valid wrap). The server just stores the supplied wrap."""
+    uid = _uid(user)
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBDeviceKey).where(
+                DBDeviceKey.user_info_id == uid,
+                DBDeviceKey.public_key == body.public_key,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+        row.approved = True
+        row.wrapped_cmk = body.wrapped_cmk
+        row.ephemeral_public_key = body.ephemeral_public_key
+        sess.add(row)
+        sess.commit()
+        return DeviceStateOut(
+            registered=True, approved=True,
+            wrapped_cmk=row.wrapped_cmk,
+            ephemeral_public_key=row.ephemeral_public_key,
         )

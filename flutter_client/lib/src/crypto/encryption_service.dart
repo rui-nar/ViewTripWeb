@@ -40,10 +40,21 @@ class EncryptionStatus {
   });
 }
 
+/// A device awaiting approval (from GET /devices/pending).
+class PendingDevice {
+  final String publicKeyB64;
+  final String label;
+  const PendingDevice(this.publicKeyB64, this.label);
+}
+
 /// The server endpoints this service needs. Implemented by the app's HTTP layer.
 abstract class EncryptionApi {
   Future<EncryptionStatus> fetchStatus(String? devicePublicKeyB64);
   Future<void> enable(Map<String, dynamic> payload);
+  Future<void> registerDevice(String publicKeyB64, String label);
+  Future<List<PendingDevice>> pendingDevices();
+  Future<void> approveDevice(
+      String publicKeyB64, String wrappedCmkB64, String ephemeralPublicKeyB64);
 }
 
 /// The user's recovery choice at enable-time (the honest A/B decision).
@@ -163,6 +174,37 @@ class EncryptionService {
     );
     _cmk = await unwrapCmkWithDeviceKeyPair(wrapped, keyPair);
     return true;
+  }
+
+  // ── Cross-device approval (trusted-device model) ──────────────────────────
+
+  /// Register THIS device for approval: ensure a device key pair exists locally,
+  /// then post its public key as pending. A trusted device approves it later;
+  /// afterwards [unlock] succeeds. Call when [unlock] returned false because the
+  /// device isn't registered/approved yet.
+  Future<void> registerThisDevice({String label = ''}) async {
+    final keyPair = await _store.load() ?? await generateDeviceKeyPair();
+    await _store.save(keyPair);
+    final pub = await keyPair.extractPublicKey();
+    await _api.registerDevice(
+        base64.encode(pub.bytes), label.isEmpty ? deviceLabel : label);
+  }
+
+  /// Devices awaiting approval on this account (shown on a trusted device).
+  Future<List<PendingDevice>> pendingDevices() => _api.pendingDevices();
+
+  /// Approve a pending device by wrapping the CMK to its public key. Requires an
+  /// unlocked CMK — which only a trusted device has, so only it can approve.
+  Future<void> approveDevice(String devicePublicKeyB64) async {
+    final cmk = _requireCmk();
+    final pub = SimplePublicKey(base64.decode(devicePublicKeyB64),
+        type: KeyPairType.x25519);
+    final wrapped = await wrapCmkToDevicePublicKey(cmk, pub);
+    await _api.approveDevice(
+      devicePublicKeyB64,
+      base64.encode(wrapped.blob),
+      base64.encode(wrapped.ephemeralPublicKey!),
+    );
   }
 
   /// Encrypt a text field to a stored envelope. Requires [isUnlocked].
