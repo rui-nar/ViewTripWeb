@@ -56,10 +56,16 @@ class RecoveryKeyChoice extends RecoveryChoice {
   const RecoveryKeyChoice();
 }
 
-/// Option B — security questions; weaker, hardened with Argon2id.
+/// Medium — security questions; weaker, hardened with Argon2id.
 class QnaChoice extends RecoveryChoice {
   final List<String> answers;
   const QnaChoice(this.answers);
+}
+
+/// High — a user passphrase (Argon2id over the raw passphrase). Recovery-only.
+class PassphraseChoice extends RecoveryChoice {
+  final String passphrase;
+  const PassphraseChoice(this.passphrase);
 }
 
 /// Result of enabling encryption. For Option A, [recoverySecret] is the
@@ -107,6 +113,11 @@ class EncryptionService {
         recoverySecret = generateRecoverySecret();
         recoveryWrap = await wrapCmkWithRecoveryKey(cmk, recoverySecret, salt);
         method = 'recovery_key';
+      case PassphraseChoice(passphrase: final passphrase):
+        const params = Argon2Params();
+        recoveryWrap = await wrapCmkWithPassphrase(cmk, passphrase, salt, params);
+        method = 'passphrase';
+        kdfParamsJson = jsonEncode(params.toJson());
       case QnaChoice(answers: final answers):
         const params = Argon2Params();
         recoveryWrap = await wrapCmkWithQna(cmk, answers, salt, params);

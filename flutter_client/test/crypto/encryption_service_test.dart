@@ -70,7 +70,7 @@ void main() {
       expect(device['label'], 'Test');
     });
 
-    test('Option B posts qna + Argon2id params and no recovery secret', () async {
+    test('Medium (Q&A) posts qna + Argon2id params and no recovery secret', () async {
       final api = FakeEncryptionApi();
       final svc = EncryptionService(FakeDeviceKeyStore(), api);
       final result = await svc.enable(const QnaChoice(['Fluffy', 'Lisbon', 'Smith']));
@@ -79,6 +79,19 @@ void main() {
       expect(svc.isUnlocked, isTrue);
       final recovery = api.enablePayload!['recovery'] as Map;
       expect(recovery['method'], 'qna');
+      expect(recovery['kdf_params_json'], isNotNull);
+    });
+
+    test('High (passphrase) posts passphrase + params and no recovery secret', () async {
+      final api = FakeEncryptionApi();
+      final svc = EncryptionService(FakeDeviceKeyStore(), api);
+      final result =
+          await svc.enable(const PassphraseChoice('correct horse battery staple'));
+
+      expect(result.recoverySecret, isNull);
+      expect(svc.isUnlocked, isTrue);
+      final recovery = api.enablePayload!['recovery'] as Map;
+      expect(recovery['method'], 'passphrase');
       expect(recovery['kdf_params_json'], isNotNull);
     });
   });

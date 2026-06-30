@@ -39,8 +39,8 @@ class DeviceWrapIn(BaseModel):
 
 
 class RecoveryWrapIn(BaseModel):
-    method: Literal["recovery_key", "qna"] = Field(
-        description="'recovery_key' (Option A) or 'qna' (Option B)")
+    method: Literal["recovery_key", "passphrase", "qna", "escrow"] = Field(
+        description="High: 'recovery_key' / 'passphrase' · Medium: 'qna' · Low: 'escrow'")
     wrapped_cmk: str = Field(description="base64 AEAD blob: CMK wrapped under the recovery secret")
     salt: str = Field(description="base64 KDF/HKDF salt")
     kdf_params_json: Optional[str] = Field(

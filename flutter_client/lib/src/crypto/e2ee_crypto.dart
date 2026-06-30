@@ -150,6 +150,34 @@ Future<SecretKey> unwrapCmkWithQna(WrappedCmk w, List<String> answers,
 }
 
 // ---------------------------------------------------------------------------
+// High — passphrase (Argon2id over the RAW passphrase; NOT normalized, because
+// case and spacing carry entropy that strengthens a user-chosen passphrase)
+// ---------------------------------------------------------------------------
+
+Future<SecretKey> _passphraseWrapKey(
+    String passphrase, List<int> salt, Argon2Params p) {
+  final argon2 = Argon2id(
+    memory: p.memoryKib,
+    parallelism: p.parallelism,
+    iterations: p.iterations,
+    hashLength: 32,
+  );
+  return argon2.deriveKeyFromPassword(password: passphrase, nonce: salt);
+}
+
+Future<WrappedCmk> wrapCmkWithPassphrase(
+    SecretKey cmk, String passphrase, List<int> salt, Argon2Params p) async {
+  final wk = await _passphraseWrapKey(passphrase, salt, p);
+  return WrappedCmk(await _wrapBytes(await cmk.extractBytes(), wk));
+}
+
+Future<SecretKey> unwrapCmkWithPassphrase(
+    WrappedCmk w, String passphrase, List<int> salt, Argon2Params p) async {
+  final wk = await _passphraseWrapKey(passphrase, salt, p);
+  return SecretKey(await _unwrapBytes(w.blob, wk));
+}
+
+// ---------------------------------------------------------------------------
 // Device wrap — X25519 (enables passwordless cross-device approval)
 // ---------------------------------------------------------------------------
 

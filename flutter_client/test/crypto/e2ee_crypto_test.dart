@@ -90,6 +90,34 @@ void main() {
     });
   });
 
+  group('High — passphrase wrap (Argon2id)', () {
+    const passphrase = 'correct horse battery staple';
+
+    test('wrap then unwrap recovers the CMK', () async {
+      final cmk = await generateCmk();
+      final w = await wrapCmkWithPassphrase(cmk, passphrase, _salt, _params);
+      final cmk2 = await unwrapCmkWithPassphrase(w, passphrase, _salt, _params);
+      final enc = await encryptField('hi', cmk);
+      expect(await decryptField(enc, cmk2), 'hi');
+    });
+
+    test('is case-sensitive (unlike Q&A, no normalization)', () async {
+      final cmk = await generateCmk();
+      final w = await wrapCmkWithPassphrase(cmk, passphrase, _salt, _params);
+      expect(
+          () => unwrapCmkWithPassphrase(
+              w, 'Correct Horse Battery Staple', _salt, _params),
+          throwsA(isA<Object>()));
+    });
+
+    test('wrong passphrase is rejected', () async {
+      final cmk = await generateCmk();
+      final w = await wrapCmkWithPassphrase(cmk, passphrase, _salt, _params);
+      expect(() => unwrapCmkWithPassphrase(w, 'nope', _salt, _params),
+          throwsA(isA<Object>()));
+    });
+  });
+
   group('Device wrap — X25519 (cross-device re-wrap)', () {
     test('CMK wrapped to a device public key unwraps with its private key',
         () async {
