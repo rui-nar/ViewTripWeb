@@ -52,6 +52,9 @@ class _FakeApi implements EncryptionApi {
     approved[pub] = true;
     wrappedFor = pub;
   }
+
+  @override
+  Future<RecoveryWrapData?> fetchRecoveryWrap(String method) async => null;
 }
 
 void main() {

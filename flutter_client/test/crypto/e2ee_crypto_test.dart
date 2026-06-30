@@ -118,6 +118,25 @@ void main() {
     });
   });
 
+  group('recovery key hex parsing', () {
+    test('round-trips a generated secret regardless of grouping', () {
+      final secret = generateRecoverySecret();
+      final hex = secret
+          .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+          .join();
+      final grouped = [
+        for (var i = 0; i < hex.length; i += 4) hex.substring(i, i + 4)
+      ].join('-');
+      expect(parseRecoveryKeyHex(grouped), secret);
+      expect(parseRecoveryKeyHex(hex.toLowerCase()), secret);
+    });
+
+    test('rejects non-hex / wrong length', () {
+      expect(parseRecoveryKeyHex('not a key'), isNull);
+      expect(parseRecoveryKeyHex('ABCD'), isNull);
+    });
+  });
+
   group('Device wrap — X25519 (cross-device re-wrap)', () {
     test('CMK wrapped to a device public key unwraps with its private key',
         () async {

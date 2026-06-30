@@ -82,6 +82,13 @@ class DeviceApproveIn(BaseModel):
     ephemeral_public_key: str = Field(description="base64 X25519 ephemeral pubkey")
 
 
+class RecoveryWrapOut(BaseModel):
+    method: str
+    wrapped_cmk: str
+    salt: str
+    kdf_params_json: Optional[str] = None
+
+
 # ── Endpoints ───────────────────────────────────────────────────────────────────
 
 @router.post("/enable", response_model=StatusOut,
@@ -203,6 +210,33 @@ def register_device(body: DeviceRegisterIn,
             approved=row.approved,
             wrapped_cmk=row.wrapped_cmk,
             ephemeral_public_key=row.ephemeral_public_key,
+        )
+
+
+@router.get("/recovery/{method}", response_model=RecoveryWrapOut,
+            summary="Fetch the CMK wrapped under a recovery method (for unlock)")
+def get_recovery_wrap(method: str,
+                      user: dict = Depends(get_current_user)) -> RecoveryWrapOut:
+    """Returns the opaque recovery wrap so a deviceless client can unlock with the
+    user's recovery secret. The blob is useless without that secret (zero-knowledge)."""
+    uid = _uid(user)
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBRecoveryWrap).where(
+                DBRecoveryWrap.user_info_id == uid,
+                DBRecoveryWrap.method == method,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No '{method}' recovery configured",
+            )
+        return RecoveryWrapOut(
+            method=row.method,
+            wrapped_cmk=row.wrapped_cmk,
+            salt=row.salt,
+            kdf_params_json=row.kdf_params_json,
         )
 
 

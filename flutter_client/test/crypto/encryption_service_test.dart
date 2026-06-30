@@ -28,6 +28,7 @@ class FakeEncryptionApi implements EncryptionApi {
   bool _enabled = false;
   final _devices = <String, _FakeDev>{};
   final _recovery = <String>[];
+  final _recoveryWraps = <String, RecoveryWrapData>{};
 
   @override
   Future<void> enable(Map<String, dynamic> payload) async {
@@ -36,8 +37,16 @@ class FakeEncryptionApi implements EncryptionApi {
     final d = payload['device'] as Map<String, dynamic>;
     _devices[d['public_key'] as String] = _FakeDev(
         true, d['wrapped_cmk'] as String, d['ephemeral_public_key'] as String);
-    _recovery.add((payload['recovery'] as Map)['method'] as String);
+    final r = payload['recovery'] as Map<String, dynamic>;
+    _recovery.add(r['method'] as String);
+    _recoveryWraps[r['method'] as String] = RecoveryWrapData(
+        r['wrapped_cmk'] as String, r['salt'] as String,
+        r['kdf_params_json'] as String?);
   }
+
+  @override
+  Future<RecoveryWrapData?> fetchRecoveryWrap(String method) async =>
+      _recoveryWraps[method];
 
   @override
   Future<EncryptionStatus> fetchStatus(String? devicePublicKeyB64) async {
@@ -189,6 +198,53 @@ void main() {
       final svcB = EncryptionService(FakeDeviceKeyStore(), api);
       expect(await svcB.prepareForSession(), isFalse); // not approved yet
       expect((await api.pendingDevices()).length, 1); // auto-registered
+    });
+  });
+
+  group('recovery (no trusted device)', () {
+    test('recovery key unlocks a fresh device and re-trusts it', () async {
+      final api = FakeEncryptionApi();
+      final svcA = EncryptionService(FakeDeviceKeyStore(), api);
+      final secret = (await svcA.enable(const RecoveryKeyChoice())).recoverySecret!;
+      final envelope = await svcA.encryptText('secret note');
+
+      final storeC = FakeDeviceKeyStore(); // brand-new device, no key
+      final svcC = EncryptionService(storeC, api);
+      expect(await svcC.unlock(), isFalse);
+
+      expect(await svcC.recoverWithRecoveryKey(secret), isTrue);
+      expect(await svcC.decryptText(envelope), 'secret note');
+
+      // Re-trusted: a later session on this device unlocks via the device key.
+      expect(await EncryptionService(storeC, api).unlock(), isTrue);
+    });
+
+    test('passphrase unlocks a fresh device', () async {
+      final api = FakeEncryptionApi();
+      final svcA = EncryptionService(FakeDeviceKeyStore(), api);
+      await svcA.enable(const PassphraseChoice('correct horse battery staple'));
+      final envelope = await svcA.encryptText('hi');
+
+      final svcC = EncryptionService(FakeDeviceKeyStore(), api);
+      expect(
+          await svcC.recoverWithPassphrase('correct horse battery staple'), isTrue);
+      expect(await svcC.decryptText(envelope), 'hi');
+    });
+
+    test('wrong recovery secret fails', () async {
+      final api = FakeEncryptionApi();
+      await EncryptionService(FakeDeviceKeyStore(), api)
+          .enable(const RecoveryKeyChoice());
+      final svc = EncryptionService(FakeDeviceKeyStore(), api);
+      expect(await svc.recoverWithRecoveryKey(generateRecoverySecret()), isFalse);
+    });
+
+    test('recovering an unconfigured method returns false', () async {
+      final api = FakeEncryptionApi();
+      await EncryptionService(FakeDeviceKeyStore(), api)
+          .enable(const RecoveryKeyChoice()); // only recovery_key configured
+      final svc = EncryptionService(FakeDeviceKeyStore(), api);
+      expect(await svc.recoverWithQna(['a', 'b', 'c']), isFalse);
     });
   });
 

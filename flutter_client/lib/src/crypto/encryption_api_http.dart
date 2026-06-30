@@ -52,4 +52,20 @@ class HttpEncryptionApi implements EncryptionApi {
         'wrapped_cmk': wrappedCmkB64,
         'ephemeral_public_key': ephemeralPublicKeyB64,
       });
+
+  @override
+  Future<RecoveryWrapData?> fetchRecoveryWrap(String method) async {
+    try {
+      final json = await _api.get('/api/encryption/recovery/$method')
+          as Map<String, dynamic>;
+      return RecoveryWrapData(
+        json['wrapped_cmk'] as String,
+        json['salt'] as String,
+        json['kdf_params_json'] as String?,
+      );
+    } on ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
 }

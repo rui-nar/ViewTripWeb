@@ -199,3 +199,18 @@ def test_approve_unknown_device_404(enc_env):
         "public_key": "NOPE", "wrapped_cmk": "X", "ephemeral_public_key": "Y",
     })
     assert resp.status_code == 404
+
+
+def test_recovery_wrap_fetch(enc_env):
+    client, _, _ = enc_env
+    client.post("/api/encryption/enable", json=_enable_body(method="qna"))
+
+    ok = client.get("/api/encryption/recovery/qna")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["wrapped_cmk"] == "WRAP_REC"
+    assert body["salt"] == "SALT"
+    assert body["kdf_params_json"] == '{"memoryKib":19456}'
+
+    # A method the user didn't configure → 404.
+    assert client.get("/api/encryption/recovery/recovery_key").status_code == 404

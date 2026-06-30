@@ -47,6 +47,14 @@ class PendingDevice {
   const PendingDevice(this.publicKeyB64, this.label);
 }
 
+/// A stored recovery wrap (from GET /recovery/{method}).
+class RecoveryWrapData {
+  final String wrappedCmkB64;
+  final String saltB64;
+  final String? kdfParamsJson;
+  const RecoveryWrapData(this.wrappedCmkB64, this.saltB64, this.kdfParamsJson);
+}
+
 /// The server endpoints this service needs. Implemented by the app's HTTP layer.
 abstract class EncryptionApi {
   Future<EncryptionStatus> fetchStatus(String? devicePublicKeyB64);
@@ -55,6 +63,9 @@ abstract class EncryptionApi {
   Future<List<PendingDevice>> pendingDevices();
   Future<void> approveDevice(
       String publicKeyB64, String wrappedCmkB64, String ephemeralPublicKeyB64);
+
+  /// The recovery wrap for [method], or null if the user didn't configure it.
+  Future<RecoveryWrapData?> fetchRecoveryWrap(String method);
 }
 
 /// The user's recovery choice at enable-time (the honest A/B decision).
@@ -222,6 +233,60 @@ class EncryptionService {
       base64.encode(wrapped.blob),
       base64.encode(wrapped.ephemeralPublicKey!),
     );
+  }
+
+  // ── Recovery (no trusted device available) ────────────────────────────────
+
+  /// Unlock with a generated recovery key (High / Option A), then re-trust this
+  /// device. Returns false if the method isn't configured or the key is wrong.
+  Future<bool> recoverWithRecoveryKey(List<int> recoverySecret) =>
+      _recover('recovery_key', (w) => unwrapCmkWithRecoveryKey(
+            WrappedCmk(base64.decode(w.wrappedCmkB64)),
+            recoverySecret, base64.decode(w.saltB64),
+          ));
+
+  /// Unlock with the user's passphrase (High), then re-trust this device.
+  Future<bool> recoverWithPassphrase(String passphrase) =>
+      _recover('passphrase', (w) => unwrapCmkWithPassphrase(
+            WrappedCmk(base64.decode(w.wrappedCmkB64)),
+            passphrase, base64.decode(w.saltB64), _argonFrom(w.kdfParamsJson),
+          ));
+
+  /// Unlock by answering the security questions (Medium), then re-trust device.
+  Future<bool> recoverWithQna(List<String> answers) =>
+      _recover('qna', (w) => unwrapCmkWithQna(
+            WrappedCmk(base64.decode(w.wrappedCmkB64)),
+            answers, base64.decode(w.saltB64), _argonFrom(w.kdfParamsJson),
+          ));
+
+  Future<bool> _recover(
+      String method, Future<SecretKey> Function(RecoveryWrapData) unwrap) async {
+    final wrap = await _api.fetchRecoveryWrap(method);
+    if (wrap == null) return false;
+    final SecretKey cmk;
+    try {
+      cmk = await unwrap(wrap);
+    } catch (_) {
+      return false; // wrong secret / corrupt wrap
+    }
+    _cmk = cmk;
+    await _retrustThisDevice();
+    return true;
+  }
+
+  /// After recovery this device holds the CMK; register + wrap the CMK to its own
+  /// key so future sessions unlock via the device (no recovery needed again).
+  Future<void> _retrustThisDevice() async {
+    final keyPair = await _store.load() ?? await generateDeviceKeyPair();
+    await _store.save(keyPair);
+    final pubB64 = base64.encode((await keyPair.extractPublicKey()).bytes);
+    await _api.registerDevice(pubB64, deviceLabel);
+    await approveDevice(pubB64);
+  }
+
+  Argon2Params _argonFrom(String? json) {
+    if (json == null) return const Argon2Params();
+    return Argon2Params.fromJson(jsonDecode(json) as Map<String, dynamic>);
   }
 
   /// Encrypt a text field to a stored envelope. Requires [isUnlocked].

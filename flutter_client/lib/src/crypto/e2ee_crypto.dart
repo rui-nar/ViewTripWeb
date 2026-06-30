@@ -90,6 +90,18 @@ Uint8List generateRecoverySecret() {
   return Uint8List.fromList(List<int>.generate(32, (_) => rnd.nextInt(256)));
 }
 
+/// Parse a recovery key the user typed back (the grouped hex shown at enable)
+/// into raw bytes. Ignores spaces/dashes/case. Null if not 32 bytes of hex.
+Uint8List? parseRecoveryKeyHex(String input) {
+  final hex = input.replaceAll(RegExp('[^0-9a-fA-F]'), '');
+  if (hex.length != 64) return null;
+  final bytes = Uint8List(32);
+  for (var i = 0; i < 32; i++) {
+    bytes[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+  }
+  return bytes;
+}
+
 Future<SecretKey> _recoveryWrapKey(List<int> recoverySecret, List<int> salt) {
   final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   return hkdf.deriveKey(
