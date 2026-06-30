@@ -234,6 +234,12 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     String memoryId,
     String langCode,
   ) async {
+    // When encryption is on, the server only holds ciphertext and cannot
+    // translate it (#26/#27). Don't send ciphertext to the translator — surface
+    // a clear "unavailable" instead. (UI shows the graceful error message.)
+    if (encryption.isUnlocked) {
+      throw Exception('Translation is unavailable for encrypted memories');
+    }
     final data = await api.get('/api/memories/$memoryId/translations/$langCode');
     return data as Map<String, dynamic>;
   }

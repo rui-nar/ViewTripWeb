@@ -9,6 +9,8 @@ import 'package:web/web.dart' as web;
 
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
+import '../crypto/enable_encryption_screen.dart';
+import '../crypto/encryption.dart';
 import 'settings_service.dart';
 import 'theme_notifier.dart';
 
@@ -810,6 +812,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 }),
                               ],
                             ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // ── Encryption ─────────────────────────────────────────
+                _SectionCard(
+                  title: 'Encryption',
+                  icon: Icons.lock_outline,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Lock your memories and journal with a key only you hold — '
+                        'so not even an administrator can read them.',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 16),
+                      FilledButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) =>
+                                EnableEncryptionScreen(service: encryption),
+                          ));
+                        },
+                        icon: const Icon(Icons.lock_outline),
+                        label: const Text('Set up encryption'),
+                      ),
+                    ],
+                  ),
                 ),
 
                 const SizedBox(height: 16),
