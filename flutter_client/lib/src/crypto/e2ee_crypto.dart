@@ -247,6 +247,13 @@ class EncryptedField {
     }
     return EncryptedField(base64.decode(parts[1]), base64.decode(parts[2]));
   }
+
+  /// Cheap structural check: does this string look like an encrypted envelope?
+  /// (Plaintext like "v1.2 notes" splits into 2 parts, so it's not mistaken.)
+  static bool isEnvelope(String s) {
+    final parts = s.split('.');
+    return parts.length == 3 && parts[0] == 'v$version';
+  }
 }
 
 /// Encrypt a text field: random DEK, wrap DEK under CMK, encrypt text under DEK.

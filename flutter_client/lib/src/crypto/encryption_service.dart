@@ -175,6 +175,29 @@ class EncryptionService {
   Future<String> decryptText(String envelope) =>
       decryptField(EncryptedField.decode(envelope), _requireCmk());
 
+  // ── CRUD-boundary helpers (used by the notifiers) ─────────────────────────
+
+  /// Encrypt a field for storage when encryption is unlocked; otherwise pass it
+  /// through unchanged (encryption off, or locked → store plaintext as before).
+  Future<String?> protect(String? plaintext) async {
+    if (plaintext == null || plaintext.isEmpty || !isUnlocked) return plaintext;
+    return encryptText(plaintext);
+  }
+
+  /// Reveal a stored field: decrypt when it's an encrypted envelope and we're
+  /// unlocked; otherwise return it unchanged (plaintext, or still-locked
+  /// ciphertext the caller renders as locked). Never throws.
+  Future<String?> reveal(String? value) async {
+    if (value == null || !EncryptedField.isEnvelope(value) || !isUnlocked) {
+      return value;
+    }
+    try {
+      return await decryptText(value);
+    } catch (_) {
+      return value; // wrong key / corrupt — surface as-is rather than crash
+    }
+  }
+
   SecretKey _requireCmk() {
     final cmk = _cmk;
     if (cmk == null) {

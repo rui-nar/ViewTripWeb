@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:viewtrip_client/src/crypto/e2ee_crypto.dart';
 import 'package:viewtrip_client/src/crypto/encryption_service.dart';
 
 /// In-memory device key store (the real one persists to the OS keystore).
@@ -134,5 +135,31 @@ void main() {
   test('encrypt/decrypt throws while locked', () async {
     final svc = EncryptionService(FakeDeviceKeyStore(), FakeEncryptionApi());
     expect(() => svc.encryptText('x'), throwsStateError);
+  });
+
+  group('protect/reveal (CRUD boundary)', () {
+    test('locked: protect and reveal pass through unchanged', () async {
+      final svc = EncryptionService(FakeDeviceKeyStore(), FakeEncryptionApi());
+      expect(await svc.protect('hello'), 'hello');
+      expect(await svc.reveal('hello'), 'hello');
+    });
+
+    test('unlocked: protect produces an envelope; reveal round-trips', () async {
+      final svc = EncryptionService(FakeDeviceKeyStore(), FakeEncryptionApi());
+      await svc.enable(const RecoveryKeyChoice());
+
+      final protectedVal = await svc.protect('Honeymoon 2025');
+      expect(protectedVal, isNot('Honeymoon 2025'));
+      expect(EncryptedField.isEnvelope(protectedVal!), isTrue);
+      expect(await svc.reveal(protectedVal), 'Honeymoon 2025');
+    });
+
+    test('unlocked: reveal leaves plaintext (non-envelope) untouched', () async {
+      final svc = EncryptionService(FakeDeviceKeyStore(), FakeEncryptionApi());
+      await svc.enable(const RecoveryKeyChoice());
+      expect(await svc.reveal('v1.2 release notes'), 'v1.2 release notes');
+      expect(await svc.protect(null), isNull);
+      expect(await svc.protect(''), '');
+    });
   });
 }

@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../crypto/encryption.dart';
 
 mixin ProjectMemoryCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
@@ -58,13 +59,15 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     items.insert(insertAt, placeholder);
     notifyListeners();
     try {
+      final encName = await encryption.protect(name);
+      final encDescription = await encryption.protect(description);
       await api.post('/api/memories/', {
         'project_name': projectName,
         'date': date,
         'geo_mode': geoMode,
-        if (name != null) 'name': name,
+        if (encName != null) 'name': encName,
         if (time != null) 'time': time,
-        if (description != null) 'description': description,
+        if (encDescription != null) 'description': encDescription,
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
@@ -105,12 +108,14 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     }
     notifyListeners();
     try {
+      final encName = await encryption.protect(name);
+      final encDescription = await encryption.protect(description);
       await api.put('/api/memories/$memoryId', {
         'date': date,
         'geo_mode': geoMode,
-        if (name != null) 'name': name,
+        if (encName != null) 'name': encName,
         if (time != null) 'time': time,
-        if (description != null) 'description': description,
+        if (encDescription != null) 'description': encDescription,
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
       });
