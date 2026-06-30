@@ -61,6 +61,9 @@ class DBProject(sqlmodel.SQLModel, table=True):
     elevation_chart_show_line: bool = sqlmodel.Field(default=True)
     # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
     languages_json: Optional[str] = sqlmodel.Field(default=None)
+    # E2EE marker (issue #26): 0 = plaintext `name`; >=1 = `name` holds a
+    # self-describing ciphertext blob encrypted client-side under the user's CMK.
+    enc_version: int = sqlmodel.Field(default=0)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +101,7 @@ _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({
     "id",
     "user_info_id",
     "lock_version",
+    "enc_version",
     "created_at",
     "updated_at",
     "share_token",
@@ -252,6 +256,9 @@ class DBMemory(sqlmodel.SQLModel, table=True):
     lat: Optional[float] = sqlmodel.Field(default=None)
     lon: Optional[float] = sqlmodel.Field(default=None)
     polarsteps_step_id: Optional[int] = sqlmodel.Field(default=None, index=True)
+    # E2EE marker (issue #26): 0 = plaintext; >=1 = `name`/`description` hold
+    # self-describing ciphertext blobs encrypted client-side under the user's CMK.
+    enc_version: int = sqlmodel.Field(default=0)
 
 
 class DBJournalEntry(sqlmodel.SQLModel, table=True):
@@ -268,6 +275,8 @@ class DBJournalEntry(sqlmodel.SQLModel, table=True):
     geo_mode: str = sqlmodel.Field(default="start_of_day")
     lat: Optional[float] = sqlmodel.Field(default=None)
     lon: Optional[float] = sqlmodel.Field(default=None)
+    # E2EE marker (issue #26): 0 = plaintext `description`; >=1 = ciphertext blob.
+    enc_version: int = sqlmodel.Field(default=0)
 
 
 class DBProjectItem(sqlmodel.SQLModel, table=True):
@@ -380,3 +389,53 @@ class DBStravaCache(sqlmodel.SQLModel, table=True):
     )
     fetched_at: float = sqlmodel.Field(default=0.0)   # Unix timestamp
     activities_json: str = sqlmodel.Field(default="[]")  # raw Strava JSON array
+
+
+# ---------------------------------------------------------------------------
+# E2EE key material (issue #26)
+# ---------------------------------------------------------------------------
+# The server stores only opaque ciphertext and wrapped keys; it never holds the
+# Content Master Key (CMK) in the clear and performs no crypto. See spike/.
+
+
+class DBDeviceKey(sqlmodel.SQLModel, table=True):
+    """A user's per-device X25519 public key and the CMK wrapped to it.
+
+    A new device registers its public key with approved=False; an already-trusted
+    device "approves" it by wrapping the CMK to this public key (filling
+    wrapped_cmk + ephemeral_public_key and setting approved=True). Basis for the
+    passwordless cross-device approval flow.
+    """
+
+    __tablename__ = "device_key"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    public_key: str = sqlmodel.Field()           # base64 X25519 device public key
+    label: str = sqlmodel.Field(default="")      # e.g. "Chrome on Windows"
+    approved: bool = sqlmodel.Field(default=False)
+    # CMK wrapped to this device's public key; NULL until approved.
+    wrapped_cmk: Optional[str] = sqlmodel.Field(default=None)      # base64 AEAD blob
+    ephemeral_public_key: Optional[str] = sqlmodel.Field(default=None)  # base64 X25519
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBRecoveryWrap(sqlmodel.SQLModel, table=True):
+    """The CMK wrapped under a user-chosen recovery method (issue #26).
+
+    method="recovery_key" → wrapped under a high-entropy CSPRNG key (Option A).
+    method="qna"          → wrapped under an Argon2id key derived from normalized
+                            security-question answers (Option B, weaker).
+    """
+
+    __tablename__ = "recovery_wrap"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    method: str = sqlmodel.Field()               # "recovery_key" | "qna"
+    wrapped_cmk: str = sqlmodel.Field()          # base64 AEAD blob
+    salt: str = sqlmodel.Field()                 # base64 KDF/HKDF salt
+    # Argon2id params (memory/iterations/parallelism) for method="qna"; NULL otherwise.
+    kdf_params_json: Optional[str] = sqlmodel.Field(default=None)
+    version: int = sqlmodel.Field(default=1)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
