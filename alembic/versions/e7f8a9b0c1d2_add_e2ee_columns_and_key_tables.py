@@ -3,8 +3,8 @@
 Adds the opaque-storage surface for zero-knowledge encryption. The server holds
 no keys and does no crypto — it only stores ciphertext blobs and wrapped keys.
 
-  * enc_version markers on memory / journalentry / project (0 = plaintext,
-    >=1 = the in-scope text columns hold self-describing ciphertext blobs).
+  * enc_version markers on memory / journalentry (0 = plaintext, >=1 = the
+    in-scope text columns hold self-describing ciphertext blobs).
   * encryption_enabled flag on userinfo (signals clients to expect ciphertext).
   * device_key table (per-device X25519 pubkey + CMK wrapped to it; approval).
   * recovery_wrap table (CMK wrapped under a recovery key or Q&A→Argon2id).
@@ -32,8 +32,6 @@ def upgrade() -> None:
     op.add_column('memory', sa.Column(
         'enc_version', sa.Integer(), nullable=False, server_default='0'))
     op.add_column('journalentry', sa.Column(
-        'enc_version', sa.Integer(), nullable=False, server_default='0'))
-    op.add_column('project', sa.Column(
         'enc_version', sa.Integer(), nullable=False, server_default='0'))
     op.add_column('userinfo', sa.Column(
         'encryption_enabled', sa.Boolean(), nullable=False,
@@ -79,8 +77,6 @@ def downgrade() -> None:
     op.drop_table('device_key')
     with op.batch_alter_table('userinfo') as batch_op:
         batch_op.drop_column('encryption_enabled')
-    with op.batch_alter_table('project') as batch_op:
-        batch_op.drop_column('enc_version')
     with op.batch_alter_table('journalentry') as batch_op:
         batch_op.drop_column('enc_version')
     with op.batch_alter_table('memory') as batch_op:

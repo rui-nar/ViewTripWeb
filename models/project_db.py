@@ -61,9 +61,6 @@ class DBProject(sqlmodel.SQLModel, table=True):
     elevation_chart_show_line: bool = sqlmodel.Field(default=True)
     # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
     languages_json: Optional[str] = sqlmodel.Field(default=None)
-    # E2EE marker (issue #26): 0 = plaintext `name`; >=1 = `name` holds a
-    # self-describing ciphertext blob encrypted client-side under the user's CMK.
-    enc_version: int = sqlmodel.Field(default=0)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +98,6 @@ _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({
     "id",
     "user_info_id",
     "lock_version",
-    "enc_version",
     "created_at",
     "updated_at",
     "share_token",
