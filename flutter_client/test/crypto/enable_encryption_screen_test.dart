@@ -28,28 +28,53 @@ Widget _wrap() => MaterialApp(
       ),
     );
 
+/// Pump on a tall surface so the whole scrolling form is laid out (the lazy
+/// ListView otherwise won't build widgets below the default 600px test height).
+Future<void> _pump(WidgetTester tester) async {
+  tester.view.physicalSize = const Size(1080, 2600);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  await tester.pumpWidget(_wrap());
+}
+
 void main() {
-  testWidgets('renders the A/B recovery choice', (tester) async {
-    await tester.pumpWidget(_wrap());
-    expect(find.text('Recovery key  ·  Stronger'), findsOneWidget);
-    expect(find.text('Security questions  ·  Easier'), findsOneWidget);
+  testWidgets('renders the three security levels', (tester) async {
+    await _pump(tester);
+    expect(find.text('High  ·  Strongest'), findsOneWidget);
+    expect(find.text('Medium  ·  Security questions'), findsOneWidget);
+    expect(find.textContaining('Low'), findsOneWidget);
   });
 
-  testWidgets('selecting security questions reveals the weaker-option warning',
-      (tester) async {
-    await tester.pumpWidget(_wrap());
-    // The warning is not shown while the stronger option is selected.
-    expect(find.textContaining('someone with access to the server'), findsNothing);
+  testWidgets('Low is presented honestly but not selectable yet', (tester) async {
+    await _pump(tester);
+    // Honest copy: recoverable -> operator could read it.
+    expect(find.textContaining('an administrator could read it'), findsOneWidget);
+    // Tapping Low does not enable the turn-on button (backend not built).
+    await tester.tap(find.textContaining('Low'));
+    await tester.pump();
+    final btn = tester.widget<FilledButton>(
+      find.ancestor(of: find.text('Turn on encryption'), matching: find.byType(FilledButton)),
+    );
+    expect(btn.onPressed, isNull);
+  });
 
-    await tester.tap(find.text('Security questions  ·  Easier'));
+  testWidgets('selecting Medium reveals the weaker-option warning', (tester) async {
+    await _pump(tester);
+    expect(find.textContaining('access to the server'), findsNothing);
+
+    await tester.tap(find.text('Medium  ·  Security questions'));
     await tester.pump();
 
-    expect(find.textContaining('someone with access to the server'), findsOneWidget);
+    expect(find.textContaining('access to the server'), findsOneWidget);
     expect(find.text('What was the name of your first pet?'), findsOneWidget);
   });
 
-  testWidgets('recovery-key path reveals a one-time key to save', (tester) async {
-    await tester.pumpWidget(_wrap());
+  testWidgets('High + recovery key reveals a one-time key to save', (tester) async {
+    await _pump(tester);
+    // High is the default; switch its method to the generated recovery key.
+    await tester.tap(find.text('Recovery key'));
+    await tester.pump();
     await tester.tap(find.text('Turn on encryption'));
     await tester.pumpAndSettle();
 
