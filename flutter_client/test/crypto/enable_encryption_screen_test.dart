@@ -33,6 +33,7 @@ class _FakeApi implements EncryptionApi {
 Widget _wrap() => MaterialApp(
       home: EnableEncryptionScreen(
         service: EncryptionService(_FakeStore(), _FakeApi()),
+        onEnabled: (_) async {}, // skip the real migration (no network in tests)
       ),
     );
 

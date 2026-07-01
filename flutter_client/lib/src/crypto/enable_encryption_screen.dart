@@ -6,10 +6,14 @@
 /// review. The structure/behaviour is final; only the strings are provisional.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../api/client.dart';
 import '../core/design_tokens.dart';
+import 'encryption_migration.dart';
 import 'encryption_service.dart';
 
 /// DRAFT — security questions offered for the Medium level. Finalize before release.
@@ -29,7 +33,16 @@ enum _Step { choose, showRecoveryKey, done }
 
 class EnableEncryptionScreen extends StatefulWidget {
   final EncryptionService service;
-  const EnableEncryptionScreen({super.key, required this.service});
+
+  /// Runs after encryption is enabled to encrypt existing entries. Defaults to
+  /// the real migration; injectable so tests don't hit the network.
+  final Future<void> Function(EncryptionService service)? onEnabled;
+
+  const EnableEncryptionScreen({
+    super.key,
+    required this.service,
+    this.onEnabled,
+  });
 
   @override
   State<EnableEncryptionScreen> createState() => _EnableEncryptionScreenState();
@@ -85,6 +98,12 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
     setState(() => _busy = true);
     try {
       final result = await widget.service.enable(_choice());
+      // Encrypt any existing plaintext entries in the background (idempotent).
+      final migrate = widget.onEnabled ??
+          (s) async {
+            await EncryptionMigration(api, s).run();
+          };
+      unawaited(migrate(widget.service).catchError((_) {}));
       if (!mounted) return;
       setState(() {
         if (result.recoverySecret != null) {
