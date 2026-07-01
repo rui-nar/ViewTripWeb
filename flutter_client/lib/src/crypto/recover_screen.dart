@@ -1,15 +1,13 @@
 /// Recover access on a device with no trusted key (#26, Phase 6): unlock with
 /// the recovery key, passphrase, or security questions the user configured, then
 /// re-trust this device so future sessions unlock automatically.
-///
-/// DRAFT COPY: question set + wording are placeholders for review.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../core/design_tokens.dart';
 import 'e2ee_crypto.dart';
-import 'enable_encryption_screen.dart' show kDraftSecurityQuestions;
+import 'enable_encryption_screen.dart' show kSecurityQuestions;
 import 'encryption_service.dart';
 
 enum _Method { recoveryKey, passphrase, questions }
@@ -31,7 +29,7 @@ class _RecoverScreenState extends State<RecoverScreen> {
   final _keyCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
   final _answers = List<TextEditingController>.generate(
-      kDraftSecurityQuestions.length, (_) => TextEditingController());
+      kSecurityQuestions.length, (_) => TextEditingController());
 
   @override
   void dispose() {
@@ -145,8 +143,8 @@ class _RecoverScreenState extends State<RecoverScreen> {
         ];
       case _Method.questions:
         return [
-          for (var i = 0; i < kDraftSecurityQuestions.length; i++) ...[
-            Text(kDraftSecurityQuestions[i],
+          for (var i = 0; i < kSecurityQuestions.length; i++) ...[
+            Text(kSecurityQuestions[i],
                 style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(height: 4),
             TextField(

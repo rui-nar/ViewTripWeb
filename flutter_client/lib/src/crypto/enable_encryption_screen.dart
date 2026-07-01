@@ -1,9 +1,5 @@
 /// Enable-encryption flow (issue #26): generate the CMK and let the user pick a
 /// security LEVEL, with honest, side-by-side tradeoffs.
-///
-/// DRAFT COPY: the intro text, the Option-B security questions, the warning
-/// wording, and the hex recovery-key rendering below are placeholders for
-/// review. The structure/behaviour is final; only the strings are provisional.
 library;
 
 import 'dart:async';
@@ -16,8 +12,8 @@ import '../core/design_tokens.dart';
 import 'encryption_migration.dart';
 import 'encryption_service.dart';
 
-/// DRAFT — security questions offered for the Medium level. Finalize before release.
-const List<String> kDraftSecurityQuestions = [
+/// Security questions offered for the Medium level.
+const List<String> kSecurityQuestions = [
   'What was the name of your first pet?',
   'What city were you born in?',
   'What was the name of your primary school?',
@@ -58,7 +54,7 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
 
   final _passphrase = TextEditingController();
   final _answers = List<TextEditingController>.generate(
-      kDraftSecurityQuestions.length, (_) => TextEditingController());
+      kSecurityQuestions.length, (_) => TextEditingController());
 
   @override
   void dispose() {
@@ -123,8 +119,7 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
     }
   }
 
-  /// DRAFT rendering: grouped uppercase hex. A BIP39 word phrase is the intended
-  /// final format (needs a wordlist dependency) — tracked as a follow-up.
+  /// Grouped uppercase hex. (A BIP39 word phrase is a possible future format.)
   String _formatRecoveryKey(List<int> bytes) {
     final hex = bytes
         .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
@@ -247,14 +242,13 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
       children: [
         _warningBanner(
           context,
-          // DRAFT warning copy.
           'Easier, but weaker. Security answers can be guessed, so someone with '
           'access to the server has a chance of recovering your data. High is '
           'much safer.',
         ),
-        for (var i = 0; i < kDraftSecurityQuestions.length; i++) ...[
+        for (var i = 0; i < kSecurityQuestions.length; i++) ...[
           const SizedBox(height: 10),
-          Text(kDraftSecurityQuestions[i], style: t.bodySmall),
+          Text(kSecurityQuestions[i], style: t.bodySmall),
           const SizedBox(height: 4),
           TextField(
             controller: _answers[i],
