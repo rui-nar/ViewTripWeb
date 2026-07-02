@@ -276,6 +276,11 @@ class MapPanel extends StatefulWidget {
   /// Template variables `{z}`, `{x}`, `{y}` are filled in by flutter_map.
   final String? trackTileUrlTemplate;
 
+  /// When true, changing the selection zooms the map to the selected
+  /// activity/segment instead of leaving the viewport as-is (view-mode
+  /// "auto-zoom to selection", issue #34).
+  final bool autoZoom;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -285,6 +290,7 @@ class MapPanel extends StatefulWidget {
     this.labelsUrl,
     this.basemapStyleUri,
     this.trackTileUrlTemplate,
+    this.autoZoom = false,
   });
 
   @override
@@ -293,6 +299,9 @@ class MapPanel extends StatefulWidget {
 
 class _MapPanelState extends State<MapPanel> {
   bool _fittedBounds = false;
+  // Points to auto-zoom to after the next full-track fit (issue #34). Set when
+  // the selection changes and autoZoom is on; consumed once in build().
+  List<LatLng>? _pendingAutoZoomPts;
   // Polyline + bounds cache — only rebuilt when geo, selection, or style changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
@@ -780,16 +789,51 @@ class _MapPanelState extends State<MapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId, hasSelection, context);
-      // Only re-fit when the selection changes (user picks a different
-      // activity/segment). A geo update from progressive track loading
-      // should never reset the viewport the user has already panned/zoomed.
-      if (selectionChanged) _fittedBounds = false;
+      // Auto-zoom to selection (issue #34). Previously this always did
+      // `_fittedBounds = false` on any selection change, which re-fit the map to
+      // the WHOLE trip every time — so view mode "reset to full trip zoom"
+      // instead of zooming to the picked item. Now: only when auto-zoom is on
+      // and something is selected do we queue a zoom to that item; with
+      // auto-zoom off, selection leaves the viewport untouched.
+      if (selectionChanged && widget.autoZoom && geo != null &&
+          (selActId != null || selSegId != null)) {
+        _pendingAutoZoomPts = ManageMapPanelState.extractSelectedPoints(
+            geo, selActId, selSegId, null, null);
+      } else if (selectionChanged) {
+        _pendingAutoZoomPts = null;
+      }
     }
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
 
     if (allPoints.isNotEmpty && !notifier.isLoading) {
       _fitBoundsOnce(allPoints);
+    }
+
+    // Auto-zoom to the selected item (issue #34), scheduled after the
+    // full-track fit so it wins over it.
+    final pendingPts = _pendingAutoZoomPts;
+    if (pendingPts != null && pendingPts.isNotEmpty) {
+      _pendingAutoZoomPts = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        double minLat = pendingPts.first.latitude, maxLat = pendingPts.first.latitude;
+        double minLon = pendingPts.first.longitude, maxLon = pendingPts.first.longitude;
+        for (final p in pendingPts) {
+          if (p.latitude < minLat) minLat = p.latitude;
+          if (p.latitude > maxLat) maxLat = p.latitude;
+          if (p.longitude < minLon) minLon = p.longitude;
+          if (p.longitude > maxLon) maxLon = p.longitude;
+        }
+        widget.mapController.animatedFitCamera(
+          cameraFit: CameraFit.bounds(
+            bounds: LatLngBounds(
+                LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+            padding: const EdgeInsets.all(48),
+          ),
+          curve: Curves.easeInOut,
+        );
+      });
     }
 
     // FlutterMap stays mounted throughout loading so the MapController stays
@@ -1321,7 +1365,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return (actIds: actIds, segIds: segIds);
   }
 
-  List<LatLng> _extractSelectedPoints(
+  /// Points of the currently-selected activity/segment (or all activities/
+  /// segments of the selected day(s)), used to compute the auto-zoom target.
+  /// Public + static so the view-mode [MapPanel] and tests can reuse it.
+  static List<LatLng> extractSelectedPoints(
     Map<String, dynamic> geo,
     dynamic selActId,
     dynamic selSegId,
@@ -1555,7 +1602,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             daySegIds.addAll(r.segIds);
           }
         }
-        _pendingAutoZoomPts = _extractSelectedPoints(
+        _pendingAutoZoomPts = extractSelectedPoints(
             geo, selActId, selSegId, dayActIds, daySegIds);
       } else if (selectionChanged2) {
         _pendingAutoZoomPts = null;

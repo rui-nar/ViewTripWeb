@@ -364,6 +364,7 @@ class _ViewLayout extends StatelessWidget {
       basemapUrl: kActiveViewBasemapUrl,
       labelsUrl: kActiveViewLabelsOverlayUrl,
       basemapStyleUri: kActiveViewStyleUri,
+      autoZoom: autoZoom,
     );
 
     return Column(
