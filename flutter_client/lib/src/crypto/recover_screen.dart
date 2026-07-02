@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 
 import '../core/design_tokens.dart';
 import 'e2ee_crypto.dart';
-import 'enable_encryption_screen.dart' show kSecurityQuestions;
 import 'encryption_service.dart';
 
 enum _Method { recoveryKey, passphrase, questions }
@@ -28,17 +27,32 @@ class _RecoverScreenState extends State<RecoverScreen> {
 
   final _keyCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
-  final _answers = List<TextEditingController>.generate(
-      kSecurityQuestions.length, (_) => TextEditingController());
+
+  // Security questions the user chose at enable, loaded on demand.
+  List<String>? _qnaQuestions;
+  List<TextEditingController> _qnaCtrls = [];
+  bool _qnaLoading = false;
 
   @override
   void dispose() {
     _keyCtrl.dispose();
     _passCtrl.dispose();
-    for (final c in _answers) {
+    for (final c in _qnaCtrls) {
       c.dispose();
     }
     super.dispose();
+  }
+
+  Future<void> _loadQna() async {
+    if (_qnaQuestions != null || _qnaLoading) return;
+    setState(() => _qnaLoading = true);
+    final qs = await widget.service.qnaRecoveryQuestions();
+    if (!mounted) return;
+    setState(() {
+      _qnaQuestions = qs;
+      _qnaCtrls = [for (final _ in qs) TextEditingController()];
+      _qnaLoading = false;
+    });
   }
 
   Future<void> _unlock() async {
@@ -52,7 +66,7 @@ class _RecoverScreenState extends State<RecoverScreen> {
         _Method.passphrase =>
           await widget.service.recoverWithPassphrase(_passCtrl.text),
         _Method.questions => await widget.service
-            .recoverWithQna(_answers.map((c) => c.text).toList()),
+            .recoverWithQna(_qnaCtrls.map((c) => c.text).toList()),
       };
       if (!mounted) return;
       setState(() {
@@ -77,7 +91,14 @@ class _RecoverScreenState extends State<RecoverScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Recover access')),
-      body: SafeArea(child: _done ? _success(context) : _form(context)),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: _done ? _success(context) : _form(context),
+          ),
+        ),
+      ),
     );
   }
 
@@ -98,13 +119,16 @@ class _RecoverScreenState extends State<RecoverScreen> {
             ButtonSegment(value: _Method.questions, label: Text('Questions')),
           ],
           selected: {_method},
-          onSelectionChanged: (s) => setState(() => _method = s.first),
+          onSelectionChanged: (s) {
+            setState(() => _method = s.first);
+            if (_method == _Method.questions) _loadQna();
+          },
         ),
         const SizedBox(height: 16),
         ..._inputs(context),
         if (_error != null) ...[
           const SizedBox(height: 12),
-          Text(_error!, style: TextStyle(color: kAccent)),
+          Text(_error!, style: const TextStyle(color: kAccent)),
         ],
         const SizedBox(height: 20),
         FilledButton(
@@ -120,6 +144,7 @@ class _RecoverScreenState extends State<RecoverScreen> {
   }
 
   List<Widget> _inputs(BuildContext context) {
+    final t = Theme.of(context).textTheme;
     switch (_method) {
       case _Method.recoveryKey:
         return [
@@ -128,6 +153,7 @@ class _RecoverScreenState extends State<RecoverScreen> {
             decoration: const InputDecoration(
               labelText: 'Recovery key',
               helperText: 'The code shown when you turned on encryption.',
+              isDense: true,
               border: OutlineInputBorder(),
             ),
           ),
@@ -138,18 +164,32 @@ class _RecoverScreenState extends State<RecoverScreen> {
             controller: _passCtrl,
             obscureText: true,
             decoration: const InputDecoration(
-              labelText: 'Passphrase', border: OutlineInputBorder()),
+              labelText: 'Passphrase', isDense: true, border: OutlineInputBorder()),
           ),
         ];
       case _Method.questions:
+        if (_qnaLoading || _qnaQuestions == null) {
+          return const [
+            Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          ];
+        }
+        if (_qnaQuestions!.isEmpty) {
+          return [
+            Text('No security questions are set up for this account.',
+                style: t.bodyMedium),
+          ];
+        }
         return [
-          for (var i = 0; i < kSecurityQuestions.length; i++) ...[
-            Text(kSecurityQuestions[i],
-                style: Theme.of(context).textTheme.bodySmall),
+          for (var i = 0; i < _qnaQuestions!.length; i++) ...[
+            Text(_qnaQuestions![i], style: t.bodySmall),
             const SizedBox(height: 4),
             TextField(
-              controller: _answers[i],
-              decoration: const InputDecoration(border: OutlineInputBorder()),
+              controller: _qnaCtrls[i],
+              decoration: const InputDecoration(
+                  isDense: true, border: OutlineInputBorder()),
             ),
             const SizedBox(height: 10),
           ],

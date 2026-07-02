@@ -12,12 +12,23 @@ import '../core/design_tokens.dart';
 import 'encryption_migration.dart';
 import 'encryption_service.dart';
 
-/// Security questions offered for the Medium level.
+/// Pool of security questions offered for the Medium level. The user picks a few
+/// (at least [kMinSecurityQuestions]) and answers them.
 const List<String> kSecurityQuestions = [
   'What was the name of your first pet?',
   'What city were you born in?',
   'What was the name of your primary school?',
+  "What is your mother's maiden name?",
+  'What was the make and model of your first car?',
+  'What is the name of the street you grew up on?',
+  'What was your childhood nickname?',
+  'What is the name of a teacher you remember?',
+  'In what city did your parents meet?',
+  'What is the title of your favourite film?',
 ];
+
+/// Minimum number of questions the user must pick+answer for the Medium level.
+const int kMinSecurityQuestions = 3;
 
 /// The three offered levels. Low is admin-recoverable (NOT zero-knowledge) and
 /// depends on server escrow + email infra not yet built — surfaced but disabled.
@@ -53,16 +64,32 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
   String? _recoveryKeyText;
 
   final _passphrase = TextEditingController();
-  final _answers = List<TextEditingController>.generate(
-      kSecurityQuestions.length, (_) => TextEditingController());
+  // Selected question indices (into kSecurityQuestions), in the order added, each
+  // with its answer controller.
+  final List<int> _selectedQuestions = [];
+  final Map<int, TextEditingController> _qnaAnswers = {};
 
   @override
   void dispose() {
     _passphrase.dispose();
-    for (final c in _answers) {
+    for (final c in _qnaAnswers.values) {
       c.dispose();
     }
     super.dispose();
+  }
+
+  void _addQuestion(int index) {
+    setState(() {
+      _selectedQuestions.add(index);
+      _qnaAnswers[index] = TextEditingController();
+    });
+  }
+
+  void _removeQuestion(int index) {
+    setState(() {
+      _selectedQuestions.remove(index);
+      _qnaAnswers.remove(index)?.dispose();
+    });
   }
 
   bool get _canEnable {
@@ -70,7 +97,8 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
       case SecurityLevel.low:
         return false; // backend not built yet
       case SecurityLevel.medium:
-        return _answers.every((c) => c.text.trim().isNotEmpty);
+        return _selectedQuestions.length >= kMinSecurityQuestions &&
+            _selectedQuestions.every((i) => _qnaAnswers[i]!.text.trim().isNotEmpty);
       case SecurityLevel.high:
         return _highMethod == _HighMethod.recoveryKey ||
             _passphrase.text.trim().isNotEmpty;
@@ -80,7 +108,10 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
   RecoveryChoice _choice() {
     switch (_level) {
       case SecurityLevel.medium:
-        return QnaChoice(_answers.map((c) => c.text).toList());
+        return QnaChoice(
+          _selectedQuestions.map((i) => kSecurityQuestions[i]).toList(),
+          _selectedQuestions.map((i) => _qnaAnswers[i]!.text).toList(),
+        );
       case SecurityLevel.high:
         return _highMethod == _HighMethod.passphrase
             ? PassphraseChoice(_passphrase.text)
@@ -136,11 +167,16 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Encrypt your data')),
       body: SafeArea(
-        child: switch (_step) {
-          _Step.choose => _buildChoose(context),
-          _Step.showRecoveryKey => _buildRecoveryKey(context),
-          _Step.done => _buildDone(context),
-        },
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: switch (_step) {
+              _Step.choose => _buildChoose(context),
+              _Step.showRecoveryKey => _buildRecoveryKey(context),
+              _Step.done => _buildDone(context),
+            },
+          ),
+        ),
       ),
     );
   }
@@ -237,6 +273,10 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
 
   Widget _buildMediumOptions(BuildContext context) {
     final t = Theme.of(context).textTheme;
+    final available = [
+      for (var i = 0; i < kSecurityQuestions.length; i++)
+        if (!_selectedQuestions.contains(i)) i
+    ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -246,14 +286,60 @@ class _EnableEncryptionScreenState extends State<EnableEncryptionScreen> {
           'access to the server has a chance of recovering your data. High is '
           'much safer.',
         ),
-        for (var i = 0; i < kSecurityQuestions.length; i++) ...[
-          const SizedBox(height: 10),
-          Text(kSecurityQuestions[i], style: t.bodySmall),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _answers[i],
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(border: OutlineInputBorder()),
+        const SizedBox(height: 12),
+        Text('Pick at least $kMinSecurityQuestions questions and answer them.',
+            style: t.bodySmall),
+
+        // Each chosen question: its text, answer field, and a remove button.
+        for (final i in _selectedQuestions) ...[
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(kSecurityQuestions[i], style: t.bodySmall),
+                    const SizedBox(height: 4),
+                    TextField(
+                      controller: _qnaAnswers[i],
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(
+                        isDense: true, border: OutlineInputBorder()),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remove',
+                icon: const Icon(Icons.close),
+                onPressed: () => _removeQuestion(i),
+              ),
+            ],
+          ),
+        ],
+
+        // Add-a-question dropdown (hidden once all are chosen).
+        if (available.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          DropdownButtonFormField<int>(
+            // Reset after each pick so the field never retains a value that has
+            // just been removed from `items` (avoids the dropdown value assertion).
+            key: ValueKey('add-question-${_selectedQuestions.length}'),
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Add a question',
+              isDense: true,
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final i in available)
+                DropdownMenuItem(value: i, child: Text(kSecurityQuestions[i])),
+            ],
+            onChanged: (i) {
+              if (i != null) _addQuestion(i);
+            },
           ),
         ],
       ],

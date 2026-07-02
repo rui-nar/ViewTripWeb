@@ -102,16 +102,20 @@ void main() {
       expect(device['label'], 'Test');
     });
 
-    test('Medium (Q&A) posts qna + Argon2id params and no recovery secret', () async {
+    test('Medium (Q&A) posts qna, persists chosen questions, no recovery secret',
+        () async {
       final api = FakeEncryptionApi();
       final svc = EncryptionService(FakeDeviceKeyStore(), api);
-      final result = await svc.enable(const QnaChoice(['Fluffy', 'Lisbon', 'Smith']));
+      final result = await svc.enable(const QnaChoice(
+          ['Pet?', 'City?', 'School?'], ['Fluffy', 'Lisbon', 'Hillcrest']));
 
       expect(result.recoverySecret, isNull);
       expect(svc.isUnlocked, isTrue);
       final recovery = api.enablePayload!['recovery'] as Map;
       expect(recovery['method'], 'qna');
       expect(recovery['kdf_params_json'], isNotNull);
+      // The chosen questions are persisted (non-secret) for the recovery screen.
+      expect(await svc.qnaRecoveryQuestions(), ['Pet?', 'City?', 'School?']);
     });
 
     test('High (passphrase) posts passphrase + params and no recovery secret', () async {
@@ -229,6 +233,21 @@ void main() {
       expect(
           await svcC.recoverWithPassphrase('correct horse battery staple'), isTrue);
       expect(await svcC.decryptText(envelope), 'hi');
+    });
+
+    test('security questions unlock a fresh device (with persisted questions)',
+        () async {
+      final api = FakeEncryptionApi();
+      final svcA = EncryptionService(FakeDeviceKeyStore(), api);
+      await svcA.enable(const QnaChoice(
+          ['Pet?', 'City?', 'School?'], ['Fluffy', 'Lisbon', 'Hillcrest']));
+      final envelope = await svcA.encryptText('note');
+
+      final svcC = EncryptionService(FakeDeviceKeyStore(), api);
+      expect(await svcC.qnaRecoveryQuestions(), ['Pet?', 'City?', 'School?']);
+      expect(
+          await svcC.recoverWithQna(['Fluffy', 'Lisbon', 'Hillcrest']), isTrue);
+      expect(await svcC.decryptText(envelope), 'note');
     });
 
     test('wrong recovery secret fails', () async {

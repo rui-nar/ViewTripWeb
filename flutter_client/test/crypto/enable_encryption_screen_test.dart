@@ -76,7 +76,24 @@ void main() {
     await tester.pump();
 
     expect(find.textContaining('access to the server'), findsOneWidget);
-    expect(find.text('What was the name of your first pet?'), findsOneWidget);
+    expect(find.textContaining('Pick at least 3'), findsOneWidget);
+    expect(find.text('Add a question'), findsOneWidget); // dropdown to pick from
+  });
+
+  testWidgets('Medium: picking a question from the dropdown adds an answer field',
+      (tester) async {
+    await _pump(tester);
+    await tester.tap(find.text('Medium  ·  Security questions'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add a question'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('What city were you born in?').last);
+    await tester.pumpAndSettle();
+
+    // The chosen question is now shown with a remove button + answer field.
+    expect(find.text('What city were you born in?'), findsOneWidget);
+    expect(find.byIcon(Icons.close), findsOneWidget);
   });
 
   testWidgets('High + recovery key reveals a one-time key to save', (tester) async {

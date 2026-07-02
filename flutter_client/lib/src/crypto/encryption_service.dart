@@ -78,10 +78,14 @@ class RecoveryKeyChoice extends RecoveryChoice {
   const RecoveryKeyChoice();
 }
 
-/// Medium — security questions; weaker, hardened with Argon2id.
+/// Medium — security questions; weaker, hardened with Argon2id. Carries the
+/// user-selected [questions] (persisted with the wrap — non-secret — so the
+/// recovery screen can re-display them) and the parallel [answers] (the wrap key
+/// derives from the answers, in order).
 class QnaChoice extends RecoveryChoice {
+  final List<String> questions;
   final List<String> answers;
-  const QnaChoice(this.answers);
+  const QnaChoice(this.questions, this.answers);
 }
 
 /// High — a user passphrase (Argon2id over the raw passphrase). Recovery-only.
@@ -140,11 +144,11 @@ class EncryptionService {
         recoveryWrap = await wrapCmkWithPassphrase(cmk, passphrase, salt, params);
         method = 'passphrase';
         kdfParamsJson = jsonEncode(params.toJson());
-      case QnaChoice(answers: final answers):
+      case QnaChoice(questions: final questions, answers: final answers):
         const params = Argon2Params();
         recoveryWrap = await wrapCmkWithQna(cmk, answers, salt, params);
         method = 'qna';
-        kdfParamsJson = jsonEncode(params.toJson());
+        kdfParamsJson = jsonEncode({...params.toJson(), 'questions': questions});
     }
 
     await _api.enable({
@@ -258,6 +262,16 @@ class EncryptionService {
             WrappedCmk(base64.decode(w.wrappedCmkB64)),
             answers, base64.decode(w.saltB64), _argonFrom(w.kdfParamsJson),
           ));
+
+  /// The security questions the user chose at enable, so the recovery screen can
+  /// re-display them. Empty if Q&A recovery isn't configured.
+  Future<List<String>> qnaRecoveryQuestions() async {
+    final json = (await _api.fetchRecoveryWrap('qna'))?.kdfParamsJson;
+    if (json == null) return const [];
+    final decoded = jsonDecode(json);
+    final q = decoded is Map<String, dynamic> ? decoded['questions'] : null;
+    return q is List ? q.cast<String>() : const [];
+  }
 
   Future<bool> _recover(
       String method, Future<SecretKey> Function(RecoveryWrapData) unwrap) async {
