@@ -214,6 +214,15 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     # reading the multi-MB full profile. Derived; see elevation_downsample.py.
     elevation_profile_low_res_json: Optional[str] = sqlmodel.Field(default=None)
 
+    # Geometry-edit state (issue #31). When True the track was edited locally
+    # (trim/add/remove/split) and Strava sync/enrichment must SKIP this row so
+    # the edit is not overwritten. The original_* columns snapshot the pre-edit
+    # geometry once, enabling a reversible "Reset to Strava". DB-only — the
+    # snapshots are never surfaced in the domain model or the .viewtrip file.
+    is_edited: bool = sqlmodel.Field(default=False)
+    original_polyline: Optional[str] = sqlmodel.Field(default=None)
+    original_elevation_profile_json: Optional[str] = sqlmodel.Field(default=None)
+
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")
 

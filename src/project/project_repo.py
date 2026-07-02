@@ -68,6 +68,20 @@ def _low_res_ep_json(ep_json: Optional[str]) -> Optional[str]:
         return None
 
 
+def _parse_ep(ep_json: Optional[str]):
+    """Parse a stored elevation_profile JSON blob to ``(distances_km, elevations_m)``.
+
+    Returns None when the blob is missing or unparseable.
+    """
+    if not ep_json:
+        return None
+    try:
+        ep = json.loads(ep_json)
+        return (ep.get("distances_km") or [], ep.get("elevations_m") or [])
+    except Exception:
+        return None
+
+
 class StaleWriteError(Exception):
     """Raised by save_project when another writer committed since this project
     was loaded (optimistic-lock conflict). Callers should reload and retry, or
@@ -343,6 +357,141 @@ class ProjectRepo:
             row.elevation_profile_json = elevation_profile_json
             row.elevation_profile_low_res_json = _low_res_ep_json(elevation_profile_json)
         sess.commit()
+
+    # ------------------------------------------------------------------
+    # Geometry editing (issue #31)
+    # ------------------------------------------------------------------
+
+    def activity_is_edited(self, activity_id: int) -> bool:
+        """Return True if the activity has a locally edited track.
+
+        Opens its own session so background enrichment tasks (which hold no
+        session) can cheaply check before overwriting geometry.
+        """
+        with get_session() as sess:
+            row = sess.get(DBActivity, activity_id)
+            return bool(row is not None and row.is_edited)
+
+    @staticmethod
+    def _write_track_geometry(row: DBActivity, points: "list") -> None:
+        """Re-derive geometry + scalar metrics from *points* onto *row* (no commit).
+
+        Snapshots the pre-edit polyline/elevation into the original_* columns on
+        the FIRST edit only, so a later "Reset to Strava" can restore them.
+        """
+        from src.models.track_edit import (
+            align_points,
+            points_to_elevation_profile,
+            points_to_polyline,
+            recompute_track_metrics,
+        )
+
+        if not row.is_edited:
+            row.original_polyline = row.summary_polyline
+            row.original_elevation_profile_json = row.elevation_profile_json
+
+        # Apportion times against the CURRENT geometry's haversine length (not
+        # the stored scalar distance, which Strava derives differently). This
+        # keeps edit→reset time recovery exact, since reset re-apportions with
+        # the same geometry-derived basis.
+        prev_metrics = recompute_track_metrics(align_points(
+            row.summary_polyline,
+            _parse_ep(row.elevation_profile_json),
+        ))
+
+        metrics = recompute_track_metrics(
+            points,
+            original_distance_m=prev_metrics.distance,
+            original_moving_time=row.moving_time or 0,
+            original_elapsed_time=row.elapsed_time or 0,
+        )
+
+        row.summary_polyline = points_to_polyline(points)
+        ep = points_to_elevation_profile(points)
+        ep_json = (
+            json.dumps({"distances_km": ep[0], "elevations_m": ep[1]}) if ep else None
+        )
+        row.elevation_profile_json = ep_json
+        row.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
+
+        row.distance = metrics.distance
+        row.total_elevation_gain = metrics.total_elevation_gain
+        row.elev_high = metrics.elev_high
+        row.elev_low = metrics.elev_low
+        row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
+        row.end_latlng_json = json.dumps(metrics.end_latlng) if metrics.end_latlng else None
+        row.average_speed = metrics.average_speed
+        row.moving_time = metrics.moving_time
+        row.elapsed_time = metrics.elapsed_time
+        row.is_edited = True
+
+    def edit_activity_track(
+        self, sess: Session, activity_id: int, points: "list"
+    ) -> bool:
+        """Apply an edited point list to an activity, recomputing all metrics.
+
+        Snapshots the original geometry on the first edit and sets is_edited.
+        Returns False if the activity row does not exist.
+        """
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return False
+        self._write_track_geometry(row, points)
+        sess.commit()
+        return True
+
+    def reset_activity_track(self, sess: Session, activity_id: int) -> bool:
+        """Restore an edited activity's geometry from its original snapshot.
+
+        Recomputes scalar metrics from the restored geometry and clears
+        is_edited + the snapshot columns.  Returns False if the row does not
+        exist or was never edited (nothing to reset).
+        """
+        row = sess.get(DBActivity, activity_id)
+        if row is None or not row.is_edited:
+            return False
+
+        from src.models.track_edit import align_points, recompute_track_metrics
+
+        orig_poly = row.original_polyline
+        orig_ep_json = row.original_elevation_profile_json
+        orig_ep = None
+        if orig_ep_json:
+            ep = json.loads(orig_ep_json)
+            orig_ep = (ep.get("distances_km") or [], ep.get("elevations_m") or [])
+        points = align_points(orig_poly, orig_ep)
+
+        row.summary_polyline = orig_poly
+        row.elevation_profile_json = orig_ep_json
+        row.elevation_profile_low_res_json = _low_res_ep_json(orig_ep_json)
+
+        if points:
+            # Geometry-derived metrics (distance, elevation, latlng) restore
+            # exactly from the snapshot. Scalar times were apportioned DOWN to
+            # the retained-distance fraction on edit; scale them back UP by the
+            # inverse ratio (restored ÷ edited distance) so a trim→reset round
+            # trip recovers the original times too.
+            edited_distance = row.distance or 0.0
+            metrics = recompute_track_metrics(points)
+            row.distance = metrics.distance
+            row.total_elevation_gain = metrics.total_elevation_gain
+            row.elev_high = metrics.elev_high
+            row.elev_low = metrics.elev_low
+            row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
+            row.end_latlng_json = json.dumps(metrics.end_latlng) if metrics.end_latlng else None
+            if edited_distance > 0 and metrics.distance > 0:
+                ratio = metrics.distance / edited_distance
+                row.moving_time = int(round((row.moving_time or 0) * ratio))
+                row.elapsed_time = int(round((row.elapsed_time or 0) * ratio))
+                row.average_speed = (
+                    metrics.distance / row.moving_time if row.moving_time > 0 else 0.0
+                )
+
+        row.is_edited = False
+        row.original_polyline = None
+        row.original_elevation_profile_json = None
+        sess.commit()
+        return True
 
     def force_update_activity(
         self, sess: Session, user_info_id: int, act: Activity
@@ -942,6 +1091,7 @@ class ProjectRepo:
                            if row.elevation_profile_low_res_json else None))
                 else None
             ),
+            is_edited=bool(getattr(row, "is_edited", False)),
         )
 
     @staticmethod

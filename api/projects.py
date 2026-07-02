@@ -187,6 +187,8 @@ def _enrich_activities(
     for act in activities:
         if act.id is None:
             continue
+        if act.is_edited:
+            continue  # locally edited track — never overwrite from Strava
         if client.remaining_requests <= 2:
             pending.append(act)
             continue
@@ -233,6 +235,8 @@ def _enrich_activities_background(
 
     any_enriched = False
     for activity_id in activity_ids:
+        if _repo.activity_is_edited(activity_id):
+            continue  # locally edited track — never overwrite from Strava
         try:
             streams  = client.get_activity_streams(activity_id)
             latlng   = streams.get("latlng",   {}).get("data") or []
@@ -1266,6 +1270,15 @@ def refresh_activity(
     """
     user_info_id = int(current_user["sub"])
 
+    # Locally edited tracks must never be overwritten by a Strava re-fetch.
+    # Surface a clear message so the client can prompt the user to reset first.
+    if _repo.activity_is_edited(activity_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This activity has a locally edited track. "
+                   "Reset it to Strava before refreshing.",
+        )
+
     client = _strava_client_for_user(user_info_id)
     if client is None:
         raise HTTPException(
@@ -1322,6 +1335,108 @@ def refresh_activity(
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    return _repo.to_dict(project)
+
+
+# ── Activity geometry editing (issue #31) ─────────────────────────────────────
+
+class TrackPointIn(BaseModel):
+    lat: float
+    lng: float
+    elev: Optional[float] = None
+
+
+class TrackEditRequest(BaseModel):
+    points: List[TrackPointIn] = Field(
+        description="Full edited track as an ordered list of {lat, lng, elev?} points")
+
+
+def _project_contains_activity(project, activity_id: int) -> bool:
+    return any(
+        it.item_type == "activity" and it.activity_id == activity_id
+        for it in project.items
+    )
+
+
+@router.put("/{name}/activities/{activity_id}/track",
+            summary="Replace an activity's track geometry")
+def edit_activity_track(
+    name: str,
+    activity_id: int,
+    body: TrackEditRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Overwrite an activity's track with an edited point list (trim/add/remove).
+
+    Snapshots the original geometry on the first edit, marks the activity edited
+    (so Strava sync skips it), recomputes distance / elevation / times, and
+    returns the updated project.
+    """
+    from src.models.track_edit import TrackPoint
+
+    user_info_id = int(current_user["sub"])
+    if len(body.points) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A track needs at least 2 points",
+        )
+    points = [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
+
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if not _project_contains_activity(project, activity_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
+        if not _repo.edit_activity_track(sess, activity_id, points):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+
+    bust_geo_cache(user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    return _repo.to_dict(project)
+
+
+@router.post("/{name}/activities/{activity_id}/reset",
+             summary="Reset an edited activity's track to the original")
+def reset_activity_track(
+    name: str,
+    activity_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Restore an edited activity's geometry from its snapshot and clear is_edited."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        if not _project_contains_activity(project, activity_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
+        if not _repo.reset_activity_track(sess, activity_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Activity has no edit to reset",
+            )
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+
+    bust_geo_cache(user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
     return _repo.to_dict(project)
 
 
