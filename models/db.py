@@ -8,7 +8,38 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 _DB_URL = os.environ.get("DATABASE_URL", "sqlite:///viewtripweb.db")
-engine = create_engine(_DB_URL, connect_args={"check_same_thread": False})
+
+
+def _make_engine(url: str):
+    """Create the app engine with a connection pool sized for the client's
+    parallel request fan-out.
+
+    The Flutter client fires many requests in parallel when opening a project
+    (meta, geo, stats, activities, photos …). SQLAlchemy's default QueuePool
+    (size 5 + 10 overflow = 15 total) is far too small: a couple of concurrent
+    users exhaust it, then every new request blocks for ``pool_timeout`` seconds
+    waiting for a connection — so the app looks completely hung and needs a
+    manual restart (issue #35). SQLite in WAL mode serves many concurrent readers
+    fine, so we raise the ceiling well above realistic load and fail fast if it
+    is ever hit. In-memory SQLite (tests) uses a non-queue pool that rejects
+    these kwargs, so they are only applied to file-backed / networked DBs.
+    """
+    is_sqlite = url.startswith("sqlite")
+    is_memory = is_sqlite and (":memory:" in url or url == "sqlite://")
+    kwargs: dict = {}
+    if is_sqlite:
+        kwargs["connect_args"] = {"check_same_thread": False}
+    if not is_memory:
+        kwargs.update(
+            pool_size=20,        # persistent connections
+            max_overflow=40,     # burst headroom → 60 total, vs the old 15
+            pool_timeout=10,     # fail fast instead of a 30s hang cascade
+            pool_pre_ping=True,  # drop dead connections rather than erroring
+        )
+    return create_engine(url, **kwargs)
+
+
+engine = _make_engine(_DB_URL)
 
 
 def _configure_sqlite(target_engine) -> None:
