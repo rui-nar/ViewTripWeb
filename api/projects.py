@@ -1440,6 +1440,80 @@ def reset_activity_track(
     return _repo.to_dict(project)
 
 
+class SplitRequest(BaseModel):
+    split_index: int = Field(
+        description="0-based point index at which to split; the point is shared "
+                    "as the last point of the head and the first of the tail")
+
+
+@router.post("/{name}/activities/{activity_id}/split",
+             summary="Split an activity into a head and a local tail")
+def split_activity(
+    name: str,
+    activity_id: int,
+    body: SplitRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Split an activity at *split_index*: the head keeps its Strava id, the tail
+    becomes a new LOCAL activity (negative id, manual, "<name> (2)") inserted
+    right after the head. Both pieces are marked edited. Returns the updated project.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_project_row(sess, user_info_id, name)
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+        if project is None or not _project_contains_activity(project, activity_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
+        try:
+            tail_id = _repo.split_activity(
+                sess, user_info_id, row.id, activity_id, body.split_index)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        if tail_id is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+
+    bust_geo_cache(user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    return _repo.to_dict(project)
+
+
+@router.delete("/{name}/activities/{activity_id}/local",
+               status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a local (split-tail) activity")
+def delete_local_activity(
+    name: str,
+    activity_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Delete a local (negative-id) activity row and unlink it from the project.
+
+    Only local activities may be deleted (Strava activities are shared). This is
+    the undo path for a split — deleting the tail leaves the head in place.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_project_row(sess, user_info_id, name)
+        if not _repo.delete_local_activity(sess, row.id, activity_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Local activity not found",
+            )
+    bust_geo_cache(user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+
+
 # ── Item management (delete + reorder) ────────────────────────────────────────
 
 @router.delete("/{name}/items/{index}", status_code=status.HTTP_204_NO_CONTENT,

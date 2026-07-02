@@ -493,6 +493,135 @@ class ProjectRepo:
         sess.commit()
         return True
 
+    def split_activity(
+        self,
+        sess: Session,
+        user_info_id: int,
+        project_id: int,
+        activity_id: int,
+        split_index: int,
+    ) -> Optional[int]:
+        """Split an activity into a head (keeps id) and a local tail (negative id).
+
+        The boundary point at *split_index* is shared: the head keeps
+        ``points[:split_index+1]`` and the tail gets ``points[split_index:]`` so
+        the two pieces stay contiguous. The tail is a new LOCAL activity
+        (``manual=True``, synthetic negative id, name ``"<name> (2)"``) inserted
+        into the project items directly after the head. Both pieces are marked
+        is_edited with their own geometry snapshot.
+
+        Returns the new tail activity id, or None if the activity is missing.
+        Raises ValueError if *split_index* does not yield two non-trivial pieces.
+        """
+        from src.models.track_edit import align_points, points_to_polyline
+
+        head = sess.get(DBActivity, activity_id)
+        if head is None:
+            return None
+
+        points = align_points(head.summary_polyline, _parse_ep(head.elevation_profile_json))
+        # Need at least 2 points on each side of the boundary.
+        if split_index < 1 or split_index > len(points) - 2:
+            raise ValueError(
+                f"split_index {split_index} out of range for a {len(points)}-point track")
+
+        head_points = points[: split_index + 1]
+        tail_points = points[split_index:]
+
+        # Allocate the next free negative id for this project's activities.
+        existing_ids = [
+            r.activity_id for r in sess.exec(
+                select(DBProjectItem).where(
+                    DBProjectItem.project_id == project_id,
+                    DBProjectItem.item_type == "activity",
+                )
+            ).all() if r.activity_id is not None
+        ]
+        tail_id = min([0, *existing_ids]) - 1
+
+        # Create the tail row copying the head's metadata.
+        tail = DBActivity(
+            id=tail_id,
+            user_info_id=user_info_id,
+            name=f"{head.name} (2)",
+            type=head.type,
+            moving_time=head.moving_time,
+            elapsed_time=head.elapsed_time,
+            start_date=head.start_date,
+            start_date_local=head.start_date_local,
+            timezone=head.timezone,
+            trainer=head.trainer,
+            commute=head.commute,
+            manual=True,
+            private=head.private,
+            gear_id=head.gear_id,
+        )
+        # Seed the tail with the FULL pre-split geometry + the original scalar
+        # times so _write_track_geometry apportions the tail's time to its own
+        # retained fraction (tail_length / full_length), mirroring the head.
+        tail.summary_polyline = head.summary_polyline
+        tail.elevation_profile_json = head.elevation_profile_json
+        sess.add(tail)
+
+        # Write head then tail geometry (each snapshots its own original + recomputes).
+        self._write_track_geometry(head, head_points)
+        self._write_track_geometry(tail, tail_points)
+
+        # Insert the tail item directly after the head item, renumbering positions.
+        item_rows = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == project_id)
+            .order_by(DBProjectItem.position)
+        ).all()
+        new_order: List[DBProjectItem] = []
+        for it in item_rows:
+            new_order.append(it)
+            if it.item_type == "activity" and it.activity_id == activity_id:
+                new_order.append(DBProjectItem(
+                    project_id=project_id, position=0,
+                    item_type="activity", activity_id=tail_id,
+                ))
+        for pos, it in enumerate(new_order):
+            it.position = pos
+            sess.add(it)
+
+        sess.commit()
+        return tail_id
+
+    def delete_local_activity(
+        self, sess: Session, project_id: int, activity_id: int
+    ) -> bool:
+        """Delete a LOCAL (negative-id) activity row and unlink it from items.
+
+        Only local activities (split tails, id < 0) may be deleted — Strava
+        activities are shared across projects and must never be row-deleted here.
+        Returns False if the id is not local or the row is absent.
+        """
+        if activity_id >= 0:
+            return False
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return False
+        sess.execute(
+            delete(DBProjectItem).where(
+                DBProjectItem.project_id == project_id,
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+            )
+        )
+        sess.delete(row)
+        # Renumber remaining item positions to stay contiguous.
+        remaining = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == project_id)
+            .order_by(DBProjectItem.position)
+        ).all()
+        for pos, it in enumerate(remaining):
+            it.position = pos
+            sess.add(it)
+        sess.commit()
+        return True
+
     def force_update_activity(
         self, sess: Session, user_info_id: int, act: Activity
     ) -> None:
