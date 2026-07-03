@@ -1118,6 +1118,61 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  // ── Activity track editing (issue #31) ─────────────────────────────────────
+
+  /// Fetch the full activity dict (with `map.summary_polyline` and
+  /// `elevation_profile`) for [activityId] — the editor needs the geometry that
+  /// the lightweight meta/list load omits. Returns null if not found.
+  Future<Map<String, dynamic>?> fetchActivityForEdit(int activityId) async {
+    final name = projectName;
+    if (name == null) return null;
+    final details = await _service.getDetails(name);
+    final raw = details['activities'];
+    if (raw is! List) return null;
+    for (final a in raw) {
+      if (a is Map<String, dynamic> &&
+          (a['id'] as num?)?.toInt() == activityId) {
+        return a;
+      }
+    }
+    return null;
+  }
+
+  /// Save an edited track (trim/add/remove) for [activityId]. [payload] is
+  /// [TrackEditModel.toSavePayload]. Reloads geometry on success. Rethrows so
+  /// the editor page can surface the failure and keep the user's edits.
+  Future<void> saveActivityTrack(
+    int activityId, Map<String, dynamic> payload) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.saveActivityTrack(name, activityId, payload);
+    await _silentReload(name);
+  }
+
+  /// Reset [activityId]'s track to the original Strava geometry.
+  Future<void> resetActivityTrack(int activityId) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.resetActivityTrack(name, activityId);
+    await _silentReload(name);
+  }
+
+  /// Split [activityId] at [splitIndex]; the tail becomes a new local activity.
+  Future<void> splitActivity(int activityId, int splitIndex) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.splitActivity(name, activityId, splitIndex);
+    await _silentReload(name);
+  }
+
+  /// Delete a local (split-tail, negative-id) [activityId].
+  Future<void> deleteLocalActivity(int activityId) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.deleteLocalActivity(name, activityId);
+    await _silentReload(name);
+  }
+
   // ── Internal helpers ───────────────────────────────────────────────────────
 
   /// Reloads project data from the API without clearing existing state first.

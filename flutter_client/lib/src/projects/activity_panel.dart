@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
+import 'activity_editor_page.dart';
 import 'day_meta_editor.dart';
 import 'journal_detail_modal.dart';
 import 'journal_dialog.dart';
@@ -700,6 +701,40 @@ class _ActivityPanelState extends State<ActivityPanel> {
     });
   }
 
+  /// Open the dedicated track editor for [activity]. Fetches the full activity
+  /// (with polyline + elevation) since the panel list is meta-only, then pushes
+  /// [ActivityEditorPage]. The page persists via the notifier and reloads on
+  /// success, so no local merge is needed here.
+  Future<void> _openTrackEditor(
+    BuildContext context,
+    ProjectNotifier notifier,
+    Map<String, dynamic> activity,
+  ) async {
+    final id = (activity['id'] as num?)?.toInt();
+    if (id == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    Map<String, dynamic>? full = activity;
+    // Fetch geometry if the panel's copy lacks it (meta load omits the polyline).
+    if ((activity['map'] as Map?)?['summary_polyline'] == null) {
+      try {
+        full = await notifier.fetchActivityForEdit(id);
+      } catch (e) {
+        messenger.showSnackBar(SnackBar(content: Text('Could not load track: $e')));
+        return;
+      }
+    }
+    if (full == null || (full['map'] as Map?)?['summary_polyline'] == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('This activity has no track to edit')),
+      );
+      return;
+    }
+    await navigator.push(MaterialPageRoute(
+      builder: (_) => ActivityEditorPage(notifier: notifier, activity: full!),
+    ));
+  }
+
   void _flyToActivity(Map<String, dynamic> activity) {
     // Highlight the tapped activity on the map (toggle if already selected).
     widget.notifier.selectActivity(activity['id']);
@@ -1375,19 +1410,36 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ),
                                 ],
                               ),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline, size: 15),
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(),
-                                color: theme.colorScheme.error.withValues(alpha: 0.6),
-                                onPressed: () => _dismissWithUndo(
-                                  context: context,
-                                  notifier: notifier,
-                                  label: 'Removed "$name"',
-                                  onOptimistic: () => notifier.removeItemLocally(i),
-                                  onConfirm: () => notifier.confirmRemoveItem(i),
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_outlined, size: 15),
+                                    tooltip: 'Edit track',
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.primary.withValues(alpha: 0.7),
+                                    onPressed: _multiSelect
+                                        ? null
+                                        : () => _openTrackEditor(context, notifier, a),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                    onPressed: () => _dismissWithUndo(
+                                      context: context,
+                                      notifier: notifier,
+                                      label: 'Removed "$name"',
+                                      onOptimistic: () => notifier.removeItemLocally(i),
+                                      onConfirm: () => notifier.confirmRemoveItem(i),
+                                    ),
+                                  ),
+                                ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),
                             ),
