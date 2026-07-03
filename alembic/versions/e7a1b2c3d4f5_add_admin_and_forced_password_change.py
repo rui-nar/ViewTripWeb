@@ -11,7 +11,7 @@ upgrade. created_at is float (Unix seconds) to match the model and the existing
 project.created_at convention.
 
 Revision ID: e7a1b2c3d4f5
-Revises: d1e2f3a4b5c6
+Revises: e7f8a9b0c1d2
 Create Date: 2026-06-23 00:00:00.000000
 
 """
@@ -23,7 +23,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'e7a1b2c3d4f5'
-down_revision: Union[str, Sequence[str], None] = 'd1e2f3a4b5c6'
+down_revision: Union[str, Sequence[str], None] = 'e7f8a9b0c1d2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
