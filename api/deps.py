@@ -17,6 +17,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import select
 
+from models.db import get_session
 from models.user import UserInfo
 
 # Secret key — set JWT_SECRET in your environment or config.
@@ -26,8 +27,15 @@ _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRY_HOURS = 24 * 7  # 7 days
 
 
-def create_access_token(user_info: UserInfo) -> str:
-    """Create a signed JWT for the given UserInfo."""
+def create_access_token(
+    user_info: UserInfo, password_change_required: bool = False
+) -> str:
+    """Create a signed JWT for the given UserInfo.
+
+    ``password_change_required`` is carried from the LocalUser row (it lives on
+    the credential, not the profile) so the client can force a password change
+    before granting access to the app.
+    """
     payload = {
         "sub": str(user_info.id),
         "local_auth_id": user_info.local_auth_id,
@@ -35,6 +43,8 @@ def create_access_token(user_info: UserInfo) -> str:
         "display_name": user_info.display_name,
         "avatar_url": user_info.avatar_url,
         "auth_provider": user_info.auth_provider,
+        "is_admin": bool(user_info.is_admin),
+        "password_change_required": bool(password_change_required),
         "exp": datetime.datetime.now(datetime.timezone.utc)
         + datetime.timedelta(hours=_JWT_EXPIRY_HOURS),
     }
@@ -81,3 +91,28 @@ def get_optional_current_user(
         return decode_token(credentials.credentials)
     except HTTPException:
         return None
+
+
+def require_admin(
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> dict:
+    """FastAPI dependency — 403 unless the caller is an admin.
+
+    Re-reads ``is_admin`` from the DB rather than trusting the (possibly stale)
+    token claim, so revoking admin takes effect immediately. Unauthenticated
+    callers already get a 401 from ``get_current_user``.
+    """
+    try:
+        user_info_id = int(current_user["sub"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
+        )
+    with get_session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None or not user_info.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required",
+            )
+    return current_user

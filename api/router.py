@@ -11,6 +11,7 @@ from scalar_fastapi import get_scalar_api_reference
 
 from src.project.project_repo import StaleWriteError
 
+from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
 from api.geo import router as geo_router
@@ -23,6 +24,7 @@ from api.strava import router as strava_router
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from models.project_db import _check_schema_contract
+from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
 from src.utils.logging import configure_logging, get_logger
 
@@ -45,6 +47,7 @@ async def lifespan(_app: FastAPI):
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
+    seed_admin()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.start()
     _log.info("Backup scheduler started — daily at 02:00 UTC")
@@ -74,6 +77,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)
 app.include_router(geo_router)
