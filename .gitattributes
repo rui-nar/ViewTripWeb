@@ -1,0 +1,8 @@
+# Flutter-generated platform runner files. They live as LF in the repo and are
+# regenerated as LF, but core.autocrlf=true kept trying to convert them to CRLF,
+# which showed them as perpetually "modified" on Windows (git diff was always
+# empty — only line endings). Pin them to LF so autocrlf leaves them alone and
+# they stop churning.
+flutter_client/**/generated_plugin_registrant.*    text eol=lf
+flutter_client/**/generated_plugins.cmake          text eol=lf
+flutter_client/**/GeneratedPluginRegistrant.swift  text eol=lf
