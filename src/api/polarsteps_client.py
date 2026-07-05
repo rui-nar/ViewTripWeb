@@ -77,6 +77,17 @@ class PolarstepsClient:
         """Return current user info — used to validate the token."""
         return self._get(f"/users/{self._user_id}")
 
+    def get_user_by_username(self, username: str) -> dict[str, Any]:
+        """Resolve a Polarsteps username/handle to their user object.
+
+        Returns the same shape as ``get_me`` (includes ``id`` and ``trips``),
+        subject to what the authenticated session is allowed to see — i.e. the
+        followee's shared trips. Raises PermissionError on an expired token; a
+        private/hidden profile surfaces as an HTTP 403/404 from ``_get``.
+        Used to view a person's (issue #40) trip you follow on Polarsteps.
+        """
+        return self._get(f"/users/byusername/{username}")
+
     def get_trips(self, user_id: int) -> list[dict[str, Any]]:
         """Return the user's trips (most-recent first) from the user endpoint."""
         data = self._get(f"/users/{user_id}")

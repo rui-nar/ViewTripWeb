@@ -28,8 +28,16 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
+import requests
+
 from api.deps import get_current_user
+from api.polarsteps import (
+    POLARSTEPS_TOKEN_EXPIRED_DETAIL,
+    _persist_rotated_token,
+    _require_client,
+)
 from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
+from src.api.polarsteps_client import format_step, format_trip
 
 router = APIRouter(prefix="/api/people", tags=["people"])
 
@@ -89,6 +97,22 @@ def _delete_avatar_files(user_id: str, person_id: int, uuid_str: str) -> None:
     photo_path = _avatar_dir(user_id, person_id)
     for suffix in ["", "_thumb"]:
         (photo_path / f"{uuid_str}{suffix}.jpg").unlink(missing_ok=True)
+
+
+def _parse_ps_username(raw: str | None) -> str | None:
+    """Extract a Polarsteps username from a stored handle or profile URL.
+
+    Accepts "alice", "@alice", "polarsteps.com/alice", or a full profile URL.
+    Returns None when there's nothing usable.
+    """
+    if not raw:
+        return None
+    v = raw.strip()
+    if "polarsteps.com/" in v:
+        v = v.split("polarsteps.com/", 1)[1]
+    v = v.lstrip("@").strip("/ ")
+    v = v.split("/")[0].split("?")[0].strip()
+    return v or None
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -301,3 +325,75 @@ def serve_avatar_thumb(
             return FileResponse(str(full_path), media_type="image/jpeg")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
     return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
+# ── Polarsteps: view a person's shared trip (issue #40) ───────────────────────
+# View-only. Uses the current user's own Polarsteps connection to fetch trips a
+# person (matched by their `polarsteps` handle) has shared with them. Their
+# content is never persisted or shared onward.
+
+def _person_ps_username(sess, person_id: int, user_info_id: int) -> str:
+    person = _get_owned_person(sess, person_id, user_info_id)
+    username = _parse_ps_username(person.polarsteps)
+    if username is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This person has no Polarsteps account",
+        )
+    return username
+
+
+def _ps_not_visible_or_502(exc: Exception):
+    if isinstance(exc, requests.HTTPError) and exc.response is not None \
+            and exc.response.status_code in (403, 404):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="That Polarsteps profile or trip isn't visible to you",
+        )
+    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+@router.get("/{person_id}/polarsteps/trips",
+            summary="List a person's Polarsteps trips (view-only)")
+def person_polarsteps_trips(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return the trips a person has shared on Polarsteps, resolved from their
+    handle via the current user's Polarsteps connection."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        username = _person_ps_username(sess, person_id, user_info_id)
+    client = _require_client(user_info_id)
+    try:
+        user = client.get_user_by_username(username)
+    except PermissionError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
+    except Exception as exc:
+        _ps_not_visible_or_502(exc)
+    _persist_rotated_token(user_info_id, client)
+    trips = list(reversed(user.get("trips") or []))
+    return [format_trip(t) for t in trips]
+
+
+@router.get("/{person_id}/polarsteps/trips/{trip_id}/steps",
+            summary="List steps for a person's Polarsteps trip (view-only)")
+def person_polarsteps_trip_steps(
+    person_id: int,
+    trip_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return the published steps (lat/lon/date) for one of a person's trips, to
+    render the route as a view-only overlay."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        _person_ps_username(sess, person_id, user_info_id)  # ownership + has-handle
+    client = _require_client(user_info_id)
+    try:
+        raw_steps = client.get_trip_steps(trip_id)
+    except PermissionError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
+    except Exception as exc:
+        _ps_not_visible_or_502(exc)
+    _persist_rotated_token(user_info_id, client)
+    return [format_step(s) for s in raw_steps]
