@@ -8,11 +8,13 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
+import '../core/design_tokens.dart' show kAccent;
 import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'memory_detail_modal.dart';
+import 'people_screen.dart' show showPersonDetailSheet;
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
@@ -1026,6 +1028,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
+  List<Marker> _cachedEncounterMarkers = [];
   bool _showMemories = true;
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
@@ -1207,6 +1210,49 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             ),
             child: const Center(
               child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
+            ),
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
+  /// Owner-only encounter pins (issue #40). Tapping opens the person sheet.
+  List<Marker> _buildEncounterMarkers(
+    List<Map<String, dynamic>> items,
+    BuildContext context,
+  ) {
+    final markers = <Marker>[];
+    for (final item in items) {
+      if (item['item_type'] != 'encounter') continue;
+      final e = item['encounter'] as Map<String, dynamic>?;
+      if (e == null) continue;
+      final lat = (e['lat'] as num?)?.toDouble();
+      final lon = (e['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: 22,
+        height: 22,
+        child: GestureDetector(
+          onTap: () {
+            final pid = (e['person_id'] as num?)?.toInt();
+            final person = widget.notifier.people
+                .cast<Map<String, dynamic>?>()
+                .firstWhere((p) => p?['id'] == pid, orElse: () => null);
+            if (person != null) {
+              showPersonDetailSheet(context, widget.notifier, person);
+            }
+          },
+          child: Container(
+            decoration: BoxDecoration(
+              color: kAccent,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+            ),
+            child: const Center(
+              child: Icon(Icons.groups, size: 12, color: Colors.white),
             ),
           ),
         ),
@@ -1586,6 +1632,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId2, hasSelection, context);
+      _cachedEncounterMarkers = _buildEncounterMarkers(items, context);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
@@ -1686,6 +1733,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedMemoryMarkers),
             if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedJournalMarkers),
+            if (_cachedEncounterMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedEncounterMarkers),
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {

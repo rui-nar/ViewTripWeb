@@ -2,6 +2,7 @@
 /// with a per-person detail sheet listing every place + date you met them.
 library;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../core/design_tokens.dart';
@@ -228,6 +229,14 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
     navigator.pop();
   }
 
+  Future<void> _pickAvatar() async {
+    final result = await FilePicker.pickFiles(type: FileType.image, withData: true);
+    final f = result?.files.firstOrNull;
+    if (f?.bytes == null) return;
+    await widget.notifier.uploadPersonAvatar(_personId, f!.bytes!, f.name);
+    await _load();
+  }
+
   Future<void> _delete() async {
     final ok = await showDialog<bool>(
       context: context,
@@ -270,7 +279,23 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
         children: [
           Row(
             children: [
-              PersonAvatar(notifier: widget.notifier, person: person, radius: 28),
+              Stack(
+                children: [
+                  PersonAvatar(
+                      notifier: widget.notifier, person: person, radius: 28),
+                  Positioned(
+                    right: -6,
+                    bottom: -6,
+                    child: IconButton(
+                      tooltip: 'Change photo',
+                      iconSize: 18,
+                      visualDensity: VisualDensity.compact,
+                      icon: const Icon(Icons.photo_camera_outlined),
+                      onPressed: _pickAvatar,
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(personDisplayName(person),
