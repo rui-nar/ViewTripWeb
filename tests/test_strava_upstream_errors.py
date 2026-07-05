@@ -65,6 +65,10 @@ def test_upstream_api_error_maps_to_502(client, monkeypatch):
         raise APIError('Strava API error 403: {"message":"Forbidden"}')
 
     monkeypatch.setattr(strava_module, "_fetch_all_strava", _boom)
+    # Bypass Strava client construction (CI has no client_id/secret) so the test
+    # exercises only the app-level error-handler wiring, not real Strava config.
+    monkeypatch.setattr(strava_module, "_strava_client_for_token",
+                        lambda *_a, **_k: object())
 
     # start_date forces the date-API path, which fetches from Strava directly.
     resp = client.get("/api/strava/activities?start_date=2026-01-01")
@@ -78,6 +82,8 @@ def test_upstream_auth_error_maps_to_401(client, monkeypatch):
         raise AuthenticationError("Strava access token is invalid or expired. Please re-authenticate")
 
     monkeypatch.setattr(strava_module, "_fetch_all_strava", _boom)
+    monkeypatch.setattr(strava_module, "_strava_client_for_token",
+                        lambda *_a, **_k: object())
 
     resp = client.get("/api/strava/activities?start_date=2026-01-01")
 
