@@ -565,6 +565,23 @@ class ProjectRepo:
 
         # Write head then tail geometry (each snapshots its own original + recomputes).
         self._write_track_geometry(head, head_points)
+        # The tail begins at the split boundary — i.e. where the head ends. Tracks
+        # carry no per-point timestamps, so derive the boundary time as the head's
+        # start plus its (now apportioned) elapsed duration. Without this the tail
+        # inherits the head's start_date and sorts out of order (often *before* the
+        # head, since its negative id wins date ties). start_date columns are stored
+        # as ISO-8601 strings, so parse → shift → re-serialise in the same format.
+        from datetime import datetime, timedelta
+
+        def _shift(iso: str) -> str:
+            if not iso:
+                return iso
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return (dt + timedelta(seconds=head.elapsed_time or 0)) \
+                .isoformat().replace("+00:00", "Z")
+
+        tail.start_date = _shift(head.start_date)
+        tail.start_date_local = _shift(head.start_date_local)
         self._write_track_geometry(tail, tail_points)
 
         # Insert the tail item directly after the head item, renumbering positions.
