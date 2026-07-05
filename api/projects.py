@@ -1563,8 +1563,24 @@ def delete_item(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if index < 0 or index >= len(project.items):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Index out of range")
+        removed = project.items[index]
         project.remove_item(index)
         _repo.save_project(sess, user_info_id, project)
+        # A split tail is a LOCAL (negative-id) activity owned solely by its
+        # timeline item. remove_item only unlinks the item, so without this the
+        # row is orphaned in the activity table and its negative id gets reused
+        # by the next split → UNIQUE constraint failure. Delete the row once no
+        # remaining item references it.
+        if (
+            removed.item_type == "activity"
+            and (removed.activity_id or 0) < 0
+            and not any(
+                it.item_type == "activity" and it.activity_id == removed.activity_id
+                for it in project.items
+            )
+        ):
+            row = _get_project_row(sess, user_info_id, name)
+            _repo.delete_local_activity(sess, row.id, removed.activity_id)
     bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)

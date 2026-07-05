@@ -9,6 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
+from src.exceptions.errors import APIError, AuthenticationError
 from src.project.project_repo import StaleWriteError
 
 from api.admin import router as admin_router
@@ -97,6 +98,30 @@ app.include_router(strava_router)
 async def _stale_write_handler(_request, exc: StaleWriteError):
     """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(AuthenticationError)
+async def _auth_error_handler(_request, exc: AuthenticationError):
+    """Map an upstream (Strava) auth failure to 401 so the client can re-authenticate.
+
+    The messages carried by AuthenticationError are already user-facing and
+    actionable (e.g. "re-authenticate via Add track → From Strava…").
+    """
+    return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+
+@app.exception_handler(APIError)
+async def _upstream_api_error_handler(_request, exc: APIError):
+    """Map an upstream third-party API failure (e.g. Strava) to 502, not a bare 500.
+
+    The raw upstream response is logged for diagnostics but not leaked to the
+    client; the client sees a stable, actionable message instead.
+    """
+    _log.warning("Upstream API error: %s", exc)
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "The Strava integration is currently unavailable. Please try again later."},
+    )
 
 
 @app.get("/scalar", include_in_schema=False)
