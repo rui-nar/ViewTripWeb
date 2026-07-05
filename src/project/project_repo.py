@@ -29,10 +29,12 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBPerson, DBProject, DBProjectItem
 from src.models.activity import Activity
+from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
+from src.models.person import Person
 from src.models.project import (
     ConnectingSegment,
     Counter,
@@ -331,6 +333,16 @@ class ProjectRepo:
         ).all()
         for jentry in journals:
             sess.delete(jentry)
+
+        # Delete encounters before people (encounter → person FK), then people.
+        for enc in sess.exec(
+            select(DBEncounter).where(DBEncounter.project_id == row.id)
+        ).all():
+            sess.delete(enc)
+        for person in sess.exec(
+            select(DBPerson).where(DBPerson.project_id == row.id)
+        ).all():
+            sess.delete(person)
 
         sess.delete(row)
         sess.commit()
@@ -924,6 +936,19 @@ class ProjectRepo:
         ).all()
         journal_by_id = {jr.id: self._row_to_journal(jr) for jr in journal_rows}
 
+        # Load people + encounter rows for this project (issue #40)
+        people = [
+            self._row_to_person(pr) for pr in sess.exec(
+                select(DBPerson).where(DBPerson.project_id == row.id)
+                .order_by(DBPerson.id)
+            ).all()
+        ]
+        encounter_by_id = {
+            er.id: self._row_to_encounter(er) for er in sess.exec(
+                select(DBEncounter).where(DBEncounter.project_id == row.id)
+            ).all()
+        }
+
         items: List[ProjectItem] = []
         activities: List[Activity] = []
         memories: List[Memory] = []
@@ -931,6 +956,7 @@ class ProjectRepo:
         seen_ids: set[int] = set()
         seen_memory_ids: set[int] = set()
         seen_journal_ids: set[int] = set()
+        seen_encounter_ids: set[int] = set()
 
         for ir in item_rows:
             if ir.item_type == "activity" and ir.activity_id is not None:
@@ -956,6 +982,13 @@ class ProjectRepo:
                     items.append(ProjectItem(item_type="journal", journal=jentry))
                     journal_entries.append(jentry)
                     seen_journal_ids.add(ir.journal_id)
+            elif ir.item_type == "encounter" and ir.encounter_id is not None:
+                if ir.encounter_id in seen_encounter_ids:
+                    continue  # deduplicate stale duplicate rows
+                enc = encounter_by_id.get(ir.encounter_id)
+                if enc:
+                    items.append(ProjectItem(item_type="encounter", encounter=enc))
+                    seen_encounter_ids.add(ir.encounter_id)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
@@ -1001,6 +1034,7 @@ class ProjectRepo:
             activities=activities,
             memories=memories,
             journal_entries=journal_entries,
+            people=people,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
@@ -1049,6 +1083,11 @@ class ProjectRepo:
                 "journal_id": (
                     item.journal.id
                     if item.item_type == "journal" and item.journal is not None
+                    else None
+                ),
+                "encounter_id": (
+                    item.encounter.id
+                    if item.item_type == "encounter" and item.encounter is not None
                     else None
                 ),
             })
@@ -1144,6 +1183,33 @@ class ProjectRepo:
             time=row.time,
             description=row.description,
             photos=json.loads(row.photos_json or "[]"),
+            geo_mode=row.geo_mode,
+            lat=row.lat,
+            lon=row.lon,
+        )
+
+    @staticmethod
+    def _row_to_person(row: DBPerson) -> Person:
+        return Person(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            email=row.email,
+            phone=row.phone,
+            polarsteps=row.polarsteps,
+            notes=row.notes,
+            avatar_photo=row.avatar_photo,
+        )
+
+    @staticmethod
+    def _row_to_encounter(row: DBEncounter) -> Encounter:
+        return Encounter(
+            id=row.id,
+            project_id=row.project_id,
+            person_id=row.person_id,
+            date=row.date,
+            time=row.time,
+            description=row.description,
             geo_mode=row.geo_mode,
             lat=row.lat,
             lon=row.lon,

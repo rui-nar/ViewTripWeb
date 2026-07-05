@@ -6,8 +6,10 @@ import json
 from typing import Any, Dict
 
 from src.models.activity import Activity
+from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
+from src.models.person import Person
 from src.models.project import (
     ConnectingSegment,
     DayMeta,
@@ -18,6 +20,30 @@ from src.models.project import (
     ProjectItem,
     SegmentEndpoint,
 )
+
+
+def _person_to_dict(p: Person) -> Dict[str, Any]:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "email": p.email,
+        "phone": p.phone,
+        "polarsteps": p.polarsteps,
+        "notes": p.notes,
+        "avatar_photo": p.avatar_photo,
+    }
+
+
+def _person_from_dict(d: Dict[str, Any]) -> Person:
+    return Person(
+        id=d.get("id"),
+        name=d.get("name"),
+        email=d.get("email"),
+        phone=d.get("phone"),
+        polarsteps=d.get("polarsteps"),
+        notes=d.get("notes"),
+        avatar_photo=d.get("avatar_photo"),
+    )
 
 
 class ProjectIO:
@@ -50,6 +76,7 @@ class ProjectIO:
             },
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": [a.to_strava_dict() for a in project.activities],
+            "people": [_person_to_dict(p) for p in project.people],
             "day_meta": {
                 dk: {
                     **{k: v for k, v in {
@@ -102,6 +129,7 @@ class ProjectIO:
             },
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": activities_out,
+            "people": [_person_to_dict(p) for p in project.people],
             "day_meta": {
                 dk: {
                     **{k: v for k, v in {
@@ -164,6 +192,8 @@ class ProjectIO:
             else list(DEFAULT_SLEEPING_OPTIONS)
         )
 
+        people = [_person_from_dict(p) for p in data.get("people", [])]
+
         project = Project(
             name=data.get("name", "Untitled"),
             version=data.get("version", 1),
@@ -171,6 +201,7 @@ class ProjectIO:
             items=items,
             filter_state=filter_state,
             activities=activities,
+            people=people,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
         )
@@ -213,6 +244,18 @@ class ProjectIO:
                 "geo_mode": j.geo_mode,
                 "lat": j.lat,
                 "lon": j.lon,
+            }
+        elif item.item_type == "encounter" and item.encounter is not None:
+            e = item.encounter
+            d["encounter"] = {
+                "id": e.id,
+                "person_id": e.person_id,
+                "date": e.date,
+                "time": e.time,
+                "description": e.description,
+                "geo_mode": e.geo_mode,
+                "lat": e.lat,
+                "lon": e.lon,
             }
         else:
             seg = item.segment
@@ -274,6 +317,19 @@ class ProjectIO:
                 lon=jd.get("lon"),
             )
             return ProjectItem(item_type="journal", journal=jentry)
+        if d.get("item_type") == "encounter":
+            ed = d.get("encounter", {})
+            enc = Encounter(
+                id=ed.get("id"),
+                person_id=ed.get("person_id"),
+                date=ed.get("date", ""),
+                time=ed.get("time"),
+                description=ed.get("description"),
+                geo_mode=ed.get("geo_mode", "start_of_day"),
+                lat=ed.get("lat"),
+                lon=ed.get("lon"),
+            )
+            return ProjectItem(item_type="encounter", encounter=enc)
         # segment
         sd = d.get("segment", {})
         seg = ConnectingSegment(
