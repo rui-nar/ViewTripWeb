@@ -29,10 +29,12 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBPerson, DBProject, DBProjectItem
 from src.models.activity import Activity
+from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
+from src.models.person import Person
 from src.models.project import (
     ConnectingSegment,
     Counter,
@@ -332,6 +334,16 @@ class ProjectRepo:
         for jentry in journals:
             sess.delete(jentry)
 
+        # Delete encounters before people (encounter → person FK), then people.
+        for enc in sess.exec(
+            select(DBEncounter).where(DBEncounter.project_id == row.id)
+        ).all():
+            sess.delete(enc)
+        for person in sess.exec(
+            select(DBPerson).where(DBPerson.project_id == row.id)
+        ).all():
+            sess.delete(person)
+
         sess.delete(row)
         sess.commit()
         return True
@@ -565,6 +577,23 @@ class ProjectRepo:
 
         # Write head then tail geometry (each snapshots its own original + recomputes).
         self._write_track_geometry(head, head_points)
+        # The tail begins at the split boundary — i.e. where the head ends. Tracks
+        # carry no per-point timestamps, so derive the boundary time as the head's
+        # start plus its (now apportioned) elapsed duration. Without this the tail
+        # inherits the head's start_date and sorts out of order (often *before* the
+        # head, since its negative id wins date ties). start_date columns are stored
+        # as ISO-8601 strings, so parse → shift → re-serialise in the same format.
+        from datetime import datetime, timedelta
+
+        def _shift(iso: str) -> str:
+            if not iso:
+                return iso
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return (dt + timedelta(seconds=head.elapsed_time or 0)) \
+                .isoformat().replace("+00:00", "Z")
+
+        tail.start_date = _shift(head.start_date)
+        tail.start_date_local = _shift(head.start_date_local)
         self._write_track_geometry(tail, tail_points)
 
         # Insert the tail item directly after the head item, renumbering positions.
@@ -783,10 +812,47 @@ class ProjectRepo:
         sess.add(row)
         sess.flush()  # populate row.id
 
+        # 2b. Create people rows, mapping each file person id → new DB id so
+        # encounter items can be re-linked below (issue #40).
+        person_id_map: Dict[int, int] = {}
+        for person in project.people:
+            p_row = DBPerson(
+                project_id=row.id,
+                name=person.name,
+                email=person.email,
+                phone=person.phone,
+                polarsteps=person.polarsteps,
+                notes=person.notes,
+                avatar_photo=person.avatar_photo,
+            )
+            sess.add(p_row)
+            sess.flush()
+            if person.id is not None:
+                person_id_map[person.id] = p_row.id
+
         # 3. Create project_item rows
         for pos, item in enumerate(project.items):
             memory_id: Optional[int] = None
-            if item.item_type == "memory" and item.memory is not None:
+            encounter_id: Optional[int] = None
+            if item.item_type == "encounter" and item.encounter is not None:
+                enc = item.encounter
+                mapped_person = person_id_map.get(enc.person_id) if enc.person_id is not None else None
+                if mapped_person is None:
+                    continue  # orphan encounter (person missing) — skip
+                enc_row = DBEncounter(
+                    project_id=row.id,
+                    person_id=mapped_person,
+                    date=enc.date,
+                    time=enc.time,
+                    description=enc.description,
+                    geo_mode=enc.geo_mode,
+                    lat=enc.lat,
+                    lon=enc.lon,
+                )
+                sess.add(enc_row)
+                sess.flush()
+                encounter_id = enc_row.id
+            elif item.item_type == "memory" and item.memory is not None:
                 # Persist the memory row so we get its DB id
                 mem = item.memory
                 mem_row = DBMemory(
@@ -815,6 +881,7 @@ class ProjectRepo:
                     if item.item_type == "segment" else None
                 ),
                 memory_id=memory_id,
+                encounter_id=encounter_id,
             )
             sess.add(db_item)
 
@@ -907,6 +974,19 @@ class ProjectRepo:
         ).all()
         journal_by_id = {jr.id: self._row_to_journal(jr) for jr in journal_rows}
 
+        # Load people + encounter rows for this project (issue #40)
+        people = [
+            self._row_to_person(pr) for pr in sess.exec(
+                select(DBPerson).where(DBPerson.project_id == row.id)
+                .order_by(DBPerson.id)
+            ).all()
+        ]
+        encounter_by_id = {
+            er.id: self._row_to_encounter(er) for er in sess.exec(
+                select(DBEncounter).where(DBEncounter.project_id == row.id)
+            ).all()
+        }
+
         items: List[ProjectItem] = []
         activities: List[Activity] = []
         memories: List[Memory] = []
@@ -914,6 +994,7 @@ class ProjectRepo:
         seen_ids: set[int] = set()
         seen_memory_ids: set[int] = set()
         seen_journal_ids: set[int] = set()
+        seen_encounter_ids: set[int] = set()
 
         for ir in item_rows:
             if ir.item_type == "activity" and ir.activity_id is not None:
@@ -939,6 +1020,13 @@ class ProjectRepo:
                     items.append(ProjectItem(item_type="journal", journal=jentry))
                     journal_entries.append(jentry)
                     seen_journal_ids.add(ir.journal_id)
+            elif ir.item_type == "encounter" and ir.encounter_id is not None:
+                if ir.encounter_id in seen_encounter_ids:
+                    continue  # deduplicate stale duplicate rows
+                enc = encounter_by_id.get(ir.encounter_id)
+                if enc:
+                    items.append(ProjectItem(item_type="encounter", encounter=enc))
+                    seen_encounter_ids.add(ir.encounter_id)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
@@ -984,6 +1072,7 @@ class ProjectRepo:
             activities=activities,
             memories=memories,
             journal_entries=journal_entries,
+            people=people,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
@@ -1032,6 +1121,11 @@ class ProjectRepo:
                 "journal_id": (
                     item.journal.id
                     if item.item_type == "journal" and item.journal is not None
+                    else None
+                ),
+                "encounter_id": (
+                    item.encounter.id
+                    if item.item_type == "encounter" and item.encounter is not None
                     else None
                 ),
             })
@@ -1127,6 +1221,33 @@ class ProjectRepo:
             time=row.time,
             description=row.description,
             photos=json.loads(row.photos_json or "[]"),
+            geo_mode=row.geo_mode,
+            lat=row.lat,
+            lon=row.lon,
+        )
+
+    @staticmethod
+    def _row_to_person(row: DBPerson) -> Person:
+        return Person(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            email=row.email,
+            phone=row.phone,
+            polarsteps=row.polarsteps,
+            notes=row.notes,
+            avatar_photo=row.avatar_photo,
+        )
+
+    @staticmethod
+    def _row_to_encounter(row: DBEncounter) -> Encounter:
+        return Encounter(
+            id=row.id,
+            project_id=row.project_id,
+            person_id=row.person_id,
+            date=row.date,
+            time=row.time,
+            description=row.description,
             geo_mode=row.geo_mode,
             lat=row.lat,
             lon=row.lon,

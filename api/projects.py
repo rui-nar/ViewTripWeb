@@ -1658,6 +1658,11 @@ def sort_items(
                 t = getattr(item.journal, "time", None) or "00:00"
                 if d:
                     key = f"{d}T{t}"
+            elif item.item_type == "encounter" and item.encounter is not None:
+                d = item.encounter.date
+                t = getattr(item.encounter, "time", None) or "00:00"
+                if d:
+                    key = f"{d}T{t}"
             elif item.item_type == "segment" and item.segment is not None:
                 seg = item.segment
                 # Primary: match segment start → activity end by coordinates.

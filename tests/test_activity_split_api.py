@@ -37,6 +37,8 @@ def _seed(engine):
             elevation_profile_json=json.dumps({"distances_km": dist_km, "elevations_m": _ELEV}),
             start_latlng_json=json.dumps([48.0, 2.0]),
             end_latlng_json=json.dumps([48.0, 2.04]),
+            start_date="2024-06-01T10:00:00Z",
+            start_date_local="2024-06-01T12:00:00Z",
         )
         sess.add(act)
         # Sandwich the activity between two segments to verify item ordering.
@@ -91,6 +93,19 @@ def test_split_distances_sum_to_original(env):
     tail = next(a for i, a in acts.items() if i < 0)
     full = recompute_track_metrics(align_points(polyline_lib.encode(_TRACK), None)).distance
     assert acts[111]["distance"] + tail["distance"] == pytest.approx(full, rel=0.02)
+
+
+def test_split_tail_starts_after_head(env):
+    client, _ = env
+    resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    head = acts[111]
+    tail = next(a for i, a in acts.items() if i < 0)
+    # The tail begins at the split boundary, strictly after the head's start, so
+    # it sorts chronologically after the head (regression: it used to inherit the
+    # head's start_date and sort before it).
+    assert tail["start_date"] > head["start_date"]
+    assert tail["start_date_local"] > head["start_date_local"]
 
 
 def test_split_item_ordering(env):

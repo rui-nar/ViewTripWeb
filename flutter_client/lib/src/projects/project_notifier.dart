@@ -12,6 +12,7 @@ import '../map/polyline_decoder.dart';
 import 'project_filter_mixin.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
+import 'project_people_crud_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
@@ -27,7 +28,7 @@ int progressiveGeoBatchSize(int activityCount) =>
     activityCount <= 8 ? 1 : (activityCount / 8).ceil();
 
 class ProjectNotifier extends ChangeNotifier
-    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectSegmentCrudMixin {
+    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
 
   ProjectNotifier(this._service);
@@ -35,6 +36,7 @@ class ProjectNotifier extends ChangeNotifier
   @override String? projectName;
   @override List<Map<String, dynamic>> activities = [];
   @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
+  @override List<Map<String, dynamic>> people = [];  // trip people directory (#40)
   @override Map<String, dynamic>? geo;
   bool isLoading = false;
   @override String? error;
@@ -322,6 +324,10 @@ class ProjectNotifier extends ChangeNotifier
       final rawItems = details['items'];
       items = rawItems is List
           ? rawItems.cast<Map<String, dynamic>>()
+          : [];
+      final rawPeople = details['people'];
+      people = rawPeople is List
+          ? rawPeople.cast<Map<String, dynamic>>()
           : [];
       final rawDm = details['day_meta'];
       dayMeta = rawDm is Map
@@ -1309,6 +1315,10 @@ class ProjectNotifier extends ChangeNotifier
     final rawItems = details['items'];
     items = rawItems is List
         ? rawItems.cast<Map<String, dynamic>>()
+        : [];
+    final rawPeople = details['people'];
+    people = rawPeople is List
+        ? rawPeople.cast<Map<String, dynamic>>()
         : [];
     final rawDm = details['day_meta'];
     dayMeta = rawDm is Map

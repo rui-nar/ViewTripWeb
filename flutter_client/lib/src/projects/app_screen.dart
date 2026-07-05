@@ -8,12 +8,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
+import 'panel_resize.dart';
+import 'people_screen.dart';
 import 'map_panel.dart';
 import 'project_add_fab.dart';
 import 'image_export.dart';
@@ -48,11 +51,36 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
   bool _isExporting = false;
+
+  // Width of the wide-layout activity panel; drag the divider to resize.
+  static const String _kPanelWidthPref = 'activity_panel_width';
+  double _panelWidth = 280;
+
+  void _onPanelDrag(double dx, double available) {
+    setState(() => _panelWidth = clampPanelWidth(
+          current: _panelWidth,
+          dx: dx,
+          available: available,
+        ));
+  }
+
+  Future<void> _savePanelWidth() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_kPanelWidthPref, _panelWidth);
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ProjectNotifier>().load(widget.projectName);
+    });
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getDouble(_kPanelWidthPref);
+      if (saved != null && mounted) {
+        setState(() => _panelWidth =
+            saved.clamp(kMinPanelWidth, kMaxPanelWidth).toDouble());
+      }
     });
   }
 
@@ -311,6 +339,16 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             ),
           ),
 
+          // People directory (#40)
+          IconButton(
+            tooltip: 'People',
+            icon: const Icon(Icons.groups_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) =>
+                  PeopleScreen(notifier: context.read<ProjectNotifier>()),
+            )),
+          ),
+
           // Filter — always visible
           Consumer<ProjectNotifier>(
             builder: (_, n, __) {
@@ -529,7 +567,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             return Row(
               children: [
                 SizedBox(
-                  width: 280,
+                  width: _panelWidth,
                   child: Consumer<ProjectNotifier>(
                     builder: (_, n, __) => ActivityPanel(
                       notifier: n,
@@ -537,6 +575,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                       scrollController: _activityScrollController,
                     ),
                   ),
+                ),
+                _PanelResizeHandle(
+                  onDrag: (dx) => _onPanelDrag(dx, constraints.maxWidth),
+                  onDragEnd: _savePanelWidth,
                 ),
                 Expanded(
                   child: Stack(
@@ -700,6 +742,36 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         },
       )),
         ],
+      ),
+    );
+  }
+}
+
+/// Thin draggable divider between the activity panel and the map. Drag left/right
+/// to resize the panel; shows a resize cursor on web/desktop.
+class _PanelResizeHandle extends StatelessWidget {
+  final ValueChanged<double> onDrag;
+  final VoidCallback onDragEnd;
+  const _PanelResizeHandle({required this.onDrag, required this.onDragEnd});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) => onDrag(d.delta.dx),
+        onHorizontalDragEnd: (_) => onDragEnd(),
+        child: SizedBox(
+          width: 8,
+          child: Center(
+            child: Container(
+              width: 2,
+              color: cs.outlineVariant,
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -279,8 +279,44 @@ class DBJournalEntry(sqlmodel.SQLModel, table=True):
     lon: Optional[float] = sqlmodel.Field(default=None)
 
 
+class DBPerson(sqlmodel.SQLModel, table=True):
+    """A person met on a trip (issue #40) — owner-only, per-project.
+
+    All identity fields are optional: a person may be just a first name or even
+    "Unknown". Referenced by DBEncounter rows; never exposed in shared views.
+    """
+
+    __tablename__ = "person"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    name: Optional[str] = sqlmodel.Field(default=None)
+    email: Optional[str] = sqlmodel.Field(default=None)
+    phone: Optional[str] = sqlmodel.Field(default=None)
+    polarsteps: Optional[str] = sqlmodel.Field(default=None)  # username or profile URL
+    notes: Optional[str] = sqlmodel.Field(default=None)
+    avatar_photo: Optional[str] = sqlmodel.Field(default=None)  # base UUID filename
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBEncounter(sqlmodel.SQLModel, table=True):
+    """Meeting a person on a given day/place (issue #40) — owner-only, per-project."""
+
+    __tablename__ = "encounter"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    person_id: int = sqlmodel.Field(foreign_key="person.id", index=True)
+    date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
+    time: Optional[str] = sqlmodel.Field(default=None)   # "HH:MM"
+    description: Optional[str] = sqlmodel.Field(default=None)
+    geo_mode: str = sqlmodel.Field(default="start_of_day")
+    lat: Optional[float] = sqlmodel.Field(default=None)
+    lon: Optional[float] = sqlmodel.Field(default=None)
+
+
 class DBProjectItem(sqlmodel.SQLModel, table=True):
-    """One ordered entry in a project — either an activity ref, segment, memory, or journal."""
+    """One ordered entry in a project — an activity ref, segment, memory, journal, or encounter."""
 
     __tablename__ = "projectitem"
 
@@ -288,7 +324,7 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     position: int   # 0-based display order; renumbered on every reorder
 
-    item_type: str  # "activity" | "segment" | "memory"
+    item_type: str  # "activity" | "segment" | "memory" | "journal" | "encounter"
 
     # Populated when item_type == "activity"
     activity_id: Optional[int] = sqlmodel.Field(
@@ -307,6 +343,11 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     # Populated when item_type == "journal"
     journal_id: Optional[int] = sqlmodel.Field(
         default=None, foreign_key="journalentry.id"
+    )
+
+    # Populated when item_type == "encounter"
+    encounter_id: Optional[int] = sqlmodel.Field(
+        default=None, foreign_key="encounter.id"
     )
 
 
