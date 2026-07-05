@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import models.db as db_module
 from api.deps import get_current_user
@@ -149,3 +149,79 @@ def test_delete_local_rejects_strava_id(env):
     # 111 is a real Strava id (>= 0) — must not be row-deleted via this endpoint.
     resp = client.delete("/api/projects/My Trip/activities/111/local")
     assert resp.status_code == 404
+
+
+def _seed_second_project(engine, user_info_id):
+    """Add a second project with its own activity (id 222) for the same user."""
+    with Session(engine) as sess:
+        proj = DBProject(user_info_id=user_info_id, name="Trip Two")
+        sess.add(proj); sess.commit(); sess.refresh(proj)
+        poly = polyline_lib.encode(_TRACK)
+        dist_km = [i * 1.0 for i in range(len(_TRACK))]
+        sess.add(DBActivity(
+            id=222, user_info_id=user_info_id, name="Ride Two", type="Ride",
+            distance=4000.0, moving_time=1000, elapsed_time=1200,
+            total_elevation_gain=60.0, summary_polyline=poly,
+            elevation_profile_json=json.dumps({"distances_km": dist_km, "elevations_m": _ELEV}),
+            start_latlng_json=json.dumps([48.0, 2.0]),
+            end_latlng_json=json.dumps([48.0, 2.04]),
+            start_date="2024-06-01T10:00:00Z",
+            start_date_local="2024-06-01T12:00:00Z",
+        ))
+        sess.add(DBProjectItem(project_id=proj.id, position=0,
+                               item_type="activity", activity_id=222))
+        sess.commit()
+
+
+def test_split_across_projects_allocates_distinct_ids(env):
+    """Regression: tail ids must be globally unique.
+
+    activity.id is a global PK. Allocating the negative tail id from only the
+    current project's items reused -1 in a second project and hit
+    'UNIQUE constraint failed: activity.id' on insert. The second split must
+    now get a distinct id (-2), not collide.
+    """
+    client, engine = env
+    with Session(engine) as sess:
+        uid = sess.exec(select(UserInfo)).first().id   # user seeded by the fixture
+    _seed_second_project(engine, uid)
+
+    r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    assert r1.status_code == 200, r1.text
+    tail1 = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
+    assert tail1 == -1
+
+    r2 = client.post("/api/projects/Trip Two/activities/222/split", json={"split_index": 2})
+    assert r2.status_code == 200, r2.text
+    tail2 = next(i for i in (a["id"] for a in r2.json()["activities"]) if i < 0)
+    assert tail2 == -2                       # distinct global id, no collision
+    assert tail2 != tail1
+
+
+def test_delete_split_item_removes_local_row_and_allows_resplit(env):
+    """Regression: deleting a split tail via the timeline must not orphan its row.
+
+    Removing the tail's item with DELETE /items/{index} used to only unlink the
+    item, leaving the negative-id activity row behind. The next split then reused
+    that id and hit 'UNIQUE constraint failed: activity.id'. Deleting the item
+    must now also delete the local row, so re-splitting succeeds.
+    """
+    client, engine = env
+    r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    tail_id = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
+
+    items = client.get("/api/projects/My Trip").json()["items"]
+    tail_index = next(i for i, it in enumerate(items)
+                      if it["item_type"] == "activity" and (it.get("activity_id") or 0) < 0)
+
+    assert client.delete(f"/api/projects/My Trip/items/{tail_index}").status_code == 204
+
+    # The local row is gone — not merely unlinked.
+    with Session(engine) as sess:
+        assert sess.get(DBActivity, tail_id) is None
+
+    # Re-splitting the same head must succeed (previously collided on the orphan).
+    # The head kept points[:3] from the first split, so split_index=1 is the only
+    # in-range boundary now.
+    r2 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 1})
+    assert r2.status_code == 200, r2.text
