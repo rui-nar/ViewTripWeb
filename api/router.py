@@ -17,6 +17,7 @@ from api.backup import router as backup_router
 from api.geo import router as geo_router
 from api.journal import router as journal_router
 from api.memories import router as memories_router
+from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
 from api.projects import router as projects_router
 from api.share import router as share_router
@@ -83,6 +84,7 @@ app.include_router(backup_router)
 app.include_router(geo_router)
 app.include_router(journal_router)
 app.include_router(memories_router)
+app.include_router(people_router)
 app.include_router(polarsteps_router)
 app.include_router(projects_router)
 app.include_router(share_router)

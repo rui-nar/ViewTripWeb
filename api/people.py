@@ -1,0 +1,303 @@
+"""REST people endpoints — CRUD + avatar for the trip's people directory (#40).
+
+People are private and owner-only — never exposed in shared views. Each person
+belongs to one project and may be referenced by any number of encounters.
+
+Routes:
+    POST   /api/people                         — create a person
+    GET    /api/people/{id}                     — person + their encounters
+    PUT    /api/people/{id}                     — update a person
+    DELETE /api/people/{id}                     — delete a person + their encounters
+    POST   /api/people/{id}/avatar              — upload/replace the avatar photo
+    DELETE /api/people/{id}/avatar              — remove the avatar photo
+    GET    /api/people/{id}/avatar              — serve full-res avatar
+    GET    /api/people/{id}/avatar/thumb        — serve avatar thumbnail
+"""
+from __future__ import annotations
+
+import io
+import os
+import uuid as uuid_lib
+from pathlib import Path
+from typing import Annotated, List, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
+from models.db import get_session
+from PIL import Image
+from pydantic import BaseModel, Field
+from sqlmodel import select
+
+from api.deps import get_current_user
+from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
+
+router = APIRouter(prefix="/api/people", tags=["people"])
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+_THUMB_SIZE = (400, 400)
+
+
+# ── Response schemas ──────────────────────────────────────────────────────────
+
+class IDOut(BaseModel):
+    id: int = Field(description="ID of the newly created person")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _avatar_dir(user_id: str, person_id: int) -> Path:
+    p = Path(_DATA_DIR) / "users" / user_id / "people" / str(person_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _get_owned_person(sess, person_id: int, user_info_id: int) -> DBPerson:
+    row = sess.get(DBPerson, person_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
+    project_row = sess.get(DBProject, row.project_id)
+    if project_row is None or project_row.user_info_id != user_info_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return row
+
+
+def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
+    row = sess.exec(
+        select(DBProject).where(
+            DBProject.user_info_id == user_info_id,
+            DBProject.name == project_name,
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return row.id
+
+
+def _person_out(row: DBPerson) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "email": row.email,
+        "phone": row.phone,
+        "polarsteps": row.polarsteps,
+        "notes": row.notes,
+        "avatar_photo": row.avatar_photo,
+    }
+
+
+def _delete_avatar_files(user_id: str, person_id: int, uuid_str: str) -> None:
+    photo_path = _avatar_dir(user_id, person_id)
+    for suffix in ["", "_thumb"]:
+        (photo_path / f"{uuid_str}{suffix}.jpg").unlink(missing_ok=True)
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+class PersonBody(BaseModel):
+    project_name: str = Field(description="Project the person belongs to")
+    name: Optional[str] = Field(None, description="Display name (optional — may be a first name or 'Unknown')")
+    email: Optional[str] = Field(None)
+    phone: Optional[str] = Field(None)
+    polarsteps: Optional[str] = Field(None, description="Polarsteps username or profile URL")
+    notes: Optional[str] = Field(None)
+
+
+class PersonUpdateBody(BaseModel):
+    name: Optional[str] = Field(None)
+    email: Optional[str] = Field(None)
+    phone: Optional[str] = Field(None)
+    polarsteps: Optional[str] = Field(None)
+    notes: Optional[str] = Field(None)
+
+
+# ── CRUD ─────────────────────────────────────────────────────────────────────
+
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=IDOut,
+             summary="Create a person")
+def create_person(
+    body: PersonBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Create a new person in the project's people directory."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        row = DBPerson(
+            project_id=project_id,
+            name=body.name,
+            email=body.email,
+            phone=body.phone,
+            polarsteps=body.polarsteps,
+            notes=body.notes,
+        )
+        sess.add(row)
+        sess.commit()
+        person_id = row.id
+    return {"id": person_id}
+
+
+@router.get("/{person_id}", summary="Get a person and their encounters")
+def get_person(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return a person plus every encounter (date, place, note) with them."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        encounters = sess.exec(
+            select(DBEncounter)
+            .where(DBEncounter.person_id == person_id)
+            .order_by(DBEncounter.date, DBEncounter.time)
+        ).all()
+        return {
+            **_person_out(row),
+            "encounters": [
+                {
+                    "id": e.id,
+                    "date": e.date,
+                    "time": e.time,
+                    "description": e.description,
+                    "lat": e.lat,
+                    "lon": e.lon,
+                }
+                for e in encounters
+            ],
+        }
+
+
+@router.put("/{person_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Update a person")
+def update_person(
+    person_id: int,
+    body: PersonUpdateBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Update a person's details."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        row.name = body.name
+        row.email = body.email
+        row.phone = body.phone
+        row.polarsteps = body.polarsteps
+        row.notes = body.notes
+        sess.add(row)
+        sess.commit()
+
+
+@router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete a person and their encounters")
+def delete_person(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Delete a person, cascade to their encounters + timeline items, and remove the avatar."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+
+        encounters = sess.exec(
+            select(DBEncounter).where(DBEncounter.person_id == person_id)
+        ).all()
+        enc_ids = [e.id for e in encounters]
+        if enc_ids:
+            for item in sess.exec(
+                select(DBProjectItem).where(DBProjectItem.encounter_id.in_(enc_ids))
+            ).all():
+                sess.delete(item)
+        for e in encounters:
+            sess.delete(e)
+
+        if row.avatar_photo:
+            _delete_avatar_files(current_user["sub"], person_id, row.avatar_photo)
+
+        sess.delete(row)
+        sess.commit()
+
+
+# ── Avatar ────────────────────────────────────────────────────────────────────
+
+@router.post("/{person_id}/avatar", status_code=status.HTTP_201_CREATED,
+             response_model=IDOut, summary="Upload or replace the avatar photo")
+async def upload_avatar(
+    person_id: int,
+    file: Annotated[UploadFile, File()],
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Upload a JPEG avatar; a 400×400 thumbnail is generated. Replaces any existing avatar."""
+    user_info_id = int(current_user["sub"])
+    raw = await file.read()
+    new_uuid = str(uuid_lib.uuid4())
+    photo_path = _avatar_dir(current_user["sub"], person_id)
+    (photo_path / f"{new_uuid}.jpg").write_bytes(raw)
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
+    img.save(str(photo_path / f"{new_uuid}_thumb.jpg"), "JPEG", quality=85)
+
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        old = row.avatar_photo
+        row.avatar_photo = new_uuid
+        sess.add(row)
+        sess.commit()
+    if old:
+        _delete_avatar_files(current_user["sub"], person_id, old)
+    return {"id": person_id}
+
+
+@router.delete("/{person_id}/avatar", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Remove the avatar photo")
+def delete_avatar(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Remove a person's avatar photo and delete its files."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        if row.avatar_photo:
+            _delete_avatar_files(current_user["sub"], person_id, row.avatar_photo)
+            row.avatar_photo = None
+            sess.add(row)
+            sess.commit()
+
+
+@router.get("/{person_id}/avatar", summary="Serve full-resolution avatar")
+def serve_avatar(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return the full-resolution avatar JPEG."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        uuid_str = row.avatar_photo
+    if not uuid_str:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
+    full_path = _avatar_dir(current_user["sub"], person_id) / f"{uuid_str}.jpg"
+    if not full_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(str(full_path), media_type="image/jpeg")
+
+
+@router.get("/{person_id}/avatar/thumb", summary="Serve avatar thumbnail")
+def serve_avatar_thumb(
+    person_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return the 400×400 avatar thumbnail; falls back to full-res if missing."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_person(sess, person_id, user_info_id)
+        uuid_str = row.avatar_photo
+    if not uuid_str:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
+    photo_dir = _avatar_dir(current_user["sub"], person_id)
+    thumb_path = photo_dir / f"{uuid_str}_thumb.jpg"
+    if not thumb_path.exists():
+        full_path = photo_dir / f"{uuid_str}.jpg"
+        if full_path.exists():
+            return FileResponse(str(full_path), media_type="image/jpeg")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(str(thumb_path), media_type="image/jpeg")
