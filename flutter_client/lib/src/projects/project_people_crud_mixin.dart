@@ -226,4 +226,56 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
       notifyListeners();
     }
   }
+
+  // ── Polarsteps: view a person's shared trip (#40 follow-up) ─────────────────
+  // View-only overlay: steps of a followed person's trip, fetched on demand and
+  // rendered on the manage map. Never persisted into the project.
+
+  /// Step points of the currently-displayed Polarsteps trip overlay (each with
+  /// `lat`/`lon`/`date`/`name`), or empty when no overlay is shown.
+  List<Map<String, dynamic>> polarstepsOverlaySteps = [];
+
+  /// Label for the current overlay (e.g. "Alice · Asia 2024"), or null.
+  String? polarstepsOverlayLabel;
+
+  /// Fetch a person's shared Polarsteps trips. Returns null on failure (error set).
+  Future<List<Map<String, dynamic>>?> fetchPersonPolarstepsTrips(
+      int personId) async {
+    try {
+      final res = await api.get('/api/people/$personId/polarsteps/trips');
+      return (res as List).cast<Map<String, dynamic>>();
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Load one trip's steps and show it as the map overlay. Returns false on failure.
+  Future<bool> showPersonPolarstepsTrip(
+      int personId, int tripId, String label) async {
+    try {
+      final res =
+          await api.get('/api/people/$personId/polarsteps/trips/$tripId/steps');
+      final steps = (res as List)
+          .cast<Map<String, dynamic>>()
+          .where((s) => s['lat'] != null && s['lon'] != null)
+          .toList();
+      polarstepsOverlaySteps = steps;
+      polarstepsOverlayLabel = label;
+      notifyListeners();
+      return true;
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void clearPolarstepsOverlay() {
+    if (polarstepsOverlaySteps.isEmpty && polarstepsOverlayLabel == null) return;
+    polarstepsOverlaySteps = [];
+    polarstepsOverlayLabel = null;
+    notifyListeners();
+  }
 }

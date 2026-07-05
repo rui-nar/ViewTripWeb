@@ -1569,7 +1569,7 @@ def delete_item(
         # A split tail is a LOCAL (negative-id) activity owned solely by its
         # timeline item. remove_item only unlinks the item, so without this the
         # row is orphaned in the activity table and its negative id gets reused
-        # by the next split -> UNIQUE constraint failure. Delete the row once no
+        # by the next split → UNIQUE constraint failure. Delete the row once no
         # remaining item references it.
         if (
             removed.item_type == "activity"
