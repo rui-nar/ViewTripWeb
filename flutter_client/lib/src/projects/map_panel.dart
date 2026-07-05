@@ -1735,6 +1735,39 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedJournalMarkers),
             if (_cachedEncounterMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedEncounterMarkers),
+            // Owner-only, view-only Polarsteps trip overlay for a person (#40).
+            if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: [
+                      for (final s in notifier.polarstepsOverlaySteps)
+                        LatLng((s['lat'] as num).toDouble(),
+                            (s['lon'] as num).toDouble()),
+                    ],
+                    color: const Color(0xFF7C3AED),
+                    strokeWidth: 3,
+                  ),
+                ],
+              ),
+              MarkerLayer(
+                markers: [
+                  for (final s in notifier.polarstepsOverlaySteps)
+                    Marker(
+                      point: LatLng((s['lat'] as num).toDouble(),
+                          (s['lon'] as num).toDouble()),
+                      width: 12,
+                      height: 12,
+                      child: const DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Color(0xFF7C3AED),
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
@@ -1798,6 +1831,44 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                   ),
                 ),
               ],
+            ),
+          ),
+        if (notifier.polarstepsOverlaySteps.isNotEmpty)
+          Positioned(
+            top: 12,
+            left: 12,
+            right: 12,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Material(
+                color: const Color(0xFF7C3AED),
+                borderRadius: BorderRadius.circular(20),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 14, right: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.travel_explore,
+                          size: 16, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          notifier.polarstepsOverlayLabel ?? 'Polarsteps trip',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close,
+                            size: 16, color: Colors.white),
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Clear overlay',
+                        onPressed: notifier.clearPolarstepsOverlay,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
       ],

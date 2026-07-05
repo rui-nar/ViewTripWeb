@@ -204,8 +204,15 @@ class _PersonDetailSheet extends StatefulWidget {
 class _PersonDetailSheetState extends State<_PersonDetailSheet> {
   Map<String, dynamic>? _full;
   bool _loading = true;
+  List<Map<String, dynamic>>? _psTrips;
+  bool _psLoading = false;
 
   int get _personId => (widget.person['id'] as num).toInt();
+
+  String? get _psHandle {
+    final h = (_full ?? widget.person)['polarsteps'] as String?;
+    return (h != null && h.trim().isNotEmpty) ? h.trim() : null;
+  }
 
   @override
   void initState() {
@@ -220,6 +227,37 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
       _full = full;
       _loading = false;
     });
+  }
+
+  Future<void> _loadPsTrips() async {
+    setState(() => _psLoading = true);
+    final trips = await widget.notifier.fetchPersonPolarstepsTrips(_personId);
+    if (!mounted) return;
+    setState(() {
+      _psTrips = trips ?? [];
+      _psLoading = false;
+    });
+    if (trips == null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(widget.notifier.error ?? 'Could not load Polarsteps trips'),
+      ));
+    }
+  }
+
+  Future<void> _showTrip(Map<String, dynamic> trip) async {
+    final navigator = Navigator.of(context);
+    final name = personDisplayName(_full ?? widget.person);
+    final label = '$name · ${trip['name'] ?? 'Trip'}';
+    final ok = await widget.notifier.showPersonPolarstepsTrip(
+        _personId, (trip['id'] as num).toInt(), label);
+    if (!mounted) return;
+    if (ok) {
+      navigator.pop(); // close sheet so the overlay is visible on the map
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(widget.notifier.error ?? 'Could not load that trip'),
+      ));
+    }
   }
 
   Future<void> _edit() async {
@@ -343,6 +381,53 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
                 ],
               ),
             ),
+          if (_psHandle != null) ...[
+            const Divider(height: 20),
+            Row(
+              children: [
+                const Icon(Icons.travel_explore_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text('Polarsteps trips', style: theme.textTheme.titleSmall),
+                const Spacer(),
+                if (_psTrips == null)
+                  TextButton(
+                    onPressed: _psLoading ? null : _loadPsTrips,
+                    child: _psLoading
+                        ? const SizedBox(
+                            width: 14, height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Text('Show trips'),
+                  ),
+              ],
+            ),
+            if (_psTrips != null && _psTrips!.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text('No trips visible to you.',
+                    style: theme.textTheme.bodySmall),
+              ),
+            if (_psTrips != null && _psTrips!.isNotEmpty)
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final t in _psTrips!)
+                      ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.map_outlined, size: 18),
+                        title: Text(t['name']?.toString() ?? 'Trip'),
+                        subtitle: Text([
+                          if (t['start_date'] != null) t['start_date'],
+                          if (t['steps_count'] != null)
+                            '${t['steps_count']} steps',
+                        ].join('  •  ')),
+                        trailing: const Icon(Icons.arrow_forward, size: 16),
+                        onTap: () => _showTrip(t),
+                      ),
+                  ],
+                ),
+              ),
+          ],
         ],
       ),
     );
