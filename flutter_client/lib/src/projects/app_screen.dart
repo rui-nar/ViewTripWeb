@@ -16,6 +16,7 @@ import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'panel_resize.dart';
+import 'people_screen.dart';
 import 'map_panel.dart';
 import 'project_add_fab.dart';
 import 'image_export.dart';
@@ -336,6 +337,16 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   visualDensity: VisualDensity.compact,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
+          ),
+
+          // People directory (#40)
+          IconButton(
+            tooltip: 'People',
+            icon: const Icon(Icons.groups_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) =>
+                  PeopleScreen(notifier: context.read<ProjectNotifier>()),
+            )),
           ),
 
           // Filter — always visible
