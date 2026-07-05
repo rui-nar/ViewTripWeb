@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'add_speed_dial.dart';
 import 'day_meta_editor.dart';
+import 'encounter_dialog.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
 
@@ -46,6 +47,18 @@ Widget buildProjectAddFab(BuildContext context, ProjectNotifier notifier) {
           context: context,
           useRootNavigator: true,
           builder: (_) => MemoryDialog(notifier: notifier),
+        ),
+      ),
+      SpeedDialAction(
+        icon: Icons.groups_outlined,
+        label: 'Encounter',
+        onTap: () => showDialog<void>(
+          context: context,
+          useRootNavigator: true,
+          builder: (_) => EncounterDialog(
+            notifier: notifier,
+            initialDate: notifier.activeDayKey(),
+          ),
         ),
       ),
       SpeedDialAction(
