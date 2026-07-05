@@ -812,10 +812,47 @@ class ProjectRepo:
         sess.add(row)
         sess.flush()  # populate row.id
 
+        # 2b. Create people rows, mapping each file person id → new DB id so
+        # encounter items can be re-linked below (issue #40).
+        person_id_map: Dict[int, int] = {}
+        for person in project.people:
+            p_row = DBPerson(
+                project_id=row.id,
+                name=person.name,
+                email=person.email,
+                phone=person.phone,
+                polarsteps=person.polarsteps,
+                notes=person.notes,
+                avatar_photo=person.avatar_photo,
+            )
+            sess.add(p_row)
+            sess.flush()
+            if person.id is not None:
+                person_id_map[person.id] = p_row.id
+
         # 3. Create project_item rows
         for pos, item in enumerate(project.items):
             memory_id: Optional[int] = None
-            if item.item_type == "memory" and item.memory is not None:
+            encounter_id: Optional[int] = None
+            if item.item_type == "encounter" and item.encounter is not None:
+                enc = item.encounter
+                mapped_person = person_id_map.get(enc.person_id) if enc.person_id is not None else None
+                if mapped_person is None:
+                    continue  # orphan encounter (person missing) — skip
+                enc_row = DBEncounter(
+                    project_id=row.id,
+                    person_id=mapped_person,
+                    date=enc.date,
+                    time=enc.time,
+                    description=enc.description,
+                    geo_mode=enc.geo_mode,
+                    lat=enc.lat,
+                    lon=enc.lon,
+                )
+                sess.add(enc_row)
+                sess.flush()
+                encounter_id = enc_row.id
+            elif item.item_type == "memory" and item.memory is not None:
                 # Persist the memory row so we get its DB id
                 mem = item.memory
                 mem_row = DBMemory(
@@ -844,6 +881,7 @@ class ProjectRepo:
                     if item.item_type == "segment" else None
                 ),
                 memory_id=memory_id,
+                encounter_id=encounter_id,
             )
             sess.add(db_item)
 
