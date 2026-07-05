@@ -135,6 +135,19 @@ class ProjectService {
     await api.put('/api/projects/$enc/languages', {'languages': languages});
   }
 
+  /// Fetch a single activity's editable geometry (polyline + elevation pairs).
+  /// GET /api/projects/{name}/activities/{id}/track
+  /// Far smaller than getDetails() — used to open the track editor without
+  /// downloading the whole project.
+  Future<Map<String, dynamic>> getActivityTrack(
+    String name,
+    int activityId,
+  ) async {
+    final enc = Uri.encodeComponent(name);
+    final data = await api.get('/api/projects/$enc/activities/$activityId/track');
+    return data as Map<String, dynamic>;
+  }
+
   /// Replace an activity's track geometry with an edited point list.
   /// PUT /api/projects/{name}/activities/{id}/track
   /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated project.

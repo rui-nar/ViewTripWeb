@@ -76,6 +76,18 @@ class TrackEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Trim to keep points [index]..end (context-menu "keep from here").
+  void trimFrom(int index) {
+    setTrimStart(index);
+    applyTrim();
+  }
+
+  /// Trim to keep points 0..[index] (context-menu "keep up to here").
+  void trimTo(int index) {
+    setTrimEnd(index);
+    applyTrim();
+  }
+
   // ── Add / Remove / Move ────────────────────────────────────────────────────
 
   /// Insert [point] into the segment after vertex [index] (-1 to prepend).

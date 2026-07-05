@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:viewtrip_client/src/map/geo_point.dart';
@@ -65,6 +66,12 @@ Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity) async {
   await tester.pump();
 }
 
+TrackEditorController _controllerOf(WidgetTester tester) {
+  final state = tester.state<State>(find.byType(ActivityEditorPage));
+  // ignore: invalid_use_of_protected_member
+  return (state as dynamic).editorControllerForTest as TrackEditorController;
+}
+
 void main() {
   group('modelForActivity', () {
     test('parses polyline and elevation into aligned points', () {
@@ -82,18 +89,24 @@ void main() {
     });
   });
 
-  testWidgets('renders the tool bar and disabled Save when pristine',
+  testWidgets('renders the Add-points toggle, hint and a disabled Save',
       (tester) async {
     await _pump(tester, _activity());
-    expect(find.text('Trim'), findsOneWidget);
-    expect(find.text('Add'), findsOneWidget);
-    expect(find.text('Remove'), findsOneWidget);
-    expect(find.text('Split'), findsOneWidget);
+    expect(find.text('Add points'), findsOneWidget);
+    expect(find.textContaining('Long-press'), findsOneWidget);
 
-    final save = tester.widget<FilledButton>(
-      find.ancestor(of: find.text('Save'), matching: find.byType(FilledButton)),
+    final save = tester.widget<TextButton>(
+      find.ancestor(of: find.text('Save'), matching: find.byType(TextButton)),
     );
     expect(save.onPressed, isNull); // nothing edited yet
+  });
+
+  testWidgets('toggling Add points flips the hint text', (tester) async {
+    await _pump(tester, _activity());
+    expect(find.textContaining('Long-press'), findsOneWidget);
+    await tester.tap(find.text('Add points'));
+    await tester.pump();
+    expect(find.textContaining('Tap the map to insert'), findsOneWidget);
   });
 
   testWidgets('Reset to Strava only shows for an edited activity',
@@ -105,33 +118,27 @@ void main() {
     expect(find.text('Reset to Strava'), findsOneWidget);
   });
 
-  testWidgets('switching to Remove reveals the Delete point action',
-      (tester) async {
-    await _pump(tester, _activity());
-    expect(find.text('Delete point'), findsNothing);
-    await tester.tap(find.text('Remove'));
-    await tester.pump();
-    expect(find.text('Delete point'), findsOneWidget);
-  });
-
-  testWidgets('Trim tool shows the Apply trim action', (tester) async {
-    await _pump(tester, _activity());
-    expect(find.text('Apply trim'), findsOneWidget);
-  });
-
   testWidgets('an edit via the controller enables Save', (tester) async {
     await _pump(tester, _activity());
-    final state = tester.state<State>(find.byType(ActivityEditorPage));
-    // Drive an edit through the page's controller to enable Save without
-    // depending on map-tile gestures.
-    // ignore: invalid_use_of_protected_member
-    final controller =
-        (state as dynamic).editorControllerForTest as TrackEditorController;
-    controller.removeSelected(0);
+    _controllerOf(tester).removeSelected(0);
     await tester.pump();
-    final save = tester.widget<FilledButton>(
-      find.ancestor(of: find.text('Save'), matching: find.byType(FilledButton)),
+    final save = tester.widget<TextButton>(
+      find.ancestor(of: find.text('Save'), matching: find.byType(TextButton)),
     );
     expect(save.onPressed, isNotNull);
+  });
+
+  testWidgets('removing a point updates the rendered map polyline',
+      (tester) async {
+    await _pump(tester, _activity());
+    PolylineLayer poly() =>
+        tester.widget<PolylineLayer>(find.byType(PolylineLayer));
+    expect(poly().polylines.first.points.length, 4);
+
+    _controllerOf(tester).removeSelected(1);
+    await tester.pump();
+
+    expect(poly().polylines.first.points.length, 3,
+        reason: 'the map polyline should drop the removed vertex');
   });
 }

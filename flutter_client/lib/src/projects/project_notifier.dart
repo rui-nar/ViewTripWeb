@@ -1120,22 +1120,14 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Activity track editing (issue #31) ─────────────────────────────────────
 
-  /// Fetch the full activity dict (with `map.summary_polyline` and
+  /// Fetch a single activity's geometry (with `map.summary_polyline` and
   /// `elevation_profile`) for [activityId] — the editor needs the geometry that
-  /// the lightweight meta/list load omits. Returns null if not found.
+  /// the lightweight meta/list load omits. Uses the per-activity endpoint so the
+  /// editor doesn't download the whole project. Returns null if not found.
   Future<Map<String, dynamic>?> fetchActivityForEdit(int activityId) async {
     final name = projectName;
     if (name == null) return null;
-    final details = await _service.getDetails(name);
-    final raw = details['activities'];
-    if (raw is! List) return null;
-    for (final a in raw) {
-      if (a is Map<String, dynamic> &&
-          (a['id'] as num?)?.toInt() == activityId) {
-        return a;
-      }
-    }
-    return null;
+    return _service.getActivityTrack(name, activityId);
   }
 
   /// Save an edited track (trim/add/remove) for [activityId]. [payload] is

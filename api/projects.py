@@ -1358,6 +1358,35 @@ def _project_contains_activity(project, activity_id: int) -> bool:
     )
 
 
+@router.get("/{name}/activities/{activity_id}/track",
+            summary="Get a single activity's editable geometry")
+def get_activity_track(
+    name: str,
+    activity_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return one activity's editor payload (map.summary_polyline + elevation_profile
+    pairs), so the track editor doesn't download the whole project just to edit a
+    single activity — the full GET /{name} payload is 10-15x larger. Same per-activity
+    shape as GET /{name}.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _repo.get_project(
+            sess, user_info_id, name,
+            legacy_path=_legacy_path(current_user["sub"], name),
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    activity = next((a for a in project.activities if a.id == activity_id), None)
+    if activity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
+    d = activity.to_strava_dict()
+    ep = activity.elevation_profile or getattr(activity, "elevation_profile_low_res", None)
+    d["elevation_profile"] = [list(pair) for pair in zip(ep[0], ep[1])] if ep else None
+    return d
+
+
 @router.put("/{name}/activities/{activity_id}/track",
             summary="Replace an activity's track geometry")
 def edit_activity_track(

@@ -59,6 +59,22 @@ void main() {
       expect(c.points.last.lng, closeTo(2.02, 1e-9));
       expect(c.isDirty, isTrue);
     });
+
+    test('trimFrom keeps index..end (context-menu "keep from here")', () {
+      final c = _controller();
+      c.trimFrom(2);
+      expect(c.points.length, 2);
+      expect(c.points.first.lng, closeTo(2.02, 1e-9));
+      expect(c.points.last.lng, closeTo(2.03, 1e-9));
+    });
+
+    test('trimTo keeps 0..index (context-menu "keep up to here")', () {
+      final c = _controller();
+      c.trimTo(1);
+      expect(c.points.length, 2);
+      expect(c.points.first.lng, closeTo(2.00, 1e-9));
+      expect(c.points.last.lng, closeTo(2.01, 1e-9));
+    });
   });
 
   group('add / remove', () {

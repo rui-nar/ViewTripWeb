@@ -717,12 +717,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
     Map<String, dynamic>? full = activity;
     // Fetch geometry if the panel's copy lacks it (meta load omits the polyline).
     if ((activity['map'] as Map?)?['summary_polyline'] == null) {
+      // Block the panel with a spinner while the fetch runs so the user gets
+      // feedback and can't fire other actions on a half-loaded list.
+      final dialogNav = Navigator.of(context, rootNavigator: true);
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: Colors.black.withValues(alpha: 0.15),
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
       try {
         full = await notifier.fetchActivityForEdit(id);
       } catch (e) {
+        dialogNav.pop();
         messenger.showSnackBar(SnackBar(content: Text('Could not load track: $e')));
         return;
       }
+      dialogNav.pop();
     }
     if (full == null || (full['map'] as Map?)?['summary_polyline'] == null) {
       messenger.showSnackBar(

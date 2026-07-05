@@ -37,6 +37,9 @@ TrackEditModel modelForActivity(Map<String, dynamic> activity) {
   return TrackEditModel.fromEncoded(poly, pairs);
 }
 
+/// Actions offered by the per-point context menu (long-press / right-click).
+enum _PointAction { trimFrom, trimTo, split, delete }
+
 class ActivityEditorPage extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> activity;
@@ -57,6 +60,9 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   final ValueNotifier<double?> _chartCursor = ValueNotifier(null);
 
   bool _saving = false;
+  // When on, tapping the map inserts a point; point-specific edits (trim / split
+  // / delete) are always available via a per-point long-press / right-click menu.
+  bool _addMode = false;
   // Current visible map bounds; drives which vertex handles are materialised.
   LatLngBounds? _bounds;
 
@@ -87,24 +93,6 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
   // ── Map interactions ────────────────────────────────────────────────────
 
-  /// Nearest vertex index to [tap] within a pixel threshold, or null.
-  int? _nearestVertex(LatLng tap) {
-    final pts = _c.points;
-    if (pts.isEmpty) return null;
-    int best = 0;
-    double bestD = double.infinity;
-    for (var i = 0; i < pts.length; i++) {
-      final dLat = pts[i].lat - tap.latitude;
-      final dLng = pts[i].lng - tap.longitude;
-      final d = dLat * dLat + dLng * dLng;
-      if (d < bestD) {
-        bestD = d;
-        best = i;
-      }
-    }
-    return best;
-  }
-
   /// Index of the segment (its start vertex) nearest to [tap], for inserts.
   int _nearestSegment(LatLng tap) {
     final pts = _c.points;
@@ -126,21 +114,75 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   }
 
   void _onMapTap(LatLng tap) {
-    switch (_c.tool) {
-      case EditTool.add:
-        final seg = _nearestSegment(tap);
-        if (seg >= 0) {
-          _c.addPointAfter(seg, EditPoint(tap.latitude, tap.longitude));
-        }
+    if (!_addMode) return;
+    final seg = _nearestSegment(tap);
+    if (seg >= 0) {
+      _c.addPointAfter(seg, EditPoint(tap.latitude, tap.longitude));
+    }
+  }
+
+  /// Per-point context menu (long-press on touch, right-click on web/desktop):
+  /// Trim / Split / Delete for the vertex at [index], anchored at [globalPos].
+  Future<void> _showPointMenu(int index, Offset globalPos) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final last = _c.points.length - 1;
+    final action = await showMenu<_PointAction>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPos.dx,
+        globalPos.dy,
+        overlay.size.width - globalPos.dx,
+        overlay.size.height - globalPos.dy,
+      ),
+      items: [
+        _menuItem(_PointAction.trimFrom, Icons.first_page,
+            'Trim: keep from here', index > 0),
+        _menuItem(_PointAction.trimTo, Icons.last_page,
+            'Trim: keep up to here', index < last),
+        _menuItem(_PointAction.split, Icons.call_split, 'Split here',
+            _c.canSplitAt(index)),
+        const PopupMenuDivider(),
+        _menuItem(_PointAction.delete, Icons.delete_outline, 'Delete point',
+            _c.points.length > 2,
+            color: kAccent),
+      ],
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case _PointAction.trimFrom:
+        _c.trimFrom(index);
         break;
-      case EditTool.remove:
-      case EditTool.split:
-        _c.selectVertex(_nearestVertex(tap));
+      case _PointAction.trimTo:
+        _c.trimTo(index);
         break;
-      case EditTool.trim:
+      case _PointAction.split:
+        await _confirmSplit(index);
+        break;
+      case _PointAction.delete:
+        _c.removeSelected(index);
         break;
     }
   }
+
+  PopupMenuItem<_PointAction> _menuItem(
+    _PointAction value,
+    IconData icon,
+    String label,
+    bool enabled, {
+    Color? color,
+  }) =>
+      PopupMenuItem<_PointAction>(
+        value: value,
+        enabled: enabled,
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 12),
+            Text(label, style: TextStyle(color: color)),
+          ],
+        ),
+      );
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
@@ -246,23 +288,26 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
               onPressed: _saving ? null : _reset,
               icon: const Icon(Icons.restore, size: 18),
               label: const Text('Reset to Strava'),
+              style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: FilledButton(
-              onPressed: (_c.canSave && !_saving) ? _save : null,
-              child: _saving
-                  ? const SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Save'),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: _MetallicSaveButton(
+              enabled: _c.canSave && !_saving,
+              saving: _saving,
+              onPressed: _save,
             ),
           ),
         ],
       ),
       body: Column(
         children: [
-          _ToolBar(controller: _c),
+          _ToolBar(
+            addMode: _addMode,
+            onAddModeChanged: (v) => setState(() => _addMode = v),
+          ),
           Expanded(
             child: Stack(
               children: [
@@ -300,12 +345,6 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
                     MarkerLayer(markers: _buildHandleMarkers()),
                   ],
                 ),
-                if (_c.tool == EditTool.split && _c.selectedIndex != null)
-                  _SplitConfirmBanner(
-                    index: _c.selectedIndex!,
-                    canSplit: _c.canSplitAt(_c.selectedIndex!),
-                    onConfirm: () => _confirmSplit(_c.selectedIndex!),
-                  ),
               ],
             ),
           ),
@@ -328,31 +367,17 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   List<Marker> _buildHandleMarkers() {
     final pts = _c.points;
     final markers = <Marker>[];
-    final tool = _c.tool;
     for (final i in _visibleVertexIndices()) {
-      final selected = _c.selectedIndex == i;
-      final trimEdge = tool == EditTool.trim &&
-          (i == _c.trimStart || i == _c.trimEnd);
-      final handle = _VertexHandle(
-        selected: selected || trimEdge,
-        onTap: () {
-          if (tool == EditTool.remove || tool == EditTool.split) {
-            _c.selectVertex(i);
-          }
-        },
-      );
       markers.add(Marker(
         point: LatLng(pts[i].lat, pts[i].lng),
-        width: 18,
-        height: 18,
-        child: (tool == EditTool.trim)
-            ? handle
-            : Draggable<int>(
-                data: i,
-                feedback: const SizedBox.shrink(),
-                onDragEnd: (_) {},
-                child: handle,
-              ),
+        width: 22,
+        height: 22,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onLongPressStart: (d) => _showPointMenu(i, d.globalPosition),
+          onSecondaryTapDown: (d) => _showPointMenu(i, d.globalPosition),
+          child: const _VertexHandle(),
+        ),
       ));
     }
     return markers;
@@ -399,8 +424,9 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 // ── Tool bar ─────────────────────────────────────────────────────────────────
 
 class _ToolBar extends StatelessWidget {
-  final TrackEditorController controller;
-  const _ToolBar({required this.controller});
+  final bool addMode;
+  final ValueChanged<bool> onAddModeChanged;
+  const _ToolBar({required this.addMode, required this.onAddModeChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -408,47 +434,27 @@ class _ToolBar extends StatelessWidget {
     return Material(
       color: theme.colorScheme.surfaceContainerHighest,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         child: Row(
           children: [
-            SegmentedButton<EditTool>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(
-                    value: EditTool.trim,
-                    icon: Icon(Icons.content_cut, size: 18),
-                    label: Text('Trim')),
-                ButtonSegment(
-                    value: EditTool.add,
-                    icon: Icon(Icons.add_location_alt_outlined, size: 18),
-                    label: Text('Add')),
-                ButtonSegment(
-                    value: EditTool.remove,
-                    icon: Icon(Icons.wrong_location_outlined, size: 18),
-                    label: Text('Remove')),
-                ButtonSegment(
-                    value: EditTool.split,
-                    icon: Icon(Icons.call_split, size: 18),
-                    label: Text('Split')),
-              ],
-              selected: {controller.tool},
-              onSelectionChanged: (s) => controller.tool = s.first,
+            FilterChip(
+              avatar: const Icon(Icons.add_location_alt_outlined, size: 18),
+              label: const Text('Add points'),
+              selected: addMode,
+              showCheckmark: false,
+              selectedColor: kAccentSoft,
+              onSelected: onAddModeChanged,
             ),
-            const Spacer(),
-            if (controller.tool == EditTool.trim)
-              TextButton.icon(
-                onPressed: controller.model.isValid ? controller.applyTrim : null,
-                icon: const Icon(Icons.check, size: 18),
-                label: const Text('Apply trim'),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                addMode
+                    ? 'Tap the map to insert a point'
+                    : 'Long-press or right-click a point to trim, split or delete',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
-            if (controller.tool == EditTool.remove)
-              TextButton.icon(
-                onPressed: controller.selectedIndex != null
-                    ? () => controller.removeSelected()
-                    : null,
-                icon: const Icon(Icons.delete_outline, size: 18),
-                label: const Text('Delete point'),
-              ),
+            ),
           ],
         ),
       ),
@@ -457,17 +463,16 @@ class _ToolBar extends StatelessWidget {
 }
 
 class _VertexHandle extends StatelessWidget {
-  final bool selected;
-  final VoidCallback onTap;
-  const _VertexHandle({required this.selected, required this.onTap});
+  const _VertexHandle();
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
+    return Center(
       child: Container(
+        width: 14,
+        height: 14,
         decoration: BoxDecoration(
-          color: selected ? kAccent : Colors.white,
+          color: Colors.white,
           shape: BoxShape.circle,
           border: Border.all(color: kAccent, width: 2),
         ),
@@ -476,40 +481,43 @@ class _VertexHandle extends StatelessWidget {
   }
 }
 
-class _SplitConfirmBanner extends StatelessWidget {
-  final int index;
-  final bool canSplit;
-  final VoidCallback onConfirm;
-  const _SplitConfirmBanner({
-    required this.index,
-    required this.canSplit,
-    required this.onConfirm,
+// ── Save button (metallic, per design system) ────────────────────────────────
+
+class _MetallicSaveButton extends StatelessWidget {
+  final bool enabled;
+  final bool saving;
+  final VoidCallback onPressed;
+
+  const _MetallicSaveButton({
+    required this.enabled,
+    required this.saving,
+    required this.onPressed,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Positioned(
-      left: 12,
-      right: 12,
-      bottom: 12,
-      child: Material(
-        elevation: 4,
+    final cs = Theme.of(context).colorScheme;
+    final fg = enabled ? Colors.white : cs.onSurfaceVariant;
+    return DecoratedBox(
+      decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(canSplit
-                    ? 'Split here (point ${index + 1})?'
-                    : 'Pick an interior point to split'),
-              ),
-              FilledButton(
-                onPressed: canSplit ? onConfirm : null,
-                child: const Text('Split'),
-              ),
-            ],
-          ),
+        gradient: enabled ? metallicBlue(Theme.of(context).brightness) : null,
+        color: enabled ? null : cs.surfaceContainerHighest,
+      ),
+      child: TextButton.icon(
+        onPressed: enabled ? onPressed : null,
+        icon: saving
+            ? SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: fg),
+              )
+            : Icon(Icons.check, size: 17, color: fg),
+        label: Text('Save',
+            style: TextStyle(color: fg, fontWeight: FontWeight.w600)),
+        style: TextButton.styleFrom(
+          minimumSize: const Size(0, 36),
+          padding: const EdgeInsets.symmetric(horizontal: 16),
         ),
       ),
     );

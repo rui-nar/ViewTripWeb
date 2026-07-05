@@ -73,6 +73,33 @@ def _find_act(body, aid=111):
     return next(a for a in body["activities"] if a["id"] == aid)
 
 
+def test_get_activity_track_returns_editor_payload(env):
+    client, _ = env
+    resp = client.get("/api/projects/My Trip/activities/111/track")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == 111
+    assert body["is_edited"] is False
+    # Geometry the editor needs is present.
+    assert body["map"]["summary_polyline"] == polyline_lib.encode(_TRACK)
+    # elevation_profile is the [[dist_km, elev_m], ...] pair form, not the
+    # {distances_km, elevations_m} storage form.
+    ep = body["elevation_profile"]
+    assert isinstance(ep, list) and ep[0] == [0.0, 100.0]
+
+
+def test_get_activity_track_unknown_activity_is_404(env):
+    client, _ = env
+    resp = client.get("/api/projects/My Trip/activities/999/track")
+    assert resp.status_code == 404
+
+
+def test_get_activity_track_unknown_project_is_404(env):
+    client, _ = env
+    resp = client.get("/api/projects/No Such Trip/activities/111/track")
+    assert resp.status_code == 404
+
+
 def test_trim_reduces_distance_and_sets_edited(env):
     client, engine = env
     # Trim to the first three points.
