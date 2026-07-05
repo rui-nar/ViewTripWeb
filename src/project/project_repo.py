@@ -540,16 +540,16 @@ class ProjectRepo:
         head_points = points[: split_index + 1]
         tail_points = points[split_index:]
 
-        # Allocate the next free negative id for this project's activities.
-        existing_ids = [
-            r.activity_id for r in sess.exec(
-                select(DBProjectItem).where(
-                    DBProjectItem.project_id == project_id,
-                    DBProjectItem.item_type == "activity",
-                )
-            ).all() if r.activity_id is not None
-        ]
-        tail_id = min([0, *existing_ids]) - 1
+        # Allocate the next free negative id. activity.id is a GLOBAL primary key,
+        # and split tails are LOCAL rows keyed by negative id. Scanning only this
+        # project's timeline items is unsafe: a previously-split tail whose item
+        # was removed from the timeline leaves the activity row orphaned (see
+        # delete_item / remove_item — they unlink the item but do not delete the
+        # row), so this project's items no longer reference it and the id gets
+        # reused → INSERT collides (UNIQUE constraint failed: activity.id). Derive
+        # the next id from the activity table itself, which sees orphans too.
+        global_min = sess.exec(select(func.min(DBActivity.id))).one()
+        tail_id = min(0, global_min or 0) - 1
 
         # Create the tail row copying the head's metadata.
         tail = DBActivity(
