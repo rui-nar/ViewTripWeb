@@ -9,10 +9,13 @@ import 'package:provider/provider.dart';
 import '../core/design_tokens.dart';
 import 'activity_editor_page.dart';
 import 'day_meta_editor.dart';
+import 'encounter_dialog.dart';
 import 'journal_detail_modal.dart';
 import 'journal_dialog.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
+import 'people_screen.dart';
+import 'people_search.dart';
 import 'project_notifier.dart';
 import 'segment_dialog.dart';
 // ── ActivityPanel ─────────────────────────────────────────────────────────────
@@ -294,6 +297,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         d = item['memory']?['date'] as String? ?? lastDate;
       } else if (item['item_type'] == 'journal') {
         d = item['journal']?['date'] as String? ?? lastDate;
+      } else if (item['item_type'] == 'encounter') {
+        d = item['encounter']?['date'] as String? ?? lastDate;
       } else {
         d = item['segment']?['date'] as String? ?? lastDate;
       }
@@ -849,6 +854,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.groups_outlined),
+              title: const Text('Encounter'),
+              subtitle: const Text('Someone you met'),
+              onTap: () {
+                Navigator.of(context).pop();
+                showDialog<void>(
+                  context: context,
+                  useRootNavigator: true,
+                  builder: (_) => EncounterDialog(
+                    notifier: notifier,
+                    initialDate: initialDate,
+                    insertAfterIndex: insertAfterIndex,
+                  ),
+                );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.route_outlined),
               title: const Text('Transportation'),
               onTap: () {
@@ -863,6 +885,109 @@ class _ActivityPanelState extends State<ActivityPanel> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Resolve the person map for an encounter's person_id from the loaded people.
+  Map<String, dynamic>? _personFor(int? personId) {
+    if (personId == null) return null;
+    for (final p in widget.notifier.people) {
+      if (p['id'] == personId) return p;
+    }
+    return null;
+  }
+
+  /// Timeline tile for an encounter item (issue #40): person avatar + name +
+  /// note; edit via swipe/tap, delete via swipe/button.
+  Widget _encounterTile(
+    BuildContext context,
+    ProjectNotifier notifier,
+    ThemeData theme,
+    Map<String, dynamic> item,
+    bool isWide,
+  ) {
+    final enc = item['encounter'] as Map<String, dynamic>? ?? {};
+    final encId = enc['id']?.toString() ?? '';
+    final person = _personFor((enc['person_id'] as num?)?.toInt());
+    final name = person != null ? personDisplayName(person) : 'Someone';
+    final date = enc['date'] as String?;
+    final time = enc['time'] as String?;
+    final note = enc['description'] as String?;
+    final label = date != null ? _fmtMemDate(date, time) : 'Encounter';
+
+    void openEdit() => showDialog<void>(
+          context: context,
+          useRootNavigator: true,
+          builder: (_) => EncounterDialog(notifier: notifier, editEntry: enc),
+        );
+
+    return _rowDismissible(
+      isWide: isWide,
+      key: ValueKey('encounter_$encId'),
+      direction: DismissDirection.horizontal,
+      background: Container(
+        color: const Color(0xFF1D4ED8),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: const Icon(Icons.edit_outlined, color: Colors.white),
+      ),
+      secondaryBackground: Container(
+        color: theme.colorScheme.error,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: Icon(Icons.delete_outline, color: theme.colorScheme.onError),
+      ),
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          openEdit();
+          return false;
+        }
+        _dismissWithUndo(
+          context: context,
+          notifier: notifier,
+          label: 'Removed encounter with "$name"',
+          onOptimistic: () => notifier.items.removeWhere((it) =>
+              it['item_type'] == 'encounter' &&
+              it['encounter']?['id']?.toString() == encId),
+          onConfirm: () => notifier.deleteEncounter(encId),
+        );
+        return true;
+      },
+      child: ListTile(
+        dense: true,
+        leading: person != null
+            ? PersonAvatar(notifier: notifier, person: person, radius: 16)
+            : const CircleAvatar(radius: 16, child: Icon(Icons.person, size: 18)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Met $name',
+                style: theme.textTheme.labelSmall,
+                overflow: TextOverflow.ellipsis),
+            Text(
+              note != null && note.isNotEmpty ? '$label  •  $note' : label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.edit_outlined, size: 15),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: openEdit,
+        ),
+        onTap: _multiSelect
+            ? null
+            : () {
+                if (person != null) {
+                  showPersonDetailSheet(context, notifier, person);
+                }
+              },
       ),
     );
   }
@@ -933,6 +1058,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
             d = item['memory']?['date'] as String?;
           } else if (item['item_type'] == 'journal') {
             d = item['journal']?['date'] as String?;
+          } else if (item['item_type'] == 'encounter') {
+            d = item['encounter']?['date'] as String?;
           } else {
             d = item['segment']?['date'] as String?;
           }
@@ -1730,6 +1857,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             ),
                           ),
                         );
+                      } else if (item['item_type'] == 'encounter') {
+                        return _encounterTile(context, notifier, theme, item, isWide);
                       } else {
                         // Segment item
                         final seg =
