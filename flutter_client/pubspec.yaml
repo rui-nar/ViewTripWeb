@@ -54,6 +54,9 @@ dependencies:
   flutter_map_animations: ^0.10.0
   latlong2: ^0.9.1
   fl_chart: ^1.2.0
+
+  # Device location — encounter location picker defaults to current position
+  geolocator: ^13.0.1
   vector_map_tiles: 9.0.0-beta.9
   vector_tile_renderer: ^6.0.0
 
