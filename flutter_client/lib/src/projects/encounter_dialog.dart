@@ -4,6 +4,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../core/current_location.dart';
 import '../core/design_tokens.dart';
 import 'location_picker_dialog.dart';
 import 'people_search.dart';
@@ -35,10 +36,10 @@ class _EncounterDialogState extends State<EncounterDialog> {
   int? _personId;
   DateTime? _date;
   TimeOfDay? _time;
-  String _geoMode = 'start_of_day';
-  double? _customLat;
-  double? _customLon;
+  double? _lat;
+  double? _lon;
   bool _saving = false;
+  bool _locating = false;
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -68,9 +69,13 @@ class _EncounterDialogState extends State<EncounterDialog> {
           );
         }
       }
-      _geoMode = e['geo_mode'] as String? ?? 'start_of_day';
-      _customLat = (e['lat'] as num?)?.toDouble();
-      _customLon = (e['lon'] as num?)?.toDouble();
+      _lat = (e['lat'] as num?)?.toDouble();
+      _lon = (e['lon'] as num?)?.toDouble();
+    } else {
+      // New encounter: default the time to now and pre-select the device's
+      // current position as the location (the user can still adjust it).
+      _time = TimeOfDay.now();
+      _fetchDeviceLocation();
     }
   }
 
@@ -80,26 +85,39 @@ class _EncounterDialogState extends State<EncounterDialog> {
     super.dispose();
   }
 
+  Future<void> _fetchDeviceLocation() async {
+    setState(() => _locating = true);
+    final here = await currentDeviceLatLng();
+    if (!mounted) return;
+    setState(() {
+      if (here != null && _lat == null && _lon == null) {
+        _lat = here.latitude;
+        _lon = here.longitude;
+      }
+      _locating = false;
+    });
+  }
+
   Future<void> _createPersonInline() async {
     final newId = await showPersonFormDialog(context, widget.notifier);
     if (newId != null && mounted) setState(() => _personId = newId);
   }
 
-  Future<void> _pickCustomLocation() async {
+  Future<void> _pickLocation() async {
     final result = await showDialog<LatLonResult>(
       context: context,
       useRootNavigator: true,
       builder: (_) => LocationPickerDialog(
         title: 'Pick encounter location',
-        initialLat: _customLat,
-        initialLon: _customLon,
+        initialLat: _lat,
+        initialLon: _lon,
         geo: widget.notifier.geo,
       ),
     );
     if (result != null && mounted) {
       setState(() {
-        _customLat = result.lat;
-        _customLon = result.lon;
+        _lat = result.lat;
+        _lon = result.lon;
       });
     }
   }
@@ -122,8 +140,6 @@ class _EncounterDialogState extends State<EncounterDialog> {
     final dateStr = _toIso(_date!);
     final timeStr = _time != null ? _fmtTime(_time!) : null;
     final desc = _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim();
-    final lat = _geoMode == 'custom' ? _customLat : null;
-    final lon = _geoMode == 'custom' ? _customLon : null;
 
     final e = widget.editEntry;
     if (e != null) {
@@ -131,21 +147,21 @@ class _EncounterDialogState extends State<EncounterDialog> {
         e['id'].toString(),
         personId: _personId!,
         date: dateStr,
-        geoMode: _geoMode,
+        geoMode: 'custom',
         time: timeStr,
         description: desc,
-        lat: lat,
-        lon: lon,
+        lat: _lat,
+        lon: _lon,
       );
     } else {
       await widget.notifier.createEncounter(
         personId: _personId!,
         date: dateStr,
-        geoMode: _geoMode,
+        geoMode: 'custom',
         time: timeStr,
         description: desc,
-        lat: lat,
-        lon: lon,
+        lat: _lat,
+        lon: _lon,
         insertAfterIndex: widget.insertAfterIndex,
       );
     }
@@ -281,29 +297,19 @@ class _EncounterDialogState extends State<EncounterDialog> {
               const SizedBox(height: 16),
               Text('Location', style: theme.textTheme.labelMedium),
               const SizedBox(height: 6),
-              SizedBox(
-                width: double.infinity,
-                child: SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'start_of_day', label: Text('Start of day')),
-                    ButtonSegment(value: 'end_of_day',   label: Text('End of day')),
-                    ButtonSegment(value: 'custom',        label: Text('Custom')),
-                  ],
-                  selected: {_geoMode},
-                  onSelectionChanged: (s) => setState(() => _geoMode = s.first),
-                  multiSelectionEnabled: false,
-                ),
+              OutlinedButton.icon(
+                icon: _locating
+                    ? const SizedBox(
+                        width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.location_on_outlined, size: 16),
+                label: Text(_locating
+                    ? 'Getting your location…'
+                    : _lat == null
+                        ? 'Pick on map'
+                        : '${_lat!.toStringAsFixed(5)}, ${_lon!.toStringAsFixed(5)}'),
+                onPressed: _pickLocation,
               ),
-              if (_geoMode == 'custom') ...[
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.location_on_outlined, size: 16),
-                  label: Text(_customLat == null
-                      ? 'Pick on map'
-                      : '${_customLat!.toStringAsFixed(5)}, ${_customLon!.toStringAsFixed(5)}'),
-                  onPressed: _pickCustomLocation,
-                ),
-              ],
             ],
           ),
         ),
