@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 import uuid
 import zipfile
@@ -281,10 +282,44 @@ def _enrich_pending_background(
     _enrich_activities_background(pending_ids, user_info_id, project_name)
 
 
+# ── Coalesced background stats refresh (issue #45) ──────────────────────────────
+# Every track mutation (edit/split/trim/…) queues a stats refresh, which recomputes
+# and writes DBProject.stats_json. A rapid burst (delete→save→delete→save) used to
+# stack one concurrent writer per save; on SQLite (single writer) those commits
+# serialise behind each other and behind the next save's own commit via
+# busy_timeout (30 s), so a save could wait the full window and fail with
+# "database is locked". Since only the *latest* project state matters, we coalesce
+# per project: at most one refresh runs at a time, and saves that arrive while one
+# is in flight set a "rerun" flag so the final state is still captured exactly once.
+_stats_refresh_lock = threading.Lock()
+_stats_refresh_state: Dict[tuple, Dict[str, bool]] = {}
+
+
 def _refresh_stats_background(user_info_id: int, project_name: str) -> None:
-    """Background task: open a fresh session and recompute project stats."""
-    with get_session() as sess:
-        _repo.compute_and_cache_stats(sess, user_info_id, project_name)
+    """Recompute project stats, coalescing concurrent refreshes per project.
+
+    If a refresh for this project is already running, mark it dirty and return
+    immediately (no second concurrent SQLite writer); the in-flight refresh reruns
+    once more when it finishes so the newest edit is always reflected.
+    """
+    key = (user_info_id, project_name)
+    with _stats_refresh_lock:
+        state = _stats_refresh_state.setdefault(key, {"running": False, "dirty": False})
+        if state["running"]:
+            state["dirty"] = True
+            return
+        state["running"] = True
+    try:
+        while True:
+            with get_session() as sess:
+                _repo.compute_and_cache_stats(sess, user_info_id, project_name)
+            with _stats_refresh_lock:
+                if not _stats_refresh_state[key]["dirty"]:
+                    break
+                _stats_refresh_state[key]["dirty"] = False
+    finally:
+        with _stats_refresh_lock:
+            _stats_refresh_state[key]["running"] = False
 
 
 def _compute_segment_geometry(
