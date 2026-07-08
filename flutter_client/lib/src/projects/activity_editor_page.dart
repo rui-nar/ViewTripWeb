@@ -57,6 +57,8 @@ class ActivityEditorPage extends StatefulWidget {
 class _ActivityEditorPageState extends State<ActivityEditorPage> {
   late final TrackEditorController _c;
   final MapController _map = MapController();
+  // Anchors screen→LatLng conversions for vertex drags to the map's own box.
+  final GlobalKey _mapKey = GlobalKey();
   final ValueNotifier<double?> _chartCursor = ValueNotifier(null);
 
   bool _saving = false;
@@ -65,6 +67,24 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   bool _addMode = false;
   // Current visible map bounds; drives which vertex handles are materialised.
   LatLngBounds? _bounds;
+  // Live drag state: the vertex being dragged and its provisional position, so
+  // the handle and its adjacent polyline segments follow the finger before the
+  // move is committed on drop via [TrackEditorController.moveVertex]. The drag is
+  // driven by raw pointer events (a [Listener]) rather than a pan gesture so it
+  // wins over flutter_map's own scale/drag recognizer; the map is locked for the
+  // duration so it can't pan underneath the moving vertex.
+  int? _dragIndex;
+  LatLng? _dragLatLng;
+  int? _dragPointer;
+  Offset? _dragStartGlobal;
+  bool _dragging = false;
+  // True while a pointer is down on a vertex handle: disables map interaction so
+  // grabbing a vertex never pans/zooms the map.
+  bool _mapLocked = false;
+
+  // Distance (logical px) a pointer must travel before a press becomes a drag,
+  // so a stationary long-press still opens the context menu instead of moving.
+  static const double _dragSlop = 8;
 
   int get _activityId => (widget.activity['id'] as num).toInt();
   bool get _isEdited => widget.activity['is_edited'] == true;
@@ -118,6 +138,55 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final seg = _nearestSegment(tap);
     if (seg >= 0) {
       _c.addPointAfter(seg, EditPoint(tap.latitude, tap.longitude));
+    }
+  }
+
+  // ── Vertex drag (issue #36) ──────────────────────────────────────────────
+
+  /// Convert a drag's global position to a map [LatLng] using the map camera.
+  /// Coordinates are taken relative to the map's own render box so the marker's
+  /// tiny handle box does not skew the unprojection.
+  LatLng? _globalToLatLng(Offset globalPos) {
+    final box = _mapKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return null;
+    return _map.camera.offsetToCrs(box.globalToLocal(globalPos));
+  }
+
+  void _onVertexPointerDown(int index, PointerDownEvent e) {
+    _dragPointer = e.pointer;
+    _dragStartGlobal = e.position;
+    _dragIndex = index;
+    _dragging = false;
+    // Lock the map immediately so it cannot pan out from under a grabbed vertex.
+    setState(() => _mapLocked = true);
+  }
+
+  void _onVertexPointerMove(PointerMoveEvent e) {
+    if (e.pointer != _dragPointer || _dragIndex == null) return;
+    if (!_dragging) {
+      if ((e.position - _dragStartGlobal!).distance < _dragSlop) return;
+      _dragging = true; // crossed the slop → this is a drag, not a long-press
+    }
+    final ll = _globalToLatLng(e.position);
+    if (ll == null) return;
+    setState(() => _dragLatLng = ll);
+  }
+
+  void _onVertexPointerUp(PointerEvent e) {
+    if (e.pointer != _dragPointer) return;
+    final index = _dragIndex;
+    final ll = _dragLatLng;
+    final moved = _dragging;
+    _dragPointer = null;
+    _dragStartGlobal = null;
+    _dragging = false;
+    setState(() {
+      _mapLocked = false;
+      _dragIndex = null;
+      _dragLatLng = null;
+    });
+    if (moved && index != null && ll != null) {
+      _c.moveVertex(index, ll.latitude, ll.longitude);
     }
   }
 
@@ -179,7 +248,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
           children: [
             Icon(icon, size: 18, color: color),
             const SizedBox(width: 12),
-            Text(label, style: TextStyle(color: color)),
+            Flexible(
+              child: Text(
+                label,
+                style: TextStyle(color: color),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
       );
@@ -273,7 +348,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final pts = _c.points;
-    final polyline = [for (final p in pts) LatLng(p.lat, p.lng)];
+    // Live-preview the dragged vertex so its adjacent segments follow the finger.
+    final polyline = [
+      for (var i = 0; i < pts.length; i++)
+        (i == _dragIndex && _dragLatLng != null)
+            ? _dragLatLng!
+            : LatLng(pts[i].lat, pts[i].lng),
+    ];
     final center = polyline.isNotEmpty ? polyline.first : const LatLng(0, 0);
 
     return Scaffold(
@@ -312,13 +393,17 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
             child: Stack(
               children: [
                 FlutterMap(
+                  key: _mapKey,
                   mapController: _map,
                   options: MapOptions(
                     initialCenter: center,
                     initialZoom: 12,
-                    interactionOptions: const InteractionOptions(
-                      flags:
-                          InteractiveFlag.all & ~InteractiveFlag.rotate,
+                    interactionOptions: InteractionOptions(
+                      // Locked while a vertex is being dragged so the map can't
+                      // pan/zoom out from under the grabbed handle.
+                      flags: _mapLocked
+                          ? InteractiveFlag.none
+                          : InteractiveFlag.all & ~InteractiveFlag.rotate,
                     ),
                     onTap: (_, latlng) => _onMapTap(latlng),
                     onPositionChanged: (camera, _) =>
@@ -368,15 +453,25 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final pts = _c.points;
     final markers = <Marker>[];
     for (final i in _visibleVertexIndices()) {
+      final point = (i == _dragIndex && _dragLatLng != null)
+          ? _dragLatLng!
+          : LatLng(pts[i].lat, pts[i].lng);
       markers.add(Marker(
-        point: LatLng(pts[i].lat, pts[i].lng),
+        point: point,
         width: 22,
         height: 22,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) => _showPointMenu(i, d.globalPosition),
-          onSecondaryTapDown: (d) => _showPointMenu(i, d.globalPosition),
-          child: const _VertexHandle(),
+        child: Listener(
+          key: ValueKey('vertex_$i'),
+          onPointerDown: (e) => _onVertexPointerDown(i, e),
+          onPointerMove: _onVertexPointerMove,
+          onPointerUp: _onVertexPointerUp,
+          onPointerCancel: _onVertexPointerUp,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPressStart: (d) => _showPointMenu(i, d.globalPosition),
+            onSecondaryTapDown: (d) => _showPointMenu(i, d.globalPosition),
+            child: const _VertexHandle(),
+          ),
         ),
       ));
     }
