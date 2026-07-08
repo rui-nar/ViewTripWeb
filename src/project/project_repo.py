@@ -34,7 +34,7 @@ from src.models.activity import Activity
 from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
-from src.models.person import Person
+from src.models.person import Person, polarsteps_from_socials
 from src.models.project import (
     ConnectingSegment,
     Counter,
@@ -821,9 +821,14 @@ class ProjectRepo:
                 name=person.name,
                 email=person.email,
                 phone=person.phone,
-                polarsteps=person.polarsteps,
+                # Mirror the polarsteps handle out of socials so the shared-trip
+                # view keeps working; fall back to any legacy standalone value.
+                polarsteps=polarsteps_from_socials(person.socials) or person.polarsteps,
                 notes=person.notes,
                 avatar_photo=person.avatar_photo,
+                socials_json=json.dumps(person.socials) if person.socials else None,
+                nationalities_json=json.dumps(person.nationalities) if person.nationalities else None,
+                residence=person.residence,
             )
             sess.add(p_row)
             sess.flush()
@@ -1237,6 +1242,9 @@ class ProjectRepo:
             polarsteps=row.polarsteps,
             notes=row.notes,
             avatar_photo=row.avatar_photo,
+            socials=json.loads(row.socials_json) if row.socials_json else [],
+            nationalities=json.loads(row.nationalities_json) if row.nationalities_json else [],
+            residence=row.residence,
         )
 
     @staticmethod

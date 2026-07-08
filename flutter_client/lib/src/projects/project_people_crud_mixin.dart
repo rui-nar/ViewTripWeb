@@ -26,8 +26,10 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     String? name,
     String? email,
     String? phone,
-    String? polarsteps,
     String? notes,
+    List<Map<String, String>>? socials,
+    List<String>? nationalities,
+    String? residence,
   }) async {
     final projectName = this.projectName;
     if (projectName == null) return null;
@@ -37,8 +39,10 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         if (name != null) 'name': name,
         if (email != null) 'email': email,
         if (phone != null) 'phone': phone,
-        if (polarsteps != null) 'polarsteps': polarsteps,
         if (notes != null) 'notes': notes,
+        if (socials != null) 'socials': socials,
+        if (nationalities != null) 'nationalities': nationalities,
+        if (residence != null) 'residence': residence,
       });
       await reloadDetailsOnly(projectName);
       return (res as Map)['id'] as int?;
@@ -54,8 +58,10 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     String? name,
     String? email,
     String? phone,
-    String? polarsteps,
     String? notes,
+    List<Map<String, String>>? socials,
+    List<String>? nationalities,
+    String? residence,
   }) async {
     final projectName = this.projectName;
     if (projectName == null) return;
@@ -64,13 +70,28 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         'name': name,
         'email': email,
         'phone': phone,
-        'polarsteps': polarsteps,
         'notes': notes,
+        'socials': socials,
+        'nationalities': nationalities,
+        'residence': residence,
       });
       await reloadDetailsOnly(projectName);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
+    }
+  }
+
+  /// City autocomplete for the residence field — proxied through the server's
+  /// Nominatim endpoint. Returns [] on failure or a too-short query.
+  Future<List<String>> searchPlaces(String query) async {
+    final q = query.trim();
+    if (q.length < 2) return [];
+    try {
+      final res = await api.get('/api/geo/places?q=${Uri.encodeQueryComponent(q)}');
+      return (res as List).cast<String>();
+    } on Exception {
+      return [];
     }
   }
 

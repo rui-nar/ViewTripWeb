@@ -16,6 +16,7 @@ Routes:
 from __future__ import annotations
 
 import io
+import json
 import os
 import uuid as uuid_lib
 from pathlib import Path
@@ -38,6 +39,7 @@ from api.polarsteps import (
 )
 from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
 from src.api.polarsteps_client import format_step, format_trip
+from src.models.person import polarsteps_from_socials
 
 router = APIRouter(prefix="/api/people", tags=["people"])
 
@@ -81,6 +83,10 @@ def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
     return row.id
 
 
+def _loads_list(raw: str | None) -> list:
+    return json.loads(raw) if raw else []
+
+
 def _person_out(row: DBPerson) -> dict:
     return {
         "id": row.id,
@@ -90,6 +96,9 @@ def _person_out(row: DBPerson) -> dict:
         "polarsteps": row.polarsteps,
         "notes": row.notes,
         "avatar_photo": row.avatar_photo,
+        "socials": _loads_list(row.socials_json),
+        "nationalities": _loads_list(row.nationalities_json),
+        "residence": row.residence,
     }
 
 
@@ -117,13 +126,21 @@ def _parse_ps_username(raw: str | None) -> str | None:
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+class SocialLink(BaseModel):
+    network: str = Field(description="e.g. instagram, facebook, polarsteps, strava")
+    handle: str = Field(description="Username or profile URL on that network")
+
+
 class PersonBody(BaseModel):
     project_name: str = Field(description="Project the person belongs to")
     name: Optional[str] = Field(None, description="Display name (optional — may be a first name or 'Unknown')")
     email: Optional[str] = Field(None)
     phone: Optional[str] = Field(None)
-    polarsteps: Optional[str] = Field(None, description="Polarsteps username or profile URL")
+    polarsteps: Optional[str] = Field(None, description="Legacy; superseded by a 'polarsteps' entry in socials")
     notes: Optional[str] = Field(None)
+    socials: Optional[List[SocialLink]] = Field(None, description="Social links; the 'polarsteps' entry drives the shared-trip view")
+    nationalities: Optional[List[str]] = Field(None, description="ISO 3166-1 alpha-2 country codes")
+    residence: Optional[str] = Field(None, description="'city, country' where they live")
 
 
 class PersonUpdateBody(BaseModel):
@@ -132,6 +149,28 @@ class PersonUpdateBody(BaseModel):
     phone: Optional[str] = Field(None)
     polarsteps: Optional[str] = Field(None)
     notes: Optional[str] = Field(None)
+    socials: Optional[List[SocialLink]] = Field(None)
+    nationalities: Optional[List[str]] = Field(None)
+    residence: Optional[str] = Field(None)
+
+
+def _apply_person_fields(row: DBPerson, body: "PersonBody | PersonUpdateBody") -> None:
+    """Write a person body's editable fields onto a DBPerson row.
+
+    Serialises the socials/nationalities lists to JSON and mirrors the polarsteps
+    handle out of socials onto the dedicated `polarsteps` column so the
+    shared-trip view keeps working; a legacy standalone `polarsteps` value is the
+    fallback when socials carry no such entry.
+    """
+    socials = [s.model_dump() for s in body.socials] if body.socials else []
+    row.name = body.name
+    row.email = body.email
+    row.phone = body.phone
+    row.notes = body.notes
+    row.socials_json = json.dumps(socials) if socials else None
+    row.nationalities_json = json.dumps(body.nationalities) if body.nationalities else None
+    row.residence = body.residence
+    row.polarsteps = polarsteps_from_socials(socials) or body.polarsteps
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -146,14 +185,8 @@ def create_person(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project_id = _get_project_id(sess, user_info_id, body.project_name)
-        row = DBPerson(
-            project_id=project_id,
-            name=body.name,
-            email=body.email,
-            phone=body.phone,
-            polarsteps=body.polarsteps,
-            notes=body.notes,
-        )
+        row = DBPerson(project_id=project_id)
+        _apply_person_fields(row, body)
         sess.add(row)
         sess.commit()
         person_id = row.id
@@ -201,11 +234,7 @@ def update_person(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_person(sess, person_id, user_info_id)
-        row.name = body.name
-        row.email = body.email
-        row.phone = body.phone
-        row.polarsteps = body.polarsteps
-        row.notes = body.notes
+        _apply_person_fields(row, body)
         sess.add(row)
         sess.commit()
 
