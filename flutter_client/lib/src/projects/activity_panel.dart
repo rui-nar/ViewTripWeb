@@ -1503,6 +1503,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final distM = (a['distance'] as num? ?? 0).toDouble();
                         final movingSec = a['moving_time'];
                         final activityId = item['activity_id'];
+                        // A split-tail activity is stored locally with a
+                        // negative id; it gets a dedicated delete affordance
+                        // that hits the local-activity delete endpoint.
+                        final localActId = (a['id'] as num?)?.toInt();
+                        final isLocal = localActId != null && localActId < 0;
                         return _rowDismissible(
                           isWide: isWide,
                           key: ValueKey('act_$activityId'),
@@ -1577,6 +1582,29 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       onConfirm: () => notifier.confirmRemoveItem(i),
                                     ),
                                   ),
+                                  if (isLocal) ...[
+                                    const SizedBox(width: 4),
+                                    IconButton(
+                                      key: ValueKey('del_local_$activityId'),
+                                      icon: const Icon(Icons.delete_forever, size: 15),
+                                      tooltip: 'Delete local activity',
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      color: kAccent,
+                                      onPressed: _multiSelect
+                                          ? null
+                                          : () => _dismissWithUndo(
+                                                context: context,
+                                                notifier: notifier,
+                                                label: 'Deleted "$name"',
+                                                onOptimistic: () =>
+                                                    notifier.removeItemLocally(i),
+                                                onConfirm: () => notifier
+                                                    .deleteLocalActivity(localActId),
+                                              ),
+                                    ),
+                                  ],
                                 ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),
