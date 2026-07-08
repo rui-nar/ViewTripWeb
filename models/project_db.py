@@ -296,6 +296,11 @@ class DBPerson(sqlmodel.SQLModel, table=True):
     polarsteps: Optional[str] = sqlmodel.Field(default=None)  # username or profile URL
     notes: Optional[str] = sqlmodel.Field(default=None)
     avatar_photo: Optional[str] = sqlmodel.Field(default=None)  # base UUID filename
+    # JSON list of {"network", "handle"} social links; the polarsteps column above
+    # is kept and mirrored from the "polarsteps" entry so the shared-trip view works.
+    socials_json: Optional[str] = sqlmodel.Field(default=None)
+    nationalities_json: Optional[str] = sqlmodel.Field(default=None)  # JSON list of ISO 3166-1 alpha-2 codes
+    residence: Optional[str] = sqlmodel.Field(default=None)  # "city, country" where they live
     created_at: float = sqlmodel.Field(default_factory=time.time)
 
 

@@ -31,6 +31,9 @@ def _person_to_dict(p: Person) -> Dict[str, Any]:
         "polarsteps": p.polarsteps,
         "notes": p.notes,
         "avatar_photo": p.avatar_photo,
+        "socials": p.socials,
+        "nationalities": p.nationalities,
+        "residence": p.residence,
     }
 
 
@@ -43,6 +46,9 @@ def _person_from_dict(d: Dict[str, Any]) -> Person:
         polarsteps=d.get("polarsteps"),
         notes=d.get("notes"),
         avatar_photo=d.get("avatar_photo"),
+        socials=d.get("socials") or [],
+        nationalities=d.get("nationalities") or [],
+        residence=d.get("residence"),
     )
 
 
