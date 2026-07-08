@@ -141,4 +141,72 @@ void main() {
     expect(poly().polylines.first.points.length, 3,
         reason: 'the map polyline should drop the removed vertex');
   });
+
+  // ── End-to-end gesture tests (issue #38) — drive the real widget tree ──────
+
+  int polyCount(WidgetTester tester) =>
+      tester.widget<PolylineLayer>(find.byType(PolylineLayer))
+          .polylines
+          .first
+          .points
+          .length;
+
+  testWidgets('Add mode: tapping the map surface inserts a point',
+      (tester) async {
+    await _pump(tester, _activity());
+    expect(polyCount(tester), 4);
+
+    // Enable Add mode via the real toolbar chip.
+    await tester.tap(find.text('Add points'));
+    await tester.pump();
+
+    // Tap the map surface away from the vertices (which sit at/east of centre)
+    // so the tap lands on the tile layer, not a handle marker. flutter_map
+    // defers the tap by its double-tap window, so pump past it.
+    final mapCentre = tester.getCenter(find.byType(FlutterMap));
+    await tester.tapAt(mapCentre + const Offset(-200, -120));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(polyCount(tester), 5,
+        reason: 'a map-surface tap in Add mode should insert one vertex');
+  });
+
+  testWidgets('Delete via context menu removes the point and updates the map',
+      (tester) async {
+    await _pump(tester, _activity());
+    expect(polyCount(tester), 4);
+
+    // Long-press the first vertex handle (at map centre, so its menu has room)
+    // to open its context menu.
+    await tester.longPress(find.byKey(const ValueKey('vertex_0')));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete point'), findsOneWidget);
+
+    await tester.tap(find.text('Delete point'));
+    await tester.pumpAndSettle();
+
+    expect(polyCount(tester), 3,
+        reason: 'deleting via the menu should drop the vertex from the map');
+  });
+
+  testWidgets('Dragging a vertex handle moves the point (issue #36)',
+      (tester) async {
+    await _pump(tester, _activity());
+    final c = _controllerOf(tester);
+    final before = c.points.first;
+
+    await tester.drag(
+      find.byKey(const ValueKey('vertex_0')),
+      const Offset(0, -80), // drag north
+    );
+    await tester.pump();
+
+    final after = c.points.first;
+    expect(after.lat == before.lat && after.lng == before.lng, isFalse,
+        reason: 'the dragged vertex should have committed a new position');
+    expect(c.isDirty, isTrue);
+    // The move is committed through moveVertex → the save payload reflects it.
+    final payload = (c.toSavePayload()['points'] as List).first as Map;
+    expect(payload['lat'], closeTo(after.lat, 1e-9));
+  });
 }
