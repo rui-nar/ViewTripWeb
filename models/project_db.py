@@ -301,6 +301,25 @@ class DBPerson(sqlmodel.SQLModel, table=True):
     socials_json: Optional[str] = sqlmodel.Field(default=None)
     nationalities_json: Optional[str] = sqlmodel.Field(default=None)  # JSON list of ISO 3166-1 alpha-2 codes
     residence: Optional[str] = sqlmodel.Field(default=None)  # "city, country" where they live
+    # Membership in at most one group (issue #50); null = ungrouped.
+    group_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person_group.id", index=True)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBPersonGroup(sqlmodel.SQLModel, table=True):
+    """A named group of people met on a trip (issue #50) — owner-only, per-project.
+
+    Members are DBPerson rows whose group_id points here. Own fields: name,
+    nationalities, socials. Never exposed in shared views.
+    """
+
+    __tablename__ = "person_group"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    name: Optional[str] = sqlmodel.Field(default=None)
+    nationalities_json: Optional[str] = sqlmodel.Field(default=None)  # JSON list of ISO alpha-2 codes
+    socials_json: Optional[str] = sqlmodel.Field(default=None)        # JSON list of {"network","handle"}
     created_at: float = sqlmodel.Field(default_factory=time.time)
 
 
