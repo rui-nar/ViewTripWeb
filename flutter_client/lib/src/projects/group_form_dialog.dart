@@ -1,0 +1,266 @@
+/// Create / edit a group of people (issue #50): name, nationalities, socials
+/// (reusing the person modal's shared field widgets) and a member list — pick
+/// existing people or create one on the fly.
+library;
+
+import 'package:flutter/material.dart';
+
+import '../core/design_tokens.dart';
+import 'nationality_field.dart';
+import 'people_search.dart';
+import 'person_form_dialog.dart';
+import 'project_notifier.dart';
+import 'social_links_field.dart';
+
+/// Show the create/edit group dialog. Returns the group id on success, or null.
+Future<int?> showGroupFormDialog(
+  BuildContext context,
+  ProjectNotifier notifier, {
+  Map<String, dynamic>? group,
+}) {
+  return showDialog<int?>(
+    context: context,
+    builder: (_) => _GroupFormDialog(notifier: notifier, group: group),
+  );
+}
+
+class _GroupFormDialog extends StatefulWidget {
+  final ProjectNotifier notifier;
+  final Map<String, dynamic>? group;
+  const _GroupFormDialog({required this.notifier, this.group});
+
+  @override
+  State<_GroupFormDialog> createState() => _GroupFormDialogState();
+}
+
+class _GroupFormDialogState extends State<_GroupFormDialog> {
+  final _socialsKey = GlobalKey<SocialLinksFieldState>();
+  final _nationalityKey = GlobalKey<NationalityFieldState>();
+
+  late final TextEditingController _name =
+      TextEditingController(text: widget.group?['name'] as String? ?? '');
+  late final Set<int> _memberIds = _initialMembers();
+  bool _saving = false;
+
+  bool get _isEdit => widget.group != null;
+  int? get _groupId => (widget.group?['id'] as num?)?.toInt();
+
+  Set<int> _initialMembers() {
+    final gid = _groupId;
+    if (gid == null) return {};
+    return {
+      for (final p in membersOfGroup(widget.notifier.people, gid))
+        (p['id'] as num).toInt(),
+    };
+  }
+
+  List<Map<String, dynamic>> _initialSocials() {
+    final raw = widget.group?['socials'];
+    return raw is List ? raw.cast<Map<String, dynamic>>() : const [];
+  }
+
+  List<String> _initialNationalities() {
+    final raw = widget.group?['nationalities'];
+    return raw is List ? [for (final c in raw) '$c'] : const [];
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _editMembers() async {
+    final result = await showDialog<Set<int>>(
+      context: context,
+      builder: (_) =>
+          _MembersPicker(notifier: widget.notifier, selected: {..._memberIds}),
+    );
+    if (result != null && mounted) {
+      setState(() {
+        _memberIds
+          ..clear()
+          ..addAll(result);
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final navigator = Navigator.of(context);
+    final name = _name.text.trim().isEmpty ? null : _name.text.trim();
+    final socials = _socialsKey.currentState?.value ?? const [];
+    final nationalities = _nationalityKey.currentState?.value ?? const [];
+
+    int? id = _groupId;
+    if (_isEdit) {
+      await widget.notifier.updateGroup(id!,
+          name: name, nationalities: nationalities, socials: socials);
+    } else {
+      id = await widget.notifier.createGroup(
+          name: name, nationalities: nationalities, socials: socials);
+    }
+    if (id != null) {
+      await widget.notifier.setGroupMembers(id, _memberIds.toList());
+    }
+    if (!mounted) return;
+    navigator.pop(id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: Text(_isEdit ? 'Edit group' : 'Add group'),
+      content: SizedBox(
+        width: 380,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: TextField(
+                  controller: _name,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Group name',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Members
+              Row(
+                children: [
+                  Text('Members', style: theme.textTheme.labelLarge),
+                  const Spacer(),
+                  TextButton.icon(
+                    key: const Key('edit-members'),
+                    onPressed: _editMembers,
+                    icon: const Icon(Icons.group_add, size: 18),
+                    label: Text(_memberIds.isEmpty ? 'Add' : 'Edit'),
+                  ),
+                ],
+              ),
+              if (_memberIds.isNotEmpty)
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final id in _memberIds)
+                      Chip(
+                        label: Text(_memberName(id)),
+                        onDeleted: () => setState(() => _memberIds.remove(id)),
+                      ),
+                  ],
+                ),
+              const SizedBox(height: 12),
+              SocialLinksField(key: _socialsKey, initial: _initialSocials()),
+              const SizedBox(height: 12),
+              NationalityField(
+                  key: _nationalityKey, initial: _initialNationalities()),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: kAccent),
+          onPressed: _saving ? null : _save,
+          child: _saving
+              ? const SizedBox(
+                  width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : Text(_isEdit ? 'Save' : 'Add'),
+        ),
+      ],
+    );
+  }
+
+  String _memberName(int id) {
+    for (final p in widget.notifier.people) {
+      if (p['id'] == id) return personDisplayName(p);
+    }
+    return 'Unknown';
+  }
+}
+
+/// Multi-select of existing people (+ create one on the fly). Pops the selected
+/// id set, or null on cancel.
+class _MembersPicker extends StatefulWidget {
+  final ProjectNotifier notifier;
+  final Set<int> selected;
+  const _MembersPicker({required this.notifier, required this.selected});
+
+  @override
+  State<_MembersPicker> createState() => _MembersPickerState();
+}
+
+class _MembersPickerState extends State<_MembersPicker> {
+  late final Set<int> _selected = {...widget.selected};
+
+  Future<void> _createPerson() async {
+    final newId = await showPersonFormDialog(context, widget.notifier);
+    if (newId != null && mounted) setState(() => _selected.add(newId));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final people = widget.notifier.people;
+    return AlertDialog(
+      title: const Text('Members'),
+      content: SizedBox(
+        width: 340,
+        height: 420,
+        child: Column(
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: const Key('new-member-person'),
+                onPressed: _createPerson,
+                icon: const Icon(Icons.person_add_alt_1, size: 18),
+                label: const Text('New person'),
+              ),
+            ),
+            Expanded(
+              child: people.isEmpty
+                  ? const Center(child: Text('No people yet — add one.'))
+                  : ListView.builder(
+                      itemCount: people.length,
+                      itemBuilder: (_, i) {
+                        final p = people[i];
+                        final id = (p['id'] as num).toInt();
+                        return CheckboxListTile(
+                          dense: true,
+                          value: _selected.contains(id),
+                          title: Text(personDisplayName(p)),
+                          onChanged: (v) => setState(() =>
+                              v == true ? _selected.add(id) : _selected.remove(id)),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_selected),
+          child: const Text('Done'),
+        ),
+      ],
+    );
+  }
+}

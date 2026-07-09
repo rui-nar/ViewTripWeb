@@ -9,6 +9,27 @@ String personDisplayName(Map<String, dynamic> person) {
   return (name == null || name.isEmpty) ? 'Unknown' : name;
 }
 
+/// The label to show for a group: its name, or "Group" when unnamed (issue #50).
+String groupDisplayName(Map<String, dynamic> group) {
+  final name = (group['name'] as String?)?.trim();
+  return (name == null || name.isEmpty) ? 'Group' : name;
+}
+
+/// How many people belong to each group id, derived from the people list (#50).
+Map<int, int> memberCountByGroup(List<Map<String, dynamic>> people) {
+  final out = <int, int>{};
+  for (final p in people) {
+    final gid = p['group_id'];
+    if (gid is int) out[gid] = (out[gid] ?? 0) + 1;
+  }
+  return out;
+}
+
+/// The people belonging to [groupId] (issue #50).
+List<Map<String, dynamic>> membersOfGroup(
+        List<Map<String, dynamic>> people, int groupId) =>
+    [for (final p in people) if (p['group_id'] == groupId) p];
+
 /// Map of person id → that person's encounter notes, derived from project [items].
 /// Used to make encounter descriptions searchable from the People list.
 Map<int, List<String>> encounterNotesByPerson(

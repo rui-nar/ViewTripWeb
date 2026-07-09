@@ -5,10 +5,13 @@ library;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../core/countries.dart';
 import '../core/design_tokens.dart';
+import 'group_form_dialog.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
 import 'project_notifier.dart';
+import 'social_links_field.dart' show socialNetworkLabel;
 
 /// Full-screen People directory for the open project.
 class PeopleScreen extends StatefulWidget {
@@ -21,6 +24,7 @@ class PeopleScreen extends StatefulWidget {
 
 class _PeopleScreenState extends State<PeopleScreen> {
   final _search = TextEditingController();
+  bool _showGroups = false;
 
   @override
   void initState() {
@@ -38,60 +42,106 @@ class _PeopleScreenState extends State<PeopleScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('People')),
+      appBar: AppBar(title: const Text('People & groups')),
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: kAccent,
         foregroundColor: Colors.white,
-        onPressed: () => showPersonFormDialog(context, widget.notifier),
-        icon: const Icon(Icons.person_add_alt_1),
-        label: const Text('Add person'),
+        onPressed: _showGroups
+            ? () => showGroupFormDialog(context, widget.notifier)
+            : () => showPersonFormDialog(context, widget.notifier),
+        icon: Icon(_showGroups ? Icons.group_add : Icons.person_add_alt_1),
+        label: Text(_showGroups ? 'Add group' : 'Add person'),
       ),
       body: AnimatedBuilder(
         animation: widget.notifier,
         builder: (context, _) {
-          final notesByPerson = encounterNotesByPerson(widget.notifier.items);
-          final counts = encounterCountByPerson(widget.notifier.items);
-          final filtered =
-              filterPeople(widget.notifier.people, _search.text, notesByPerson);
           return Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-                child: TextField(
-                  controller: _search,
-                  decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.search),
-                    hintText: 'Search people, details or encounter notes',
-                    isDense: true,
-                    border: const OutlineInputBorder(),
-                    suffixIcon: _search.text.isEmpty
-                        ? null
-                        : IconButton(
-                            icon: const Icon(Icons.clear),
-                            onPressed: () => _search.clear(),
-                          ),
-                  ),
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                        value: false,
+                        icon: Icon(Icons.person_outline, size: 18),
+                        label: Text('People')),
+                    ButtonSegment(
+                        value: true,
+                        icon: Icon(Icons.groups_outlined, size: 18),
+                        label: Text('Groups')),
+                  ],
+                  selected: {_showGroups},
+                  onSelectionChanged: (s) =>
+                      setState(() => _showGroups = s.first),
                 ),
               ),
               Expanded(
-                child: widget.notifier.people.isEmpty
-                    ? _empty(theme, 'No people yet',
-                        'Add someone you met, or log an encounter on a day.')
-                    : filtered.isEmpty
-                        ? _empty(theme, 'No matches', 'Try a different search.')
-                        : ListView.builder(
-                            itemCount: filtered.length,
-                            itemBuilder: (_, i) => _PersonTile(
-                              notifier: widget.notifier,
-                              person: filtered[i],
-                              encounterCount:
-                                  counts[filtered[i]['id']] ?? 0,
-                            ),
-                          ),
-              ),
+                  child: _showGroups ? _groupsBody(theme) : _peopleBody(theme)),
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _peopleBody(ThemeData theme) {
+    final notesByPerson = encounterNotesByPerson(widget.notifier.items);
+    final counts = encounterCountByPerson(widget.notifier.items);
+    final filtered =
+        filterPeople(widget.notifier.people, _search.text, notesByPerson);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+          child: TextField(
+            controller: _search,
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              hintText: 'Search people, details or encounter notes',
+              isDense: true,
+              border: const OutlineInputBorder(),
+              suffixIcon: _search.text.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () => _search.clear(),
+                    ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: widget.notifier.people.isEmpty
+              ? _empty(theme, 'No people yet',
+                  'Add someone you met, or log an encounter on a day.')
+              : filtered.isEmpty
+                  ? _empty(theme, 'No matches', 'Try a different search.')
+                  : ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (_, i) => _PersonTile(
+                        notifier: widget.notifier,
+                        person: filtered[i],
+                        encounterCount: counts[filtered[i]['id']] ?? 0,
+                      ),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _groupsBody(ThemeData theme) {
+    final groups = widget.notifier.groups;
+    if (groups.isEmpty) {
+      return _empty(theme, 'No groups yet',
+          'Group people you met — e.g. a hostel crew or a family.');
+    }
+    final counts = memberCountByGroup(widget.notifier.people);
+    return ListView.builder(
+      itemCount: groups.length,
+      itemBuilder: (_, i) => _GroupTile(
+        notifier: widget.notifier,
+        group: groups[i],
+        memberCount: counts[groups[i]['id']] ?? 0,
       ),
     );
   }
@@ -444,6 +494,184 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
           Icon(icon, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
           const SizedBox(width: 10),
           Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Groups (issue #50) ────────────────────────────────────────────────────────
+
+class _GroupTile extends StatelessWidget {
+  final ProjectNotifier notifier;
+  final Map<String, dynamic> group;
+  final int memberCount;
+  const _GroupTile({
+    required this.notifier,
+    required this.group,
+    required this.memberCount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: CircleAvatar(
+        radius: 22,
+        backgroundColor: kAccentSoft,
+        child: const Icon(Icons.groups, color: kAccent),
+      ),
+      title: Text(groupDisplayName(group)),
+      subtitle: Text('$memberCount ${memberCount == 1 ? 'member' : 'members'}'),
+      onTap: () => showGroupDetailSheet(context, notifier, group),
+    );
+  }
+}
+
+/// Per-group detail sheet: info + members (tap a member → their sheet).
+Future<void> showGroupDetailSheet(
+  BuildContext context,
+  ProjectNotifier notifier,
+  Map<String, dynamic> group,
+) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (_) => _GroupDetailSheet(notifier: notifier, group: group),
+  );
+}
+
+class _GroupDetailSheet extends StatelessWidget {
+  final ProjectNotifier notifier;
+  final Map<String, dynamic> group;
+  const _GroupDetailSheet({required this.notifier, required this.group});
+
+  int get _groupId => (group['id'] as num).toInt();
+
+  Future<void> _edit(BuildContext context) async {
+    final navigator = Navigator.of(context);
+    await showGroupFormDialog(context, notifier, group: group);
+    navigator.pop();
+  }
+
+  Future<void> _delete(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete group?'),
+        content: const Text(
+            'The group is removed; its members are kept (just ungrouped).'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: kAccent),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final navigator = Navigator.of(context);
+    await notifier.deleteGroup(_groupId);
+    navigator.pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final nationalities =
+        (group['nationalities'] as List?)?.cast<String>() ?? const [];
+    final socials =
+        (group['socials'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
+    final members = membersOfGroup(notifier.people, _groupId);
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16, right: 16, top: 4,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 24,
+                backgroundColor: kAccentSoft,
+                child: const Icon(Icons.groups, color: kAccent),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(groupDisplayName(group),
+                    style: theme.textTheme.titleLarge),
+              ),
+              IconButton(
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: () => _edit(context)),
+              IconButton(
+                  icon: Icon(Icons.delete_outline, color: kAccent),
+                  onPressed: () => _delete(context)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (nationalities.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  for (final c in nationalities)
+                    Chip(
+                      label: Text(countryName(c)),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                ],
+              ),
+            ),
+          for (final s in socials)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.link, size: 18),
+                  const SizedBox(width: 10),
+                  Text('${socialNetworkLabel('${s['network']}')}: '
+                      '${s['handle'] ?? ''}'),
+                ],
+              ),
+            ),
+          const SizedBox(height: 12),
+          Text('Members', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          if (members.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child:
+                  Text('No members yet.', style: theme.textTheme.bodySmall),
+            )
+          else
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final p in members)
+                    ListTile(
+                      dense: true,
+                      leading:
+                          PersonAvatar(notifier: notifier, person: p, radius: 16),
+                      title: Text(personDisplayName(p)),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        showPersonDetailSheet(context, notifier, p);
+                      },
+                    ),
+                ],
+              ),
+            ),
         ],
       ),
     );

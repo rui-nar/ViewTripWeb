@@ -45,4 +45,28 @@ void main() {
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('Bob'), findsNothing);
   });
+
+  testWidgets('Groups tab lists groups with member counts (#50)',
+      (tester) async {
+    final n = ProjectNotifier(ProjectService())..projectName = 'Trip';
+    n.people = [
+      {'id': 1, 'name': 'Alice', 'group_id': 5},
+      {'id': 2, 'name': 'Bob', 'group_id': 5},
+      {'id': 3, 'name': 'Cara'},
+    ];
+    n.groups = [
+      {'id': 5, 'name': 'Hostel crew', 'nationalities': [], 'socials': []},
+    ];
+    await tester.pumpWidget(MaterialApp(home: PeopleScreen(notifier: n)));
+    await tester.pump();
+    // Defaults to the People tab.
+    expect(find.text('Alice'), findsOneWidget);
+    expect(find.text('Hostel crew'), findsNothing);
+
+    await tester.tap(find.text('Groups'));
+    await tester.pump();
+    expect(find.text('Hostel crew'), findsOneWidget);
+    expect(find.text('2 members'), findsOneWidget);
+    expect(find.widgetWithText(FloatingActionButton, 'Add group'), findsOneWidget);
+  });
 }

@@ -22,6 +22,26 @@ void main() {
     });
   });
 
+  group('groups (#50)', () {
+    test('groupDisplayName falls back to "Group" when unnamed', () {
+      expect(groupDisplayName({'id': 1}), 'Group');
+      expect(groupDisplayName({'id': 1, 'name': '  '}), 'Group');
+      expect(groupDisplayName({'id': 1, 'name': 'Crew'}), 'Crew');
+    });
+
+    test('memberCountByGroup + membersOfGroup partition people by group_id', () {
+      final people = [
+        {'id': 1, 'name': 'A', 'group_id': 10},
+        {'id': 2, 'name': 'B', 'group_id': 10},
+        {'id': 3, 'name': 'C', 'group_id': 20},
+        {'id': 4, 'name': 'D', 'group_id': null},
+      ];
+      expect(memberCountByGroup(people), {10: 2, 20: 1});
+      expect(membersOfGroup(people, 10).map((p) => p['id']), [1, 2]);
+      expect(membersOfGroup(people, 99), isEmpty);
+    });
+  });
+
   group('encounter aggregation', () {
     test('counts and collects notes per person', () {
       final items = [
