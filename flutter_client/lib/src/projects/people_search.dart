@@ -30,6 +30,26 @@ List<Map<String, dynamic>> membersOfGroup(
         List<Map<String, dynamic>> people, int groupId) =>
     [for (final p in people) if (p['group_id'] == groupId) p];
 
+/// Classify an encounter's map pin (issue #50): a **group** pin when the
+/// encounter's person belongs to a group (the individual is masked), else a
+/// **person** pin. Returns null when the person is unknown. [kind] is
+/// 'group' or 'person'; [entity] is the group/person map to render + open.
+({String kind, Map<String, dynamic> entity})? classifyEncounterPin(
+  int? personId,
+  Map<int, Map<String, dynamic>> peopleById,
+  Map<int, Map<String, dynamic>> groupsById,
+) {
+  if (personId == null) return null;
+  final person = peopleById[personId];
+  if (person == null) return null;
+  final gid = person['group_id'];
+  if (gid is int) {
+    final group = groupsById[gid];
+    if (group != null) return (kind: 'group', entity: group);
+  }
+  return (kind: 'person', entity: person);
+}
+
 /// Map of person id → that person's encounter notes, derived from project [items].
 /// Used to make encounter descriptions searchable from the People list.
 Map<int, List<String>> encounterNotesByPerson(

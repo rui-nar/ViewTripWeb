@@ -40,6 +40,29 @@ void main() {
       expect(membersOfGroup(people, 10).map((p) => p['id']), [1, 2]);
       expect(membersOfGroup(people, 99), isEmpty);
     });
+
+    test('classifyEncounterPin masks grouped people behind their group', () {
+      final peopleById = {
+        1: {'id': 1, 'name': 'A', 'group_id': 10},
+        2: {'id': 2, 'name': 'B'}, // ungrouped
+      };
+      final groupsById = {
+        10: {'id': 10, 'name': 'Crew'},
+      };
+      // Grouped person → group pin.
+      final g = classifyEncounterPin(1, peopleById, groupsById)!;
+      expect(g.kind, 'group');
+      expect(g.entity['name'], 'Crew');
+      // Ungrouped person → person pin.
+      final p = classifyEncounterPin(2, peopleById, groupsById)!;
+      expect(p.kind, 'person');
+      expect(p.entity['name'], 'B');
+      // Unknown person → null.
+      expect(classifyEncounterPin(99, peopleById, groupsById), isNull);
+      // Grouped but the group is missing → fall back to person.
+      final orphan = classifyEncounterPin(1, peopleById, {})!;
+      expect(orphan.kind, 'person');
+    });
   });
 
   group('encounter aggregation', () {
