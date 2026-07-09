@@ -37,6 +37,7 @@ class ProjectNotifier extends ChangeNotifier
   @override List<Map<String, dynamic>> activities = [];
   @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
   @override List<Map<String, dynamic>> people = [];  // trip people directory (#40)
+  @override List<Map<String, dynamic>> groups = [];  // people groups (#50)
   @override Map<String, dynamic>? geo;
   bool isLoading = false;
   @override String? error;
@@ -328,6 +329,10 @@ class ProjectNotifier extends ChangeNotifier
       final rawPeople = details['people'];
       people = rawPeople is List
           ? rawPeople.cast<Map<String, dynamic>>()
+          : [];
+      final rawPeopleGroups = details['groups'];
+      groups = rawPeopleGroups is List
+          ? rawPeopleGroups.cast<Map<String, dynamic>>()
           : [];
       final rawDm = details['day_meta'];
       dayMeta = rawDm is Map
@@ -1319,6 +1324,10 @@ class ProjectNotifier extends ChangeNotifier
     final rawPeople = details['people'];
     people = rawPeople is List
         ? rawPeople.cast<Map<String, dynamic>>()
+        : [];
+    final rawPeopleGroups = details['groups'];
+    groups = rawPeopleGroups is List
+        ? rawPeopleGroups.cast<Map<String, dynamic>>()
         : [];
     final rawDm = details['day_meta'];
     dayMeta = rawDm is Map

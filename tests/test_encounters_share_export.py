@@ -14,11 +14,12 @@ import models.db as db_module
 from api.deps import get_optional_current_user
 from api.share import invalidate_share_cache, router as share_router
 from models.project_db import (
-    DBEncounter, DBMemory, DBPerson, DBProject, DBProjectItem,
+    DBEncounter, DBMemory, DBPerson, DBPersonGroup, DBProject, DBProjectItem,
 )
 from models.user import UserInfo
 from src.models.encounter import Encounter
 from src.models.person import Person
+from src.models.person_group import PersonGroup
 from src.models.project import Project, ProjectItem
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo
@@ -36,7 +37,10 @@ def _seed_shared(engine):
 
         mem = DBMemory(project_id=proj.id, public_id="pub1", name="M", date="2024-06-01")
         sess.add(mem); sess.commit(); sess.refresh(mem)
-        person = DBPerson(project_id=proj.id, name="Alice", email="alice@x.com")
+        grp = DBPersonGroup(project_id=proj.id, name="Crew")
+        sess.add(grp); sess.commit(); sess.refresh(grp)
+        person = DBPerson(project_id=proj.id, name="Alice", email="alice@x.com",
+                          group_id=grp.id)
         sess.add(person); sess.commit(); sess.refresh(person)
         enc = DBEncounter(project_id=proj.id, person_id=person.id, date="2024-06-01")
         sess.add(enc); sess.commit(); sess.refresh(enc)
@@ -68,8 +72,9 @@ def share_client(monkeypatch):
 
 def test_shared_view_excludes_people_and_encounters(share_client):
     result = share_client.get("/api/share/tok_full").json()
-    # People directory is stripped entirely.
+    # People + groups directories are stripped entirely.
     assert "people" not in result
+    assert "groups" not in result
     # Encounter items are stripped; the memory item survives.
     types = [it["item_type"] for it in result["items"]]
     assert "encounter" not in types
@@ -79,6 +84,7 @@ def test_shared_view_excludes_people_and_encounters(share_client):
 def test_shared_meta_excludes_people_and_encounters(share_client):
     result = share_client.get("/api/share/tok_full/meta").json()
     assert "people" not in result
+    assert "groups" not in result
     assert "encounter" not in [it["item_type"] for it in result["items"]]
 
 
@@ -126,3 +132,40 @@ def test_viewtrip_roundtrip_preserves_people_and_encounters(monkeypatch):
     # The encounter is re-linked to the imported person's new id.
     assert enc_items[0].encounter.person_id == loaded.people[0].id
     assert enc_items[0].encounter.description == "met"
+
+
+def test_viewtrip_roundtrip_preserves_groups_and_membership(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as sess:
+        u = UserInfo(display_name="U", email="u@e.com")
+        sess.add(u); sess.commit(); sess.refresh(u)
+        uid = u.id
+
+    group = PersonGroup(id=7, name="Crew", nationalities=["FR"],
+                        socials=[{"network": "instagram", "handle": "crew"}])
+    person = Person(id=1, name="Alice", group_id=7)
+    project = Project(name="Roundtrip", people=[person], groups=[group])
+
+    repo = ProjectRepo()
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "Roundtrip.viewtrip")
+        ProjectIO.save(project, path)
+        with Session(engine) as sess:
+            repo.ingest_project(sess, uid, path)
+        with Session(engine) as sess:
+            loaded = repo.get_project(sess, uid, "Roundtrip")
+
+    assert loaded is not None
+    assert len(loaded.groups) == 1
+    g = loaded.groups[0]
+    assert g.name == "Crew" and g.nationalities == ["FR"]
+    assert g.socials == [{"network": "instagram", "handle": "crew"}]
+    # The member is re-linked to the imported group's new id.
+    assert len(loaded.people) == 1
+    assert loaded.people[0].group_id == g.id

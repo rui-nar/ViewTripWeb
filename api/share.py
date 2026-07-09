@@ -255,6 +255,7 @@ def shared_project(
         # Journal entries, encounters and people are always private (third-party
         # PII) — strip from all shared views.
         result.pop("people", None)
+        result.pop("groups", None)
         result["items"] = [
             item for item in (result.get("items") or [])
             if item.get("item_type") not in ("journal", "encounter")
@@ -298,6 +299,7 @@ def shared_project_meta(
     # Journal entries, encounters and people are always private (third-party PII)
     # — strip from all shared views.
     result.pop("people", None)
+    result.pop("groups", None)
     result["items"] = [
         item for item in (result.get("items") or [])
         if item.get("item_type") not in ("journal", "encounter")

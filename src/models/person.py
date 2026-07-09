@@ -38,3 +38,4 @@ class Person:
     socials: List[Dict[str, str]] = field(default_factory=list)  # [{"network", "handle"}, …]
     nationalities: List[str] = field(default_factory=list)       # ISO 3166-1 alpha-2 codes
     residence: Optional[str] = None         # "city, country" where they live
+    group_id: Optional[int] = None          # membership: at most one group (issue #50)

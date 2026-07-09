@@ -10,6 +10,7 @@ from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
 from src.models.person import Person
+from src.models.person_group import PersonGroup
 from src.models.project import (
     ConnectingSegment,
     DayMeta,
@@ -34,6 +35,7 @@ def _person_to_dict(p: Person) -> Dict[str, Any]:
         "socials": p.socials,
         "nationalities": p.nationalities,
         "residence": p.residence,
+        "group_id": p.group_id,
     }
 
 
@@ -49,6 +51,25 @@ def _person_from_dict(d: Dict[str, Any]) -> Person:
         socials=d.get("socials") or [],
         nationalities=d.get("nationalities") or [],
         residence=d.get("residence"),
+        group_id=d.get("group_id"),
+    )
+
+
+def _group_to_dict(g: PersonGroup) -> Dict[str, Any]:
+    return {
+        "id": g.id,
+        "name": g.name,
+        "nationalities": g.nationalities,
+        "socials": g.socials,
+    }
+
+
+def _group_from_dict(d: Dict[str, Any]) -> PersonGroup:
+    return PersonGroup(
+        id=d.get("id"),
+        name=d.get("name"),
+        nationalities=d.get("nationalities") or [],
+        socials=d.get("socials") or [],
     )
 
 
@@ -83,6 +104,7 @@ class ProjectIO:
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": [a.to_strava_dict() for a in project.activities],
             "people": [_person_to_dict(p) for p in project.people],
+            "groups": [_group_to_dict(g) for g in project.groups],
             "day_meta": {
                 dk: {
                     **{k: v for k, v in {
@@ -136,6 +158,7 @@ class ProjectIO:
             "items": [ProjectIO._serialise_item(i) for i in project.items],
             "activities": activities_out,
             "people": [_person_to_dict(p) for p in project.people],
+            "groups": [_group_to_dict(g) for g in project.groups],
             "day_meta": {
                 dk: {
                     **{k: v for k, v in {
@@ -199,6 +222,7 @@ class ProjectIO:
         )
 
         people = [_person_from_dict(p) for p in data.get("people", [])]
+        groups = [_group_from_dict(g) for g in data.get("groups", [])]
 
         project = Project(
             name=data.get("name", "Untitled"),
@@ -208,6 +232,7 @@ class ProjectIO:
             filter_state=filter_state,
             activities=activities,
             people=people,
+            groups=groups,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
         )

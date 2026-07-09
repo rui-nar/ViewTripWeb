@@ -14,7 +14,8 @@ import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'memory_detail_modal.dart';
-import 'people_screen.dart' show showPersonDetailSheet;
+import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
+import 'people_search.dart' show classifyEncounterPin;
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
@@ -1223,6 +1224,18 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     List<Map<String, dynamic>> items,
     BuildContext context,
   ) {
+    // Lookups for pin classification: a grouped person's encounter shows the
+    // group ("People") icon (the individual is masked); an ungrouped person
+    // shows a person icon (issue #50).
+    final peopleById = {
+      for (final p in widget.notifier.people)
+        if (p['id'] is int) p['id'] as int: p,
+    };
+    final groupsById = {
+      for (final g in widget.notifier.groups)
+        if (g['id'] is int) g['id'] as int: g,
+    };
+
     final markers = <Marker>[];
     for (final item in items) {
       if (item['item_type'] != 'encounter') continue;
@@ -1231,28 +1244,33 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final lat = (e['lat'] as num?)?.toDouble();
       final lon = (e['lon'] as num?)?.toDouble();
       if (lat == null || lon == null) continue;
+
+      final pin = classifyEncounterPin(
+          (e['person_id'] as num?)?.toInt(), peopleById, groupsById);
+      final isGroup = pin?.kind == 'group';
       markers.add(Marker(
         point: LatLng(lat, lon),
         width: 22,
         height: 22,
         child: GestureDetector(
-          onTap: () {
-            final pid = (e['person_id'] as num?)?.toInt();
-            final person = widget.notifier.people
-                .cast<Map<String, dynamic>?>()
-                .firstWhere((p) => p?['id'] == pid, orElse: () => null);
-            if (person != null) {
-              showPersonDetailSheet(context, widget.notifier, person);
-            }
-          },
+          onTap: pin == null
+              ? null
+              : () {
+                  if (isGroup) {
+                    showGroupDetailSheet(context, widget.notifier, pin.entity);
+                  } else {
+                    showPersonDetailSheet(context, widget.notifier, pin.entity);
+                  }
+                },
           child: Container(
             decoration: BoxDecoration(
               color: kAccent,
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white, width: 2),
             ),
-            child: const Center(
-              child: Icon(Icons.groups, size: 12, color: Colors.white),
+            child: Center(
+              child: Icon(isGroup ? Icons.groups : Icons.person,
+                  size: 12, color: Colors.white),
             ),
           ),
         ),

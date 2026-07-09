@@ -12,6 +12,7 @@ from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
 from src.models.person import Person
+from src.models.person_group import PersonGroup
 
 SegmentType = Literal["train", "flight", "boat", "bus"]
 
@@ -156,6 +157,8 @@ class Project:
     journal_entries: List[JournalEntry] = field(default_factory=list)
     # People met on the trip (issue #40); referenced by encounter items.
     people: List[Person] = field(default_factory=list)
+    # Groups of people (issue #50); members are people whose group_id points here.
+    groups: List[PersonGroup] = field(default_factory=list)
     # Track display style — persisted per project
     track_color: str = "#F97316"
     track_secondary_color: Optional[str] = None  # None = auto-derive from primary

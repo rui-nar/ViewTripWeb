@@ -29,12 +29,13 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBPerson, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from src.models.activity import Activity
 from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
 from src.models.person import Person, polarsteps_from_socials
+from src.models.person_group import PersonGroup
 from src.models.project import (
     ConnectingSegment,
     Counter,
@@ -334,7 +335,8 @@ class ProjectRepo:
         for jentry in journals:
             sess.delete(jentry)
 
-        # Delete encounters before people (encounter → person FK), then people.
+        # Delete encounters before people (encounter → person FK), then people
+        # (person → group FK), then groups (issue #50).
         for enc in sess.exec(
             select(DBEncounter).where(DBEncounter.project_id == row.id)
         ).all():
@@ -343,6 +345,10 @@ class ProjectRepo:
             select(DBPerson).where(DBPerson.project_id == row.id)
         ).all():
             sess.delete(person)
+        for group in sess.exec(
+            select(DBPersonGroup).where(DBPersonGroup.project_id == row.id)
+        ).all():
+            sess.delete(group)
 
         sess.delete(row)
         sess.commit()
@@ -812,6 +818,21 @@ class ProjectRepo:
         sess.add(row)
         sess.flush()  # populate row.id
 
+        # 2a. Create groups first, mapping each file group id → new DB id so people
+        # can be re-linked to their group below (issue #50).
+        group_id_map: Dict[int, int] = {}
+        for group in project.groups:
+            g_row = DBPersonGroup(
+                project_id=row.id,
+                name=group.name,
+                nationalities_json=json.dumps(group.nationalities) if group.nationalities else None,
+                socials_json=json.dumps(group.socials) if group.socials else None,
+            )
+            sess.add(g_row)
+            sess.flush()
+            if group.id is not None:
+                group_id_map[group.id] = g_row.id
+
         # 2b. Create people rows, mapping each file person id → new DB id so
         # encounter items can be re-linked below (issue #40).
         person_id_map: Dict[int, int] = {}
@@ -829,6 +850,7 @@ class ProjectRepo:
                 socials_json=json.dumps(person.socials) if person.socials else None,
                 nationalities_json=json.dumps(person.nationalities) if person.nationalities else None,
                 residence=person.residence,
+                group_id=group_id_map.get(person.group_id) if person.group_id is not None else None,
             )
             sess.add(p_row)
             sess.flush()
@@ -986,6 +1008,13 @@ class ProjectRepo:
                 .order_by(DBPerson.id)
             ).all()
         ]
+        # Load groups (issue #50)
+        groups = [
+            self._row_to_group(gr) for gr in sess.exec(
+                select(DBPersonGroup).where(DBPersonGroup.project_id == row.id)
+                .order_by(DBPersonGroup.id)
+            ).all()
+        ]
         encounter_by_id = {
             er.id: self._row_to_encounter(er) for er in sess.exec(
                 select(DBEncounter).where(DBEncounter.project_id == row.id)
@@ -1078,6 +1107,7 @@ class ProjectRepo:
             memories=memories,
             journal_entries=journal_entries,
             people=people,
+            groups=groups,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
@@ -1245,6 +1275,17 @@ class ProjectRepo:
             socials=json.loads(row.socials_json) if row.socials_json else [],
             nationalities=json.loads(row.nationalities_json) if row.nationalities_json else [],
             residence=row.residence,
+            group_id=row.group_id,
+        )
+
+    @staticmethod
+    def _row_to_group(row: DBPersonGroup) -> PersonGroup:
+        return PersonGroup(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            nationalities=json.loads(row.nationalities_json) if row.nationalities_json else [],
+            socials=json.loads(row.socials_json) if row.socials_json else [],
         )
 
     @staticmethod

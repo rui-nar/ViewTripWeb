@@ -13,6 +13,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   set items(List<Map<String, dynamic>> v);
   List<Map<String, dynamic>> get people;
   set people(List<Map<String, dynamic>> v);
+  List<Map<String, dynamic>> get groups;
+  set groups(List<Map<String, dynamic>> v);
   String? get error;
   set error(String? v);
 
@@ -298,5 +300,95 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     polarstepsOverlaySteps = [];
     polarstepsOverlayLabel = null;
     notifyListeners();
+  }
+
+  // ── Group CRUD (issue #50) ──────────────────────────────────────────────────
+
+  /// Create a group; returns the new id, or null on failure.
+  Future<int?> createGroup({
+    String? name,
+    List<String>? nationalities,
+    List<Map<String, String>>? socials,
+  }) async {
+    final projectName = this.projectName;
+    if (projectName == null) return null;
+    try {
+      final res = await api.post('/api/groups/', {
+        'project_name': projectName,
+        if (name != null) 'name': name,
+        if (nationalities != null) 'nationalities': nationalities,
+        if (socials != null) 'socials': socials,
+      });
+      await reloadDetailsOnly(projectName);
+      return (res as Map)['id'] as int?;
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+      return null;
+    }
+  }
+
+  Future<void> updateGroup(
+    int groupId, {
+    String? name,
+    List<String>? nationalities,
+    List<Map<String, String>>? socials,
+  }) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    try {
+      await api.put('/api/groups/$groupId', {
+        'name': name,
+        'nationalities': nationalities,
+        'socials': socials,
+      });
+      await reloadDetailsOnly(projectName);
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+    }
+  }
+
+  Future<void> deleteGroup(int groupId) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    // Optimistic: drop the group and ungroup its members locally.
+    groups = groups.where((g) => g['id'] != groupId).toList();
+    for (final p in people) {
+      if (p['group_id'] == groupId) p['group_id'] = null;
+    }
+    notifyListeners();
+    try {
+      await api.delete('/api/groups/$groupId');
+      await reloadDetailsOnly(projectName);
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+    }
+  }
+
+  /// Set the group's member list to exactly [personIds] (assigns them, clears others).
+  Future<void> setGroupMembers(int groupId, List<int> personIds) async {
+    final projectName = this.projectName;
+    if (projectName == null) return;
+    try {
+      await api.put('/api/groups/$groupId/members', {'person_ids': personIds});
+      await reloadDetailsOnly(projectName);
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+    }
+  }
+
+  /// Fetch a group with its members (id, name, avatar).
+  Future<Map<String, dynamic>?> fetchGroup(int groupId) async {
+    try {
+      final res = await api.get('/api/groups/$groupId');
+      return (res as Map).cast<String, dynamic>();
+    } on Exception catch (e) {
+      error = errorMessage(e);
+      notifyListeners();
+      return null;
+    }
   }
 }

@@ -6,34 +6,16 @@
 /// a "+" (Instagram / Facebook / Polarsteps / Strava / …), email-format
 /// validation, multi-select nationalities from the ISO country list, and a
 /// residence field with server-backed city autocomplete. Name is title-cased and
-/// Notes sentence-cased as you type.
+/// Notes sentence-cased as you type. The social + nationality editors are shared
+/// with the group modal (issue #50).
 library;
 
 import 'package:flutter/material.dart';
 
-import '../core/countries.dart';
 import '../core/design_tokens.dart';
+import 'nationality_field.dart';
 import 'project_notifier.dart';
-
-/// Social networks offered in the "+" picker. Stored lower-case; the value is a
-/// free handle or profile URL. Extensible — add a code here and a label below.
-const List<String> kSocialNetworks = [
-  'instagram',
-  'facebook',
-  'polarsteps',
-  'strava',
-  'tiktok',
-  'x',
-  'linkedin',
-  'website',
-];
-
-String _networkLabel(String code) => switch (code) {
-      'x' => 'X',
-      'tiktok' => 'TikTok',
-      'linkedin' => 'LinkedIn',
-      _ => code[0].toUpperCase() + code.substring(1),
-    };
+import 'social_links_field.dart';
 
 /// Show the create/edit person dialog. Returns the person id on success (the new
 /// id when creating, the existing id when editing), or null if cancelled.
@@ -57,16 +39,10 @@ class PersonFormDialog extends StatefulWidget {
   State<PersonFormDialog> createState() => _PersonFormDialogState();
 }
 
-/// One editable social-link row: a network selection plus its handle controller.
-class _SocialRow {
-  String network;
-  final TextEditingController handle;
-  _SocialRow(this.network, String value)
-      : handle = TextEditingController(text: value);
-}
-
 class _PersonFormDialogState extends State<PersonFormDialog> {
   final _formKey = GlobalKey<FormState>();
+  final _socialsKey = GlobalKey<SocialLinksFieldState>();
+  final _nationalityKey = GlobalKey<NationalityFieldState>();
 
   late final TextEditingController _name =
       TextEditingController(text: widget.person?['name'] as String? ?? '');
@@ -77,8 +53,6 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
   late final TextEditingController _notes =
       TextEditingController(text: widget.person?['notes'] as String? ?? '');
 
-  late final List<_SocialRow> _socials = _initialSocials();
-  late final List<String> _nationalities = _initialNationalities();
   // The Autocomplete-owned controller for the residence field, captured on first
   // build so its typed/selected value can be read at save time.
   TextEditingController? _residenceController;
@@ -89,20 +63,14 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
 
   bool get _isEdit => widget.person != null;
 
-  List<_SocialRow> _initialSocials() {
+  List<Map<String, dynamic>> _initialSocials() {
     final raw = widget.person?['socials'];
-    if (raw is! List) return [];
-    return [
-      for (final e in raw)
-        if (e is Map && e['network'] != null)
-          _SocialRow('${e['network']}', '${e['handle'] ?? ''}'),
-    ];
+    return raw is List ? raw.cast<Map<String, dynamic>>() : const [];
   }
 
   List<String> _initialNationalities() {
     final raw = widget.person?['nationalities'];
-    if (raw is! List) return [];
-    return [for (final c in raw) '$c'];
+    return raw is List ? [for (final c in raw) '$c'] : const [];
   }
 
   @override
@@ -111,9 +79,6 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
     _email.dispose();
     _phone.dispose();
     _notes.dispose();
-    for (final s in _socials) {
-      s.handle.dispose();
-    }
     super.dispose();
   }
 
@@ -134,11 +99,8 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
     setState(() => _saving = true);
     final navigator = Navigator.of(context);
 
-    final socials = [
-      for (final s in _socials)
-        if (s.handle.text.trim().isNotEmpty)
-          {'network': s.network, 'handle': s.handle.text.trim()},
-    ];
+    final socials = _socialsKey.currentState?.value ?? const [];
+    final nationalities = _nationalityKey.currentState?.value ?? const [];
     final residence = _residenceController?.text.trim();
 
     int? id;
@@ -151,7 +113,7 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
         phone: _t(_phone),
         notes: _t(_notes),
         socials: socials,
-        nationalities: _nationalities,
+        nationalities: nationalities,
         residence: (residence == null || residence.isEmpty) ? null : residence,
       );
     } else {
@@ -161,42 +123,13 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
         phone: _t(_phone),
         notes: _t(_notes),
         socials: socials,
-        nationalities: _nationalities,
+        nationalities: nationalities,
         residence: (residence == null || residence.isEmpty) ? null : residence,
       );
     }
     if (!mounted) return;
     navigator.pop(id);
   }
-
-  // ── Socials ─────────────────────────────────────────────────────────────────
-
-  void _addSocial() {
-    // Default to the first network not already present, else the first network.
-    final used = _socials.map((s) => s.network).toSet();
-    final next = kSocialNetworks.firstWhere((n) => !used.contains(n),
-        orElse: () => kSocialNetworks.first);
-    setState(() => _socials.add(_SocialRow(next, '')));
-  }
-
-  void _removeSocial(int i) {
-    setState(() => _socials.removeAt(i).handle.dispose());
-  }
-
-  // ── Nationalities ─────────────────────────────────────────────────────────
-
-  Future<void> _addNationality() async {
-    final code = await showDialog<String>(
-      context: context,
-      builder: (_) => _CountryPickerDialog(exclude: _nationalities.toSet()),
-    );
-    if (code == null || !mounted) return;
-    if (!_nationalities.contains(code)) {
-      setState(() => _nationalities.add(code));
-    }
-  }
-
-  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -220,9 +153,10 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
                     key: const Key('person-email')),
                 _text(_phone, 'Phone', keyboard: TextInputType.phone),
                 const SizedBox(height: 12),
-                _socialsSection(),
+                SocialLinksField(key: _socialsKey, initial: _initialSocials()),
                 const SizedBox(height: 12),
-                _nationalitySection(),
+                NationalityField(
+                    key: _nationalityKey, initial: _initialNationalities()),
                 const SizedBox(height: 12),
                 _residenceField(),
                 const SizedBox(height: 12),
@@ -247,97 +181,6 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
               : Text(_isEdit ? 'Save' : 'Add'),
         ),
-      ],
-    );
-  }
-
-  Widget _sectionLabel(String label, {Widget? trailing}) {
-    final theme = Theme.of(context);
-    return Row(
-      children: [
-        Text(label, style: theme.textTheme.labelLarge),
-        const Spacer(),
-        if (trailing != null) trailing,
-      ],
-    );
-  }
-
-  Widget _socialsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionLabel(
-          'Social networks',
-          trailing: TextButton.icon(
-            key: const Key('add-social'),
-            onPressed: _addSocial,
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add'),
-          ),
-        ),
-        for (var i = 0; i < _socials.length; i++)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
-              children: [
-                DropdownButton<String>(
-                  value: _socials[i].network,
-                  underline: const SizedBox.shrink(),
-                  items: [
-                    for (final n in kSocialNetworks)
-                      DropdownMenuItem(value: n, child: Text(_networkLabel(n))),
-                  ],
-                  onChanged: (v) =>
-                      setState(() => _socials[i].network = v ?? _socials[i].network),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _socials[i].handle,
-                    decoration: const InputDecoration(
-                      hintText: 'handle or URL',
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                IconButton(
-                  key: Key('remove-social-$i'),
-                  icon: const Icon(Icons.close, size: 18),
-                  onPressed: () => _removeSocial(i),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _nationalitySection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionLabel(
-          'Nationality',
-          trailing: TextButton.icon(
-            key: const Key('add-nationality'),
-            onPressed: _addNationality,
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('Add'),
-          ),
-        ),
-        if (_nationalities.isNotEmpty)
-          Wrap(
-            spacing: 6,
-            runSpacing: 4,
-            children: [
-              for (final code in _nationalities)
-                Chip(
-                  label: Text(countryName(code)),
-                  onDeleted: () => setState(() => _nationalities.remove(code)),
-                ),
-            ],
-          ),
       ],
     );
   }
@@ -391,69 +234,6 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
           isDense: true,
         ),
       ),
-    );
-  }
-}
-
-/// Searchable single-select country list; pops the chosen alpha-2 code.
-class _CountryPickerDialog extends StatefulWidget {
-  final Set<String> exclude;
-  const _CountryPickerDialog({required this.exclude});
-
-  @override
-  State<_CountryPickerDialog> createState() => _CountryPickerDialogState();
-}
-
-class _CountryPickerDialogState extends State<_CountryPickerDialog> {
-  String _query = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final q = _query.trim().toLowerCase();
-    final matches = [
-      for (final c in kCountries)
-        if (!widget.exclude.contains(c.code) &&
-            (q.isEmpty || c.name.toLowerCase().contains(q)))
-          c,
-    ];
-    return AlertDialog(
-      title: const Text('Add nationality'),
-      content: SizedBox(
-        width: 320,
-        height: 420,
-        child: Column(
-          children: [
-            TextField(
-              key: const Key('country-search'),
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Search countries…',
-                prefixIcon: Icon(Icons.search),
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-              onChanged: (v) => setState(() => _query = v),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: ListView.builder(
-                itemCount: matches.length,
-                itemBuilder: (_, i) => ListTile(
-                  dense: true,
-                  title: Text(matches[i].name),
-                  onTap: () => Navigator.of(context).pop(matches[i].code),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
     );
   }
 }
