@@ -135,6 +135,7 @@ image with a Dockerfile `ENV`; the published image is public.
 - **Projects** — assemble trips from Strava/Polarsteps activities; reorder, sort chronologically, add flight/train/bus/boat connecting segments with real-world route geometry resolved from OSM/HAFAS.
 - **Memories** — photo + text annotations per day, with likes, threaded comments, and optional translation.
 - **Journals** — private day notes with photos.
+- **Encounters** — a per-project directory of people you meet (name, social links, nationalities, residence city, avatar) and where/when you met them, shown inline on their day and as owner-only map pins. People and encounters are never included in shared views.
 - **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.
 - **Sharing** — read-only public links (with or without memories); social-media composer that posts a memory's photos, a trip map image, and a durable deep link via the OS share sheet / WhatsApp / Facebook.
 - **Export** — GPX, `.viewtrip` (JSON), or ZIP (`.viewtrip` + photos).
