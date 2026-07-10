@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import '../photos/photo_upgrade_screen.dart';
 import '../shared/shared_memory_service.dart';
 import 'memory_dialog.dart';
 import 'project_notifier.dart';
@@ -399,6 +400,15 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     final hostContext = navigator.context;
     navigator.pop();
     showSocialShareDialog(hostContext, notifier, initialMemoryPublicId: pid);
+  }
+
+  void _upgradePhotos() {
+    final memory = _current;
+    final notifier = widget.notifier;
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final hostContext = navigator.context;
+    navigator.pop();
+    showPhotoUpgradeDialog(hostContext, notifier, memory);
   }
 
   String _photoThumbUrl(String uuid) {
@@ -917,6 +927,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                       size: 18, color: _kText2),
                   tooltip: 'Share to social media',
                   onPressed: _shareToSocial,
+                ),
+                const SizedBox(width: 4),
+              ],
+              if (!widget.readOnly &&
+                  widget.shareToken == null &&
+                  (_current['photos'] as List?)?.isNotEmpty == true) ...[
+                IconButton(
+                  icon: const Icon(Icons.high_quality_outlined,
+                      size: 18, color: _kText2),
+                  tooltip: 'Upgrade photos',
+                  onPressed: _upgradePhotos,
                 ),
                 const SizedBox(width: 4),
               ],
