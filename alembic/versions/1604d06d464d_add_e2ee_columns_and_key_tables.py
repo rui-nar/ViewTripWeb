@@ -9,7 +9,7 @@ no keys and does no crypto — it only stores ciphertext blobs and wrapped keys.
   * device_key table (per-device X25519 pubkey + CMK wrapped to it; approval).
   * recovery_wrap table (CMK wrapped under a recovery key or Q&A→Argon2id).
 
-Revision ID: e7f8a9b0c1d2
+Revision ID: 1604d06d464d
 Revises: d1e2f3a4b5c6
 Create Date: 2026-06-30 00:00:00.000000
 
@@ -21,7 +21,7 @@ import sqlmodel
 from alembic import op
 
 
-revision: str = 'e7f8a9b0c1d2'
+revision: str = '1604d06d464d'
 down_revision: Union[str, Sequence[str], None] = 'd1e2f3a4b5c6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
