@@ -191,6 +191,51 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     }
   }
 
+  /// Replace a photo's bytes in place for a memory (issue #33 photo
+  /// upgrade). Returns the new UUID on success and swaps it into local
+  /// state at the same position — the server preserves photo order, so no
+  /// reload is needed, matching updateMemory's optimistic-update style.
+  Future<String?> replaceMemoryPhoto(
+    String memoryId,
+    String oldPhotoUuid,
+    Uint8List bytes,
+    String filename,
+  ) async {
+    final token = api.tokenForUpload;
+    if (token == null) return null;
+    final uri = Uri.parse(
+        '${api.baseUrl}/api/memories/$memoryId/photos/$oldPhotoUuid/replace');
+    final request = http.MultipartRequest('PUT', uri)
+      ..headers['Authorization'] = 'Bearer $token'
+      ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    try {
+      final streamed = await request.send();
+      final res = await http.Response.fromStream(streamed);
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(res.body);
+      final newUuid = match?.group(1);
+      if (newUuid == null) return null;
+
+      for (final item in items) {
+        if (item['item_type'] == 'memory' &&
+            item['memory']?['id']?.toString() == memoryId) {
+          final mem = Map<String, dynamic>.from(item['memory'] as Map);
+          final photos =
+              List<String>.from((mem['photos'] as List?)?.cast<String>() ?? []);
+          final idx = photos.indexOf(oldPhotoUuid);
+          if (idx != -1) photos[idx] = newUuid;
+          mem['photos'] = photos;
+          item['memory'] = mem;
+          break;
+        }
+      }
+      notifyListeners();
+      return newUuid;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ── Comments ────────────────────────────────────────────────────────────────
 
   Future<List<Map<String, dynamic>>> fetchComments(String memoryId) async {

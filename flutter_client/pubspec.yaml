@@ -62,6 +62,10 @@ dependencies:
   cryptography_plus: ^3.0.0
   flutter_secure_storage: ^10.3.1
 
+  # Photo upgrade: EXIF capture time/GPS + image decoding for pHash (pure Dart, web-safe)
+  exif: ^3.3.0
+  image: ^4.8.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
