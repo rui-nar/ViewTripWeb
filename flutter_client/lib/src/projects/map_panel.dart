@@ -284,6 +284,13 @@ class MapPanel extends StatefulWidget {
   /// "auto-zoom to selection", issue #34).
   final bool autoZoom;
 
+  /// Initial camera position (carried over from the other mode when
+  /// switching view/edit, so the viewport doesn't reset to fit-all-bounds).
+  /// When set, the initial full-track auto-fit is skipped.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -294,6 +301,9 @@ class MapPanel extends StatefulWidget {
     this.basemapStyleUri,
     this.trackTileUrlTemplate,
     this.autoZoom = false,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
   });
 
   @override
@@ -301,7 +311,9 @@ class MapPanel extends StatefulWidget {
 }
 
 class _MapPanelState extends State<MapPanel> {
-  bool _fittedBounds = false;
+  // Seeded true when an initial camera position was carried over from the
+  // other mode (view/edit toggle) — skips the fit-all-bounds animation.
+  late bool _fittedBounds = widget.initialLat != null;
   // Points to auto-zoom to after the next full-track fit (issue #34). Set when
   // the selection changes and autoZoom is on; consumed once in build().
   List<LatLng>? _pendingAutoZoomPts;
@@ -847,8 +859,10 @@ class _MapPanelState extends State<MapPanel> {
         FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
-            initialCenter: const LatLng(0, 0),
-            initialZoom: 2,
+            initialCenter: widget.initialLat != null
+                ? LatLng(widget.initialLat!, widget.initialLng!)
+                : const LatLng(0, 0),
+            initialZoom: widget.initialZoom ?? 2,
             maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
@@ -996,6 +1010,13 @@ class ManageMapPanel extends StatefulWidget {
   /// Mapbox vector style URI. When set, a VectorTileLayer replaces the raster TileLayer.
   final String? basemapStyleUri;
 
+  /// Initial camera position (carried over from the other mode when
+  /// switching view/edit). The caller is expected to seed [fittedNotifier]
+  /// to `true` when these are set, so the fit-all-bounds animation is skipped.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
   const ManageMapPanel({
     super.key,
     required this.notifier,
@@ -1005,6 +1026,9 @@ class ManageMapPanel extends StatefulWidget {
     this.autoZoom = false,
     this.basemapSubdomains = const [],
     this.basemapStyleUri,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
   });
 
   @override
@@ -1712,8 +1736,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
-            initialCenter: const LatLng(48.0, 10.0),
-            initialZoom: 4,
+            initialCenter: widget.initialLat != null
+                ? LatLng(widget.initialLat!, widget.initialLng!)
+                : const LatLng(48.0, 10.0),
+            initialZoom: widget.initialZoom ?? 4,
             maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,

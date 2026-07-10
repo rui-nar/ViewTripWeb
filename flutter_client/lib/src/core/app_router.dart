@@ -105,7 +105,12 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          return AppScreen(projectName: projectName);
+          return AppScreen(
+            projectName: projectName,
+            initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
+            initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
+            initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
+          );
         },
       ),
       GoRoute(
@@ -113,7 +118,12 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          return ViewScreen(projectName: projectName);
+          return ViewScreen(
+            projectName: projectName,
+            initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
+            initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
+            initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
+          );
         },
       ),
       GoRoute(

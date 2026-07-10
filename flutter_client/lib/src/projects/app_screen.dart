@@ -30,7 +30,19 @@ import 'sync_import_dialog.dart';
 class AppScreen extends StatefulWidget {
   final String projectName;
 
-  const AppScreen({super.key, required this.projectName});
+  /// Camera position carried over from view mode via the mode toggle, so
+  /// switching modes doesn't reset the map viewport to fit-all-bounds.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
+  const AppScreen({
+    super.key,
+    required this.projectName,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
+  });
 
   @override
   State<AppScreen> createState() => _AppScreenState();
@@ -41,7 +53,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
-  final ValueNotifier<bool> _mapFitted = ValueNotifier(false);
+  // Seeded true when a camera position was carried over from view mode.
+  late final ValueNotifier<bool> _mapFitted =
+      ValueNotifier(widget.initialLat != null);
   final ScrollController _activityScrollController = ScrollController();
   // Separate controller for the narrow-layout overlay panel: wide and narrow
   // are mutually-exclusive LayoutBuilder branches, and sharing one controller
@@ -331,8 +345,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 ),
               ],
               selected: const {false},
-              onSelectionChanged: (s) => context.go(
-                  '/view?project=${Uri.encodeComponent(widget.projectName)}'),
+              onSelectionChanged: (s) {
+                final cam = _mapController.mapController.camera;
+                context.go(
+                    '/view?project=${Uri.encodeComponent(widget.projectName)}'
+                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}');
+              },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
@@ -599,6 +617,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           basemapSubdomains: kActiveManageSubdomains,
                           fittedNotifier: _mapFitted,
                           basemapStyleUri: kActiveManageStyleUri,
+                          initialLat: widget.initialLat,
+                          initialLng: widget.initialLng,
+                          initialZoom: widget.initialZoom,
                         ),
                       )),
                       Positioned(
@@ -672,6 +693,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     basemapSubdomains: kActiveManageSubdomains,
                     fittedNotifier: _mapFitted,
                     basemapStyleUri: kActiveManageStyleUri,
+                    initialLat: widget.initialLat,
+                    initialLng: widget.initialLng,
+                    initialZoom: widget.initialZoom,
                   ),
                 )),
 
