@@ -1270,7 +1270,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       if (lat == null || lon == null) continue;
 
       final pin = classifyEncounterPin(
-          (e['person_id'] as num?)?.toInt(), peopleById, groupsById);
+          (e['person_id'] as num?)?.toInt(), (e['group_id'] as num?)?.toInt(),
+          peopleById, groupsById);
       final isGroup = pin?.kind == 'group';
       markers.add(Marker(
         point: LatLng(lat, lon),

@@ -1,8 +1,9 @@
-"""REST encounter endpoints — CRUD for people met on a day (issue #40).
+"""REST encounter endpoints — CRUD for people/groups met on a day (issue #40, #56).
 
 Encounters are private and owner-only — never exposed in shared views. Each
-encounter links one person to a day, with an optional place (map pin, defaulting
-to the day's location) and a free-text note. Rendered as an ordered project item.
+encounter links one person OR one group to a day (exactly one of person_id/
+group_id), with an optional place (map pin, defaulting to the day's location) and
+a free-text note. Rendered as an ordered project item.
 
 Routes:
     POST   /api/encounters              — create an encounter (person + day + place)
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from models.project_db import DBActivity, DBEncounter, DBPerson, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/encounters", tags=["encounters"])
 
@@ -61,6 +62,22 @@ def _require_person_in_project(sess, person_id: int, project_id: int) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not in project")
 
 
+def _require_group_in_project(sess, group_id: int, project_id: int) -> None:
+    group = sess.get(DBPersonGroup, group_id)
+    if group is None or group.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not in project")
+
+
+def _require_exactly_one_of_person_or_group(
+    person_id: Optional[int], group_id: Optional[int]
+) -> None:
+    if (person_id is None) == (group_id is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Exactly one of person_id or group_id must be set",
+        )
+
+
 def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
     """Resolve an encounter's coordinates from the day's activities (mirrors journal)."""
     if geo_mode == "custom":
@@ -92,7 +109,8 @@ def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
 
 class EncounterBody(BaseModel):
     project_name: str = Field(description="Project the encounter belongs to")
-    person_id: int = Field(description="Person met")
+    person_id: Optional[int] = Field(None, description="Person met (exactly one of person_id/group_id)")
+    group_id: Optional[int] = Field(None, description="Group met (exactly one of person_id/group_id)")
     date: str = Field(description="Date of the encounter (YYYY-MM-DD)")
     geo_mode: str = Field("start_of_day", description="'start_of_day', 'end_of_day', or 'custom'")
     time: Optional[str] = Field(None, description="Optional time of day (HH:MM)")
@@ -103,7 +121,8 @@ class EncounterBody(BaseModel):
 
 
 class EncounterUpdateBody(BaseModel):
-    person_id: int = Field(description="Person met")
+    person_id: Optional[int] = Field(None, description="Person met (exactly one of person_id/group_id)")
+    group_id: Optional[int] = Field(None, description="Group met (exactly one of person_id/group_id)")
     date: str = Field(description="Date of the encounter (YYYY-MM-DD)")
     geo_mode: str = Field("start_of_day", description="'start_of_day', 'end_of_day', or 'custom'")
     time: Optional[str] = Field(None)
@@ -120,11 +139,15 @@ def create_encounter(
     body: EncounterBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Create an encounter with a person on a day and insert it at the requested position."""
+    """Create an encounter with a person or group on a day and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         project_id = _get_project_id(sess, user_info_id, body.project_name)
-        _require_person_in_project(sess, body.person_id, project_id)
+        _require_exactly_one_of_person_or_group(body.person_id, body.group_id)
+        if body.person_id is not None:
+            _require_person_in_project(sess, body.person_id, project_id)
+        else:
+            _require_group_in_project(sess, body.group_id, project_id)
 
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
@@ -133,6 +156,7 @@ def create_encounter(
         row = DBEncounter(
             project_id=project_id,
             person_id=body.person_id,
+            group_id=body.group_id,
             date=body.date,
             time=body.time,
             description=body.description,
@@ -176,17 +200,22 @@ def update_encounter(
     body: EncounterUpdateBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Update an encounter's person, date, place, or note."""
+    """Update an encounter's person/group, date, place, or note."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_encounter(sess, encounter_id, user_info_id)
-        _require_person_in_project(sess, body.person_id, row.project_id)
+        _require_exactly_one_of_person_or_group(body.person_id, body.group_id)
+        if body.person_id is not None:
+            _require_person_in_project(sess, body.person_id, row.project_id)
+        else:
+            _require_group_in_project(sess, body.group_id, row.project_id)
 
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
             lat, lon = _resolve_geo(sess, row.project_id, body.date, body.geo_mode)
 
         row.person_id = body.person_id
+        row.group_id = body.group_id
         row.date = body.date
         row.time = body.time
         row.description = body.description

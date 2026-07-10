@@ -26,11 +26,22 @@ Notes on reproduction fidelity:
 Fix: ``_refresh_stats_background`` coalesces per project — at most one stats
 writer runs at a time; refreshes requested while one is in flight set a rerun
 flag so the final state is still recomputed exactly once.
+
+Follow-up (same symptom, different trigger): coalescing bounds *concurrent*
+writers to one, but doesn't bound how long a single commit can hold the write
+lock. SQLite's default WAL behaviour runs an inline checkpoint synchronously
+inside whichever commit crosses the ~1000-page threshold — on slow storage
+(e.g. NAS disks) that checkpoint I/O can itself take seconds, and any other
+writer queued behind it burns its busy_timeout waiting on that one unlucky
+commit. Fix: disable the inline auto-checkpoint (``wal_autocheckpoint=0``) and
+replace it with a periodic PASSIVE checkpoint (``models.db.checkpoint_wal``)
+that never blocks a concurrent writer.
 """
 from __future__ import annotations
 
 import json
 import threading
+import time
 
 import polyline as polyline_lib
 import pytest
@@ -64,6 +75,7 @@ def _make_file_engine(tmp_path, busy_timeout_ms: int = 300):
             cur.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA wal_autocheckpoint=0")
         finally:
             cur.close()
 
@@ -182,3 +194,36 @@ def test_coalesced_refresh_persists_stats(env):
         ).first()
         assert row.stats_json is not None
         assert json.loads(row.stats_json)  # non-empty stats dict
+
+
+def test_wal_autocheckpoint_disabled(env):
+    """Automatic checkpointing must be off — otherwise whichever commit crosses
+    the WAL size threshold pays the checkpoint's I/O cost inline and holds the
+    single write lock for its duration, exactly like the stacked-writer issue
+    but triggered by any commit instead of a burst."""
+    engine, _uid = env
+    with engine.connect() as conn:
+        value = conn.exec_driver_sql("PRAGMA wal_autocheckpoint").scalar()
+    assert value == 0
+
+
+def test_checkpoint_wal_does_not_block_concurrent_writer(env):
+    """A PASSIVE checkpoint must never make an interactive writer wait: while
+    another connection holds an open write transaction, checkpoint_wal() should
+    return promptly (checkpointing fewer frames, not blocking) instead of
+    contending for the lock itself."""
+    engine, _uid = env
+
+    holder = engine.raw_connection()
+    try:
+        cur = holder.cursor()
+        cur.execute("BEGIN IMMEDIATE")  # acquire and hold the write lock
+        cur.execute("UPDATE project SET updated_at = 2 WHERE id = 1")
+
+        start = time.monotonic()
+        db_module.checkpoint_wal()  # must not raise or hang behind the lock
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0
+    finally:
+        holder.rollback()
+        holder.close()

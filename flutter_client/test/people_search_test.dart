@@ -13,6 +13,11 @@ Map<String, dynamic> _enc(int personId, {String? note}) => {
       'encounter': {'person_id': personId, 'description': note},
     };
 
+Map<String, dynamic> _groupEnc(int groupId, {String? note, String? date}) => {
+      'item_type': 'encounter',
+      'encounter': {'group_id': groupId, 'description': note, 'date': date},
+    };
+
 void main() {
   group('personDisplayName', () {
     test('falls back to Unknown when name is missing or blank', () {
@@ -50,18 +55,31 @@ void main() {
         10: {'id': 10, 'name': 'Crew'},
       };
       // Grouped person → group pin.
-      final g = classifyEncounterPin(1, peopleById, groupsById)!;
+      final g = classifyEncounterPin(1, null, peopleById, groupsById)!;
       expect(g.kind, 'group');
       expect(g.entity['name'], 'Crew');
       // Ungrouped person → person pin.
-      final p = classifyEncounterPin(2, peopleById, groupsById)!;
+      final p = classifyEncounterPin(2, null, peopleById, groupsById)!;
       expect(p.kind, 'person');
       expect(p.entity['name'], 'B');
       // Unknown person → null.
-      expect(classifyEncounterPin(99, peopleById, groupsById), isNull);
+      expect(classifyEncounterPin(99, null, peopleById, groupsById), isNull);
       // Grouped but the group is missing → fall back to person.
-      final orphan = classifyEncounterPin(1, peopleById, {})!;
+      final orphan = classifyEncounterPin(1, null, peopleById, {})!;
       expect(orphan.kind, 'person');
+    });
+
+    test('classifyEncounterPin resolves a direct group_id without needing a person (#56)', () {
+      final groupsById = {10: {'id': 10, 'name': 'Crew'}};
+      final g = classifyEncounterPin(null, 10, {}, groupsById)!;
+      expect(g.kind, 'group');
+      expect(g.entity['name'], 'Crew');
+      // group_id set but the group is missing → orphan, no person fallback.
+      expect(classifyEncounterPin(null, 99, {}, groupsById), isNull);
+      // group_id takes priority even when a person_id is also present.
+      final peopleById = {1: {'id': 1, 'name': 'A'}};
+      final both = classifyEncounterPin(1, 10, peopleById, groupsById)!;
+      expect(both.kind, 'group');
     });
   });
 
@@ -75,6 +93,22 @@ void main() {
       ];
       expect(encounterCountByPerson(items), {1: 2, 2: 1});
       expect(encounterNotesByPerson(items), {1: ['cafe', 'beach'], 2: ['trail']});
+    });
+
+    test('counts, collects notes, and lists encounters per group (#56)', () {
+      final items = [
+        _groupEnc(10, note: 'met the crew', date: '2024-06-01'),
+        _groupEnc(10, note: 'again', date: '2024-06-02'),
+        _groupEnc(20, note: 'other crew', date: '2024-06-03'),
+        _enc(1, note: 'unrelated person encounter'),
+        {'item_type': 'activity'},
+      ];
+      expect(encounterCountByGroup(items), {10: 2, 20: 1});
+      expect(encounterNotesByGroup(items),
+          {10: ['met the crew', 'again'], 20: ['other crew']});
+      final forTen = encountersForGroup(items, 10);
+      expect(forTen.map((e) => e['date']), ['2024-06-01', '2024-06-02']);
+      expect(encountersForGroup(items, 99), isEmpty);
     });
   });
 

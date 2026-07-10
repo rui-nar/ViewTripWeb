@@ -324,13 +324,17 @@ class DBPersonGroup(sqlmodel.SQLModel, table=True):
 
 
 class DBEncounter(sqlmodel.SQLModel, table=True):
-    """Meeting a person on a given day/place (issue #40) — owner-only, per-project."""
+    """Meeting a person or group on a given day/place (issue #40, #56) — owner-only, per-project.
+
+    Exactly one of person_id/group_id is set (enforced at the API layer).
+    """
 
     __tablename__ = "encounter"
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
-    person_id: int = sqlmodel.Field(foreign_key="person.id", index=True)
+    person_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person.id", index=True)
+    group_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person_group.id", index=True)
     date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
     time: Optional[str] = sqlmodel.Field(default=None)   # "HH:MM"
     description: Optional[str] = sqlmodel.Field(default=None)

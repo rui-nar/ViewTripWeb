@@ -856,7 +856,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
             ListTile(
               leading: const Icon(Icons.groups_outlined),
               title: const Text('Encounter'),
-              subtitle: const Text('Someone you met'),
+              subtitle: const Text('Someone or a group you met'),
               onTap: () {
                 Navigator.of(context).pop();
                 showDialog<void>(
@@ -898,6 +898,15 @@ class _ActivityPanelState extends State<ActivityPanel> {
     return null;
   }
 
+  /// Resolve the group map for an encounter's group_id (issue #56).
+  Map<String, dynamic>? _groupFor(int? groupId) {
+    if (groupId == null) return null;
+    for (final g in widget.notifier.groups) {
+      if (g['id'] == groupId) return g;
+    }
+    return null;
+  }
+
   /// Timeline tile for an encounter item (issue #40): person avatar + name +
   /// note; edit via swipe/tap, delete via swipe/button.
   Widget _encounterTile(
@@ -909,8 +918,13 @@ class _ActivityPanelState extends State<ActivityPanel> {
   ) {
     final enc = item['encounter'] as Map<String, dynamic>? ?? {};
     final encId = enc['id']?.toString() ?? '';
-    final person = _personFor((enc['person_id'] as num?)?.toInt());
-    final name = person != null ? personDisplayName(person) : 'Someone';
+    final group = _groupFor((enc['group_id'] as num?)?.toInt());
+    final person = group == null ? _personFor((enc['person_id'] as num?)?.toInt()) : null;
+    final name = group != null
+        ? groupDisplayName(group)
+        : person != null
+            ? personDisplayName(person)
+            : 'Someone';
     final date = enc['date'] as String?;
     final time = enc['time'] as String?;
     final note = enc['description'] as String?;
@@ -956,9 +970,14 @@ class _ActivityPanelState extends State<ActivityPanel> {
       },
       child: ListTile(
         dense: true,
-        leading: person != null
-            ? PersonAvatar(notifier: notifier, person: person, radius: 16)
-            : const CircleAvatar(radius: 16, child: Icon(Icons.person, size: 18)),
+        leading: group != null
+            ? CircleAvatar(
+                radius: 16,
+                backgroundColor: kAccentSoft,
+                child: const Icon(Icons.groups, size: 18, color: kAccent))
+            : person != null
+                ? PersonAvatar(notifier: notifier, person: person, radius: 16)
+                : const CircleAvatar(radius: 16, child: Icon(Icons.person, size: 18)),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -984,7 +1003,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
         onTap: _multiSelect
             ? null
             : () {
-                if (person != null) {
+                if (group != null) {
+                  showGroupDetailSheet(context, notifier, group);
+                } else if (person != null) {
                   showPersonDetailSheet(context, notifier, person);
                 }
               },

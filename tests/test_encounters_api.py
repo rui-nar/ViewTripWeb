@@ -12,9 +12,10 @@ from sqlmodel import Session, SQLModel, create_engine
 import models.db as db_module
 from api.deps import get_current_user
 from api.encounters import router as encounters_router
+from api.groups import router as groups_router
 from api.people import router as people_router
 from api.projects import router as projects_router
-from models.project_db import DBActivity, DBEncounter, DBPerson, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from models.user import UserInfo
 
 
@@ -55,6 +56,7 @@ def env(monkeypatch):
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid), "email": "a@e.com"}
     app.include_router(encounters_router)
+    app.include_router(groups_router)
     app.include_router(people_router)
     app.include_router(projects_router)
     return TestClient(app), engine, uid, pid
@@ -66,6 +68,23 @@ def _create(client, pid, date, **kw):
     r = client.post("/api/encounters/", json=body)
     assert r.status_code == 201, r.text
     return r.json()["id"]
+
+
+def _create_with_group(client, gid, date, **kw):
+    body = {"project_name": "My Trip", "group_id": gid, "date": date}
+    body.update(kw)
+    r = client.post("/api/encounters/", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _seed_group(engine, pid, name="Crew"):
+    """A group in the same project as person [pid] (issue #56)."""
+    with Session(engine) as sess:
+        person = sess.get(DBPerson, pid)
+        g = DBPersonGroup(project_id=person.project_id, name=name)
+        sess.add(g); sess.commit(); sess.refresh(g)
+        return g.id
 
 
 def test_create_encounter_appears_as_item(env):
@@ -163,3 +182,73 @@ def test_encounter_requires_person_in_project(env):
         "project_name": "My Trip", "person_id": opid, "date": "2024-06-01",
     })
     assert r.status_code == 404
+
+
+# ── Group encounters (issue #56) ────────────────────────────────────────────
+
+def test_create_encounter_with_group(env):
+    client, _, _, pid = env
+    gid = _seed_group(env[1], pid)
+    eid = _create_with_group(client, gid, "2024-06-01", description="met the crew")
+    enc = [it for it in client.get("/api/projects/My Trip").json()["items"]
+           if it["item_type"] == "encounter"][0]["encounter"]
+    assert enc["id"] == eid
+    assert enc["group_id"] == gid
+    assert enc["person_id"] is None
+
+
+def test_create_encounter_requires_exactly_one_of_person_or_group(env):
+    client, engine, _, pid = env
+    gid = _seed_group(engine, pid)
+    # Neither set.
+    r = client.post("/api/encounters/", json={
+        "project_name": "My Trip", "date": "2024-06-01",
+    })
+    assert r.status_code == 400
+    # Both set.
+    r = client.post("/api/encounters/", json={
+        "project_name": "My Trip", "person_id": pid, "group_id": gid,
+        "date": "2024-06-01",
+    })
+    assert r.status_code == 400
+
+
+def test_encounter_requires_group_in_project(env):
+    client, engine, uid, _ = env
+    with Session(engine) as sess:
+        p2 = DBProject(user_info_id=uid, name="Other")
+        sess.add(p2); sess.commit(); sess.refresh(p2)
+        other_group = DBPersonGroup(project_id=p2.id, name="Other crew")
+        sess.add(other_group); sess.commit(); sess.refresh(other_group)
+        ogid = other_group.id
+    r = client.post("/api/encounters/", json={
+        "project_name": "My Trip", "group_id": ogid, "date": "2024-06-01",
+    })
+    assert r.status_code == 404
+
+
+def test_update_encounter_switches_person_to_group(env):
+    client, engine, _, pid = env
+    gid = _seed_group(engine, pid)
+    eid = _create(client, pid, "2024-06-01")
+    r = client.put(f"/api/encounters/{eid}", json={
+        "group_id": gid, "date": "2024-06-01", "geo_mode": "custom",
+        "lat": 1.0, "lon": 2.0,
+    })
+    assert r.status_code == 204
+    enc = [it for it in client.get("/api/projects/My Trip").json()["items"]
+           if it["item_type"] == "encounter"][0]["encounter"]
+    assert enc["group_id"] == gid
+    assert enc["person_id"] is None
+
+
+def test_deleting_group_cascades_encounters(env):
+    client, engine, _, pid = env
+    gid = _seed_group(engine, pid)
+    eid = _create_with_group(client, gid, "2024-06-01")
+    assert client.delete(f"/api/groups/{gid}").status_code == 204
+    with Session(engine) as sess:
+        assert sess.get(DBEncounter, eid) is None
+        assert sess.get(DBPersonGroup, gid) is None
+    items = client.get("/api/projects/My Trip").json()["items"]
+    assert not any(it["item_type"] == "encounter" for it in items)

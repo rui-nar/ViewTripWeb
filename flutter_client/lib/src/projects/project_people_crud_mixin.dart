@@ -156,8 +156,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
 
   // ── Encounter CRUD ────────────────────────────────────────────────────────
 
+  /// Create an encounter with a person OR a group met (issue #56 — caller
+  /// guarantees exactly one of [personId]/[groupId] is set).
   Future<void> createEncounter({
-    required int personId,
+    int? personId,
+    int? groupId,
     required String date,
     required String geoMode,
     String? time,
@@ -173,6 +176,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
       'encounter': {
         'id': '__optimistic__',
         'person_id': personId,
+        'group_id': groupId,
         'date': date,
         'time': time,
         'description': description,
@@ -190,6 +194,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
       await api.post('/api/encounters/', {
         'project_name': projectName,
         'person_id': personId,
+        'group_id': groupId,
         'date': date,
         'geo_mode': geoMode,
         if (time != null) 'time': time,
@@ -205,9 +210,12 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     }
   }
 
+  /// Update an encounter's person/group, date, place, or note (issue #56 —
+  /// caller guarantees exactly one of [personId]/[groupId] is set).
   Future<void> updateEncounter(
     String encounterId, {
-    required int personId,
+    int? personId,
+    int? groupId,
     required String date,
     required String geoMode,
     String? time,
@@ -220,6 +228,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     try {
       await api.put('/api/encounters/$encounterId', {
         'person_id': personId,
+        'group_id': groupId,
         'date': date,
         'geo_mode': geoMode,
         if (time != null) 'time': time,
@@ -352,8 +361,13 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   Future<void> deleteGroup(int groupId) async {
     final projectName = this.projectName;
     if (projectName == null) return;
-    // Optimistic: drop the group and ungroup its members locally.
+    // Optimistic: drop the group, its direct group-encounters (issue #56 —
+    // unlike a member, they have no fallback), and ungroup remaining members.
     groups = groups.where((g) => g['id'] != groupId).toList();
+    items = items
+        .where((it) => !(it['item_type'] == 'encounter' &&
+            it['encounter']?['group_id'] == groupId))
+        .toList();
     for (final p in people) {
       if (p['group_id'] == groupId) p['group_id'] = null;
     }

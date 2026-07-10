@@ -136,12 +136,14 @@ class _PeopleScreenState extends State<PeopleScreen> {
           'Group people you met — e.g. a hostel crew or a family.');
     }
     final counts = memberCountByGroup(widget.notifier.people);
+    final encCounts = encounterCountByGroup(widget.notifier.items);
     return ListView.builder(
       itemCount: groups.length,
       itemBuilder: (_, i) => _GroupTile(
         notifier: widget.notifier,
         group: groups[i],
         memberCount: counts[groups[i]['id']] ?? 0,
+        encounterCount: encCounts[groups[i]['id']] ?? 0,
       ),
     );
   }
@@ -506,14 +508,21 @@ class _GroupTile extends StatelessWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> group;
   final int memberCount;
+  final int encounterCount;
   const _GroupTile({
     required this.notifier,
     required this.group,
     required this.memberCount,
+    required this.encounterCount,
   });
 
   @override
   Widget build(BuildContext context) {
+    final subtitleParts = [
+      '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
+      if (encounterCount > 0)
+        '$encounterCount ${encounterCount == 1 ? 'encounter' : 'encounters'}',
+    ];
     return ListTile(
       leading: CircleAvatar(
         radius: 22,
@@ -521,7 +530,7 @@ class _GroupTile extends StatelessWidget {
         child: const Icon(Icons.groups, color: kAccent),
       ),
       title: Text(groupDisplayName(group)),
-      subtitle: Text('$memberCount ${memberCount == 1 ? 'member' : 'members'}'),
+      subtitle: Text(subtitleParts.join('  •  ')),
       onTap: () => showGroupDetailSheet(context, notifier, group),
     );
   }
@@ -672,6 +681,35 @@ class _GroupDetailSheet extends StatelessWidget {
                 ],
               ),
             ),
+          const SizedBox(height: 12),
+          Text('Encounters', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Builder(builder: (context) {
+            final encounters = encountersForGroup(notifier.items, _groupId);
+            if (encounters.isEmpty) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text('No encounters logged yet.',
+                    style: theme.textTheme.bodySmall),
+              );
+            }
+            return Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final e in encounters)
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.place_outlined, size: 18),
+                      title: Text(e['date']?.toString() ?? ''),
+                      subtitle: (e['description'] as String?)?.isNotEmpty ?? false
+                          ? Text(e['description'] as String)
+                          : null,
+                    ),
+                ],
+              ),
+            );
+          }),
         ],
       ),
     );
