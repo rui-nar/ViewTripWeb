@@ -8,11 +8,14 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
+import '../core/design_tokens.dart' show kAccent;
 import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'memory_detail_modal.dart';
+import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
+import 'people_search.dart' show classifyEncounterPin;
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
@@ -276,6 +279,18 @@ class MapPanel extends StatefulWidget {
   /// Template variables `{z}`, `{x}`, `{y}` are filled in by flutter_map.
   final String? trackTileUrlTemplate;
 
+  /// When true, changing the selection zooms the map to the selected
+  /// activity/segment instead of leaving the viewport as-is (view-mode
+  /// "auto-zoom to selection", issue #34).
+  final bool autoZoom;
+
+  /// Initial camera position (carried over from the other mode when
+  /// switching view/edit, so the viewport doesn't reset to fit-all-bounds).
+  /// When set, the initial full-track auto-fit is skipped.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -285,6 +300,10 @@ class MapPanel extends StatefulWidget {
     this.labelsUrl,
     this.basemapStyleUri,
     this.trackTileUrlTemplate,
+    this.autoZoom = false,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
   });
 
   @override
@@ -292,7 +311,12 @@ class MapPanel extends StatefulWidget {
 }
 
 class _MapPanelState extends State<MapPanel> {
-  bool _fittedBounds = false;
+  // Seeded true when an initial camera position was carried over from the
+  // other mode (view/edit toggle) — skips the fit-all-bounds animation.
+  late bool _fittedBounds = widget.initialLat != null;
+  // Points to auto-zoom to after the next full-track fit (issue #34). Set when
+  // the selection changes and autoZoom is on; consumed once in build().
+  List<LatLng>? _pendingAutoZoomPts;
   // Polyline + bounds cache — only rebuilt when geo, selection, or style changes.
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
@@ -780,16 +804,51 @@ class _MapPanelState extends State<MapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId, hasSelection, context);
-      // Only re-fit when the selection changes (user picks a different
-      // activity/segment). A geo update from progressive track loading
-      // should never reset the viewport the user has already panned/zoomed.
-      if (selectionChanged) _fittedBounds = false;
+      // Auto-zoom to selection (issue #34). Previously this always did
+      // `_fittedBounds = false` on any selection change, which re-fit the map to
+      // the WHOLE trip every time — so view mode "reset to full trip zoom"
+      // instead of zooming to the picked item. Now: only when auto-zoom is on
+      // and something is selected do we queue a zoom to that item; with
+      // auto-zoom off, selection leaves the viewport untouched.
+      if (selectionChanged && widget.autoZoom && geo != null &&
+          (selActId != null || selSegId != null)) {
+        _pendingAutoZoomPts = ManageMapPanelState.extractSelectedPoints(
+            geo, selActId, selSegId, null, null);
+      } else if (selectionChanged) {
+        _pendingAutoZoomPts = null;
+      }
     }
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
 
     if (allPoints.isNotEmpty && !notifier.isLoading) {
       _fitBoundsOnce(allPoints);
+    }
+
+    // Auto-zoom to the selected item (issue #34), scheduled after the
+    // full-track fit so it wins over it.
+    final pendingPts = _pendingAutoZoomPts;
+    if (pendingPts != null && pendingPts.isNotEmpty) {
+      _pendingAutoZoomPts = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        double minLat = pendingPts.first.latitude, maxLat = pendingPts.first.latitude;
+        double minLon = pendingPts.first.longitude, maxLon = pendingPts.first.longitude;
+        for (final p in pendingPts) {
+          if (p.latitude < minLat) minLat = p.latitude;
+          if (p.latitude > maxLat) maxLat = p.latitude;
+          if (p.longitude < minLon) minLon = p.longitude;
+          if (p.longitude > maxLon) maxLon = p.longitude;
+        }
+        widget.mapController.animatedFitCamera(
+          cameraFit: CameraFit.bounds(
+            bounds: LatLngBounds(
+                LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+            padding: const EdgeInsets.all(48),
+          ),
+          curve: Curves.easeInOut,
+        );
+      });
     }
 
     // FlutterMap stays mounted throughout loading so the MapController stays
@@ -800,8 +859,10 @@ class _MapPanelState extends State<MapPanel> {
         FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
-            initialCenter: const LatLng(0, 0),
-            initialZoom: 2,
+            initialCenter: widget.initialLat != null
+                ? LatLng(widget.initialLat!, widget.initialLng!)
+                : const LatLng(0, 0),
+            initialZoom: widget.initialZoom ?? 2,
             maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
@@ -949,6 +1010,13 @@ class ManageMapPanel extends StatefulWidget {
   /// Mapbox vector style URI. When set, a VectorTileLayer replaces the raster TileLayer.
   final String? basemapStyleUri;
 
+  /// Initial camera position (carried over from the other mode when
+  /// switching view/edit). The caller is expected to seed [fittedNotifier]
+  /// to `true` when these are set, so the fit-all-bounds animation is skipped.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
   const ManageMapPanel({
     super.key,
     required this.notifier,
@@ -958,6 +1026,9 @@ class ManageMapPanel extends StatefulWidget {
     this.autoZoom = false,
     this.basemapSubdomains = const [],
     this.basemapStyleUri,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
   });
 
   @override
@@ -982,6 +1053,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
+  List<Marker> _cachedEncounterMarkers = [];
   bool _showMemories = true;
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
@@ -1171,6 +1243,67 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return markers;
   }
 
+  /// Owner-only encounter pins (issue #40). Tapping opens the person sheet.
+  List<Marker> _buildEncounterMarkers(
+    List<Map<String, dynamic>> items,
+    BuildContext context,
+  ) {
+    // Lookups for pin classification: a grouped person's encounter shows the
+    // group ("People") icon (the individual is masked); an ungrouped person
+    // shows a person icon (issue #50).
+    final peopleById = {
+      for (final p in widget.notifier.people)
+        if (p['id'] is int) p['id'] as int: p,
+    };
+    final groupsById = {
+      for (final g in widget.notifier.groups)
+        if (g['id'] is int) g['id'] as int: g,
+    };
+
+    final markers = <Marker>[];
+    for (final item in items) {
+      if (item['item_type'] != 'encounter') continue;
+      final e = item['encounter'] as Map<String, dynamic>?;
+      if (e == null) continue;
+      final lat = (e['lat'] as num?)?.toDouble();
+      final lon = (e['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+
+      final pin = classifyEncounterPin(
+          (e['person_id'] as num?)?.toInt(), (e['group_id'] as num?)?.toInt(),
+          peopleById, groupsById);
+      final isGroup = pin?.kind == 'group';
+      markers.add(Marker(
+        point: LatLng(lat, lon),
+        width: 22,
+        height: 22,
+        child: GestureDetector(
+          onTap: pin == null
+              ? null
+              : () {
+                  if (isGroup) {
+                    showGroupDetailSheet(context, widget.notifier, pin.entity);
+                  } else {
+                    showPersonDetailSheet(context, widget.notifier, pin.entity);
+                  }
+                },
+          child: Container(
+            decoration: BoxDecoration(
+              color: kAccent,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+            ),
+            child: Center(
+              child: Icon(isGroup ? Icons.groups : Icons.person,
+                  size: 12, color: Colors.white),
+            ),
+          ),
+        ),
+      ));
+    }
+    return markers;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1321,7 +1454,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return (actIds: actIds, segIds: segIds);
   }
 
-  List<LatLng> _extractSelectedPoints(
+  /// Points of the currently-selected activity/segment (or all activities/
+  /// segments of the selected day(s)), used to compute the auto-zoom target.
+  /// Public + static so the view-mode [MapPanel] and tests can reuse it.
+  static List<LatLng> extractSelectedPoints(
     Map<String, dynamic> geo,
     dynamic selActId,
     dynamic selSegId,
@@ -1539,6 +1675,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId2, hasSelection, context);
+      _cachedEncounterMarkers = _buildEncounterMarkers(items, context);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
@@ -1555,7 +1692,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             daySegIds.addAll(r.segIds);
           }
         }
-        _pendingAutoZoomPts = _extractSelectedPoints(
+        _pendingAutoZoomPts = extractSelectedPoints(
             geo, selActId, selSegId, dayActIds, daySegIds);
       } else if (selectionChanged2) {
         _pendingAutoZoomPts = null;
@@ -1600,8 +1737,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
-            initialCenter: const LatLng(48.0, 10.0),
-            initialZoom: 4,
+            initialCenter: widget.initialLat != null
+                ? LatLng(widget.initialLat!, widget.initialLng!)
+                : const LatLng(48.0, 10.0),
+            initialZoom: widget.initialZoom ?? 4,
             maxZoom: kMaxMapZoom,
             interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
@@ -1639,6 +1778,41 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedMemoryMarkers),
             if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedJournalMarkers),
+            if (_cachedEncounterMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedEncounterMarkers),
+            // Owner-only, view-only Polarsteps trip overlay for a person (#40).
+            if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: [
+                      for (final s in notifier.polarstepsOverlaySteps)
+                        LatLng((s['lat'] as num).toDouble(),
+                            (s['lon'] as num).toDouble()),
+                    ],
+                    color: const Color(0xFF7C3AED),
+                    strokeWidth: 3,
+                  ),
+                ],
+              ),
+              MarkerLayer(
+                markers: [
+                  for (final s in notifier.polarstepsOverlaySteps)
+                    Marker(
+                      point: LatLng((s['lat'] as num).toDouble(),
+                          (s['lon'] as num).toDouble()),
+                      width: 12,
+                      height: 12,
+                      child: const DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Color(0xFF7C3AED),
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
@@ -1702,6 +1876,44 @@ class ManageMapPanelState extends State<ManageMapPanel> {
                   ),
                 ),
               ],
+            ),
+          ),
+        if (notifier.polarstepsOverlaySteps.isNotEmpty)
+          Positioned(
+            top: 12,
+            left: 12,
+            right: 12,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Material(
+                color: const Color(0xFF7C3AED),
+                borderRadius: BorderRadius.circular(20),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 14, right: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.travel_explore,
+                          size: 16, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          notifier.polarstepsOverlayLabel ?? 'Polarsteps trip',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close,
+                            size: 16, color: Colors.white),
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Clear overlay',
+                        onPressed: notifier.clearPolarstepsOverlay,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
       ],

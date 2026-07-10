@@ -135,6 +135,71 @@ class ProjectService {
     await api.put('/api/projects/$enc/languages', {'languages': languages});
   }
 
+  /// Fetch a single activity's editable geometry (polyline + elevation pairs).
+  /// GET /api/projects/{name}/activities/{id}/track
+  /// Far smaller than getDetails() — used to open the track editor without
+  /// downloading the whole project.
+  Future<Map<String, dynamic>> getActivityTrack(
+    String name,
+    int activityId,
+  ) async {
+    final enc = Uri.encodeComponent(name);
+    final data = await api.get('/api/projects/$enc/activities/$activityId/track');
+    return data as Map<String, dynamic>;
+  }
+
+  /// Replace an activity's track geometry with an edited point list.
+  /// PUT /api/projects/{name}/activities/{id}/track
+  /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated project.
+  Future<Map<String, dynamic>> saveActivityTrack(
+    String name,
+    int activityId,
+    Map<String, dynamic> payload,
+  ) async {
+    final enc = Uri.encodeComponent(name);
+    final data = await api.put(
+      '/api/projects/$enc/activities/$activityId/track',
+      payload,
+    );
+    return data as Map<String, dynamic>;
+  }
+
+  /// Reset an edited activity's track to the original Strava geometry.
+  /// POST /api/projects/{name}/activities/{id}/reset
+  Future<Map<String, dynamic>> resetActivityTrack(
+    String name,
+    int activityId,
+  ) async {
+    final enc = Uri.encodeComponent(name);
+    final data = await api.post(
+      '/api/projects/$enc/activities/$activityId/reset',
+      const {},
+    );
+    return data as Map<String, dynamic>;
+  }
+
+  /// Split an activity at [splitIndex]; the tail becomes a new local activity.
+  /// POST /api/projects/{name}/activities/{id}/split
+  Future<Map<String, dynamic>> splitActivity(
+    String name,
+    int activityId,
+    int splitIndex,
+  ) async {
+    final enc = Uri.encodeComponent(name);
+    final data = await api.post(
+      '/api/projects/$enc/activities/$activityId/split',
+      {'split_index': splitIndex},
+    );
+    return data as Map<String, dynamic>;
+  }
+
+  /// Delete a local (split-tail, negative-id) activity.
+  /// DELETE /api/projects/{name}/activities/{id}/local
+  Future<void> deleteLocalActivity(String name, int activityId) async {
+    final enc = Uri.encodeComponent(name);
+    await api.delete('/api/projects/$enc/activities/$activityId/local');
+  }
+
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
   Future<Map<String, dynamic>> resolveTrainRoute(
     String projectName,

@@ -54,6 +54,10 @@ class Activity:
     # .viewtrip file format). Same shape as elevation_profile. Served when the full
     # profile is deferred (meta / low-res loads).
     elevation_profile_low_res: Optional[Tuple[List[float], List[float]]] = None
+    # Geometry-edit flag (issue #31). True when the track was edited locally, so
+    # Strava sync must skip this activity. Round-trips through the DB and the REST
+    # API; the pre-edit snapshot itself stays DB-only.
+    is_edited: bool = False
 
     def to_strava_dict(self) -> dict:
         """Serialise to a dict that can be round-tripped via from_strava_api()."""
@@ -101,6 +105,7 @@ class Activity:
                 "distances_km": self.elevation_profile[0],
                 "elevations_m": self.elevation_profile[1],
             } if self.elevation_profile else None,
+            "is_edited": self.is_edited,
         }
 
     def __str__(self) -> str:
@@ -157,4 +162,5 @@ class Activity:
                 if (ep := data.get("elevation_profile"))
                 else None
             ),
+            is_edited=data.get("is_edited", False),
         )

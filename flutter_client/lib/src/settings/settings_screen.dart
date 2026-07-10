@@ -867,6 +867,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 const SizedBox(height: 16),
 
+                // ── Admin (admins only) ────────────────────────────────
+                if (context.watch<AuthNotifier>().user?.isAdmin ?? false) ...[
+                  _SectionCard(
+                    title: 'Admin',
+                    icon: Icons.admin_panel_settings_outlined,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Deployment usage — users, storage, project counts, '
+                          'and user password reset.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: () => context.push('/admin'),
+                          icon: const Icon(Icons.dashboard_outlined),
+                          label: const Text('Open admin dashboard'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+
                 // ── Danger Zone ────────────────────────────────────────
                 _SectionCard(
                   title: 'Danger Zone',

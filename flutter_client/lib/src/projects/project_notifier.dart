@@ -13,6 +13,7 @@ import '../map/polyline_decoder.dart';
 import 'project_filter_mixin.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
+import 'project_people_crud_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
@@ -28,7 +29,7 @@ int progressiveGeoBatchSize(int activityCount) =>
     activityCount <= 8 ? 1 : (activityCount / 8).ceil();
 
 class ProjectNotifier extends ChangeNotifier
-    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectSegmentCrudMixin {
+    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
 
   ProjectNotifier(this._service);
@@ -36,6 +37,8 @@ class ProjectNotifier extends ChangeNotifier
   @override String? projectName;
   @override List<Map<String, dynamic>> activities = [];
   @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
+  @override List<Map<String, dynamic>> people = [];  // trip people directory (#40)
+  @override List<Map<String, dynamic>> groups = [];  // people groups (#50)
   @override Map<String, dynamic>? geo;
   bool isLoading = false;
   @override String? error;
@@ -325,6 +328,14 @@ class ProjectNotifier extends ChangeNotifier
           ? rawItems.cast<Map<String, dynamic>>()
           : [];
       await _revealItems(items);
+      final rawPeople = details['people'];
+      people = rawPeople is List
+          ? rawPeople.cast<Map<String, dynamic>>()
+          : [];
+      final rawPeopleGroups = details['groups'];
+      groups = rawPeopleGroups is List
+          ? rawPeopleGroups.cast<Map<String, dynamic>>()
+          : [];
       final rawDm = details['day_meta'];
       dayMeta = rawDm is Map
           ? rawDm.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
@@ -1124,6 +1135,53 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  // ── Activity track editing (issue #31) ─────────────────────────────────────
+
+  /// Fetch a single activity's geometry (with `map.summary_polyline` and
+  /// `elevation_profile`) for [activityId] — the editor needs the geometry that
+  /// the lightweight meta/list load omits. Uses the per-activity endpoint so the
+  /// editor doesn't download the whole project. Returns null if not found.
+  Future<Map<String, dynamic>?> fetchActivityForEdit(int activityId) async {
+    final name = projectName;
+    if (name == null) return null;
+    return _service.getActivityTrack(name, activityId);
+  }
+
+  /// Save an edited track (trim/add/remove) for [activityId]. [payload] is
+  /// [TrackEditModel.toSavePayload]. Reloads geometry on success. Rethrows so
+  /// the editor page can surface the failure and keep the user's edits.
+  Future<void> saveActivityTrack(
+    int activityId, Map<String, dynamic> payload) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.saveActivityTrack(name, activityId, payload);
+    await _silentReload(name);
+  }
+
+  /// Reset [activityId]'s track to the original Strava geometry.
+  Future<void> resetActivityTrack(int activityId) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.resetActivityTrack(name, activityId);
+    await _silentReload(name);
+  }
+
+  /// Split [activityId] at [splitIndex]; the tail becomes a new local activity.
+  Future<void> splitActivity(int activityId, int splitIndex) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.splitActivity(name, activityId, splitIndex);
+    await _silentReload(name);
+  }
+
+  /// Delete a local (split-tail, negative-id) [activityId].
+  Future<void> deleteLocalActivity(int activityId) async {
+    final name = projectName;
+    if (name == null) return;
+    await _service.deleteLocalActivity(name, activityId);
+    await _silentReload(name);
+  }
+
   // ── Internal helpers ───────────────────────────────────────────────────────
 
   /// Reloads project data from the API without clearing existing state first.
@@ -1290,6 +1348,14 @@ class ProjectNotifier extends ChangeNotifier
     final rawItems = details['items'];
     items = rawItems is List
         ? rawItems.cast<Map<String, dynamic>>()
+        : [];
+    final rawPeople = details['people'];
+    people = rawPeople is List
+        ? rawPeople.cast<Map<String, dynamic>>()
+        : [];
+    final rawPeopleGroups = details['groups'];
+    groups = rawPeopleGroups is List
+        ? rawPeopleGroups.cast<Map<String, dynamic>>()
         : [];
     final rawDm = details['day_meta'];
     dayMeta = rawDm is Map

@@ -7,11 +7,15 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
+import 'activity_editor_page.dart';
 import 'day_meta_editor.dart';
+import 'encounter_dialog.dart';
 import 'journal_detail_modal.dart';
 import 'journal_dialog.dart';
 import 'memory_detail_modal.dart';
 import 'memory_dialog.dart';
+import 'people_screen.dart';
+import 'people_search.dart';
 import 'project_notifier.dart';
 import 'segment_dialog.dart';
 // ── ActivityPanel ─────────────────────────────────────────────────────────────
@@ -293,6 +297,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         d = item['memory']?['date'] as String? ?? lastDate;
       } else if (item['item_type'] == 'journal') {
         d = item['journal']?['date'] as String? ?? lastDate;
+      } else if (item['item_type'] == 'encounter') {
+        d = item['encounter']?['date'] as String? ?? lastDate;
       } else {
         d = item['segment']?['date'] as String? ?? lastDate;
       }
@@ -700,6 +706,51 @@ class _ActivityPanelState extends State<ActivityPanel> {
     });
   }
 
+  /// Open the dedicated track editor for [activity]. Fetches the full activity
+  /// (with polyline + elevation) since the panel list is meta-only, then pushes
+  /// [ActivityEditorPage]. The page persists via the notifier and reloads on
+  /// success, so no local merge is needed here.
+  Future<void> _openTrackEditor(
+    BuildContext context,
+    ProjectNotifier notifier,
+    Map<String, dynamic> activity,
+  ) async {
+    final id = (activity['id'] as num?)?.toInt();
+    if (id == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    Map<String, dynamic>? full = activity;
+    // Fetch geometry if the panel's copy lacks it (meta load omits the polyline).
+    if ((activity['map'] as Map?)?['summary_polyline'] == null) {
+      // Block the panel with a spinner while the fetch runs so the user gets
+      // feedback and can't fire other actions on a half-loaded list.
+      final dialogNav = Navigator.of(context, rootNavigator: true);
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: Colors.black.withValues(alpha: 0.15),
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+      try {
+        full = await notifier.fetchActivityForEdit(id);
+      } catch (e) {
+        dialogNav.pop();
+        messenger.showSnackBar(SnackBar(content: Text('Could not load track: $e')));
+        return;
+      }
+      dialogNav.pop();
+    }
+    if (full == null || (full['map'] as Map?)?['summary_polyline'] == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('This activity has no track to edit')),
+      );
+      return;
+    }
+    await navigator.push(MaterialPageRoute(
+      builder: (_) => ActivityEditorPage(notifier: notifier, activity: full!),
+    ));
+  }
+
   void _flyToActivity(Map<String, dynamic> activity) {
     // Highlight the tapped activity on the map (toggle if already selected).
     widget.notifier.selectActivity(activity['id']);
@@ -803,6 +854,23 @@ class _ActivityPanelState extends State<ActivityPanel> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.groups_outlined),
+              title: const Text('Encounter'),
+              subtitle: const Text('Someone or a group you met'),
+              onTap: () {
+                Navigator.of(context).pop();
+                showDialog<void>(
+                  context: context,
+                  useRootNavigator: true,
+                  builder: (_) => EncounterDialog(
+                    notifier: notifier,
+                    initialDate: initialDate,
+                    insertAfterIndex: insertAfterIndex,
+                  ),
+                );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.route_outlined),
               title: const Text('Transportation'),
               onTap: () {
@@ -817,6 +885,130 @@ class _ActivityPanelState extends State<ActivityPanel> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Resolve the person map for an encounter's person_id from the loaded people.
+  Map<String, dynamic>? _personFor(int? personId) {
+    if (personId == null) return null;
+    for (final p in widget.notifier.people) {
+      if (p['id'] == personId) return p;
+    }
+    return null;
+  }
+
+  /// Resolve the group map for an encounter's group_id (issue #56).
+  Map<String, dynamic>? _groupFor(int? groupId) {
+    if (groupId == null) return null;
+    for (final g in widget.notifier.groups) {
+      if (g['id'] == groupId) return g;
+    }
+    return null;
+  }
+
+  /// Timeline tile for an encounter item (issue #40): person avatar + name +
+  /// note; edit via swipe/tap, delete via swipe/button.
+  Widget _encounterTile(
+    BuildContext context,
+    ProjectNotifier notifier,
+    ThemeData theme,
+    Map<String, dynamic> item,
+    bool isWide,
+  ) {
+    final enc = item['encounter'] as Map<String, dynamic>? ?? {};
+    final encId = enc['id']?.toString() ?? '';
+    final group = _groupFor((enc['group_id'] as num?)?.toInt());
+    final person = group == null ? _personFor((enc['person_id'] as num?)?.toInt()) : null;
+    final name = group != null
+        ? groupDisplayName(group)
+        : person != null
+            ? personDisplayName(person)
+            : 'Someone';
+    final date = enc['date'] as String?;
+    final time = enc['time'] as String?;
+    final note = enc['description'] as String?;
+    final label = date != null ? _fmtMemDate(date, time) : 'Encounter';
+
+    void openEdit() => showDialog<void>(
+          context: context,
+          useRootNavigator: true,
+          builder: (_) => EncounterDialog(notifier: notifier, editEntry: enc),
+        );
+
+    return _rowDismissible(
+      isWide: isWide,
+      key: ValueKey('encounter_$encId'),
+      direction: DismissDirection.horizontal,
+      background: Container(
+        color: const Color(0xFF1D4ED8),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: const Icon(Icons.edit_outlined, color: Colors.white),
+      ),
+      secondaryBackground: Container(
+        color: theme.colorScheme.error,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: Icon(Icons.delete_outline, color: theme.colorScheme.onError),
+      ),
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          openEdit();
+          return false;
+        }
+        _dismissWithUndo(
+          context: context,
+          notifier: notifier,
+          label: 'Removed encounter with "$name"',
+          onOptimistic: () => notifier.items.removeWhere((it) =>
+              it['item_type'] == 'encounter' &&
+              it['encounter']?['id']?.toString() == encId),
+          onConfirm: () => notifier.deleteEncounter(encId),
+        );
+        return true;
+      },
+      child: ListTile(
+        dense: true,
+        leading: group != null
+            ? CircleAvatar(
+                radius: 16,
+                backgroundColor: kAccentSoft,
+                child: const Icon(Icons.groups, size: 18, color: kAccent))
+            : person != null
+                ? PersonAvatar(notifier: notifier, person: person, radius: 16)
+                : const CircleAvatar(radius: 16, child: Icon(Icons.person, size: 18)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Met $name',
+                style: theme.textTheme.labelSmall,
+                overflow: TextOverflow.ellipsis),
+            Text(
+              note != null && note.isNotEmpty ? '$label  •  $note' : label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.edit_outlined, size: 15),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: openEdit,
+        ),
+        onTap: _multiSelect
+            ? null
+            : () {
+                if (group != null) {
+                  showGroupDetailSheet(context, notifier, group);
+                } else if (person != null) {
+                  showPersonDetailSheet(context, notifier, person);
+                }
+              },
       ),
     );
   }
@@ -887,6 +1079,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
             d = item['memory']?['date'] as String?;
           } else if (item['item_type'] == 'journal') {
             d = item['journal']?['date'] as String?;
+          } else if (item['item_type'] == 'encounter') {
+            d = item['encounter']?['date'] as String?;
           } else {
             d = item['segment']?['date'] as String?;
           }
@@ -1330,6 +1524,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
                         final distM = (a['distance'] as num? ?? 0).toDouble();
                         final movingSec = a['moving_time'];
                         final activityId = item['activity_id'];
+                        // A split-tail activity is stored locally with a
+                        // negative id; it gets a dedicated delete affordance
+                        // that hits the local-activity delete endpoint.
+                        final localActId = (a['id'] as num?)?.toInt();
+                        final isLocal = localActId != null && localActId < 0;
                         return _rowDismissible(
                           isWide: isWide,
                           key: ValueKey('act_$activityId'),
@@ -1375,19 +1574,59 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ),
                                 ],
                               ),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline, size: 15),
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(),
-                                color: theme.colorScheme.error.withValues(alpha: 0.6),
-                                onPressed: () => _dismissWithUndo(
-                                  context: context,
-                                  notifier: notifier,
-                                  label: 'Removed "$name"',
-                                  onOptimistic: () => notifier.removeItemLocally(i),
-                                  onConfirm: () => notifier.confirmRemoveItem(i),
-                                ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit_outlined, size: 15),
+                                    tooltip: 'Edit track',
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.primary.withValues(alpha: 0.7),
+                                    onPressed: _multiSelect
+                                        ? null
+                                        : () => _openTrackEditor(context, notifier, a),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 15),
+                                    visualDensity: VisualDensity.compact,
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                    onPressed: () => _dismissWithUndo(
+                                      context: context,
+                                      notifier: notifier,
+                                      label: 'Removed "$name"',
+                                      onOptimistic: () => notifier.removeItemLocally(i),
+                                      onConfirm: () => notifier.confirmRemoveItem(i),
+                                    ),
+                                  ),
+                                  if (isLocal) ...[
+                                    const SizedBox(width: 4),
+                                    IconButton(
+                                      key: ValueKey('del_local_$activityId'),
+                                      icon: const Icon(Icons.delete_forever, size: 15),
+                                      tooltip: 'Delete local activity',
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      color: kAccent,
+                                      onPressed: _multiSelect
+                                          ? null
+                                          : () => _dismissWithUndo(
+                                                context: context,
+                                                notifier: notifier,
+                                                label: 'Deleted "$name"',
+                                                onOptimistic: () =>
+                                                    notifier.removeItemLocally(i),
+                                                onConfirm: () => notifier
+                                                    .deleteLocalActivity(localActId),
+                                              ),
+                                    ),
+                                  ],
+                                ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),
                             ),
@@ -1667,6 +1906,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                             ),
                           ),
                         );
+                      } else if (item['item_type'] == 'encounter') {
+                        return _encounterTile(context, notifier, theme, item, isWide);
                       } else {
                         // Segment item
                         final seg =

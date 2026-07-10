@@ -102,13 +102,31 @@ class ViewProjectNotifier extends ProjectNotifier {
 
 class ViewScreen extends StatelessWidget {
   final String projectName;
-  const ViewScreen({super.key, required this.projectName});
+
+  /// Camera position carried over from edit mode via the mode toggle, so
+  /// switching modes doesn't reset the map viewport to fit-all-bounds.
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+
+  const ViewScreen({
+    super.key,
+    required this.projectName,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
+  });
 
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
       create: (_) => ViewProjectNotifier(projectName),
-      child: _ViewBody(projectName: projectName),
+      child: _ViewBody(
+        projectName: projectName,
+        initialLat: initialLat,
+        initialLng: initialLng,
+        initialZoom: initialZoom,
+      ),
     );
   }
 }
@@ -117,7 +135,15 @@ class ViewScreen extends StatelessWidget {
 
 class _ViewBody extends StatefulWidget {
   final String projectName;
-  const _ViewBody({required this.projectName});
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
+  const _ViewBody({
+    required this.projectName,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
+  });
 
   @override
   State<_ViewBody> createState() => _ViewBodyState();
@@ -200,8 +226,12 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                 ),
               ],
               selected: const {true},
-              onSelectionChanged: (s) => context.go(
-                  '/app?project=${Uri.encodeComponent(widget.projectName)}'),
+              onSelectionChanged: (s) {
+                final cam = _mapController.mapController.camera;
+                context.go(
+                    '/app?project=${Uri.encodeComponent(widget.projectName)}'
+                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}');
+              },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
@@ -317,6 +347,9 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   notifier: notifier,
                   mapController: _mapController,
                   autoZoom: _autoZoom,
+                  initialLat: widget.initialLat,
+                  initialLng: widget.initialLng,
+                  initialZoom: widget.initialZoom,
                 );
               },
             ),
@@ -333,11 +366,17 @@ class _ViewLayout extends StatelessWidget {
   final ViewProjectNotifier notifier;
   final AnimatedMapController mapController;
   final bool autoZoom;
+  final double? initialLat;
+  final double? initialLng;
+  final double? initialZoom;
 
   const _ViewLayout({
     required this.notifier,
     required this.mapController,
     required this.autoZoom,
+    this.initialLat,
+    this.initialLng,
+    this.initialZoom,
   });
 
   @override
@@ -364,6 +403,10 @@ class _ViewLayout extends StatelessWidget {
       basemapUrl: kActiveViewBasemapUrl,
       labelsUrl: kActiveViewLabelsOverlayUrl,
       basemapStyleUri: kActiveViewStyleUri,
+      autoZoom: autoZoom,
+      initialLat: initialLat,
+      initialLng: initialLng,
+      initialZoom: initialZoom,
     );
 
     return Column(

@@ -49,6 +49,20 @@ _google_client_id = (
 )
 
 
+def _admin_emails() -> set[str]:
+    """Case-insensitive set of emails promoted to admin via ADMIN_EMAILS.
+
+    Comma-separated; whitespace and empty entries ignored. Read at call time so
+    tests (and ops) can set it without reimporting the module.
+    """
+    raw = os.environ.get("ADMIN_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _is_admin_email(email: str) -> bool:
+    return bool(email) and email.lower() in _admin_emails()
+
+
 # ── Request / response schemas ────────────────────────────────────────────────
 
 class TokenRequest(BaseModel):
@@ -87,15 +101,19 @@ def _user_info_for_local_id(sess, local_auth_id: int) -> UserInfo | None:
     ).first()
 
 
-def _token_response(user_info: UserInfo) -> TokenResponse:
+def _token_response(
+    user_info: UserInfo, password_change_required: bool = False
+) -> TokenResponse:
     return TokenResponse(
-        access_token=create_access_token(user_info),
+        access_token=create_access_token(user_info, password_change_required),
         user={
             "id": user_info.id,
             "email": user_info.email,
             "display_name": user_info.display_name,
             "avatar_url": user_info.avatar_url,
             "auth_provider": user_info.auth_provider,
+            "is_admin": bool(user_info.is_admin),
+            "password_change_required": bool(password_change_required),
         },
     )
 
@@ -126,7 +144,14 @@ def login(body: TokenRequest):
             sess.add(user_info)
             sess.commit()
             sess.refresh(user_info)
-        return _token_response(user_info)
+        # Promote to admin if this account's email/username is in ADMIN_EMAILS.
+        promote = _is_admin_email(user_info.email) or _is_admin_email(user.username)
+        if promote and not user_info.is_admin:
+            user_info.is_admin = True
+            sess.add(user_info)
+            sess.commit()
+            sess.refresh(user_info)
+        return _token_response(user_info, user.password_change_required)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
@@ -155,6 +180,7 @@ def register(body: RegisterRequest):
             display_name=body.display_name or body.username,
             email="",
             auth_provider="local",
+            is_admin=_is_admin_email(body.username),
         )
         sess.add(user_info)
         sess.commit()
@@ -214,7 +240,13 @@ def google_login(body: GoogleTokenRequest):
                 email=email,
                 avatar_url=picture,
                 auth_provider="google",
+                is_admin=_is_admin_email(email),
             )
+            sess.add(user_info)
+            sess.commit()
+            sess.refresh(user_info)
+        elif _is_admin_email(user_info.email) and not user_info.is_admin:
+            user_info.is_admin = True
             sess.add(user_info)
             sess.commit()
             sess.refresh(user_info)
@@ -271,6 +303,8 @@ def change_password(
                 detail="Current password is incorrect",
             )
         local_user.password_hash = LocalUser.hash_password(body.new_password)
+        # A successful change satisfies any forced-change requirement.
+        local_user.password_change_required = False
         sess.add(local_user)
         sess.commit()
     return {"ok": True}

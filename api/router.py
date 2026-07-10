@@ -9,21 +9,28 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
+from src.exceptions.errors import APIError, AuthenticationError
 from src.project.project_repo import StaleWriteError
 
+from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
+from api.encounters import router as encounters_router
 from api.encryption import router as encryption_router
 from api.geo import router as geo_router
+from api.groups import router as groups_router
 from api.journal import router as journal_router
 from api.memories import router as memories_router
+from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
 from api.projects import router as projects_router
 from api.share import router as share_router
 from api.strava import router as strava_router
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from models.db import checkpoint_wal
 from models.project_db import _check_schema_contract
+from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
 from src.utils.logging import configure_logging, get_logger
 
@@ -46,7 +53,9 @@ async def lifespan(_app: FastAPI):
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
+    seed_admin()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
+    _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
     _scheduler.start()
     _log.info("Backup scheduler started — daily at 02:00 UTC")
     yield
@@ -75,12 +84,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)
+app.include_router(encounters_router)
 app.include_router(encryption_router)
 app.include_router(geo_router)
+app.include_router(groups_router)
 app.include_router(journal_router)
 app.include_router(memories_router)
+app.include_router(people_router)
 app.include_router(polarsteps_router)
 app.include_router(projects_router)
 app.include_router(share_router)
@@ -91,6 +104,30 @@ app.include_router(strava_router)
 async def _stale_write_handler(_request, exc: StaleWriteError):
     """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(AuthenticationError)
+async def _auth_error_handler(_request, exc: AuthenticationError):
+    """Map an upstream (Strava) auth failure to 401 so the client can re-authenticate.
+
+    The messages carried by AuthenticationError are already user-facing and
+    actionable (e.g. "re-authenticate via Add track → From Strava…").
+    """
+    return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+
+@app.exception_handler(APIError)
+async def _upstream_api_error_handler(_request, exc: APIError):
+    """Map an upstream third-party API failure (e.g. Strava) to 502, not a bare 500.
+
+    The raw upstream response is logged for diagnostics but not leaked to the
+    client; the client sees a stable, actionable message instead.
+    """
+    _log.warning("Upstream API error: %s", exc)
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "The Strava integration is currently unavailable. Please try again later."},
+    )
 
 
 @app.get("/scalar", include_in_schema=False)

@@ -8,7 +8,38 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 _DB_URL = os.environ.get("DATABASE_URL", "sqlite:///viewtripweb.db")
-engine = create_engine(_DB_URL, connect_args={"check_same_thread": False})
+
+
+def _make_engine(url: str):
+    """Create the app engine with a connection pool sized for the client's
+    parallel request fan-out.
+
+    The Flutter client fires many requests in parallel when opening a project
+    (meta, geo, stats, activities, photos …). SQLAlchemy's default QueuePool
+    (size 5 + 10 overflow = 15 total) is far too small: a couple of concurrent
+    users exhaust it, then every new request blocks for ``pool_timeout`` seconds
+    waiting for a connection — so the app looks completely hung and needs a
+    manual restart (issue #35). SQLite in WAL mode serves many concurrent readers
+    fine, so we raise the ceiling well above realistic load and fail fast if it
+    is ever hit. In-memory SQLite (tests) uses a non-queue pool that rejects
+    these kwargs, so they are only applied to file-backed / networked DBs.
+    """
+    is_sqlite = url.startswith("sqlite")
+    is_memory = is_sqlite and (":memory:" in url or url == "sqlite://")
+    kwargs: dict = {}
+    if is_sqlite:
+        kwargs["connect_args"] = {"check_same_thread": False}
+    if not is_memory:
+        kwargs.update(
+            pool_size=20,        # persistent connections
+            max_overflow=40,     # burst headroom → 60 total, vs the old 15
+            pool_timeout=10,     # fail fast instead of a 30s hang cascade
+            pool_pre_ping=True,  # drop dead connections rather than erroring
+        )
+    return create_engine(url, **kwargs)
+
+
+engine = _make_engine(_DB_URL)
 
 
 def _configure_sqlite(target_engine) -> None:
@@ -20,11 +51,19 @@ def _configure_sqlite(target_engine) -> None:
     downloads), it raises "database is locked" instead of waiting. On every new
     connection we set:
 
-      * busy_timeout=30000 — wait up to 30s for a lock rather than erroring
+      * busy_timeout=30000  — wait up to 30s for a lock rather than erroring
         immediately. The single biggest win; safe on every filesystem.
       * journal_mode=WAL    — readers no longer block on the writer. Persisted in
         the DB header; safe on local filesystems (incl. Btrfs).
       * synchronous=NORMAL  — the standard, durable-enough pairing with WAL.
+      * wal_autocheckpoint=0 — disable SQLite's default *inline* checkpoint
+        (which runs synchronously inside whichever commit happens to push the
+        WAL past ~1000 pages). On slow storage that checkpoint's I/O can take
+        seconds, and since it runs inside that connection's commit, it holds the
+        single SQLite write lock for the whole thing — any other writer queued
+        behind it burns its busy_timeout waiting on an unlucky commit instead of
+        real contention. ``checkpoint_wal()`` below replaces it with a periodic
+        PASSIVE checkpoint that never blocks a writer.
 
     No-op for non-SQLite backends.
     """
@@ -38,11 +77,35 @@ def _configure_sqlite(target_engine) -> None:
             cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA wal_autocheckpoint=0")
         finally:
             cursor.close()
 
 
 _configure_sqlite(engine)
+
+
+def checkpoint_wal() -> None:
+    """Fold the WAL back into the main DB file via a PASSIVE checkpoint.
+
+    Meant to be called periodically from a background job (see api/router.py)
+    now that automatic checkpointing is disabled. PASSIVE mode never waits for
+    other connections' locks — it checkpoints as many frames as it can without
+    disturbing concurrent readers/writers and returns immediately — so this
+    keeps the WAL small without ever making an interactive request pay for the
+    checkpoint's I/O cost. No-op for non-SQLite backends.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    conn = engine.raw_connection()
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
 
 
 def create_db_and_tables() -> None:

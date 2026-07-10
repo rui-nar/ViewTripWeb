@@ -11,6 +11,8 @@ class User {
   final String displayName;
   final String avatarUrl;
   final String authProvider; // "local" | "google"
+  final bool isAdmin;
+  final bool passwordChangeRequired;
 
   const User({
     required this.id,
@@ -18,6 +20,8 @@ class User {
     required this.displayName,
     required this.avatarUrl,
     required this.authProvider,
+    this.isAdmin = false,
+    this.passwordChangeRequired = false,
   });
 
   factory User.fromMap(Map<String, dynamic> map) => User(
@@ -26,6 +30,8 @@ class User {
         displayName: map['display_name'] as String? ?? '',
         avatarUrl: map['avatar_url'] as String? ?? '',
         authProvider: map['auth_provider'] as String? ?? 'local',
+        isAdmin: map['is_admin'] == true,
+        passwordChangeRequired: map['password_change_required'] == true,
       );
 
   /// Sentinel used after restoring a session from secure storage when no
@@ -167,6 +173,15 @@ class AuthNotifier extends ChangeNotifier {
   void updateUser(Map<String, dynamic> userMap) {
     _user = User.fromMap(userMap);
     notifyListeners();
+  }
+
+  /// Re-fetch the profile from the server (e.g. after a forced password change
+  /// clears `password_change_required`), so redirects re-evaluate.
+  Future<void> refreshProfile() async {
+    try {
+      _user = User.fromMap(await _service.getMe());
+      notifyListeners();
+    } catch (_) {}
   }
 
   void clearError() {

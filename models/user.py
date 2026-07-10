@@ -1,6 +1,7 @@
 """User-related database models."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import bcrypt
@@ -16,6 +17,8 @@ class LocalUser(sqlmodel.SQLModel, table=True):
     username: str = sqlmodel.Field(default="", unique=True, index=True)
     password_hash: bytes = sqlmodel.Field(default=b"")
     enabled: bool = sqlmodel.Field(default=True)
+    # Forces a password change on next login (seeded admin, admin-reset accounts).
+    password_change_required: bool = sqlmodel.Field(default=False)
 
     @staticmethod
     def hash_password(password: str) -> bytes:
@@ -39,6 +42,8 @@ class UserInfo(sqlmodel.SQLModel, table=True):
     email: str = sqlmodel.Field(default="", index=True)
     avatar_url: str = sqlmodel.Field(default="")
     auth_provider: str = sqlmodel.Field(default="local")  # "local" | "google"
+    is_admin: bool = sqlmodel.Field(default=False)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
     # E2EE (issue #26): True once the user has enabled client-side encryption.
     # The server still holds no keys; this only signals clients to expect
     # ciphertext for in-scope fields. Backed by device_key / recovery_wrap rows.

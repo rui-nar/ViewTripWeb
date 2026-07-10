@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../admin/admin_screen.dart';
 import '../auth/auth_notifier.dart';
+import '../auth/forced_change_password_screen.dart';
 import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../auth/welcome_screen.dart';
@@ -60,6 +62,16 @@ GoRouter buildRouter(BuildContext context) {
       // Redirect authenticated users away from public pages.
       if (isLoggedIn && isPublicPage) return '/projects';
 
+      // Force a password change when required (seeded admin / admin-reset users).
+      if (isLoggedIn && auth.user!.passwordChangeRequired) {
+        return loc == '/change-password' ? null : '/change-password';
+      }
+      // Don't linger on the change-password page once it's no longer required.
+      if (loc == '/change-password') return '/projects';
+
+      // The admin route is admin-only (the server also enforces this with 403).
+      if (loc == '/admin' && !(auth.user?.isAdmin ?? false)) return '/projects';
+
       return null;
     },
 
@@ -77,6 +89,14 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) => const RegisterScreen(),
       ),
       GoRoute(
+        path: '/change-password',
+        builder: (context, state) => const ForcedChangePasswordScreen(),
+      ),
+      GoRoute(
+        path: '/admin',
+        builder: (context, state) => AdminScreen(),
+      ),
+      GoRoute(
         path: '/projects',
         builder: (context, state) => const ProjectsScreen(),
       ),
@@ -85,7 +105,12 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          return AppScreen(projectName: projectName);
+          return AppScreen(
+            projectName: projectName,
+            initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
+            initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
+            initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
+          );
         },
       ),
       GoRoute(
@@ -93,7 +118,12 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          return ViewScreen(projectName: projectName);
+          return ViewScreen(
+            projectName: projectName,
+            initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
+            initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
+            initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
+          );
         },
       ),
       GoRoute(

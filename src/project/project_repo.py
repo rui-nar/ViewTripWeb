@@ -29,10 +29,13 @@ from sqlmodel import Session, select
 # Ensure all SQLModel table classes are registered with SQLAlchemy's metadata
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
-from models.project_db import DBActivity, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
+from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from src.models.activity import Activity
+from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
+from src.models.person import Person, polarsteps_from_socials
+from src.models.person_group import PersonGroup
 from src.models.project import (
     ConnectingSegment,
     Counter,
@@ -64,6 +67,20 @@ def _low_res_ep_json(ep_json: Optional[str]) -> Optional[str]:
             return None
         dd, ee = downsample_elevation(d, e)
         return json.dumps({"distances_km": dd, "elevations_m": ee})
+    except Exception:
+        return None
+
+
+def _parse_ep(ep_json: Optional[str]):
+    """Parse a stored elevation_profile JSON blob to ``(distances_km, elevations_m)``.
+
+    Returns None when the blob is missing or unparseable.
+    """
+    if not ep_json:
+        return None
+    try:
+        ep = json.loads(ep_json)
+        return (ep.get("distances_km") or [], ep.get("elevations_m") or [])
     except Exception:
         return None
 
@@ -318,6 +335,21 @@ class ProjectRepo:
         for jentry in journals:
             sess.delete(jentry)
 
+        # Delete encounters before people (encounter → person FK), then people
+        # (person → group FK), then groups (issue #50).
+        for enc in sess.exec(
+            select(DBEncounter).where(DBEncounter.project_id == row.id)
+        ).all():
+            sess.delete(enc)
+        for person in sess.exec(
+            select(DBPerson).where(DBPerson.project_id == row.id)
+        ).all():
+            sess.delete(person)
+        for group in sess.exec(
+            select(DBPersonGroup).where(DBPersonGroup.project_id == row.id)
+        ).all():
+            sess.delete(group)
+
         sess.delete(row)
         sess.commit()
         return True
@@ -343,6 +375,287 @@ class ProjectRepo:
             row.elevation_profile_json = elevation_profile_json
             row.elevation_profile_low_res_json = _low_res_ep_json(elevation_profile_json)
         sess.commit()
+
+    # ------------------------------------------------------------------
+    # Geometry editing (issue #31)
+    # ------------------------------------------------------------------
+
+    def activity_is_edited(self, activity_id: int) -> bool:
+        """Return True if the activity has a locally edited track.
+
+        Opens its own session so background enrichment tasks (which hold no
+        session) can cheaply check before overwriting geometry.
+        """
+        with get_session() as sess:
+            row = sess.get(DBActivity, activity_id)
+            return bool(row is not None and row.is_edited)
+
+    @staticmethod
+    def _write_track_geometry(row: DBActivity, points: "list") -> None:
+        """Re-derive geometry + scalar metrics from *points* onto *row* (no commit).
+
+        Snapshots the pre-edit polyline/elevation into the original_* columns on
+        the FIRST edit only, so a later "Reset to Strava" can restore them.
+        """
+        from src.models.track_edit import (
+            align_points,
+            points_to_elevation_profile,
+            points_to_polyline,
+            recompute_track_metrics,
+        )
+
+        if not row.is_edited:
+            row.original_polyline = row.summary_polyline
+            row.original_elevation_profile_json = row.elevation_profile_json
+
+        # Apportion times against the CURRENT geometry's haversine length (not
+        # the stored scalar distance, which Strava derives differently). This
+        # keeps edit→reset time recovery exact, since reset re-apportions with
+        # the same geometry-derived basis.
+        prev_metrics = recompute_track_metrics(align_points(
+            row.summary_polyline,
+            _parse_ep(row.elevation_profile_json),
+        ))
+
+        metrics = recompute_track_metrics(
+            points,
+            original_distance_m=prev_metrics.distance,
+            original_moving_time=row.moving_time or 0,
+            original_elapsed_time=row.elapsed_time or 0,
+        )
+
+        row.summary_polyline = points_to_polyline(points)
+        ep = points_to_elevation_profile(points)
+        ep_json = (
+            json.dumps({"distances_km": ep[0], "elevations_m": ep[1]}) if ep else None
+        )
+        row.elevation_profile_json = ep_json
+        row.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
+
+        row.distance = metrics.distance
+        row.total_elevation_gain = metrics.total_elevation_gain
+        row.elev_high = metrics.elev_high
+        row.elev_low = metrics.elev_low
+        row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
+        row.end_latlng_json = json.dumps(metrics.end_latlng) if metrics.end_latlng else None
+        row.average_speed = metrics.average_speed
+        row.moving_time = metrics.moving_time
+        row.elapsed_time = metrics.elapsed_time
+        row.is_edited = True
+
+    def edit_activity_track(
+        self, sess: Session, activity_id: int, points: "list"
+    ) -> bool:
+        """Apply an edited point list to an activity, recomputing all metrics.
+
+        Snapshots the original geometry on the first edit and sets is_edited.
+        Returns False if the activity row does not exist.
+        """
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return False
+        self._write_track_geometry(row, points)
+        sess.commit()
+        return True
+
+    def reset_activity_track(self, sess: Session, activity_id: int) -> bool:
+        """Restore an edited activity's geometry from its original snapshot.
+
+        Recomputes scalar metrics from the restored geometry and clears
+        is_edited + the snapshot columns.  Returns False if the row does not
+        exist or was never edited (nothing to reset).
+        """
+        row = sess.get(DBActivity, activity_id)
+        if row is None or not row.is_edited:
+            return False
+
+        from src.models.track_edit import align_points, recompute_track_metrics
+
+        orig_poly = row.original_polyline
+        orig_ep_json = row.original_elevation_profile_json
+        orig_ep = None
+        if orig_ep_json:
+            ep = json.loads(orig_ep_json)
+            orig_ep = (ep.get("distances_km") or [], ep.get("elevations_m") or [])
+        points = align_points(orig_poly, orig_ep)
+
+        row.summary_polyline = orig_poly
+        row.elevation_profile_json = orig_ep_json
+        row.elevation_profile_low_res_json = _low_res_ep_json(orig_ep_json)
+
+        if points:
+            # Geometry-derived metrics (distance, elevation, latlng) restore
+            # exactly from the snapshot. Scalar times were apportioned DOWN to
+            # the retained-distance fraction on edit; scale them back UP by the
+            # inverse ratio (restored ÷ edited distance) so a trim→reset round
+            # trip recovers the original times too.
+            edited_distance = row.distance or 0.0
+            metrics = recompute_track_metrics(points)
+            row.distance = metrics.distance
+            row.total_elevation_gain = metrics.total_elevation_gain
+            row.elev_high = metrics.elev_high
+            row.elev_low = metrics.elev_low
+            row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
+            row.end_latlng_json = json.dumps(metrics.end_latlng) if metrics.end_latlng else None
+            if edited_distance > 0 and metrics.distance > 0:
+                ratio = metrics.distance / edited_distance
+                row.moving_time = int(round((row.moving_time or 0) * ratio))
+                row.elapsed_time = int(round((row.elapsed_time or 0) * ratio))
+                row.average_speed = (
+                    metrics.distance / row.moving_time if row.moving_time > 0 else 0.0
+                )
+
+        row.is_edited = False
+        row.original_polyline = None
+        row.original_elevation_profile_json = None
+        sess.commit()
+        return True
+
+    def split_activity(
+        self,
+        sess: Session,
+        user_info_id: int,
+        project_id: int,
+        activity_id: int,
+        split_index: int,
+    ) -> Optional[int]:
+        """Split an activity into a head (keeps id) and a local tail (negative id).
+
+        The boundary point at *split_index* is shared: the head keeps
+        ``points[:split_index+1]`` and the tail gets ``points[split_index:]`` so
+        the two pieces stay contiguous. The tail is a new LOCAL activity
+        (``manual=True``, synthetic negative id, name ``"<name> (2)"``) inserted
+        into the project items directly after the head. Both pieces are marked
+        is_edited with their own geometry snapshot.
+
+        Returns the new tail activity id, or None if the activity is missing.
+        Raises ValueError if *split_index* does not yield two non-trivial pieces.
+        """
+        from src.models.track_edit import align_points, points_to_polyline
+
+        head = sess.get(DBActivity, activity_id)
+        if head is None:
+            return None
+
+        points = align_points(head.summary_polyline, _parse_ep(head.elevation_profile_json))
+        # Need at least 2 points on each side of the boundary.
+        if split_index < 1 or split_index > len(points) - 2:
+            raise ValueError(
+                f"split_index {split_index} out of range for a {len(points)}-point track")
+
+        head_points = points[: split_index + 1]
+        tail_points = points[split_index:]
+
+        # Allocate the next free negative id. activity.id is a GLOBAL primary key,
+        # and split tails are LOCAL rows keyed by negative id. Scanning only this
+        # project's timeline items is unsafe: a previously-split tail whose item
+        # was removed from the timeline leaves the activity row orphaned (see
+        # delete_item / remove_item — they unlink the item but do not delete the
+        # row), so this project's items no longer reference it and the id gets
+        # reused → INSERT collides (UNIQUE constraint failed: activity.id). Derive
+        # the next id from the activity table itself, which sees orphans too.
+        global_min = sess.exec(select(func.min(DBActivity.id))).one()
+        tail_id = min(0, global_min or 0) - 1
+
+        # Create the tail row copying the head's metadata.
+        tail = DBActivity(
+            id=tail_id,
+            user_info_id=user_info_id,
+            name=f"{head.name} (2)",
+            type=head.type,
+            moving_time=head.moving_time,
+            elapsed_time=head.elapsed_time,
+            start_date=head.start_date,
+            start_date_local=head.start_date_local,
+            timezone=head.timezone,
+            trainer=head.trainer,
+            commute=head.commute,
+            manual=True,
+            private=head.private,
+            gear_id=head.gear_id,
+        )
+        # Seed the tail with the FULL pre-split geometry + the original scalar
+        # times so _write_track_geometry apportions the tail's time to its own
+        # retained fraction (tail_length / full_length), mirroring the head.
+        tail.summary_polyline = head.summary_polyline
+        tail.elevation_profile_json = head.elevation_profile_json
+        sess.add(tail)
+
+        # Write head then tail geometry (each snapshots its own original + recomputes).
+        self._write_track_geometry(head, head_points)
+        # The tail begins at the split boundary — i.e. where the head ends. Tracks
+        # carry no per-point timestamps, so derive the boundary time as the head's
+        # start plus its (now apportioned) elapsed duration. Without this the tail
+        # inherits the head's start_date and sorts out of order (often *before* the
+        # head, since its negative id wins date ties). start_date columns are stored
+        # as ISO-8601 strings, so parse → shift → re-serialise in the same format.
+        from datetime import datetime, timedelta
+
+        def _shift(iso: str) -> str:
+            if not iso:
+                return iso
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return (dt + timedelta(seconds=head.elapsed_time or 0)) \
+                .isoformat().replace("+00:00", "Z")
+
+        tail.start_date = _shift(head.start_date)
+        tail.start_date_local = _shift(head.start_date_local)
+        self._write_track_geometry(tail, tail_points)
+
+        # Insert the tail item directly after the head item, renumbering positions.
+        item_rows = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == project_id)
+            .order_by(DBProjectItem.position)
+        ).all()
+        new_order: List[DBProjectItem] = []
+        for it in item_rows:
+            new_order.append(it)
+            if it.item_type == "activity" and it.activity_id == activity_id:
+                new_order.append(DBProjectItem(
+                    project_id=project_id, position=0,
+                    item_type="activity", activity_id=tail_id,
+                ))
+        for pos, it in enumerate(new_order):
+            it.position = pos
+            sess.add(it)
+
+        sess.commit()
+        return tail_id
+
+    def delete_local_activity(
+        self, sess: Session, project_id: int, activity_id: int
+    ) -> bool:
+        """Delete a LOCAL (negative-id) activity row and unlink it from items.
+
+        Only local activities (split tails, id < 0) may be deleted — Strava
+        activities are shared across projects and must never be row-deleted here.
+        Returns False if the id is not local or the row is absent.
+        """
+        if activity_id >= 0:
+            return False
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return False
+        sess.execute(
+            delete(DBProjectItem).where(
+                DBProjectItem.project_id == project_id,
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+            )
+        )
+        sess.delete(row)
+        # Renumber remaining item positions to stay contiguous.
+        remaining = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == project_id)
+            .order_by(DBProjectItem.position)
+        ).all()
+        for pos, it in enumerate(remaining):
+            it.position = pos
+            sess.add(it)
+        sess.commit()
+        return True
 
     def force_update_activity(
         self, sess: Session, user_info_id: int, act: Activity
@@ -505,10 +818,70 @@ class ProjectRepo:
         sess.add(row)
         sess.flush()  # populate row.id
 
+        # 2a. Create groups first, mapping each file group id → new DB id so people
+        # can be re-linked to their group below (issue #50).
+        group_id_map: Dict[int, int] = {}
+        for group in project.groups:
+            g_row = DBPersonGroup(
+                project_id=row.id,
+                name=group.name,
+                nationalities_json=json.dumps(group.nationalities) if group.nationalities else None,
+                socials_json=json.dumps(group.socials) if group.socials else None,
+            )
+            sess.add(g_row)
+            sess.flush()
+            if group.id is not None:
+                group_id_map[group.id] = g_row.id
+
+        # 2b. Create people rows, mapping each file person id → new DB id so
+        # encounter items can be re-linked below (issue #40).
+        person_id_map: Dict[int, int] = {}
+        for person in project.people:
+            p_row = DBPerson(
+                project_id=row.id,
+                name=person.name,
+                email=person.email,
+                phone=person.phone,
+                # Mirror the polarsteps handle out of socials so the shared-trip
+                # view keeps working; fall back to any legacy standalone value.
+                polarsteps=polarsteps_from_socials(person.socials) or person.polarsteps,
+                notes=person.notes,
+                avatar_photo=person.avatar_photo,
+                socials_json=json.dumps(person.socials) if person.socials else None,
+                nationalities_json=json.dumps(person.nationalities) if person.nationalities else None,
+                residence=person.residence,
+                group_id=group_id_map.get(person.group_id) if person.group_id is not None else None,
+            )
+            sess.add(p_row)
+            sess.flush()
+            if person.id is not None:
+                person_id_map[person.id] = p_row.id
+
         # 3. Create project_item rows
         for pos, item in enumerate(project.items):
             memory_id: Optional[int] = None
-            if item.item_type == "memory" and item.memory is not None:
+            encounter_id: Optional[int] = None
+            if item.item_type == "encounter" and item.encounter is not None:
+                enc = item.encounter
+                mapped_person = person_id_map.get(enc.person_id) if enc.person_id is not None else None
+                mapped_group = group_id_map.get(enc.group_id) if enc.group_id is not None else None
+                if mapped_person is None and mapped_group is None:
+                    continue  # orphan encounter (person/group missing) — skip
+                enc_row = DBEncounter(
+                    project_id=row.id,
+                    person_id=mapped_person,
+                    group_id=mapped_group,
+                    date=enc.date,
+                    time=enc.time,
+                    description=enc.description,
+                    geo_mode=enc.geo_mode,
+                    lat=enc.lat,
+                    lon=enc.lon,
+                )
+                sess.add(enc_row)
+                sess.flush()
+                encounter_id = enc_row.id
+            elif item.item_type == "memory" and item.memory is not None:
                 # Persist the memory row so we get its DB id
                 mem = item.memory
                 mem_row = DBMemory(
@@ -537,6 +910,7 @@ class ProjectRepo:
                     if item.item_type == "segment" else None
                 ),
                 memory_id=memory_id,
+                encounter_id=encounter_id,
             )
             sess.add(db_item)
 
@@ -629,6 +1003,26 @@ class ProjectRepo:
         ).all()
         journal_by_id = {jr.id: self._row_to_journal(jr) for jr in journal_rows}
 
+        # Load people + encounter rows for this project (issue #40)
+        people = [
+            self._row_to_person(pr) for pr in sess.exec(
+                select(DBPerson).where(DBPerson.project_id == row.id)
+                .order_by(DBPerson.id)
+            ).all()
+        ]
+        # Load groups (issue #50)
+        groups = [
+            self._row_to_group(gr) for gr in sess.exec(
+                select(DBPersonGroup).where(DBPersonGroup.project_id == row.id)
+                .order_by(DBPersonGroup.id)
+            ).all()
+        ]
+        encounter_by_id = {
+            er.id: self._row_to_encounter(er) for er in sess.exec(
+                select(DBEncounter).where(DBEncounter.project_id == row.id)
+            ).all()
+        }
+
         items: List[ProjectItem] = []
         activities: List[Activity] = []
         memories: List[Memory] = []
@@ -636,6 +1030,7 @@ class ProjectRepo:
         seen_ids: set[int] = set()
         seen_memory_ids: set[int] = set()
         seen_journal_ids: set[int] = set()
+        seen_encounter_ids: set[int] = set()
 
         for ir in item_rows:
             if ir.item_type == "activity" and ir.activity_id is not None:
@@ -661,6 +1056,13 @@ class ProjectRepo:
                     items.append(ProjectItem(item_type="journal", journal=jentry))
                     journal_entries.append(jentry)
                     seen_journal_ids.add(ir.journal_id)
+            elif ir.item_type == "encounter" and ir.encounter_id is not None:
+                if ir.encounter_id in seen_encounter_ids:
+                    continue  # deduplicate stale duplicate rows
+                enc = encounter_by_id.get(ir.encounter_id)
+                if enc:
+                    items.append(ProjectItem(item_type="encounter", encounter=enc))
+                    seen_encounter_ids.add(ir.encounter_id)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg))
@@ -706,6 +1108,8 @@ class ProjectRepo:
             activities=activities,
             memories=memories,
             journal_entries=journal_entries,
+            people=people,
+            groups=groups,
             day_meta=day_meta,
             sleeping_options=sleeping_options,
             sleeping_option_groups=sleeping_option_groups,
@@ -754,6 +1158,11 @@ class ProjectRepo:
                 "journal_id": (
                     item.journal.id
                     if item.item_type == "journal" and item.journal is not None
+                    else None
+                ),
+                "encounter_id": (
+                    item.encounter.id
+                    if item.item_type == "encounter" and item.encounter is not None
                     else None
                 ),
             })
@@ -855,6 +1264,48 @@ class ProjectRepo:
         )
 
     @staticmethod
+    def _row_to_person(row: DBPerson) -> Person:
+        return Person(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            email=row.email,
+            phone=row.phone,
+            polarsteps=row.polarsteps,
+            notes=row.notes,
+            avatar_photo=row.avatar_photo,
+            socials=json.loads(row.socials_json) if row.socials_json else [],
+            nationalities=json.loads(row.nationalities_json) if row.nationalities_json else [],
+            residence=row.residence,
+            group_id=row.group_id,
+        )
+
+    @staticmethod
+    def _row_to_group(row: DBPersonGroup) -> PersonGroup:
+        return PersonGroup(
+            id=row.id,
+            project_id=row.project_id,
+            name=row.name,
+            nationalities=json.loads(row.nationalities_json) if row.nationalities_json else [],
+            socials=json.loads(row.socials_json) if row.socials_json else [],
+        )
+
+    @staticmethod
+    def _row_to_encounter(row: DBEncounter) -> Encounter:
+        return Encounter(
+            id=row.id,
+            project_id=row.project_id,
+            person_id=row.person_id,
+            group_id=row.group_id,
+            date=row.date,
+            time=row.time,
+            description=row.description,
+            geo_mode=row.geo_mode,
+            lat=row.lat,
+            lon=row.lon,
+        )
+
+    @staticmethod
     def _row_to_memory(row: DBMemory) -> Memory:
         return Memory(
             id=row.id,
@@ -942,6 +1393,7 @@ class ProjectRepo:
                            if row.elevation_profile_low_res_json else None))
                 else None
             ),
+            is_edited=bool(getattr(row, "is_edited", False)),
         )
 
     @staticmethod

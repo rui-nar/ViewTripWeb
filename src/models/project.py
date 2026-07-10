@@ -8,8 +8,11 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Literal, Optional
 
 from src.models.activity import Activity
+from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
+from src.models.person import Person
+from src.models.person_group import PersonGroup
 
 SegmentType = Literal["train", "flight", "boat", "bus"]
 
@@ -113,11 +116,12 @@ class ConnectingSegment:
 @dataclass
 class ProjectItem:
     """One entry in the project's ordered item list."""
-    item_type: Literal["activity", "segment", "memory", "journal"]
+    item_type: Literal["activity", "segment", "memory", "journal", "encounter"]
     activity_id: Optional[int] = None
     segment: Optional[ConnectingSegment] = None
     memory: Optional[Memory] = None
     journal: Optional[JournalEntry] = None
+    encounter: Optional[Encounter] = None
 
 
 @dataclass
@@ -151,6 +155,10 @@ class Project:
     activities: List[Activity] = field(default_factory=list)
     memories: List[Memory] = field(default_factory=list)
     journal_entries: List[JournalEntry] = field(default_factory=list)
+    # People met on the trip (issue #40); referenced by encounter items.
+    people: List[Person] = field(default_factory=list)
+    # Groups of people (issue #50); members are people whose group_id points here.
+    groups: List[PersonGroup] = field(default_factory=list)
     # Track display style — persisted per project
     track_color: str = "#F97316"
     track_secondary_color: Optional[str] = None  # None = auto-derive from primary

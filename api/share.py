@@ -252,10 +252,13 @@ def shared_project(
     cached_result = _details_cache.get(token)
     if cached_result is None:
         result = _repo.to_dict(project)
-        # Journal entries are always private — strip from all shared views
+        # Journal entries, encounters and people are always private (third-party
+        # PII) — strip from all shared views.
+        result.pop("people", None)
+        result.pop("groups", None)
         result["items"] = [
             item for item in (result.get("items") or [])
-            if item.get("item_type") != "journal"
+            if item.get("item_type") not in ("journal", "encounter")
         ]
         if token_type == "no_memories":
             result["items"] = [
@@ -293,10 +296,13 @@ def shared_project_meta(
     # elevation_profile=None and summary_polyline=None on all activities,
     # so to_dict() produces the stripped payload without extra work.
     result = _repo.to_dict(project)
-    # Journal entries are always private — strip from all shared views
+    # Journal entries, encounters and people are always private (third-party PII)
+    # — strip from all shared views.
+    result.pop("people", None)
+    result.pop("groups", None)
     result["items"] = [
         item for item in (result.get("items") or [])
-        if item.get("item_type") != "journal"
+        if item.get("item_type") not in ("journal", "encounter")
     ]
     if token_type == "no_memories":
         result["items"] = [

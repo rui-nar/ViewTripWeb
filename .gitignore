@@ -69,3 +69,6 @@ delete_memories.py
 dev-server.ps1
 viewtripweb.db-shm
 viewtripweb.db-wal
+
+# Claude Code transient worktree state (harness-managed, not project content)
+.claude/worktrees/

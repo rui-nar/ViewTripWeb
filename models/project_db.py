@@ -214,6 +214,15 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     # reading the multi-MB full profile. Derived; see elevation_downsample.py.
     elevation_profile_low_res_json: Optional[str] = sqlmodel.Field(default=None)
 
+    # Geometry-edit state (issue #31). When True the track was edited locally
+    # (trim/add/remove/split) and Strava sync/enrichment must SKIP this row so
+    # the edit is not overwritten. The original_* columns snapshot the pre-edit
+    # geometry once, enabling a reversible "Reset to Strava". DB-only — the
+    # snapshots are never surfaced in the domain model or the .viewtrip file.
+    is_edited: bool = sqlmodel.Field(default=False)
+    original_polyline: Optional[str] = sqlmodel.Field(default=None)
+    original_elevation_profile_json: Optional[str] = sqlmodel.Field(default=None)
+
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")
 
@@ -275,8 +284,72 @@ class DBJournalEntry(sqlmodel.SQLModel, table=True):
     enc_version: int = sqlmodel.Field(default=0)
 
 
+class DBPerson(sqlmodel.SQLModel, table=True):
+    """A person met on a trip (issue #40) — owner-only, per-project.
+
+    All identity fields are optional: a person may be just a first name or even
+    "Unknown". Referenced by DBEncounter rows; never exposed in shared views.
+    """
+
+    __tablename__ = "person"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    name: Optional[str] = sqlmodel.Field(default=None)
+    email: Optional[str] = sqlmodel.Field(default=None)
+    phone: Optional[str] = sqlmodel.Field(default=None)
+    polarsteps: Optional[str] = sqlmodel.Field(default=None)  # username or profile URL
+    notes: Optional[str] = sqlmodel.Field(default=None)
+    avatar_photo: Optional[str] = sqlmodel.Field(default=None)  # base UUID filename
+    # JSON list of {"network", "handle"} social links; the polarsteps column above
+    # is kept and mirrored from the "polarsteps" entry so the shared-trip view works.
+    socials_json: Optional[str] = sqlmodel.Field(default=None)
+    nationalities_json: Optional[str] = sqlmodel.Field(default=None)  # JSON list of ISO 3166-1 alpha-2 codes
+    residence: Optional[str] = sqlmodel.Field(default=None)  # "city, country" where they live
+    # Membership in at most one group (issue #50); null = ungrouped.
+    group_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person_group.id", index=True)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBPersonGroup(sqlmodel.SQLModel, table=True):
+    """A named group of people met on a trip (issue #50) — owner-only, per-project.
+
+    Members are DBPerson rows whose group_id points here. Own fields: name,
+    nationalities, socials. Never exposed in shared views.
+    """
+
+    __tablename__ = "person_group"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    name: Optional[str] = sqlmodel.Field(default=None)
+    nationalities_json: Optional[str] = sqlmodel.Field(default=None)  # JSON list of ISO alpha-2 codes
+    socials_json: Optional[str] = sqlmodel.Field(default=None)        # JSON list of {"network","handle"}
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBEncounter(sqlmodel.SQLModel, table=True):
+    """Meeting a person or group on a given day/place (issue #40, #56) — owner-only, per-project.
+
+    Exactly one of person_id/group_id is set (enforced at the API layer).
+    """
+
+    __tablename__ = "encounter"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    person_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person.id", index=True)
+    group_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="person_group.id", index=True)
+    date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
+    time: Optional[str] = sqlmodel.Field(default=None)   # "HH:MM"
+    description: Optional[str] = sqlmodel.Field(default=None)
+    geo_mode: str = sqlmodel.Field(default="start_of_day")
+    lat: Optional[float] = sqlmodel.Field(default=None)
+    lon: Optional[float] = sqlmodel.Field(default=None)
+
+
 class DBProjectItem(sqlmodel.SQLModel, table=True):
-    """One ordered entry in a project — either an activity ref, segment, memory, or journal."""
+    """One ordered entry in a project — an activity ref, segment, memory, journal, or encounter."""
 
     __tablename__ = "projectitem"
 
@@ -284,7 +357,7 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     position: int   # 0-based display order; renumbered on every reorder
 
-    item_type: str  # "activity" | "segment" | "memory"
+    item_type: str  # "activity" | "segment" | "memory" | "journal" | "encounter"
 
     # Populated when item_type == "activity"
     activity_id: Optional[int] = sqlmodel.Field(
@@ -303,6 +376,11 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     # Populated when item_type == "journal"
     journal_id: Optional[int] = sqlmodel.Field(
         default=None, foreign_key="journalentry.id"
+    )
+
+    # Populated when item_type == "encounter"
+    encounter_id: Optional[int] = sqlmodel.Field(
+        default=None, foreign_key="encounter.id"
     )
 
 
