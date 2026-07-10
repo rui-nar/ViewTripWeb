@@ -112,6 +112,60 @@ class ConnectingSegment:
     #   real track (Overpass found no usable geometry). Surfaced to the UI so a straight segment
     #   isn't silently mistaken for a real resolved route.
 
+    def to_dict(self) -> dict:
+        """Serialise to a dict that can be round-tripped via from_dict()."""
+        return {
+            "id": self.id,
+            "segment_type": self.segment_type,
+            "label": self.label,
+            "date": self.date,
+            "start": {
+                "lat": self.start.lat,
+                "lon": self.start.lon,
+                "source": self.start.source,
+            },
+            "end": {
+                "lat": self.end.lat,
+                "lon": self.end.lon,
+                "source": self.end.source,
+            },
+            "route_mode": self.route_mode,
+            "train_number": self.train_number,
+            "hafas_provider": self.hafas_provider,
+            "route_polyline": self.route_polyline,
+            "route_status": self.route_status,
+            "route_error": self.route_error,
+            "route_started_at": self.route_started_at,
+            "route_degraded": self.route_degraded,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ConnectingSegment":
+        """Create a ConnectingSegment instance from a dict produced by to_dict()."""
+        return cls(
+            id=d.get("id", ""),
+            segment_type=d.get("segment_type", "flight"),
+            label=d.get("label", ""),
+            date=d.get("date"),
+            start=SegmentEndpoint(
+                lat=d.get("start", {}).get("lat", 0.0),
+                lon=d.get("start", {}).get("lon", 0.0),
+                source=d.get("start", {}).get("source", "auto"),
+            ),
+            end=SegmentEndpoint(
+                lat=d.get("end", {}).get("lat", 0.0),
+                lon=d.get("end", {}).get("lon", 0.0),
+                source=d.get("end", {}).get("source", "auto"),
+            ),
+            route_mode=d.get("route_mode", "great_circle"),
+            train_number=d.get("train_number"),
+            hafas_provider=d.get("hafas_provider"),
+            route_polyline=d.get("route_polyline"),
+            route_status=d.get("route_status", "idle"),
+            route_error=d.get("route_error"),
+            route_started_at=d.get("route_started_at"),
+        )
+
 
 @dataclass
 class ProjectItem:

@@ -19,8 +19,25 @@ from src.models.project import (
     Project,
     ProjectFilterState,
     ProjectItem,
-    SegmentEndpoint,
 )
+
+
+# Dispatch tables for ProjectItem serialisation, keyed by item_type. "activity"
+# is handled as a special case in _serialise_item/_deserialise_item (it's just
+# an activity_id, not a nested dict) and doesn't fit this shape. "segment" is
+# the implicit default (no explicit item_type match) on the deserialise side,
+# matching the original if/elif chain's trailing `else` branch.
+_ITEM_TYPE_SERIALIZERS = {
+    "memory": lambda item: {"memory": item.memory.to_dict()},
+    "journal": lambda item: {"journal": item.journal.to_dict()},
+    "encounter": lambda item: {"encounter": item.encounter.to_dict()},
+}
+
+_ITEM_TYPE_DESERIALIZERS = {
+    "memory": lambda d: ProjectItem(item_type="memory", memory=Memory.from_dict(d.get("memory", {}))),
+    "journal": lambda d: ProjectItem(item_type="journal", journal=JournalEntry.from_dict(d.get("journal", {}))),
+    "encounter": lambda d: ProjectItem(item_type="encounter", encounter=Encounter.from_dict(d.get("encounter", {}))),
+}
 
 
 def _person_to_dict(p: Person) -> Dict[str, Any]:
@@ -248,144 +265,19 @@ class ProjectIO:
         d: Dict[str, Any] = {"item_type": item.item_type}
         if item.item_type == "activity":
             d["activity_id"] = item.activity_id
-        elif item.item_type == "memory" and item.memory is not None:
-            mem = item.memory
-            d["memory"] = {
-                "id": mem.id,
-                "public_id": mem.public_id,
-                "name": mem.name,
-                "date": mem.date,
-                "time": mem.time,
-                "description": mem.description,
-                "photos": mem.photos,
-                "geo_mode": mem.geo_mode,
-                "lat": mem.lat,
-                "lon": mem.lon,
-                "comment_count": mem.comment_count,
-                "like_count": mem.like_count,
-            }
-        elif item.item_type == "journal" and item.journal is not None:
-            j = item.journal
-            d["journal"] = {
-                "id": j.id,
-                "date": j.date,
-                "time": j.time,
-                "description": j.description,
-                "photos": j.photos,
-                "geo_mode": j.geo_mode,
-                "lat": j.lat,
-                "lon": j.lon,
-            }
-        elif item.item_type == "encounter" and item.encounter is not None:
-            e = item.encounter
-            d["encounter"] = {
-                "id": e.id,
-                "person_id": e.person_id,
-                "group_id": e.group_id,
-                "date": e.date,
-                "time": e.time,
-                "description": e.description,
-                "geo_mode": e.geo_mode,
-                "lat": e.lat,
-                "lon": e.lon,
-            }
+        elif item.item_type in _ITEM_TYPE_SERIALIZERS and getattr(item, item.item_type) is not None:
+            d.update(_ITEM_TYPE_SERIALIZERS[item.item_type](item))
         else:
-            seg = item.segment
-            d["segment"] = {
-                "id": seg.id,
-                "segment_type": seg.segment_type,
-                "label": seg.label,
-                "date": seg.date,
-                "start": {
-                    "lat": seg.start.lat,
-                    "lon": seg.start.lon,
-                    "source": seg.start.source,
-                },
-                "end": {
-                    "lat": seg.end.lat,
-                    "lon": seg.end.lon,
-                    "source": seg.end.source,
-                },
-                "route_mode": seg.route_mode,
-                "train_number": seg.train_number,
-                "hafas_provider": seg.hafas_provider,
-                "route_polyline": seg.route_polyline,
-                "route_status": seg.route_status,
-                "route_error": seg.route_error,
-                "route_started_at": seg.route_started_at,
-                "route_degraded": seg.route_degraded,
-            }
+            d["segment"] = item.segment.to_dict()
         return d
 
     @staticmethod
     def _deserialise_item(d: Dict[str, Any]) -> ProjectItem:
-        if d.get("item_type") == "activity":
+        item_type = d.get("item_type")
+        if item_type == "activity":
             return ProjectItem(item_type="activity", activity_id=d.get("activity_id"))
-        if d.get("item_type") == "memory":
-            md = d.get("memory", {})
-            mem = Memory(
-                id=md.get("id"),
-                public_id=md.get("public_id"),
-                name=md.get("name"),
-                date=md.get("date", ""),
-                time=md.get("time"),
-                description=md.get("description"),
-                photos=md.get("photos", []),
-                geo_mode=md.get("geo_mode", "start_of_day"),
-                lat=md.get("lat"),
-                lon=md.get("lon"),
-            )
-            return ProjectItem(item_type="memory", memory=mem)
-        if d.get("item_type") == "journal":
-            jd = d.get("journal", {})
-            jentry = JournalEntry(
-                id=jd.get("id"),
-                date=jd.get("date", ""),
-                time=jd.get("time"),
-                description=jd.get("description"),
-                photos=jd.get("photos", []),
-                geo_mode=jd.get("geo_mode", "start_of_day"),
-                lat=jd.get("lat"),
-                lon=jd.get("lon"),
-            )
-            return ProjectItem(item_type="journal", journal=jentry)
-        if d.get("item_type") == "encounter":
-            ed = d.get("encounter", {})
-            enc = Encounter(
-                id=ed.get("id"),
-                person_id=ed.get("person_id"),
-                group_id=ed.get("group_id"),
-                date=ed.get("date", ""),
-                time=ed.get("time"),
-                description=ed.get("description"),
-                geo_mode=ed.get("geo_mode", "start_of_day"),
-                lat=ed.get("lat"),
-                lon=ed.get("lon"),
-            )
-            return ProjectItem(item_type="encounter", encounter=enc)
-        # segment
-        sd = d.get("segment", {})
-        seg = ConnectingSegment(
-            id=sd.get("id", ""),
-            segment_type=sd.get("segment_type", "flight"),
-            label=sd.get("label", ""),
-            date=sd.get("date"),
-            start=SegmentEndpoint(
-                lat=sd.get("start", {}).get("lat", 0.0),
-                lon=sd.get("start", {}).get("lon", 0.0),
-                source=sd.get("start", {}).get("source", "auto"),
-            ),
-            end=SegmentEndpoint(
-                lat=sd.get("end", {}).get("lat", 0.0),
-                lon=sd.get("end", {}).get("lon", 0.0),
-                source=sd.get("end", {}).get("source", "auto"),
-            ),
-            route_mode=sd.get("route_mode", "great_circle"),
-            train_number=sd.get("train_number"),
-            hafas_provider=sd.get("hafas_provider"),
-            route_polyline=sd.get("route_polyline"),
-            route_status=sd.get("route_status", "idle"),
-            route_error=sd.get("route_error"),
-            route_started_at=sd.get("route_started_at"),
-        )
+        if item_type in _ITEM_TYPE_DESERIALIZERS:
+            return _ITEM_TYPE_DESERIALIZERS[item_type](d)
+        # segment — implicit default when item_type is missing/None or "segment"
+        seg = ConnectingSegment.from_dict(d.get("segment", {}))
         return ProjectItem(item_type="segment", segment=seg)
