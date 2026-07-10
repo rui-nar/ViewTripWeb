@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import '../api/client.dart';
+import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import 'project_filter_mixin.dart';
@@ -326,6 +327,7 @@ class ProjectNotifier extends ChangeNotifier
       items = rawItems is List
           ? rawItems.cast<Map<String, dynamic>>()
           : [];
+      await _revealItems(items);
       final rawPeople = details['people'];
       people = rawPeople is List
           ? rawPeople.cast<Map<String, dynamic>>()
@@ -1005,7 +1007,10 @@ class ProjectNotifier extends ChangeNotifier
           changed = true;
         }
       }
-      if (changed) notifyListeners();
+      if (changed) {
+        await _revealItems(items);
+        notifyListeners();
+      }
     } catch (_) {}
   }
 
@@ -1047,6 +1052,7 @@ class ProjectNotifier extends ChangeNotifier
           : [];
       final rawItems = result['items'];
       items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
+      await _revealItems(items);
       _updateStats();
       _buildFullTrack();
       // Refresh GeoJSON so the map polylines reflect the updated track.
@@ -1266,7 +1272,7 @@ class ProjectNotifier extends ChangeNotifier
         _service.getGeo(name),
       ]);
       final details = results[0];
-      _applyDetails(details, name);
+      await _applyDetails(details, name);
       _autoFillDaysToToday();
       geo = results[1];
       _updateStats();
@@ -1283,7 +1289,7 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _silentReloadDetailsOnly(String name) async {
     try {
       final details = await _service.getDetailsMeta(name);
-      _applyDetails(details, name);
+      await _applyDetails(details, name);
       _autoFillDaysToToday();
       _updateStats();
     } on Exception catch (e) {
@@ -1293,7 +1299,29 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  void _applyDetails(dynamic details, String name) {
+  /// Decrypt in-scope memory/journal text in [list] in place (issue #26).
+  /// No-op when encryption is locked/off; idempotent (plaintext passes through),
+  /// so it is safe to call after any item load.
+  Future<void> _revealItems(List<Map<String, dynamic>> list) async {
+    if (!encryption.isUnlocked) return;
+    for (final item in list) {
+      switch (item['item_type']) {
+        case 'memory':
+          final m = item['memory'];
+          if (m is Map) {
+            m['name'] = await encryption.reveal(m['name'] as String?);
+            m['description'] = await encryption.reveal(m['description'] as String?);
+          }
+        case 'journal':
+          final j = item['journal'];
+          if (j is Map) {
+            j['description'] = await encryption.reveal(j['description'] as String?);
+          }
+      }
+    }
+  }
+
+  Future<void> _applyDetails(dynamic details, String name) async {
     projectName = details['name'] as String? ?? name;
     tripStart   = details['trip_start'] as String?;
     final rawColor = details['track_color'] as String?;
@@ -1337,6 +1365,7 @@ class ProjectNotifier extends ChangeNotifier
     sleepingOptions = rawOpts is List
         ? List<String>.from(rawOpts)
         : List<String>.from(_defaultSleepingOptions);
+    await _revealItems(items);
   }
 
   // ── Mixin delegates (forward private helpers to ProjectMemoryCrudMixin) ────

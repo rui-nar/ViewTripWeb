@@ -44,6 +44,10 @@ class UserInfo(sqlmodel.SQLModel, table=True):
     auth_provider: str = sqlmodel.Field(default="local")  # "local" | "google"
     is_admin: bool = sqlmodel.Field(default=False)
     created_at: float = sqlmodel.Field(default_factory=time.time)
+    # E2EE (issue #26): True once the user has enabled client-side encryption.
+    # The server still holds no keys; this only signals clients to expect
+    # ciphertext for in-scope fields. Backed by device_key / recovery_wrap rows.
+    encryption_enabled: bool = sqlmodel.Field(default=False)
 
 
 class StravaToken(sqlmodel.SQLModel, table=True):

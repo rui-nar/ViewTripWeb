@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
+import '../crypto/encryption.dart';
 import 'auth_service.dart';
 
 // ── User model ─────────────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ class AuthNotifier extends ChangeNotifier {
         try {
           final data = await _service.getMe();
           _user = User.fromMap(data);
+          await _unlockEncryption();
         } on ApiException catch (e) {
           if (e.statusCode == 401) {
             await _service.logout();
@@ -101,6 +103,7 @@ class AuthNotifier extends ChangeNotifier {
       final map = await _service.loginWithPassword(email, password);
       _user = User.fromMap(map);
       _error = null;
+      await _unlockEncryption();
     } on Exception catch (e) {
       _error = _extractMessage(e);
       _user = null;
@@ -115,6 +118,7 @@ class AuthNotifier extends ChangeNotifier {
       final map = await _service.loginWithGoogle(idToken);
       _user = User.fromMap(map);
       _error = null;
+      await _unlockEncryption();
     } on Exception catch (e) {
       _error = _extractMessage(e);
       _user = null;
@@ -139,6 +143,7 @@ class AuthNotifier extends ChangeNotifier {
       );
       _user = User.fromMap(map);
       _error = null;
+      await _unlockEncryption();
     } on Exception catch (e) {
       _error = _extractMessage(e);
       _user = null;
@@ -149,9 +154,19 @@ class AuthNotifier extends ChangeNotifier {
 
   Future<void> logout() async {
     await _service.logout();
+    encryption.lock();
     _user = null;
     _error = null;
     notifyListeners();
+  }
+
+  /// After a successful login/restore, try to unlock encryption on this trusted
+  /// device. Harmless no-op when encryption is disabled or this device isn't
+  /// approved yet (those fall through to device approval / recovery). Never throws.
+  Future<void> _unlockEncryption() async {
+    try {
+      await encryption.prepareForSession();
+    } catch (_) {}
   }
 
   /// Update the in-memory user from a token-response `user` map.

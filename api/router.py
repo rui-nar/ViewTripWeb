@@ -16,6 +16,7 @@ from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
 from api.encounters import router as encounters_router
+from api.encryption import router as encryption_router
 from api.geo import router as geo_router
 from api.groups import router as groups_router
 from api.journal import router as journal_router
@@ -87,6 +88,7 @@ app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)
 app.include_router(encounters_router)
+app.include_router(encryption_router)
 app.include_router(geo_router)
 app.include_router(groups_router)
 app.include_router(journal_router)
