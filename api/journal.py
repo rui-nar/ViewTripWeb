@@ -9,6 +9,7 @@ Routes:
     POST   /api/journal/{id}/photos                — upload a photo
     POST   /api/journal/{id}/photos/from-url       — queue a photo download from URL
     DELETE /api/journal/{id}/photos/{uuid}         — delete a specific photo
+    PUT    /api/journal/{id}/photos/{uuid}/replace — replace a photo's bytes in place
     GET    /api/journal/{id}/photos/{uuid}         — serve full-res photo
     GET    /api/journal/{id}/photos/{uuid}/thumb   — serve thumbnail
 """
@@ -348,6 +349,43 @@ def delete_photo(
         row.photos_json = json.dumps(photos)
         sess.add(row)
         sess.commit()
+
+
+@router.put("/{journal_id}/photos/{old_uuid}/replace", status_code=status.HTTP_200_OK,
+            response_model=UUIDOut, summary="Replace a photo")
+async def replace_photo(
+    journal_id: int,
+    old_uuid: str,
+    file: Annotated[UploadFile, File()],
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Replace a photo's bytes with a higher-quality upload, keeping its position in photos_json."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = _get_owned_journal(sess, journal_id, user_info_id)
+        photos: List[str] = json.loads(row.photos_json or "[]")
+        if old_uuid not in photos:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+
+    raw = await file.read()
+    new_uuid = str(uuid_lib.uuid4())
+    _save_photo_files(current_user["sub"], journal_id, new_uuid, raw)
+
+    with get_session() as sess:
+        row = sess.get(DBJournalEntry, journal_id)
+        photos: List[str] = json.loads(row.photos_json or "[]")
+        # In-place index replacement, not remove+append: photos_json order is display order.
+        photos[photos.index(old_uuid)] = new_uuid
+        row.photos_json = json.dumps(photos)
+        sess.add(row)
+        sess.commit()
+
+    photo_path = _photo_dir(current_user["sub"], journal_id)
+    for suffix in ["", "_thumb"]:
+        f = photo_path / f"{old_uuid}{suffix}.jpg"
+        f.unlink(missing_ok=True)
+
+    return {"uuid": new_uuid}
 
 
 @router.get("/{journal_id}/photos/{photo_uuid}", summary="Serve full-resolution photo")
