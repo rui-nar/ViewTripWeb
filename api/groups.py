@@ -8,7 +8,7 @@ Routes:
     POST   /api/groups                   — create a group
     GET    /api/groups/{id}               — group + its members
     PUT    /api/groups/{id}               — update a group
-    DELETE /api/groups/{id}               — delete a group (ungroups its members)
+    DELETE /api/groups/{id}               — delete a group (ungroups members, deletes group-encounters)
     PUT    /api/groups/{id}/members       — set the group's member list
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from models.project_db import DBPerson, DBPersonGroup, DBProject
+from models.project_db import DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -162,10 +162,25 @@ def delete_group(
     group_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Delete a group; its members are ungrouped (not deleted)."""
+    """Delete a group; its members are ungrouped (not deleted), but any
+    encounters logged directly against the group (issue #56) are deleted too —
+    unlike a member, a group-encounter has no other entity to fall back to."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_group(sess, group_id, user_info_id)
+
+        encounters = sess.exec(
+            select(DBEncounter).where(DBEncounter.group_id == group_id)
+        ).all()
+        enc_ids = [e.id for e in encounters]
+        if enc_ids:
+            for item in sess.exec(
+                select(DBProjectItem).where(DBProjectItem.encounter_id.in_(enc_ids))
+            ).all():
+                sess.delete(item)
+        for e in encounters:
+            sess.delete(e)
+
         for m in sess.exec(select(DBPerson).where(DBPerson.group_id == group_id)).all():
             m.group_id = None
             sess.add(m)

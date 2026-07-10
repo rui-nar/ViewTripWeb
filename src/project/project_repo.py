@@ -864,11 +864,13 @@ class ProjectRepo:
             if item.item_type == "encounter" and item.encounter is not None:
                 enc = item.encounter
                 mapped_person = person_id_map.get(enc.person_id) if enc.person_id is not None else None
-                if mapped_person is None:
-                    continue  # orphan encounter (person missing) — skip
+                mapped_group = group_id_map.get(enc.group_id) if enc.group_id is not None else None
+                if mapped_person is None and mapped_group is None:
+                    continue  # orphan encounter (person/group missing) — skip
                 enc_row = DBEncounter(
                     project_id=row.id,
                     person_id=mapped_person,
+                    group_id=mapped_group,
                     date=enc.date,
                     time=enc.time,
                     description=enc.description,
@@ -1294,6 +1296,7 @@ class ProjectRepo:
             id=row.id,
             project_id=row.project_id,
             person_id=row.person_id,
+            group_id=row.group_id,
             date=row.date,
             time=row.time,
             description=row.description,

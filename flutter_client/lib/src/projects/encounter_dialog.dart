@@ -1,11 +1,13 @@
-/// Dialog to create or edit an encounter (issue #40): pick/create a person, a
-/// day, an optional place (defaults to the day's location) and a note.
+/// Dialog to create or edit an encounter (issue #40): pick/create a person or
+/// group (issue #56), a day, an optional place (defaults to the day's
+/// location) and a note.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../core/current_location.dart';
 import '../core/design_tokens.dart';
+import 'group_form_dialog.dart';
 import 'location_picker_dialog.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
@@ -34,6 +36,7 @@ class EncounterDialog extends StatefulWidget {
 class _EncounterDialogState extends State<EncounterDialog> {
   late TextEditingController _descCtrl;
   int? _personId;
+  int? _groupId;
   DateTime? _date;
   TimeOfDay? _time;
   double? _lat;
@@ -53,7 +56,10 @@ class _EncounterDialogState extends State<EncounterDialog> {
     super.initState();
     final e = widget.editEntry;
     _descCtrl = TextEditingController(text: e?['description'] as String? ?? '');
-    _personId = (e?['person_id'] as num?)?.toInt() ?? widget.initialPersonId;
+    _groupId = (e?['group_id'] as num?)?.toInt();
+    _personId = _groupId == null
+        ? (e?['person_id'] as num?)?.toInt() ?? widget.initialPersonId
+        : null;
 
     final ds = (e?['date'] as String?) ?? widget.initialDate;
     if (ds != null) _date = DateTime.tryParse(ds);
@@ -100,7 +106,22 @@ class _EncounterDialogState extends State<EncounterDialog> {
 
   Future<void> _createPersonInline() async {
     final newId = await showPersonFormDialog(context, widget.notifier);
-    if (newId != null && mounted) setState(() => _personId = newId);
+    if (newId != null && mounted) {
+      setState(() {
+        _personId = newId;
+        _groupId = null;
+      });
+    }
+  }
+
+  Future<void> _createGroupInline() async {
+    final newId = await showGroupFormDialog(context, widget.notifier);
+    if (newId != null && mounted) {
+      setState(() {
+        _groupId = newId;
+        _personId = null;
+      });
+    }
   }
 
   Future<void> _pickLocation() async {
@@ -123,9 +144,9 @@ class _EncounterDialogState extends State<EncounterDialog> {
   }
 
   Future<void> _save() async {
-    if (_personId == null) {
+    if (_personId == null && _groupId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pick a person')),
+        const SnackBar(content: Text('Pick a person or group')),
       );
       return;
     }
@@ -145,7 +166,8 @@ class _EncounterDialogState extends State<EncounterDialog> {
     if (e != null) {
       await widget.notifier.updateEncounter(
         e['id'].toString(),
-        personId: _personId!,
+        personId: _personId,
+        groupId: _groupId,
         date: dateStr,
         geoMode: 'custom',
         time: timeStr,
@@ -155,7 +177,8 @@ class _EncounterDialogState extends State<EncounterDialog> {
       );
     } else {
       await widget.notifier.createEncounter(
-        personId: _personId!,
+        personId: _personId,
+        groupId: _groupId,
         date: dateStr,
         geoMode: 'custom',
         time: timeStr,
@@ -173,6 +196,18 @@ class _EncounterDialogState extends State<EncounterDialog> {
     final theme = Theme.of(context);
     final isEdit = widget.editEntry != null;
     final people = widget.notifier.people;
+    final groups = widget.notifier.groups;
+
+    // (kind, id) so a person id and a group id never collide as raw ints.
+    final selected = _groupId != null
+        ? ('group', _groupId!)
+        : _personId != null
+            ? ('person', _personId!)
+            : null;
+    final knownSelection = selected != null &&
+        (selected.$1 == 'group'
+            ? groups.any((g) => g['id'] == selected.$2)
+            : people.any((p) => p['id'] == selected.$2));
 
     return AlertDialog(
       title: Text(isEdit ? 'Edit encounter' : 'Add encounter'),
@@ -183,38 +218,98 @@ class _EncounterDialogState extends State<EncounterDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Person picker + inline create
-              Text('Person *', style: theme.textTheme.labelMedium),
+              // Person/group picker + inline create (issue #56)
+              Text('Person or group *', style: theme.textTheme.labelMedium),
               const SizedBox(height: 4),
               Row(
                 children: [
                   Expanded(
-                    child: DropdownButtonFormField<int>(
-                      initialValue: people.any((p) => p['id'] == _personId)
-                          ? _personId
-                          : null,
+                    child: DropdownButtonFormField<(String, int)>(
+                      key: const Key('encounter-person-group-picker'),
+                      initialValue: knownSelection ? selected : null,
                       isExpanded: true,
                       decoration: const InputDecoration(
                         isDense: true,
                         border: OutlineInputBorder(),
-                        hintText: 'Select a person',
+                        hintText: 'Select a person or group',
                       ),
                       items: [
-                        for (final p in people)
-                          DropdownMenuItem<int>(
-                            value: (p['id'] as num).toInt(),
-                            child: Text(personDisplayName(p),
-                                overflow: TextOverflow.ellipsis),
+                        if (groups.isNotEmpty) ...[
+                          DropdownMenuItem(
+                            enabled: false,
+                            value: ('header', -1),
+                            child: Text('GROUPS',
+                                style: theme.textTheme.labelSmall),
                           ),
+                          for (final g in groups)
+                            DropdownMenuItem(
+                              value: ('group', (g['id'] as num).toInt()),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.groups, size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(groupDisplayName(g),
+                                        overflow: TextOverflow.ellipsis),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                        if (people.isNotEmpty) ...[
+                          DropdownMenuItem(
+                            enabled: false,
+                            value: ('header', -2),
+                            child: Text('PEOPLE',
+                                style: theme.textTheme.labelSmall),
+                          ),
+                          for (final p in people)
+                            DropdownMenuItem(
+                              value: ('person', (p['id'] as num).toInt()),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.person, size: 16),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(personDisplayName(p),
+                                        overflow: TextOverflow.ellipsis),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ],
-                      onChanged: (v) => setState(() => _personId = v),
+                      onChanged: (v) {
+                        if (v == null) return;
+                        setState(() {
+                          _personId = v.$1 == 'person' ? v.$2 : null;
+                          _groupId = v.$1 == 'group' ? v.$2 : null;
+                        });
+                      },
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'New person',
-                    icon: const Icon(Icons.person_add_alt_1),
-                    color: kAccent,
-                    onPressed: _createPersonInline,
+                  PopupMenuButton<void>(
+                    tooltip: 'New person or group',
+                    icon: const Icon(Icons.add_circle_outline),
+                    iconColor: kAccent,
+                    itemBuilder: (_) => [
+                      PopupMenuItem(
+                        onTap: _createPersonInline,
+                        child: const ListTile(
+                          leading: Icon(Icons.person_add_alt_1),
+                          title: Text('New person'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      PopupMenuItem(
+                        onTap: _createGroupInline,
+                        child: const ListTile(
+                          leading: Icon(Icons.group_add),
+                          title: Text('New group'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),

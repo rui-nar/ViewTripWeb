@@ -281,6 +281,7 @@ class ProjectIO:
             d["encounter"] = {
                 "id": e.id,
                 "person_id": e.person_id,
+                "group_id": e.group_id,
                 "date": e.date,
                 "time": e.time,
                 "description": e.description,
@@ -353,6 +354,7 @@ class ProjectIO:
             enc = Encounter(
                 id=ed.get("id"),
                 person_id=ed.get("person_id"),
+                group_id=ed.get("group_id"),
                 date=ed.get("date", ""),
                 time=ed.get("time"),
                 description=ed.get("description"),
