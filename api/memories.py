@@ -6,6 +6,7 @@ Routes:
     DELETE /api/memories/{id}                       — delete a memory + its photos
     POST   /api/memories/{id}/photos                — upload a photo
     DELETE /api/memories/{id}/photos/{uuid}         — delete a specific photo
+    PUT    /api/memories/{id}/photos/{uuid}/replace — replace a photo's bytes in place
     GET    /api/memories/{id}/photos/{uuid}         — serve full-res photo
     GET    /api/memories/{id}/photos/{uuid}/thumb   — serve thumbnail
     GET    /api/memories/{id}/comments              — list comments (threaded)
@@ -509,6 +510,39 @@ def delete_photo(
         mem_row.photos_json = json.dumps(photos)
         sess.add(mem_row)
         sess.commit()
+
+
+@router.put("/{memory_id}/photos/{old_uuid}/replace", status_code=status.HTTP_200_OK,
+            response_model=UUIDOut, summary="Replace a photo")
+async def replace_photo(
+    memory_id: int,
+    old_uuid: str,
+    file: Annotated[UploadFile, File()],
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Replace a photo's bytes with a higher-quality upload, keeping its position in photos_json."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        photos: List[str] = json.loads(mem_row.photos_json or "[]")
+        if old_uuid not in photos:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+
+    raw = await file.read()
+    new_uuid = str(uuid_lib.uuid4())
+    _save_photo_files(current_user["sub"], memory_id, new_uuid, raw)
+
+    with get_session() as sess:
+        mem_row = sess.get(DBMemory, memory_id)
+        photos: List[str] = json.loads(mem_row.photos_json or "[]")
+        # In-place index replacement, not remove+append: photos_json order is display order.
+        photos[photos.index(old_uuid)] = new_uuid
+        mem_row.photos_json = json.dumps(photos)
+        sess.add(mem_row)
+        sess.commit()
+
+    _delete_photo_files(current_user["sub"], memory_id, [old_uuid])
+    return {"uuid": new_uuid}
 
 
 @router.get("/{memory_id}/photos/{photo_uuid}", summary="Serve full-resolution photo")
