@@ -309,6 +309,14 @@ class ProjectNotifier extends ChangeNotifier
       // data is fetched separately in the background (see below).
       final detailsFuture = _service.getDetailsMeta(name);
       final lowResFuture = _service.getLowResGeo(name);
+      // Both futures need a listener from the moment they're created: if
+      // lowResFuture rejects first, the catch below returns before
+      // detailsFuture is ever awaited, leaving it truly unobserved — a later
+      // rejection on it then surfaces as an orphaned, uncatchable async error
+      // instead of being handled here. ignore() is a no-op when we do go on
+      // to await each future normally below.
+      detailsFuture.ignore();
+      lowResFuture.ignore();
 
       geo = await lowResFuture;
       if (_loadKey == name) notifyListeners(); // map visible at ~2.2s
@@ -524,8 +532,11 @@ class ProjectNotifier extends ChangeNotifier
         _buildFullTrack();
         notifyListeners();
       }
-    } on Exception catch (_) {
-      // Non-fatal — elevation chart simply stays empty.
+    } on Object catch (_) {
+      // Non-fatal — elevation chart simply stays empty. Catch Object (not
+      // just Exception), matching _loadFullGeoProgressively above: a decode
+      // failure can throw an Error (RangeError/TypeError) that would
+      // otherwise escape as an unhandled async exception.
     }
   }
 
