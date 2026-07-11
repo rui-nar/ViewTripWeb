@@ -7,6 +7,9 @@ import 'package:viewtrip_client/src/core/design_tokens.dart';
 class _FakeAdminService extends AdminService {
   List<Map<String, dynamic>> searchResult = [];
   int? resetCalledFor;
+  int? adminToggledFor;
+  bool? adminToggledTo;
+  Object? setAdminError;
 
   @override
   Future<Map<String, dynamic>> getStats() async => {
@@ -39,6 +42,13 @@ class _FakeAdminService extends AdminService {
   Future<String> resetPassword(int userInfoId) async {
     resetCalledFor = userInfoId;
     return 'TEMP-PW-123';
+  }
+
+  @override
+  Future<void> setAdmin(int userInfoId, bool isAdmin) async {
+    if (setAdminError != null) throw setAdminError!;
+    adminToggledFor = userInfoId;
+    adminToggledTo = isAdmin;
   }
 }
 
@@ -102,5 +112,74 @@ void main() {
     await tester.pumpAndSettle();
     expect(svc.resetCalledFor, 10);
     expect(find.text('TEMP-PW-123'), findsOneWidget); // temp-password dialog
+  });
+
+  testWidgets('admin toggle grants and revokes, label flips after the call',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {'id': 20, 'email': 'plain@x.com', 'display_name': 'Plain', 'encryption_tier': 'none', 'is_admin': false},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.enterText(find.byType(TextField), 'plain');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(OutlinedButton, 'Make admin'), findsOneWidget);
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Make admin'));
+    await tester.pumpAndSettle();
+
+    expect(svc.adminToggledFor, 20);
+    expect(svc.adminToggledTo, true);
+    expect(find.widgetWithText(OutlinedButton, 'Remove admin'), findsOneWidget);
+  });
+
+  testWidgets('admin toggle failure (e.g. self-revoke 409) surfaces a snackbar',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..setAdminError = Exception('You cannot remove your own admin access.')
+      ..searchResult = [
+        {'id': 21, 'email': 'me@x.com', 'display_name': 'Me', 'encryption_tier': 'none', 'is_admin': true},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.enterText(find.byType(TextField), 'me');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Remove admin'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('You cannot remove your own admin access.'), findsOneWidget);
+    // Label stays as-is since the call failed.
+    expect(find.widgetWithText(OutlinedButton, 'Remove admin'), findsOneWidget);
+  });
+
+  testWidgets('search row stays readable (no per-character wrap) on a narrow width',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {
+          'id': 30, 'email': 'narrow@x.com', 'display_name': 'Narrow Name',
+          'encryption_tier': 'none', 'is_admin': false,
+        },
+      ];
+    // Narrow enough to force the stacked (non-Row) layout branch, but not so
+    // narrow that the (pre-existing, unrelated) _SectionCard header overflows.
+    tester.view.physicalSize = const Size(560, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(home: AdminScreen(service: svc)));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'narrow');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull); // no RenderFlex overflow
+    // The full name renders as one Text widget, not split per character.
+    expect(find.text('Narrow Name'), findsOneWidget);
   });
 }

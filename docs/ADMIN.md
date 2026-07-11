@@ -5,8 +5,9 @@ count + recent sign-ups, per-user storage, project/activity/memory counts,
 aggregate totals, and each user's chosen encryption tier — plus a user search
 and a tier-gated password reset.
 
-Reach it at **Settings → Admin → "Open admin dashboard"** (the card only shows
-for admins) or the `/admin` route.
+Reach it at the admin-panel icon in the projects-screen app bar (shown only to
+admins), **Settings → Admin → "Open admin dashboard"**, or the `/admin` route
+directly.
 
 ## Who is an admin
 - **Seeded account:** on startup, if no `admin` user exists, one is created with
@@ -16,6 +17,13 @@ for admins) or the `/admin` route.
 - **`ADMIN_EMAILS`** (optional): a comma-separated, case-insensitive list of
   emails; matching accounts are promoted to admin on login. Use this to make
   your own real account an admin.
+- **Granted from the dashboard:** an admin can promote/demote any user found
+  via the search box ("Make admin" / "Remove admin"). An admin cannot revoke
+  their own access — this guarantees there's always at least one admin left
+  to undo a mistake. Note that `is_admin` is baked into the JWT at login time,
+  so a promoted/demoted user must log out and back in for the change to take
+  effect client-side (the server-side `/api/admin/*` gate always re-checks the
+  DB, so revocation is enforced immediately regardless).
 
 Access is enforced server-side: every `/api/admin/*` route requires an admin
 (`require_admin`, re-checked against the DB) and returns **403** otherwise.

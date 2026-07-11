@@ -28,4 +28,10 @@ class AdminService {
         '/api/admin/users/$userInfoId/reset-password', {}) as Map<String, dynamic>;
     return data['temp_password'] as String;
   }
+
+  /// Grant or revoke admin access for a user.
+  /// Throws [ApiException] (409) when revoking your own admin access.
+  Future<void> setAdmin(int userInfoId, bool isAdmin) async {
+    await api.post('/api/admin/users/$userInfoId/set-admin', {'is_admin': isAdmin});
+  }
 }

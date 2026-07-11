@@ -72,6 +72,7 @@ class _AdminScreenState extends State<AdminScreen> {
   List<Map<String, dynamic>> _results = [];
   bool _searching = false;
   final Set<int> _resetting = {};
+  final Set<int> _togglingAdmin = {};
 
   @override
   void initState() {
@@ -149,6 +150,24 @@ class _AdminScreenState extends State<AdminScreen> {
       }
     } finally {
       if (mounted) setState(() => _resetting.remove(id));
+    }
+  }
+
+  Future<void> _toggleAdmin(Map<String, dynamic> user) async {
+    final id = user['id'] as int;
+    final grant = !(user['is_admin'] == true);
+    setState(() => _togglingAdmin.add(id));
+    try {
+      await widget.service.setAdmin(id, grant);
+      if (mounted) setState(() => user['is_admin'] = grant);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _togglingAdmin.remove(id));
     }
   }
 
@@ -310,8 +329,10 @@ class _AdminScreenState extends State<AdminScreen> {
         else
           ..._results.map((u) => _SearchRow(
                 user: u,
-                busy: _resetting.contains(u['id']),
+                busyReset: _resetting.contains(u['id']),
+                busyAdmin: _togglingAdmin.contains(u['id']),
                 onReset: () => _resetPassword(u),
+                onToggleAdmin: () => _toggleAdmin(u),
               )),
       ],
     );
@@ -406,26 +427,40 @@ class _TierChip extends StatelessWidget {
 
 class _SearchRow extends StatelessWidget {
   final Map<String, dynamic> user;
-  final bool busy;
+  final bool busyReset;
+  final bool busyAdmin;
   final VoidCallback onReset;
+  final VoidCallback onToggleAdmin;
 
   const _SearchRow({
     required this.user,
-    required this.busy,
+    required this.busyReset,
+    required this.busyAdmin,
     required this.onReset,
+    required this.onToggleAdmin,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tier = user['encryption_tier'] as String? ?? 'none';
+    final isAdmin = user['is_admin'] == true;
     // Reset is enabled only for None/Low tiers (server hard-blocks Medium/High).
     final canReset = tier == 'none' || tier == 'low';
     final label = (user['display_name'] as String?)?.isNotEmpty == true
         ? user['display_name'] as String
         : (user['email'] as String? ?? '#${user['id']}');
 
-    final button = busy
+    final info = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(label, style: theme.textTheme.bodyMedium),
+        Text(user['email'] as String? ?? '', style: theme.textTheme.bodySmall),
+      ],
+    );
+
+    final resetButton = busyReset
         ? const SizedBox(
             width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
         : OutlinedButton(
@@ -433,31 +468,55 @@ class _SearchRow extends StatelessWidget {
             child: const Text('Reset password'),
           );
 
+    final adminButton = busyAdmin
+        ? const SizedBox(
+            width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+        : OutlinedButton(
+            onPressed: onToggleAdmin,
+            child: Text(isAdmin ? 'Remove admin' : 'Make admin'),
+          );
+
+    // A Wrap (not a Row of fixed-width buttons) so on narrow widths the
+    // controls reflow onto a second line instead of squeezing `info` to zero.
+    final controls = Wrap(
+      spacing: 12,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        _TierChip(tier: tier),
+        adminButton,
+        canReset
+            ? resetButton
+            : Tooltip(
+                message:
+                    'Blocked: $tier-tier encryption is zero-knowledge. A reset '
+                    'would destroy the user\'s encrypted data.',
+                child: resetButton,
+              ),
+      ],
+    );
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Below this width the controls alone need most of the row, so stack
+          // instead of letting `info` get squeezed toward zero width.
+          if (constraints.maxWidth >= 560) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Text(label, style: theme.textTheme.bodyMedium),
-                Text(user['email'] as String? ?? '',
-                    style: theme.textTheme.bodySmall),
+                Expanded(child: info),
+                const SizedBox(width: 12),
+                controls,
               ],
-            ),
-          ),
-          _TierChip(tier: tier),
-          const SizedBox(width: 12),
-          canReset
-              ? button
-              : Tooltip(
-                  message:
-                      'Blocked: $tier-tier encryption is zero-knowledge. A reset '
-                      'would destroy the user\'s encrypted data.',
-                  child: button,
-                ),
-        ],
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [info, const SizedBox(height: 8), controls],
+          );
+        },
       ),
     );
   }
@@ -511,7 +570,11 @@ class _SectionCard extends StatelessWidget {
               children: [
                 Icon(icon, color: theme.colorScheme.primary, size: 20),
                 const SizedBox(width: 8),
-                Text(title, style: theme.textTheme.titleLarge),
+                Expanded(
+                  child: Text(title,
+                      style: theme.textTheme.titleLarge,
+                      overflow: TextOverflow.ellipsis),
+                ),
               ],
             ),
             const Divider(height: 24),

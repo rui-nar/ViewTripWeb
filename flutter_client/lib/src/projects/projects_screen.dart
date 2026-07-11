@@ -113,6 +113,12 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
           ],
         ),
         actions: [
+          if (auth.user?.isAdmin ?? false)
+            IconButton(
+              icon: const Icon(Icons.admin_panel_settings_outlined),
+              tooltip: 'Admin dashboard',
+              onPressed: () => context.push('/admin'),
+            ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: 'Settings',

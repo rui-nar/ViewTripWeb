@@ -88,13 +88,16 @@ _ADMIN_ROUTES = [
     ("get", "/api/admin/storage/refresh"),
     ("get", "/api/admin/users/search?q=a"),
     ("post", "/api/admin/users/1/reset-password"),
+    ("post", "/api/admin/users/1/set-admin"),
 ]
 
 
 class TestGating:
     def _call(self, client, method, path):
-        return getattr(client, method)(path) if method == "get" \
-            else client.post(path, json={})
+        if method != "get":
+            body = {"is_admin": True} if "set-admin" in path else {}
+            return client.post(path, json=body)
+        return client.get(path)
 
     @pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
     def test_admin_reaches_route(self, admin_client, engine, method, path):
@@ -342,3 +345,57 @@ class TestResetPassword:
         client, *_ = ctx
         resp = client.post("/api/admin/users/999999/reset-password", json={})
         assert resp.status_code == 404
+
+
+# ── 16. Grant / revoke admin ──────────────────────────────────────────────────
+
+class TestSetAdmin:
+    @pytest.fixture
+    def ctx(self, engine):
+        with Session(engine) as sess:
+            admin, _ = _mk_user(sess, display_name="admin", email="admin@x.io",
+                                is_admin=True)
+            other_admin, _ = _mk_user(sess, display_name="Other admin",
+                                       email="other-admin@x.io", is_admin=True)
+            plain, _ = _mk_user(sess, display_name="Plain", email="plain@x.io")
+            aid, oid, pid = admin.id, other_admin.id, plain.id
+        payload = {"sub": str(aid), "email": "admin@x.io", "auth_provider": "local"}
+        return TestClient(_admin_app(engine, payload)), engine, aid, oid, pid
+
+    def test_grant_admin(self, ctx):
+        client, engine, _, _, pid = ctx
+        resp = client.post(f"/api/admin/users/{pid}/set-admin", json={"is_admin": True})
+        assert resp.status_code == 200
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, pid).is_admin is True
+
+    def test_revoke_other_admin(self, ctx):
+        client, engine, _, oid, _ = ctx
+        resp = client.post(f"/api/admin/users/{oid}/set-admin", json={"is_admin": False})
+        assert resp.status_code == 200
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, oid).is_admin is False
+
+    def test_cannot_revoke_own_admin(self, ctx):
+        client, engine, aid, _, _ = ctx
+        resp = client.post(f"/api/admin/users/{aid}/set-admin", json={"is_admin": False})
+        assert resp.status_code == 409
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, aid).is_admin is True
+
+    def test_granting_own_admin_is_a_noop_not_blocked(self, ctx):
+        client, _, aid, _, _ = ctx
+        resp = client.post(f"/api/admin/users/{aid}/set-admin", json={"is_admin": True})
+        assert resp.status_code == 200
+
+    def test_set_admin_unknown_user_404(self, ctx):
+        client, *_ = ctx
+        resp = client.post("/api/admin/users/999999/set-admin", json={"is_admin": True})
+        assert resp.status_code == 404
+
+    def test_search_results_carry_is_admin(self, ctx):
+        client, _, aid, oid, pid = ctx
+        res = client.get("/api/admin/users/search?q=plain").json()
+        assert res[0]["is_admin"] is False
+        res = client.get("/api/admin/users/search?q=other-admin").json()
+        assert res[0]["is_admin"] is True

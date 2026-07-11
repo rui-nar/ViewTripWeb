@@ -79,10 +79,19 @@ class SearchResult(BaseModel):
     display_name: str
     auth_provider: str
     encryption_tier: str
+    is_admin: bool
 
 
 class ResetPasswordResponse(BaseModel):
     temp_password: str = Field(description="Shown once; not recoverable afterwards")
+
+
+class SetAdminRequest(BaseModel):
+    is_admin: bool = Field(description="True to grant admin access, False to revoke it")
+
+
+class OkResponse(BaseModel):
+    ok: bool = True
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -202,9 +211,40 @@ def search_users(
                 display_name=ui.display_name,
                 auth_provider=ui.auth_provider,
                 encryption_tier=user_encryption_tier(sess, ui.id),
+                is_admin=bool(ui.is_admin),
             )
             for ui, lu in rows
         ]
+
+
+@router.post("/users/{user_info_id}/set-admin", response_model=OkResponse,
+             summary="Grant or revoke admin access for a user")
+def set_admin(
+    user_info_id: int,
+    body: SetAdminRequest,
+    admin: Annotated[dict, Depends(require_admin)],
+):
+    """Toggle ``is_admin`` for a user. An admin cannot revoke their own access,
+    so there's always at least one admin left who can undo a mistake."""
+    if not body.is_admin and str(user_info_id) == str(admin.get("sub")):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You cannot remove your own admin access.",
+        )
+    with get_session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+        user_info.is_admin = body.is_admin
+        sess.add(user_info)
+        sess.commit()
+
+    _log.info(
+        "Admin set is_admin=%s for user_info_id=%s", body.is_admin, user_info_id
+    )
+    return {"ok": True}
 
 
 @router.post("/users/{user_info_id}/reset-password",
