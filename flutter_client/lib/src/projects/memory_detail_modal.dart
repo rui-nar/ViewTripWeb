@@ -5,6 +5,7 @@ import '../api/client.dart';
 import '../photos/photo_upgrade_screen.dart';
 import '../shared/shared_memory_service.dart';
 import 'memory_dialog.dart';
+import 'project_memory_crud_mixin.dart' show TranslationUnavailableException;
 import 'project_notifier.dart';
 import 'social_share_dialog.dart';
 
@@ -282,9 +283,13 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     } catch (e) {
       debugPrint('Translation failed for "$langCode": $e');
       if (mounted) {
-        final detail = e is ApiException ? ' (${e.statusCode})' : '';
+        // Encrypted memories can never be translated — retrying is pointless,
+        // so this gets its own message instead of the generic transient-error one.
+        final message = e is TranslationUnavailableException
+            ? 'This memory is encrypted and can\'t be translated.'
+            : 'Couldn\'t translate${e is ApiException ? ' (${e.statusCode})' : ''}. Please try again.';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Couldn\'t translate$detail. Please try again.')),
+          SnackBar(content: Text(message)),
         );
       }
     } finally {
