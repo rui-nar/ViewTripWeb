@@ -23,9 +23,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
-import api.projects as projects_mod
+import api.segments as segments_mod
 from api.deps import get_current_user
-from api.projects import router as projects_router, _resolve_route_job
+from api.segments import router as segments_router, _resolve_route_job
 from models.project_db import DBProject, DBProjectItem
 from models.user import UserInfo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
@@ -38,7 +38,7 @@ from src.project.project_repo import StaleWriteError
 def _make_app(user_payload: dict) -> FastAPI:
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: user_payload
-    app.include_router(projects_router)
+    app.include_router(segments_router)
     return app
 
 
@@ -57,7 +57,7 @@ def _add_segment(engine, project_id: int, seg: ConnectingSegment) -> None:
 
 
 def _load_segment(engine, user_id: int, name: str, seg_id: str) -> ConnectingSegment:
-    project = projects_mod._repo.get_project(_open(engine), user_id, name)
+    project = segments_mod._repo.get_project(_open(engine), user_id, name)
     return next(s for i in project.items
                if (s := i.segment) and i.item_type == "segment" and s.id == seg_id)
 
@@ -78,7 +78,7 @@ def env(monkeypatch):
     )
     monkeypatch.setattr(db_module, "engine", test_engine)
     # Keep the geo-cache bust cheap and side-effect-free.
-    monkeypatch.setattr(projects_mod, "bust_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(segments_mod, "bust_geo_cache", lambda *a, **k: None)
 
     SQLModel.metadata.create_all(test_engine)
     with Session(test_engine) as sess:
@@ -114,7 +114,7 @@ def test_trigger_returns_202_and_marks_pending(env, monkeypatch):
     # Mock the background job so the trigger is tested in isolation (TestClient
     # otherwise runs background tasks synchronously after the response).
     calls: list = []
-    monkeypatch.setattr(projects_mod, "_resolve_route_job",
+    monkeypatch.setattr(segments_mod, "_resolve_route_job",
                         lambda *a: calls.append(a))
 
     resp = client.post(
@@ -134,7 +134,7 @@ def test_trigger_returns_202_and_marks_pending(env, monkeypatch):
 
 def test_trigger_404_for_missing_segment(env, monkeypatch):
     client, *_ = env
-    monkeypatch.setattr(projects_mod, "_resolve_route_job", lambda *a: None)
+    monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a: None)
     resp = client.post(
         "/api/projects/My Trip/segments/nope/resolve-route", json={})
     assert resp.status_code == 404
@@ -144,7 +144,7 @@ def test_trigger_400_for_non_transport_segment(env, monkeypatch):
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id,
                  ConnectingSegment(id="flt", segment_type="flight"))
-    monkeypatch.setattr(projects_mod, "_resolve_route_job", lambda *a: None)
+    monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a: None)
     resp = client.post(
         "/api/projects/My Trip/segments/flt/resolve-route", json={})
     assert resp.status_code == 400
@@ -158,7 +158,7 @@ def test_job_success_writes_resolved(env, monkeypatch):
 
     fake_line = [[24.94, 60.17], [25.0, 62.0], [25.73, 66.50]]
     # (polyline, stop_count, degraded, strategy)
-    monkeypatch.setattr(projects_mod, "_compute_segment_geometry",
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
                         lambda seg, params: (fake_line, 3, False, "relation_endpoints"))
 
     _resolve_route_job(user_id, "My Trip", "seg-1",
@@ -182,7 +182,7 @@ def test_job_failure_marks_failed_and_keeps_great_circle(env, monkeypatch):
     def _boom(seg, params):
         raise RuntimeError("overpass exploded")
 
-    monkeypatch.setattr(projects_mod, "_compute_segment_geometry", _boom)
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _boom)
 
     _resolve_route_job(user_id, "My Trip", "seg-1", {})
 
@@ -210,7 +210,7 @@ def test_mark_segment_failed_flips_pending(env):
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _pending_segment())
 
-    projects_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "db boom")
+    segments_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "db boom")
 
     seg = _load_segment(engine, user_id, "My Trip", "seg-1")
     assert seg.route_status == "failed"
@@ -228,7 +228,7 @@ def test_mark_segment_failed_leaves_terminal_state_untouched(env):
     seg.route_polyline = json.dumps([[24.9, 60.1], [25.7, 66.5]])
     _add_segment(engine, project_id, seg)
 
-    projects_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "boom")
+    segments_mod._mark_segment_failed(user_id, "My Trip", "seg-1", "boom")
 
     seg = _load_segment(engine, user_id, "My Trip", "seg-1")
     assert seg.route_status == "resolved"  # unchanged
@@ -243,7 +243,7 @@ def test_job_crash_marks_failed_not_stuck_pending(env, monkeypatch):
 
     # The job's first get_project (its load step) raises once; the retry inside
     # _mark_segment_failed then succeeds and flips the segment to failed.
-    real_get = projects_mod._repo.get_project
+    real_get = segments_mod._repo.get_project
     state = {"n": 0}
 
     def flaky_get(*a, **k):
@@ -252,8 +252,8 @@ def test_job_crash_marks_failed_not_stuck_pending(env, monkeypatch):
             raise RuntimeError("transient load crash")
         return real_get(*a, **k)
 
-    monkeypatch.setattr(projects_mod._repo, "get_project", flaky_get)
-    monkeypatch.setattr(projects_mod, "warm_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(segments_mod._repo, "get_project", flaky_get)
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
 
     _resolve_route_job(user_id, "My Trip", "seg-1",
                        {"hafas_provider": "vr", "train_number": "273"})
@@ -273,7 +273,7 @@ def test_job_degraded_straight_line_is_flagged(env, monkeypatch):
 
     straight = [[24.94, 60.17], [25.73, 66.50]]
     # (polyline, stop_count, degraded, strategy)
-    monkeypatch.setattr(projects_mod, "_compute_segment_geometry",
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
                         lambda seg, params: (straight, 2, True, "straight"))
 
     _resolve_route_job(user_id, "My Trip", "seg-1",
@@ -291,7 +291,7 @@ def test_save_project_optimistic_lock_detects_conflict(env):
     """Two writers that loaded the same version can't both commit silently."""
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _train_segment())
-    repo = projects_mod._repo
+    repo = segments_mod._repo
 
     # Two independent loads observe the same lock_version.
     with Session(engine) as s:
@@ -314,7 +314,7 @@ def test_blind_save_does_not_raise(env):
     """Default save_project (check_version=False) overwrites regardless."""
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _train_segment())
-    repo = projects_mod._repo
+    repo = segments_mod._repo
 
     with Session(engine) as s:
         p = repo.get_project(s, user_id, "My Trip")

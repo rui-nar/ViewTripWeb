@@ -49,7 +49,7 @@ from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, create_engine, select
 
-import api.projects as projects_module
+import api.project_shared as shared_module
 import models.db as db_module
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
@@ -113,7 +113,7 @@ def env(tmp_path, monkeypatch):
     engine = _make_file_engine(tmp_path)
     monkeypatch.setattr(db_module, "engine", engine)
     # Isolate the module-level coalescing state between tests.
-    monkeypatch.setattr(projects_module, "_stats_refresh_state", {})
+    monkeypatch.setattr(shared_module, "_stats_refresh_state", {})
     uid = _seed(engine)
     return engine, uid
 
@@ -164,16 +164,16 @@ def test_burst_saves_coalesce_stats_refresh(env, monkeypatch):
             started.set()        # first refresh is now running
             release.wait(3)      # hold it so the burst piles up while it runs
 
-    monkeypatch.setattr(projects_module._repo, "compute_and_cache_stats", fake_compute)
+    monkeypatch.setattr(shared_module._repo, "compute_and_cache_stats", fake_compute)
 
     worker = threading.Thread(
-        target=projects_module._refresh_stats_background, args=(uid, "My Trip"))
+        target=shared_module._refresh_stats_background, args=(uid, "My Trip"))
     worker.start()
     assert started.wait(3), "first refresh never started"
 
     # Burst of five more saves arriving while the first refresh is still running.
     for _ in range(5):
-        projects_module._refresh_stats_background(uid, "My Trip")
+        shared_module._refresh_stats_background(uid, "My Trip")
 
     release.set()
     worker.join(5)
@@ -186,7 +186,7 @@ def test_burst_saves_coalesce_stats_refresh(env, monkeypatch):
 def test_coalesced_refresh_persists_stats(env):
     """A single coalesced refresh still recomputes and caches real stats."""
     engine, uid = env
-    projects_module._refresh_stats_background(uid, "My Trip")
+    shared_module._refresh_stats_background(uid, "My Trip")
     with Session(engine) as sess:
         row = sess.exec(
             select(DBProject).where(

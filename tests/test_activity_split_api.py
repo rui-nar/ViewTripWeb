@@ -12,6 +12,8 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import models.db as db_module
 from api.deps import get_current_user
+from api.activities import router as activities_router
+from api.project_items import router as project_items_router
 from api.projects import router as projects_router
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
@@ -66,6 +68,8 @@ def env(monkeypatch):
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid), "email": "a@e.com"}
     app.include_router(projects_router)
+    app.include_router(activities_router)
+    app.include_router(project_items_router)
     return TestClient(app), engine
 
 

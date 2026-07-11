@@ -18,7 +18,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
 from api.deps import get_current_user
-from api.projects import router as projects_router
+from api.activities import router as activities_router
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
 from src.project.project_repo import ProjectRepo
@@ -65,7 +65,7 @@ def env(monkeypatch):
 
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid), "email": "a@e.com"}
-    app.include_router(projects_router)
+    app.include_router(activities_router)
     return TestClient(app), engine
 
 
@@ -181,7 +181,7 @@ class TestSyncSkip:
         assert repo.activity_is_edited(111) is True
 
     def test_enrich_activities_skips_edited(self, env):
-        from api.projects import _enrich_activities
+        from api.activities import _enrich_activities
         from src.models.activity import Activity
         from datetime import datetime
 

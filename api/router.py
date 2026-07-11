@@ -12,6 +12,7 @@ from scalar_fastapi import get_scalar_api_reference
 from src.exceptions.errors import APIError, AuthenticationError
 from src.project.project_repo import StaleWriteError
 
+from api.activities import router as activities_router
 from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
@@ -23,7 +24,11 @@ from api.journal import router as journal_router
 from api.memories import router as memories_router
 from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
+from api.project_items import router as project_items_router
+from api.project_shares import router as project_shares_router
+from api.project_transfer import router as project_transfer_router
 from api.projects import router as projects_router
+from api.segments import router as segments_router
 from api.share import router as share_router
 from api.strava import router as strava_router
 from alembic import command as alembic_command
@@ -84,6 +89,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(activities_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)
@@ -95,7 +101,11 @@ app.include_router(journal_router)
 app.include_router(memories_router)
 app.include_router(people_router)
 app.include_router(polarsteps_router)
+app.include_router(project_items_router)
+app.include_router(project_shares_router)
+app.include_router(project_transfer_router)
 app.include_router(projects_router)
+app.include_router(segments_router)
 app.include_router(share_router)
 app.include_router(strava_router)
 

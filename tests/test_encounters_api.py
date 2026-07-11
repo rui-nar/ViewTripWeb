@@ -14,6 +14,7 @@ from api.deps import get_current_user
 from api.encounters import router as encounters_router
 from api.groups import router as groups_router
 from api.people import router as people_router
+from api.project_items import router as project_items_router
 from api.projects import router as projects_router
 from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from models.user import UserInfo
@@ -58,6 +59,7 @@ def env(monkeypatch):
     app.include_router(encounters_router)
     app.include_router(groups_router)
     app.include_router(people_router)
+    app.include_router(project_items_router)
     app.include_router(projects_router)
     return TestClient(app), engine, uid, pid
 
