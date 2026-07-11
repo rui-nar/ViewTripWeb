@@ -8,6 +8,7 @@ Routes:
     POST   /api/projects/{name}/activities/{activity_id}/reset      — reset edited track to original
     POST   /api/projects/{name}/activities/{activity_id}/split      — split into head + local tail
     DELETE /api/projects/{name}/activities/{activity_id}/local      — delete a local (split-tail) activity
+    PUT    /api/activities/{activity_id}                            — update an activity's E2EE-in-scope fields
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
 from api.project_shared import _get_project_row, _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
@@ -520,3 +522,77 @@ def delete_local_activity(
     bust_geo_cache(user_info_id, name)
     background_tasks.add_task(_refresh_stats_background, user_info_id, name)
     background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+
+
+# ── Activity field update (issue #29 — client-side E2EE migration) ────────────
+#
+# A separate, project-agnostic router: activities are rows shared across every
+# project that references them (see DBActivity's docstring), so — unlike the
+# routes above — this doesn't hang off /api/projects/{name}. Deliberately
+# narrow: it only ever writes the six DB columns EncryptionMigration.run()
+# (flutter_client/lib/src/crypto/encryption_migration.dart) needs to migrate an
+# activity from plaintext to ciphertext, plus the two original_* edit-undo
+# snapshot columns (issue #31) it may also need to scrub — nothing else. This
+# is not a general-purpose activity editor; every other activity field is
+# updated exclusively via the Strava-sync / track-edit paths above.
+activity_fields_router = APIRouter(prefix="/api/activities", tags=["activities"])
+
+
+class ActivityFieldsUpdate(BaseModel):
+    name: Optional[str] = None
+    summary_polyline: Optional[str] = None
+    start_latlng_json: Optional[str] = None
+    end_latlng_json: Optional[str] = None
+    elevation_profile_json: Optional[str] = None
+    elevation_profile_low_res_json: Optional[str] = None
+    original_polyline: Optional[str] = None
+    original_elevation_profile_json: Optional[str] = None
+
+
+@activity_fields_router.put("/{activity_id}", summary="Update an activity's E2EE-in-scope fields")
+def update_activity_fields(
+    activity_id: int,
+    body: ActivityFieldsUpdate,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Write only the fields present in the request body (unset fields are left
+    untouched — this is a partial update, not a replace) directly onto the
+    activity row. Used by the client's encryption-enable migration to swap a
+    still-plaintext field for its encrypted envelope, and safe to call
+    repeatedly (idempotent: re-sending the same ciphertext is a no-op).
+
+    The server does not interpret these values — once encrypted they're opaque
+    ciphertext envelopes — so there is intentionally no JSON/polyline
+    validation here, unlike the track-edit endpoints.
+    """
+    user_info_id = int(current_user["sub"])
+    data = body.model_dump(exclude_unset=True)
+    with get_session() as sess:
+        row = sess.get(DBActivity, activity_id)
+        if row is None or row.user_info_id != user_info_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        for field, value in data.items():
+            setattr(row, field, value)
+        sess.add(row)
+        sess.commit()
+
+        # Bust the full-res geo cache for every project this activity appears
+        # in — same as every other activity-mutating endpoint above — so a
+        # subsequent (non-E2EE-client) geo load doesn't serve a stale cached
+        # response built from the pre-migration plaintext.
+        project_ids = sess.exec(
+            select(DBProjectItem.project_id).where(
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+            ).distinct()
+        ).all()
+        project_names = sess.exec(
+            select(DBProject.name).where(DBProject.id.in_(project_ids))
+        ).all() if project_ids else []
+
+    for pname in project_names:
+        bust_geo_cache(user_info_id, pname)
+        background_tasks.add_task(_refresh_stats_background, user_info_id, pname)
+
+    return {"id": activity_id}

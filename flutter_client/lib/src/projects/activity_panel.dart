@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
+import '../crypto/e2ee_crypto.dart' show EncryptedField;
 import 'activity_editor_page.dart';
 import 'day_meta_editor.dart';
 import 'encounter_dialog.dart';
@@ -740,14 +741,27 @@ class _ActivityPanelState extends State<ActivityPanel> {
       }
       dialogNav.pop();
     }
-    if (full == null || (full['map'] as Map?)?['summary_polyline'] == null) {
+    final loaded = full;
+    final poly = (loaded?['map'] as Map?)?['summary_polyline'] as String?;
+    if (loaded == null || poly == null) {
       messenger.showSnackBar(
         const SnackBar(content: Text('This activity has no track to edit')),
       );
       return;
     }
+    // Track editing needs a Dart polyline re-encoder + server-side metric
+    // recompute that don't exist yet for ciphertext (issue #29) — hide the
+    // entry point rather than open an editor that can't save.
+    if (EncryptedField.isEnvelope(poly)) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text("This activity is encrypted and its track can't be edited."),
+        ),
+      );
+      return;
+    }
     await navigator.push(MaterialPageRoute(
-      builder: (_) => ActivityEditorPage(notifier: notifier, activity: full!),
+      builder: (_) => ActivityEditorPage(notifier: notifier, activity: loaded),
     ));
   }
 

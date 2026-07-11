@@ -1,11 +1,14 @@
-/// One-time migration of a user's EXISTING plaintext memory/journal text to
-/// ciphertext when they enable encryption (#26, Phase 7).
+/// One-time migration of a user's EXISTING plaintext memory/journal text
+/// (#26, Phase 7) and activity geometry (#29) to ciphertext when they enable
+/// encryption.
 ///
 /// Client-side by necessity (the server can't read the plaintext to encrypt it).
 /// Idempotent and resumable: it re-encrypts only fields that are still plaintext
 /// (an already-encrypted envelope is left untouched), so a re-run finishes the
 /// job after any interruption and never double-encrypts.
 library;
+
+import 'dart:convert';
 
 import '../api/client.dart';
 import 'e2ee_crypto.dart';
@@ -16,8 +19,10 @@ class EncryptionMigration {
   final EncryptionService _enc;
   EncryptionMigration(this._api, this._enc);
 
-  /// Encrypt all still-plaintext memory/journal text across every project.
-  /// Returns the number of rows updated. No-op if encryption isn't unlocked.
+  /// Encrypt all still-plaintext memory/journal text and activity geometry
+  /// (name, summary_polyline, start/end latlng, elevation profile — issue #29)
+  /// across every project. Returns the number of rows updated. No-op if
+  /// encryption isn't unlocked.
   Future<int> run() async {
     if (!_enc.isUnlocked) return 0;
     var migrated = 0;
@@ -35,6 +40,10 @@ class EncryptionMigration {
           case 'journal':
             migrated += await _migrateJournal(item['journal'] as Map?);
         }
+      }
+      final activities = (details['activities'] as List?) ?? const [];
+      for (final raw in activities) {
+        migrated += await _migrateActivity(raw as Map?);
       }
     }
     return migrated;
@@ -76,6 +85,71 @@ class EncryptionMigration {
       if (j['lat'] != null) 'lat': j['lat'],
       if (j['lon'] != null) 'lon': j['lon'],
     });
+    return 1;
+  }
+
+  /// Migrate one activity's E2EE-in-scope fields (issue #29): name,
+  /// summary_polyline, start/end latlng, elevation profile. Idempotent by the
+  /// same structural detection as memories/journal — for name/summary_polyline
+  /// that's `_isPlain`; for start_latlng/end_latlng/elevation_profile it's
+  /// implicit, because the server itself nulls those parsed fields out once
+  /// the underlying column is ciphertext (see ActivityMixin._row_to_activity),
+  /// so a re-run naturally sees nothing left to migrate.
+  Future<int> _migrateActivity(Map? act) async {
+    if (act == null) return 0;
+    final id = act['id'];
+    if (id == null) return 0;
+
+    final name = act['name'] as String?;
+    // The wire shape nests the polyline under "map" (to_strava_dict()'s
+    // {"map": {"summary_polyline": ...}}).
+    final summaryPolyline = (act['map'] as Map?)?['summary_polyline'] as String?;
+    final startLatlng = act['start_latlng'];
+    final endLatlng = act['end_latlng'];
+    final elevationProfile = act['elevation_profile']; // [[dist_km, elev_m], …]
+
+    final body = <String, dynamic>{};
+    if (_isPlain(name)) {
+      body['name'] = await _enc.protect(name);
+    }
+    if (_isPlain(summaryPolyline)) {
+      body['summary_polyline'] = await _enc.protect(summaryPolyline);
+    }
+    if (startLatlng is List && startLatlng.isNotEmpty) {
+      body['start_latlng_json'] = await _enc.protect(jsonEncode(startLatlng));
+    }
+    if (endLatlng is List && endLatlng.isNotEmpty) {
+      body['end_latlng_json'] = await _enc.protect(jsonEncode(endLatlng));
+    }
+    if (elevationProfile is List && elevationProfile.isNotEmpty) {
+      final distances = [for (final pair in elevationProfile) (pair as List)[0]];
+      final elevations = [for (final pair in elevationProfile) (pair as List)[1]];
+      final epJson = jsonEncode({'distances_km': distances, 'elevations_m': elevations});
+      final encEp = await _enc.protect(epJson);
+      body['elevation_profile_json'] = encEp;
+      // The API never exposes the true downsampled low-res series separately
+      // (it's folded into `elevation_profile` as a meta/low-res-load fallback
+      // only) — there's nothing distinct for the client to read and encrypt.
+      // Re-encrypting the full series here avoids leaving
+      // elevation_profile_low_res_json as a plaintext remnant; the elevation
+      // chart re-downsamples client-side regardless (_kMaxChartPoints), so
+      // this doesn't change what's rendered, only a slightly larger payload
+      // for meta/low-res-only loads.
+      body['elevation_profile_low_res_json'] = encEp;
+    }
+    if (body.isEmpty) return 0;
+
+    // original_polyline / original_elevation_profile_json (issue #31's
+    // edit-undo snapshot) are DB-only and never surfaced to the client via any
+    // GET endpoint, so they can't be read-then-encrypted here. Best-effort
+    // scrub them to null instead whenever an activity is migrated: they become
+    // unreachable dead weight once track editing is disabled for encrypted
+    // activities, and clearing them avoids leaving plaintext GPS remnants
+    // around without a new endpoint to expose them for encryption.
+    body['original_polyline'] = null;
+    body['original_elevation_profile_json'] = null;
+
+    await _api.put('/api/activities/$id', body);
     return 1;
   }
 }

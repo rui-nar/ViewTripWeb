@@ -22,6 +22,7 @@ from src.models.great_circle import great_circle_points
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
+from src.utils.encryption_check import is_encrypted_envelope
 
 router = APIRouter(prefix="/api/geo", tags=["geo"])
 
@@ -170,6 +171,11 @@ def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Di
         if item.item_type == "activity":
             activity = project.activity_by_id(item.activity_id)
             if activity is None:
+                continue
+            if is_encrypted_envelope(activity.summary_polyline):
+                # Encrypted geometry (issue #29) — the server can't decode this;
+                # skip it entirely. The client builds this activity's track
+                # itself, from its own decrypted copy, once unlocked.
                 continue
 
             if activity.summary_polyline and encoded:
