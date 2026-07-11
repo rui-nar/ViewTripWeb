@@ -1,6 +1,7 @@
 /// Read-only project view for users accessing a shared link (no auth required).
 library;
 
+import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
@@ -16,6 +17,7 @@ import '../projects/project_notifier.dart';
 import '../projects/project_service.dart';
 import '../projects/project_stats_screen.dart';
 import 'anonymous_id.dart';
+import 'share_fragment_key.dart';
 
 // ── Shared service — calls /api/share/{token}, appends ?aid= when provided ───
 
@@ -82,6 +84,11 @@ class SharedProjectNotifier extends ProjectNotifier {
   ProjectService get service => _sharedSvc;
   bool _disposed = false;
 
+  /// Per-share content key from the URL fragment (issue #28), or null if
+  /// absent — read once at construction time via [readShareKeyFromUrlFragment].
+  @override
+  final SecretKey? shareContentKey;
+
   @override
   bool get loadOwnerExtras => false;
 
@@ -96,13 +103,13 @@ class SharedProjectNotifier extends ProjectNotifier {
   @override
   Map<String, String> get photoAuthHeaders => const {};
 
-  SharedProjectNotifier._internal(this.token, _SharedProjectService svc)
+  SharedProjectNotifier._internal(this.token, _SharedProjectService svc, this.shareContentKey)
       : _sharedSvc = svc,
         super(svc);
 
   factory SharedProjectNotifier(String token, {String? anonymousId}) {
     final svc = _SharedProjectService(token, anonymousId: anonymousId);
-    return SharedProjectNotifier._internal(token, svc);
+    return SharedProjectNotifier._internal(token, svc, readShareKeyFromUrlFragment());
   }
 
   @override
@@ -249,6 +256,7 @@ class _SharedProjectViewState extends State<_SharedProjectView>
         mem.cast<String, dynamic>(),
         readOnly: true,
         shareToken: widget.token,
+        shareContentKey: pn is SharedProjectNotifier ? pn.shareContentKey : null,
       );
     });
   }

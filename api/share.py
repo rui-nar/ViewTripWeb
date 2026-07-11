@@ -257,6 +257,12 @@ def _strip_encrypted_memory_fields(
     holding the share-link's URL-fragment key can still decrypt it — these are
     new keys, distinct from `name`/`description`, so the client can tell
     "share-encrypted, decrypt with the fragment key" apart from anything else.
+
+    Also sets `name_encrypted`/`description_encrypted` booleans whenever a
+    field is stripped (regardless of whether share content exists for it) —
+    a client-side `null` alone is ambiguous between "genuinely empty" and
+    "encrypted", and the anonymous viewer UI needs to tell those apart to
+    show an explicit "unavailable" state instead of a blank title/notes.
     """
     share_content = share_content or {}
     for item in items:
@@ -272,10 +278,12 @@ def _strip_encrypted_memory_fields(
         content_row = share_content.get(mem.get("id"))
         if name_enc:
             mem["name"] = None
+            mem["name_encrypted"] = True
             if content_row is not None and content_row.name_ciphertext:
                 mem["share_name_ciphertext"] = content_row.name_ciphertext
         if desc_enc:
             mem["description"] = None
+            mem["description_encrypted"] = True
             if content_row is not None and content_row.description_ciphertext:
                 mem["share_description_ciphertext"] = content_row.description_ciphertext
 

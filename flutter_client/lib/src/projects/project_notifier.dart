@@ -3,6 +3,7 @@ library;
 
 import 'dart:async';
 
+import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
@@ -10,6 +11,7 @@ import '../api/client.dart';
 import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
+import '../share/share_content_generator.dart';
 import 'project_filter_mixin.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
@@ -276,6 +278,12 @@ class ProjectNotifier extends ChangeNotifier
   /// Subclasses can return false to skip owner-only authenticated calls
   /// (sync-meta, share-info, background sync check).
   bool get loadOwnerExtras => true;
+
+  /// Per-share content key (issue #28), or null when not applicable. Only
+  /// [SharedProjectNotifier] overrides this — the owner's authenticated
+  /// notifier never has one (it doesn't need it; the owner already sees
+  /// decrypted content via the CMK).
+  SecretKey? get shareContentKey => null;
 
   // Tracks the name/token passed to the current load() call so Phase 2 can
   // detect navigation-away without comparing against the mutable projectName
@@ -920,6 +928,25 @@ class ProjectNotifier extends ChangeNotifier
     } on ApiException catch (e) {
       throw Exception(e.body);
     }
+  }
+
+  /// Encrypt this project's currently-encrypted memories under a fresh
+  /// per-share content key and upload the result (issue #28), so anonymous
+  /// share-link viewers holding the key (in the URL fragment) can decrypt
+  /// them. Explicit, one-shot, owner-triggered — NOT auto-synced on edits;
+  /// calling again generates a NEW key and overwrites the previous envelopes
+  /// (idempotent regeneration), so a previously copied link stops decrypting
+  /// and the owner must re-share the freshly generated URL.
+  ///
+  /// Returns the base64 share key to embed in the share URL as `#key=...`,
+  /// or null if the project has no encrypted memories to include. Requires
+  /// [createShareToken] to have been called first — content is only ever
+  /// attached to the "full" share token. See [ShareContentGenerator] for the
+  /// actual (independently-testable) logic.
+  Future<String?> generateShareContent() async {
+    final name = projectName;
+    if (name == null) throw Exception('No project open');
+    return ShareContentGenerator(api).generate(name, items);
   }
 
   /// Fetches raw bytes for an export API path.

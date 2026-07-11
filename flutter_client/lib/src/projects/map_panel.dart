@@ -576,7 +576,8 @@ class _MapPanelState extends State<MapPanel> {
         child: GestureDetector(
           onTap: () {
             widget.notifier.selectMemory(mem['id']);
-            showMemoryDetail(context, widget.notifier, mem, readOnly: true);
+            showMemoryDetail(context, widget.notifier, mem, readOnly: true,
+                shareContentKey: widget.notifier.shareContentKey);
           },
           child: Container(
             decoration: BoxDecoration(

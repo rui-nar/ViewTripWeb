@@ -80,6 +80,8 @@ class TestSharedProjectStripsCiphertext:
         mem = next(it["memory"] for it in resp.json()["items"] if it["item_type"] == "memory")
         assert mem["name"] is None
         assert mem["description"] == "plain notes"
+        assert mem["name_encrypted"] is True
+        assert "description_encrypted" not in mem
 
     def test_encrypted_description_is_not_returned_raw(self, share_client):
         client, _mem_id = share_client(name="A place", description=_ENVELOPE_DESC)
@@ -89,6 +91,8 @@ class TestSharedProjectStripsCiphertext:
         mem = next(it["memory"] for it in resp.json()["items"] if it["item_type"] == "memory")
         assert mem["name"] == "A place"
         assert mem["description"] is None
+        assert mem["description_encrypted"] is True
+        assert "name_encrypted" not in mem
 
     def test_both_encrypted_are_stripped(self, share_client):
         client, _mem_id = share_client(name=_ENVELOPE_NAME, description=_ENVELOPE_DESC)
@@ -97,6 +101,8 @@ class TestSharedProjectStripsCiphertext:
         mem = next(it["memory"] for it in resp.json()["items"] if it["item_type"] == "memory")
         assert mem["name"] is None
         assert mem["description"] is None
+        assert mem["name_encrypted"] is True
+        assert mem["description_encrypted"] is True
 
     def test_plaintext_memory_is_unaffected(self, share_client):
         client, _mem_id = share_client(name="A place", description="Some notes")
@@ -104,6 +110,8 @@ class TestSharedProjectStripsCiphertext:
         mem = next(it["memory"] for it in resp.json()["items"] if it["item_type"] == "memory")
         assert mem["name"] == "A place"
         assert mem["description"] == "Some notes"
+        assert "name_encrypted" not in mem
+        assert "description_encrypted" not in mem
 
 
 class TestSharedProjectMetaStripsCiphertext:

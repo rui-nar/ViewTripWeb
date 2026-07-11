@@ -54,6 +54,13 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   bool _visitorsLoading = false;
   Map<String, dynamic>? _visitors;
 
+  // Per-share content key (issue #28) — set once generateShareContent()
+  // succeeds; appended as the `#key=...` URL fragment on the full-project
+  // share link. Held only in memory: the server never sees the key itself,
+  // so leaving this screen (without copying the link) means regenerating.
+  String? _shareContentKey;
+  bool _generatingShareContent = false;
+
   late Color _trackColor;
   Color? _trackSecondaryColor; // null = auto-derive
   late double _trackWidth;
@@ -568,6 +575,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
             _ShareLinkCard(
               label: 'Full project',
               token: n.shareToken,
+              shareKeyFragment: _shareContentKey,
               onCreateLink: () async {
                 await n.createShareToken();
                 setState(() {});
@@ -575,10 +583,40 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               },
               onRevoke: () async {
                 await n.revokeShareToken();
-                setState(() {});
+                setState(() => _shareContentKey = null);
                 _loadVisitors();
               },
             ),
+            if (n.shareToken != null) ...[
+              const SizedBox(height: 8),
+              _ShareContentGenerator(
+                busy: _generatingShareContent,
+                generated: _shareContentKey != null,
+                onGenerate: () async {
+                  setState(() => _generatingShareContent = true);
+                  final messenger = ScaffoldMessenger.of(context);
+                  try {
+                    final key = await n.generateShareContent();
+                    if (!mounted) return;
+                    setState(() => _shareContentKey = key);
+                    if (key == null) {
+                      messenger.showSnackBar(const SnackBar(content: Text(
+                          'No encrypted memories to include — the link works as-is.')));
+                    } else {
+                      messenger.showSnackBar(const SnackBar(content: Text(
+                          'Encrypted content included — copy the link again to share it.')));
+                    }
+                  } catch (e) {
+                    if (mounted) {
+                      messenger.showSnackBar(SnackBar(
+                          content: Text('Failed to include encrypted content: $e')));
+                    }
+                  } finally {
+                    if (mounted) setState(() => _generatingShareContent = false);
+                  }
+                },
+              ),
+            ],
             const SizedBox(height: 8),
             _ShareLinkCard(
               label: 'Without memories',
@@ -1565,16 +1603,23 @@ class _ShareLinkCard extends StatelessWidget {
   final VoidCallback onCreateLink;
   final VoidCallback onRevoke;
 
+  /// base64 per-share content key (issue #28), if one has been generated
+  /// this session — appended as `#key=...` so the link decrypts encrypted
+  /// memories for anyone who opens it.
+  final String? shareKeyFragment;
+
   const _ShareLinkCard({
     required this.label,
     required this.token,
     required this.onCreateLink,
     required this.onRevoke,
+    this.shareKeyFragment,
   });
 
   String _shareUrl(String t) {
     final origin = api.baseUrl.isEmpty ? Uri.base.origin : api.baseUrl;
-    return '$origin/share/$t';
+    final base = '$origin/share/$t';
+    return shareKeyFragment != null ? '$base#key=$shareKeyFragment' : base;
   }
 
   @override
@@ -1668,6 +1713,66 @@ class _ShareLinkCard extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+// ── Share content generator ─────────────────────────────────────────────────────
+
+/// Explicit, owner-triggered action (issue #28) that re-encrypts this
+/// project's encrypted memories under a fresh per-share key and uploads them,
+/// so the full-project link decrypts for anyone who opens it — not automatic,
+/// and not kept in sync with later edits; re-run after editing an encrypted
+/// memory to update what the link reveals.
+class _ShareContentGenerator extends StatelessWidget {
+  final bool busy;
+  final bool generated;
+  final VoidCallback onGenerate;
+
+  const _ShareContentGenerator({
+    required this.busy,
+    required this.generated,
+    required this.onGenerate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0x220A1320),
+        border: Border.all(color: _kBorder),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(generated ? Icons.enhanced_encryption : Icons.lock_outline,
+              size: 16, color: _kMuted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              generated
+                  ? 'Encrypted content included in this link.'
+                  : 'Encrypted memories show as private in this link by default.',
+              style: const TextStyle(fontSize: 12, color: _kMuted),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (busy)
+            const SizedBox(
+                width: 16, height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2))
+          else
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: _kBlueActive,
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: onGenerate,
+              child: Text(generated ? 'Regenerate' : 'Include encrypted content'),
+            ),
         ],
       ),
     );
