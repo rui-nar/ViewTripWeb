@@ -22,6 +22,7 @@ Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend. The run
 | Maps | flutter_map · Mapbox / Esri raster + vector tiles |
 | Routing | OSM Overpass (rail/ferry/bus geometry) · HAFAS / digitraffic (train schedules) |
 | Translation | Google Translate v2 (optional, memory translations) |
+| Encryption | Optional zero-knowledge E2EE — device-key + recovery-key/security-Q&A model; `cryptography_plus` (XChaCha20-Poly1305) client-side; server stores only opaque ciphertext, never decrypts |
 
 ---
 
@@ -135,9 +136,10 @@ image with a Dockerfile `ENV`; the published image is public.
 - **Projects** — assemble trips from Strava/Polarsteps activities; reorder, sort chronologically, add flight/train/bus/boat connecting segments with real-world route geometry resolved from OSM/HAFAS.
 - **Memories** — photo + text annotations per day, with likes, threaded comments, and optional translation.
 - **Journals** — private day notes with photos.
-- **Encounters** — a per-project directory of people you meet (name, social links, nationalities, residence city, avatar) and where/when you met them, shown inline on their day and as owner-only map pins. People and encounters are never included in shared views.
+- **Encounters & Groups** — a per-project directory of people (and groups of people) you meet — name, social links, nationalities, residence city, avatar — and where/when you met them, shown inline on their day and as owner-only map pins. People, groups, and encounters are never included in shared views.
 - **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.
 - **Sharing** — read-only public links (with or without memories); social-media composer that posts a memory's photos, a trip map image, and a durable deep link via the OS share sheet / WhatsApp / Facebook.
+- **Zero-knowledge encryption (optional)** — encrypt memory/journal text and activity GPS/name client-side so the server admin can't read it. Device-key based (passwordless daily use across trusted devices) with a recovery key or security-Q&A backstop. Sharing an encrypted memory uses a per-share content key embedded in the link's URL fragment, never sent to the server.
 - **Export** — GPX, `.viewtrip` (JSON), or ZIP (`.viewtrip` + photos).
 - **Backups** — automatic daily SQLite backup (30-day retention) with user-initiated restore from settings.
 
@@ -156,14 +158,20 @@ Routes are grouped by tag (router prefix):
 | Tag | Prefix | Covers |
 |---|---|---|
 | `auth` | `/api/auth` | login (`/token`), register, Google login, profile, change/delete account |
-| `projects` | `/api/projects` | project + item + segment CRUD, import/export, stats, day-meta, track style, share-token management, async route resolution |
+| `projects` | `/api/projects` | project CRUD, import/export, stats, day-meta, track style, item ordering, segments, share-token management, async route resolution (split across several route modules, one prefix) |
+| `activities` | `/api/activities` | add/refresh/track-edit/split/delete Strava activities within a project |
 | `geo` | `/api/geo` | full + low-res GeoJSON FeatureCollections for the map |
 | `memories` | `/api/memories` | memory CRUD, photos, comments, likes, translations |
 | `journal` | `/api/journal` | journal entry CRUD + photos |
-| `share` | `/api/share` | public read-only project access, tiles, shared-memory comments/likes |
+| `encounters` | `/api/encounters` | people-you-met CRUD, tied to a day/place |
+| `people` | `/api/people` | per-project people directory CRUD, avatars |
+| `groups` | `/api/groups` | groups of people CRUD + membership |
+| `encryption` | `/api/encryption` | E2EE enable/status, device register/approve, recovery |
+| `share` | `/api/share` | public read-only project access, tiles, shared-memory comments/likes/translations |
 | `strava` | `/api/strava` | OAuth connect/callback/status, activity browsing, project sync |
 | `polarsteps` | `/api/polarsteps` | connect/disconnect, trip + step listing |
 | `backup` | `/api/backup` | list + restore database backups |
+| `admin` | `/api/admin` | admin dashboard endpoints (same app/port, gated by `is_admin`) |
 
 ---
 
