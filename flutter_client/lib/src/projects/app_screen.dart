@@ -359,7 +359,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
           // People directory (#40)
           IconButton(
-            tooltip: 'People',
+            tooltip: 'Encounters',
             icon: const Icon(Icons.groups_outlined),
             onPressed: () => Navigator.of(context).push(MaterialPageRoute(
               builder: (_) =>

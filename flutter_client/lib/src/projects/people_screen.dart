@@ -42,7 +42,7 @@ class _PeopleScreenState extends State<PeopleScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('People & groups')),
+      appBar: AppBar(title: const Text('Encounters & groups')),
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: kAccent,
         foregroundColor: Colors.white,
