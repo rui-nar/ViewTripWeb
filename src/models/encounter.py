@@ -23,3 +23,32 @@ class Encounter:
     geo_mode: str = "start_of_day"          # "start_of_day" | "end_of_day" | "custom"
     lat: Optional[float] = None
     lon: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        """Serialise to a dict that can be round-tripped via from_dict()."""
+        return {
+            "id": self.id,
+            "person_id": self.person_id,
+            "group_id": self.group_id,
+            "date": self.date,
+            "time": self.time,
+            "description": self.description,
+            "geo_mode": self.geo_mode,
+            "lat": self.lat,
+            "lon": self.lon,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Encounter":
+        """Create an Encounter instance from a dict produced by to_dict()."""
+        return cls(
+            id=d.get("id"),
+            person_id=d.get("person_id"),
+            group_id=d.get("group_id"),
+            date=d.get("date", ""),
+            time=d.get("time"),
+            description=d.get("description"),
+            geo_mode=d.get("geo_mode", "start_of_day"),
+            lat=d.get("lat"),
+            lon=d.get("lon"),
+        )

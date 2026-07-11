@@ -3,6 +3,9 @@
 import os
 import pytest
 
+from src.models.encounter import Encounter
+from src.models.journal import JournalEntry
+from src.models.memory import Memory
 from src.models.project import (
     ConnectingSegment,
     Project,
@@ -30,6 +33,20 @@ def _make_segment_item(label: str = "Paris → Lyon") -> ProjectItem:
         end=SegmentEndpoint(lat=45.74, lon=4.83, source="manual"),
     )
     return ProjectItem(item_type="segment", segment=seg)
+
+
+def _make_journal_item(description: str = "Great day") -> ProjectItem:
+    entry = JournalEntry(
+        id=7,
+        date="2024-05-01",
+        time="09:30",
+        description=description,
+        photos=["photo1"],
+        geo_mode="custom",
+        lat=48.85,
+        lon=2.35,
+    )
+    return ProjectItem(item_type="journal", journal=entry)
 
 
 @pytest.fixture
@@ -165,6 +182,49 @@ class TestProjectIOHelpers:
         assert restored.segment.segment_type == "train"
         assert restored.segment.start.lat == pytest.approx(48.85)
 
+    def test_serialise_journal_item(self):
+        item = _make_journal_item("Serialise me")
+        d = ProjectIO._serialise_item(item)
+        assert d["item_type"] == "journal"
+        j_d = d["journal"]
+        assert j_d["id"] == 7
+        assert j_d["date"] == "2024-05-01"
+        assert j_d["time"] == "09:30"
+        assert j_d["description"] == "Serialise me"
+        assert j_d["photos"] == ["photo1"]
+        assert j_d["geo_mode"] == "custom"
+        assert j_d["lat"] == pytest.approx(48.85)
+        assert j_d["lon"] == pytest.approx(2.35)
+
+    def test_deserialise_journal_item(self):
+        d = {
+            "item_type": "journal",
+            "journal": {
+                "id": 9,
+                "date": "2024-06-15",
+                "time": "14:00",
+                "description": "Deserialise me",
+                "photos": ["p1", "p2"],
+                "geo_mode": "start_of_day",
+                "lat": 45.0,
+                "lon": 5.0,
+            },
+        }
+        item = ProjectIO._deserialise_item(d)
+        assert item.item_type == "journal"
+        assert item.journal.id == 9
+        assert item.journal.description == "Deserialise me"
+        assert item.journal.photos == ["p1", "p2"]
+        assert item.journal.lat == pytest.approx(45.0)
+
+    def test_round_trip_item_journal(self):
+        orig = _make_journal_item("round trip journal")
+        restored = ProjectIO._deserialise_item(ProjectIO._serialise_item(orig))
+        assert restored.item_type == "journal"
+        assert restored.journal.description == "round trip journal"
+        assert restored.journal.date == "2024-05-01"
+        assert restored.journal.lat == pytest.approx(48.85)
+
 
 # ---------------------------------------------------------------------------
 # Full file round-trip
@@ -246,3 +306,123 @@ class TestProjectIORoundTrip:
         loaded = ProjectIO.load(path)
         assert loaded.name == "München → Paris 🚂"
         assert loaded.items[0].segment.label == "Basel → Zürich ✓"
+
+
+# ---------------------------------------------------------------------------
+# Dataclass to_dict()/from_dict() round-trips
+# ---------------------------------------------------------------------------
+
+class TestDataclassRoundTrips:
+    def test_memory_round_trip(self):
+        mem = Memory(
+            id=1,
+            public_id="pub-123",
+            name="Lunch stop",
+            date="2024-03-10",
+            time="12:30",
+            description="Great pizza",
+            photos=["a.jpg", "b.jpg"],
+            geo_mode="custom",
+            lat=41.9,
+            lon=12.5,
+            comment_count=3,
+            like_count=5,
+        )
+        restored = Memory.from_dict(mem.to_dict())
+        assert restored.id == mem.id
+        assert restored.public_id == mem.public_id
+        assert restored.name == mem.name
+        assert restored.date == mem.date
+        assert restored.time == mem.time
+        assert restored.description == mem.description
+        assert restored.photos == mem.photos
+        assert restored.geo_mode == mem.geo_mode
+        assert restored.lat == pytest.approx(mem.lat)
+        assert restored.lon == pytest.approx(mem.lon)
+
+    def test_journal_entry_round_trip(self):
+        entry = JournalEntry(
+            id=2,
+            date="2024-03-11",
+            time="08:00",
+            description="Morning notes",
+            photos=["c.jpg"],
+            geo_mode="end_of_day",
+            lat=45.1,
+            lon=7.7,
+        )
+        restored = JournalEntry.from_dict(entry.to_dict())
+        assert restored.id == entry.id
+        assert restored.date == entry.date
+        assert restored.time == entry.time
+        assert restored.description == entry.description
+        assert restored.photos == entry.photos
+        assert restored.geo_mode == entry.geo_mode
+        assert restored.lat == pytest.approx(entry.lat)
+        assert restored.lon == pytest.approx(entry.lon)
+
+    def test_encounter_round_trip(self):
+        enc = Encounter(
+            id=3,
+            person_id=42,
+            group_id=None,
+            date="2024-03-12",
+            time="17:15",
+            description="Met at the hostel",
+            geo_mode="start_of_day",
+            lat=48.2,
+            lon=16.4,
+        )
+        restored = Encounter.from_dict(enc.to_dict())
+        assert restored.id == enc.id
+        assert restored.person_id == enc.person_id
+        assert restored.group_id == enc.group_id
+        assert restored.date == enc.date
+        assert restored.time == enc.time
+        assert restored.description == enc.description
+        assert restored.geo_mode == enc.geo_mode
+        assert restored.lat == pytest.approx(enc.lat)
+        assert restored.lon == pytest.approx(enc.lon)
+
+    def test_encounter_round_trip_group_id(self):
+        """issue #56 — group_id is the alternative to person_id, must round-trip too."""
+        enc = Encounter(
+            id=4,
+            person_id=None,
+            group_id=17,
+            date="2024-03-13",
+            description="Met the whole crew",
+        )
+        restored = Encounter.from_dict(enc.to_dict())
+        assert restored.person_id is None
+        assert restored.group_id == 17
+
+    def test_connecting_segment_round_trip(self):
+        seg = ConnectingSegment(
+            id="seg-1",
+            segment_type="boat",
+            label="Piraeus → Naxos",
+            date="2024-03-14",
+            start=SegmentEndpoint(lat=37.9, lon=23.6, source="auto"),
+            end=SegmentEndpoint(lat=37.1, lon=25.4, source="manual"),
+            route_mode="ferry",
+            train_number=None,
+            hafas_provider=None,
+            route_polyline="encoded-polyline",
+            route_status="resolved",
+            route_error=None,
+            route_started_at="2024-03-14T10:00:00",
+        )
+        restored = ConnectingSegment.from_dict(seg.to_dict())
+        assert restored.id == seg.id
+        assert restored.segment_type == seg.segment_type
+        assert restored.label == seg.label
+        assert restored.date == seg.date
+        assert restored.start.lat == pytest.approx(seg.start.lat)
+        assert restored.start.source == seg.start.source
+        assert restored.end.lat == pytest.approx(seg.end.lat)
+        assert restored.end.source == seg.end.source
+        assert restored.route_mode == seg.route_mode
+        assert restored.route_polyline == seg.route_polyline
+        assert restored.route_status == seg.route_status
+        assert restored.route_started_at == seg.route_started_at
