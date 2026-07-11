@@ -5,8 +5,17 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
-from api.memories import _utc_now
+import models.db as db_module
+from api.deps import get_current_user
+from api.memories import _is_encrypted_envelope, _utc_now
+from api.memories import router as memories_router
+from models.project_db import DBMemory, DBMemoryTranslation, DBProject
+from models.user import UserInfo
 
 
 # ---------------------------------------------------------------------------
@@ -177,3 +186,149 @@ class TestProjectLanguages:
         p = Project(name="trip")
         d = ProjectIO.to_dict(p)
         assert d["languages"] == []
+
+
+# ---------------------------------------------------------------------------
+# _is_encrypted_envelope — mirrors the client's EncryptedField.isEnvelope
+# format check (e2ee_crypto.dart), issue #27
+# ---------------------------------------------------------------------------
+
+class TestIsEncryptedEnvelope:
+    def test_none_and_empty_are_not_envelopes(self):
+        assert _is_encrypted_envelope(None) is False
+        assert _is_encrypted_envelope("") is False
+
+    def test_plaintext_is_not_an_envelope(self):
+        assert _is_encrypted_envelope("A lovely afternoon in Lisbon") is False
+        assert _is_encrypted_envelope("v1 without dots") is False
+
+    def test_wrong_version_prefix_is_not_an_envelope(self):
+        assert _is_encrypted_envelope("v2.YWJj.ZGVm") is False
+
+    def test_wrong_part_count_is_not_an_envelope(self):
+        assert _is_encrypted_envelope("v1.YWJj") is False
+        assert _is_encrypted_envelope("v1.YWJj.ZGVm.extra") is False
+
+    def test_valid_envelope_shape_is_detected(self):
+        assert _is_encrypted_envelope("v1.YWJj.ZGVm") is True
+
+
+# ---------------------------------------------------------------------------
+# GET .../translations/{lang} and PUT .../{id} — encrypted-memory handling
+# (issue #27: never send ciphertext to the translator; purge stale cached
+# translations once a memory's content becomes ciphertext)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def env(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as sess:
+        user = UserInfo(display_name="Alice", email="alice@example.com")
+        sess.add(user)
+        sess.commit()
+        sess.refresh(user)
+        user_id = user.id
+
+        project = DBProject(user_info_id=user_id, name="My Trip",
+                             languages_json=json.dumps(["fr"]))
+        sess.add(project)
+        sess.commit()
+        sess.refresh(project)
+        project_id = project.id
+
+    app = FastAPI()
+    app.dependency_overrides[get_current_user] = lambda: {"sub": str(user_id), "email": "alice@example.com"}
+    app.include_router(memories_router)
+    client = TestClient(app)
+    return client, engine, project_id
+
+
+def _insert_memory(engine, project_id, name=None, description=None) -> int:
+    with Session(engine) as sess:
+        row = DBMemory(project_id=project_id, date="2025-06-01", geo_mode="custom",
+                        name=name, description=description)
+        sess.add(row)
+        sess.commit()
+        sess.refresh(row)
+        return row.id
+
+
+def _insert_cached_translation(engine, memory_id, lang_code="fr") -> None:
+    with Session(engine) as sess:
+        sess.add(DBMemoryTranslation(
+            memory_id=memory_id, lang_code=lang_code,
+            name="Bonjour", description="Un souvenir", created_at=_utc_now(),
+        ))
+        sess.commit()
+
+
+class TestGetTranslationRejectsEncrypted:
+    def test_rejects_when_name_is_an_envelope(self, env):
+        client, engine, project_id = env
+        mem_id = _insert_memory(engine, project_id, name="v1.YWJj.ZGVm", description="plain")
+        with patch("api.memories.translate_text", new_callable=AsyncMock) as mock_translate:
+            r = client.get(f"/api/memories/{mem_id}/translations/fr")
+        assert r.status_code == 409
+        mock_translate.assert_not_called()
+
+    def test_rejects_when_description_is_an_envelope(self, env):
+        client, engine, project_id = env
+        mem_id = _insert_memory(engine, project_id, name="A place", description="v1.YWJj.ZGVm")
+        with patch("api.memories.translate_text", new_callable=AsyncMock) as mock_translate:
+            r = client.get(f"/api/memories/{mem_id}/translations/fr")
+        assert r.status_code == 409
+        mock_translate.assert_not_called()
+
+    def test_plaintext_memory_still_translates(self, env):
+        client, engine, project_id = env
+        mem_id = _insert_memory(engine, project_id, name="A place", description="Some notes")
+        mock_translate = AsyncMock(side_effect=["Un lieu", "Quelques notes"])
+        with patch("api.memories.translate_text", mock_translate):
+            r = client.get(f"/api/memories/{mem_id}/translations/fr")
+        assert r.status_code == 200
+        assert r.json() == {"lang_code": "fr", "name": "Un lieu", "description": "Quelques notes"}
+
+
+class TestUpdateMemoryPurgesTranslationCache:
+    def test_purges_cache_when_content_becomes_encrypted(self, env):
+        client, engine, project_id = env
+        mem_id = _insert_memory(engine, project_id, name="A place", description="Some notes")
+        _insert_cached_translation(engine, mem_id)
+
+        r = client.put(f"/api/memories/{mem_id}", json={
+            "date": "2025-06-01", "geo_mode": "custom",
+            "name": "v1.YWJj.ZGVm", "description": "v1.eGl6.enp6",
+        })
+        assert r.status_code == 204
+
+        with Session(engine) as sess:
+            from sqlmodel import select
+            remaining = sess.exec(
+                select(DBMemoryTranslation).where(DBMemoryTranslation.memory_id == mem_id)
+            ).all()
+        assert remaining == []
+
+    def test_keeps_cache_when_content_stays_plaintext(self, env):
+        client, engine, project_id = env
+        mem_id = _insert_memory(engine, project_id, name="A place", description="Some notes")
+        _insert_cached_translation(engine, mem_id)
+
+        r = client.put(f"/api/memories/{mem_id}", json={
+            "date": "2025-06-01", "geo_mode": "custom",
+            "name": "A renamed place", "description": "Updated notes",
+        })
+        assert r.status_code == 204
+
+        with Session(engine) as sess:
+            from sqlmodel import select
+            remaining = sess.exec(
+                select(DBMemoryTranslation).where(DBMemoryTranslation.memory_id == mem_id)
+            ).all()
+        assert len(remaining) == 1
