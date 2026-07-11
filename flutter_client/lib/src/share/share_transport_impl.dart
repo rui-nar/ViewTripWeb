@@ -13,10 +13,11 @@ class ShareTransportImpl implements ShareTransport {
 
   @override
   Future<void> shareFiles(List<XFile> files, {required String text}) =>
-      Share.shareXFiles(files, text: text);
+      SharePlus.instance.share(ShareParams(files: files, text: text));
 
   @override
-  Future<void> shareTextOnly(String text) => Share.share(text);
+  Future<void> shareTextOnly(String text) =>
+      SharePlus.instance.share(ShareParams(text: text));
 
   @override
   Future<void> shareUrlIntent(Uri uri) =>
