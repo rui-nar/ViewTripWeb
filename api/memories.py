@@ -41,6 +41,7 @@ from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryT
 from models.user import UserInfo
 from src.models.memory import Memory
 from src.project.memory_match import step_key
+from src.utils.encryption_check import is_encrypted_envelope as _is_encrypted_envelope
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
 
@@ -48,18 +49,6 @@ _log = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
-
-
-def _is_encrypted_envelope(value: Optional[str]) -> bool:
-    """True if *value* is a client-side E2EE ciphertext envelope (`v1.<b64>.<b64>`,
-    see `EncryptedField` in flutter_client/lib/src/crypto/e2ee_crypto.dart) rather
-    than plaintext. The server never decrypts fields — this is a cheap format
-    check so encrypted content is never sent to a third-party translator and
-    cached as a bogus "translation" (issue #27)."""
-    if not value:
-        return False
-    parts = value.split(".")
-    return len(parts) == 3 and parts[0] == "v1"
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
