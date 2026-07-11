@@ -30,6 +30,7 @@ from api.deps import get_current_user
 from api.project_shared import _DATA_DIR, _legacy_path, _projects_dir, _repo
 from src.models.great_circle import great_circle_points
 from src.project.project_io import ProjectIO
+from src.utils.encryption_check import is_encrypted_envelope
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -92,6 +93,25 @@ def export_project_gpx(
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # A GPX export can't carry an activity whose geometry is client-side E2EE
+    # ciphertext (issue #29) — the server can't decode it, and silently
+    # producing a file missing some tracks (or garbage) would be worse than an
+    # explicit error. Check every activity actually referenced by this project
+    # up front, before building anything (mirrors api/memories.py's
+    # get_translation 409 for an encrypted memory, issue #27).
+    for item in project.items:
+        if item.item_type != "activity":
+            continue
+        act = project.activity_by_id(item.activity_id) if item.activity_id else None
+        if act is None:
+            continue
+        if (is_encrypted_envelope(act.summary_polyline)
+                or act.start_latlng_enc or act.end_latlng_enc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot export GPX for a project containing an encrypted activity",
+            )
 
     gpx = gpxpy.gpx.GPX()
     gpx.name = project.name

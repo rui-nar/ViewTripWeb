@@ -12,7 +12,7 @@ from scalar_fastapi import get_scalar_api_reference
 from src.exceptions.errors import APIError, AuthenticationError
 from src.project.project_repo import StaleWriteError
 
-from api.activities import router as activities_router
+from api.activities import router as activities_router, activity_fields_router
 from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
@@ -90,6 +90,7 @@ app.add_middleware(
 )
 
 app.include_router(activities_router)
+app.include_router(activity_fields_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)

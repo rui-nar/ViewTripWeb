@@ -536,6 +536,12 @@ def _compute_low_res_geo(project: Project) -> str:
     ``start_latlng`` to ``end_latlng`` — no polyline decoding required.
     Connecting segments use the same 50-point great-circle arcs as the
     full-res endpoint (they're already cheap to compute).
+
+    Encrypted geometry (issue #29) needs no extra guard here: ActivityMixin.
+    _row_to_activity() already leaves start_latlng/end_latlng as None (instead
+    of raising on json.loads) when the underlying column is a ciphertext
+    envelope, so such an activity is already skipped by the None check below —
+    the same "no geometry" fallback as an activity that never had latlng data.
     """
     from src.models.great_circle import great_circle_points
 
