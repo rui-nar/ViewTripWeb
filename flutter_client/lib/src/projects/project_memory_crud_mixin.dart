@@ -11,6 +11,11 @@ import 'package:http/http.dart' as http;
 import '../api/client.dart';
 import '../crypto/encryption.dart';
 
+/// Thrown by [ProjectMemoryCrudMixin.fetchTranslation] when a memory is
+/// encrypted — a permanent state, not a transient failure, so callers should
+/// show a distinct message rather than the generic "please try again" (#27).
+class TranslationUnavailableException implements Exception {}
+
 mixin ProjectMemoryCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   String? get projectName;
@@ -281,9 +286,10 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
   ) async {
     // When encryption is on, the server only holds ciphertext and cannot
     // translate it (#26/#27). Don't send ciphertext to the translator — surface
-    // a clear "unavailable" instead. (UI shows the graceful error message.)
+    // a distinct "unavailable" error so the UI can show a message that doesn't
+    // invite a retry (the server also rejects this independently, see #27).
     if (encryption.isUnlocked) {
-      throw Exception('Translation is unavailable for encrypted memories');
+      throw TranslationUnavailableException();
     }
     final data = await api.get('/api/memories/$memoryId/translations/$langCode');
     return data as Map<String, dynamic>;

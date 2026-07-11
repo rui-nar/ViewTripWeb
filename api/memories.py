@@ -50,6 +50,18 @@ _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
 
 
+def _is_encrypted_envelope(value: Optional[str]) -> bool:
+    """True if *value* is a client-side E2EE ciphertext envelope (`v1.<b64>.<b64>`,
+    see `EncryptedField` in flutter_client/lib/src/crypto/e2ee_crypto.dart) rather
+    than plaintext. The server never decrypts fields — this is a cheap format
+    check so encrypted content is never sent to a third-party translator and
+    cached as a bogus "translation" (issue #27)."""
+    if not value:
+        return False
+    parts = value.split(".")
+    return len(parts) == 3 and parts[0] == "v1"
+
+
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class IDOut(BaseModel):
@@ -358,6 +370,16 @@ def update_memory(
         mem_row.lat = lat
         mem_row.lon = lon
         sess.add(mem_row)
+
+        # Once a memory's content becomes ciphertext, any previously-cached
+        # translation of the old plaintext is a plaintext-adjacent artifact that
+        # would otherwise survive encryption unprotected — purge it (issue #27).
+        if _is_encrypted_envelope(body.name) or _is_encrypted_envelope(body.description):
+            for row in sess.exec(
+                select(DBMemoryTranslation).where(DBMemoryTranslation.memory_id == memory_id)
+            ).all():
+                sess.delete(row)
+
         sess.commit()
 
 
@@ -807,6 +829,11 @@ async def get_translation(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        if _is_encrypted_envelope(mem_row.name) or _is_encrypted_envelope(mem_row.description):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot translate an encrypted memory",
+            )
         project_row = sess.get(DBProject, mem_row.project_id)
         allowed_langs = _json.loads(getattr(project_row, 'languages_json', None) or "[]")
         if lang_code not in allowed_langs:
