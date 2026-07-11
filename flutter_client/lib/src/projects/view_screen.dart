@@ -15,6 +15,7 @@ import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
 import 'map_panel.dart';
+import 'people_screen.dart';
 import 'project_add_fab.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
@@ -237,6 +238,17 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap),
             ),
           ),
+
+          // People directory (#40)
+          IconButton(
+            tooltip: 'Encounters',
+            icon: const Icon(Icons.groups_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => PeopleScreen(
+                  notifier: context.read<ViewProjectNotifier>()),
+            )),
+          ),
+
           Consumer<ViewProjectNotifier>(
             builder: (_, n, __) {
               final active = n.tagFilter.isNotEmpty;
