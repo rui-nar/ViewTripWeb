@@ -388,7 +388,7 @@ def edit_activity_track(
     user_info_id = int(current_user["sub"])
     if len(body.points) < 2:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A track needs at least 2 points",
         )
     points = [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
@@ -483,7 +483,7 @@ def split_activity(
                 sess, user_info_id, row.id, activity_id, body.split_index)
         except ValueError as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         if tail_id is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         project = _repo.get_project(

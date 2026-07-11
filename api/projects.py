@@ -205,7 +205,7 @@ def update_project(
         if body.new_name is not None:
             new_name = body.new_name.strip()
             if not new_name:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Name cannot be empty")
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Name cannot be empty")
             if new_name != name and _repo.project_exists(sess, user_info_id, new_name):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
             row.name = new_name

@@ -41,7 +41,7 @@ def delete_item(
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if index < 0 or index >= len(project.items):
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Index out of range")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Index out of range")
         removed = project.items[index]
         project.remove_item(index)
         _repo.save_project(sess, user_info_id, project)
