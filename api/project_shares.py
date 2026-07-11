@@ -3,6 +3,7 @@
 Routes:
     POST   /api/projects/{name}/share                    — create share link
     DELETE /api/projects/{name}/share                     — revoke share link
+    PUT    /api/projects/{name}/share/content              — upload per-share encrypted memory content
     GET    /api/projects/{name}/share-info                — get share tokens
     POST   /api/projects/{name}/share/no-memories         — create no-memories share link
     DELETE /api/projects/{name}/share/no-memories         — revoke no-memories share link
@@ -20,8 +21,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from models.project_db import DBProject, DBShareVisit
+from api.memories import _utc_now
+from models.project_db import DBMemory, DBProject, DBShareMemoryContent, DBShareVisit
 from models.user import UserInfo
+from src.utils.encryption_check import is_encrypted_envelope
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -37,6 +40,17 @@ class ShareTokenNoMemoriesOut(BaseModel):
 class ShareInfoOut(BaseModel):
     share_token: Optional[str] = Field(None, description="Full-access share token, or null if not created")
     share_token_no_memories: Optional[str] = Field(None, description="No-memories share token, or null if not created")
+
+class ShareMemoryContentItem(BaseModel):
+    memory_id: int
+    name_ciphertext: Optional[str] = None
+    description_ciphertext: Optional[str] = None
+
+class ShareMemoryContentBody(BaseModel):
+    items: List[ShareMemoryContentItem]
+
+class ShareMemoryContentOut(BaseModel):
+    updated: int = Field(description="Number of memories whose share-encrypted content was upserted")
 
 
 # ── Project sharing ────────────────────────────────────────────────────────────
@@ -70,7 +84,13 @@ def revoke_share_link(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Revoke the share token — the project becomes private again."""
+    """Revoke the share token — the project becomes private again.
+
+    Also deletes any DBShareMemoryContent rows for the "full" token type: the
+    per-share content key lives only in that token's URL fragment, so once the
+    token is gone the re-encrypted content is unusable and must not linger.
+    No-op if there was nothing to delete (mirrors the token's own no-op case).
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = sess.exec(
@@ -86,9 +106,94 @@ def revoke_share_link(
             from api.share import invalidate_share_cache
             invalidate_tile_cache(row.share_token)
             invalidate_share_cache(row.share_token)
+            _delete_share_memory_content(sess, row.id, "full")
         row.share_token = None
         sess.add(row)
         sess.commit()
+
+
+def _delete_share_memory_content(sess, project_id: int, token_type: str) -> None:
+    """Delete all DBShareMemoryContent rows for this project's memories + token_type."""
+    memory_ids = sess.exec(
+        select(DBMemory.id).where(DBMemory.project_id == project_id)
+    ).all()
+    if not memory_ids:
+        return
+    rows = sess.exec(
+        select(DBShareMemoryContent).where(
+            DBShareMemoryContent.memory_id.in_(memory_ids),
+            DBShareMemoryContent.token_type == token_type,
+        )
+    ).all()
+    for row in rows:
+        sess.delete(row)
+
+
+@router.put("/{name}/share/content", response_model=ShareMemoryContentOut,
+            summary="Upload per-share encrypted memory content")
+def upload_share_memory_content(
+    name: str,
+    body: ShareMemoryContentBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Bulk-upsert re-encrypted memory content for the project's "full" share
+    token (issue #28). This is a client-driven bulk upsert, not per-memory
+    CRUD: the owner's client walks its already-decrypted memories, re-encrypts
+    each actually-encrypted one under a fresh per-share content key, and PUTs
+    every resulting envelope here in one call — calling again simply
+    overwrites the previous envelopes (idempotent regeneration).
+
+    Only memories that both belong to this project AND are themselves E2EE
+    (name or description is a ciphertext envelope) are accepted; anything
+    else in the payload is silently skipped rather than rejecting the batch.
+    The share key used to produce these envelopes is never part of the
+    request — the server only ever sees ciphertext.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = sess.exec(
+            select(DBProject).where(
+                DBProject.user_info_id == user_info_id,
+                DBProject.name == name,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+        updated = 0
+        now = _utc_now()
+        for item in body.items:
+            mem = sess.get(DBMemory, item.memory_id)
+            if mem is None or mem.project_id != row.id:
+                continue
+            if not (is_encrypted_envelope(mem.name) or is_encrypted_envelope(mem.description)):
+                continue
+            existing = sess.exec(
+                select(DBShareMemoryContent).where(
+                    DBShareMemoryContent.memory_id == item.memory_id,
+                    DBShareMemoryContent.token_type == "full",
+                )
+            ).first()
+            if existing:
+                existing.name_ciphertext = item.name_ciphertext
+                existing.description_ciphertext = item.description_ciphertext
+                sess.add(existing)
+            else:
+                sess.add(DBShareMemoryContent(
+                    memory_id=item.memory_id,
+                    token_type="full",
+                    name_ciphertext=item.name_ciphertext,
+                    description_ciphertext=item.description_ciphertext,
+                    created_at=now,
+                ))
+            updated += 1
+        sess.commit()
+
+        if row.share_token:
+            from api.share import invalidate_share_cache
+            invalidate_share_cache(row.share_token)
+
+    return {"updated": updated}
 
 
 @router.get("/{name}/share-info", response_model=ShareInfoOut, summary="Get share tokens")

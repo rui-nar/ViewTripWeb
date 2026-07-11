@@ -450,6 +450,30 @@ class DBMemoryTranslation(sqlmodel.SQLModel, table=True):
     created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
 
 
+class DBShareMemoryContent(sqlmodel.SQLModel, table=True):
+    """A memory's name/description re-encrypted under a per-share content key
+    (issue #28), so an anonymous share-link holder can decrypt it client-side
+    without the owner's CMK. The share key itself is never sent to or stored
+    by the server — it lives only in the share URL fragment (`#key=...`).
+
+    1:1 lifecycle with the project's "full" share token: rows are upserted by
+    the owner-triggered share-content generation flow and deleted wholesale
+    when that token is revoked (see revoke_share_link in api/project_shares.py).
+    """
+
+    __tablename__ = "share_memory_content"
+    __table_args__ = (UniqueConstraint("memory_id", "token_type"),)
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    memory_id: int = sqlmodel.Field(foreign_key="memory.id", index=True)
+    # "full" — the no-memories share variant never carries memory content by
+    # definition, so it has no use for this table.
+    token_type: str = sqlmodel.Field(default="full")
+    name_ciphertext: Optional[str] = sqlmodel.Field(default=None)
+    description_ciphertext: Optional[str] = sqlmodel.Field(default=None)
+    created_at: str = sqlmodel.Field(default="")  # ISO-8601 UTC
+
+
 class DBStravaCache(sqlmodel.SQLModel, table=True):
     """Per-user cache of the raw Strava activity list.
 

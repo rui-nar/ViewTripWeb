@@ -1,7 +1,9 @@
 // ignore_for_file: deprecated_member_use
+import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import '../crypto/share_crypto.dart';
 import '../photos/photo_upgrade_screen.dart';
 import '../shared/shared_memory_service.dart';
 import 'memory_dialog.dart';
@@ -16,13 +18,16 @@ import 'social_share_dialog.dart';
 /// Mobile (<640px): hero photo on top, scrollable content below.
 ///
 /// Pass [shareToken] when opening from a shared-project view so that
-/// comment/like API calls go to the share endpoints.
+/// comment/like API calls go to the share endpoints. Pass [shareContentKey]
+/// (issue #28) when the viewer has one, so an encrypted memory's
+/// `share_name_ciphertext`/`share_description_ciphertext` can be decrypted.
 void showMemoryDetail(
   BuildContext context,
   ProjectNotifier notifier,
   Map<String, dynamic> memory, {
   bool readOnly = false,
   String? shareToken,
+  SecretKey? shareContentKey,
 }) {
   showDialog(
     context: context,
@@ -32,6 +37,7 @@ void showMemoryDetail(
       memory: memory,
       readOnly: readOnly,
       shareToken: shareToken,
+      shareContentKey: shareContentKey,
     ),
   );
 }
@@ -52,12 +58,14 @@ class _MemoryDetailModal extends StatefulWidget {
   final Map<String, dynamic> memory;
   final bool readOnly;
   final String? shareToken;
+  final SecretKey? shareContentKey;
 
   const _MemoryDetailModal({
     required this.notifier,
     required this.memory,
     this.readOnly = false,
     this.shareToken,
+    this.shareContentKey,
   });
 
   @override
@@ -87,6 +95,15 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
   final Map<String, Map<String, dynamic>> _translationCache = {};
   bool _translating = false;
 
+  // ── Share-encrypted content state (issue #28) ────────────────────────────
+  // Set when the memory carries share_name_ciphertext/share_description_ciphertext
+  // and widget.shareContentKey successfully decrypts them. When they stay
+  // null despite the memory being marked encrypted (see _nameUnavailable /
+  // _descriptionUnavailable below), decryption either wasn't attempted (no
+  // key) or failed (wrong key / tamper).
+  String? _decryptedShareName;
+  String? _decryptedShareDescription;
+
   static const _kLangFlags = {
     'en': '🇬🇧', 'pt': '🇵🇹', 'fr': '🇫🇷', 'de': '🇩🇪',
     'es': '🇪🇸', 'it': '🇮🇹', 'nl': '🇳🇱', 'ja': '🇯🇵',
@@ -114,6 +131,36 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     _likeCount = (_current['like_count'] as num?)?.toInt() ?? 0;
     _loadLikes();
     _loadComments();
+    _maybeDecryptShareContent();
+  }
+
+  /// Decrypt share_name_ciphertext/share_description_ciphertext (issue #28)
+  /// with widget.shareContentKey, if the memory carries either. No-op when
+  /// the memory has no share ciphertext at all (the common case — most
+  /// memories are either plaintext or the owner never generated share
+  /// content). Leaves [_decryptedShareName]/[_decryptedShareDescription] null
+  /// — and so [_nameUnavailable]/[_descriptionUnavailable] true — when there's
+  /// no key, or the key doesn't decrypt it.
+  Future<void> _maybeDecryptShareContent() async {
+    final nameCt = _current['share_name_ciphertext'] as String?;
+    final descCt = _current['share_description_ciphertext'] as String?;
+    if (nameCt == null && descCt == null) return;
+
+    final key = widget.shareContentKey;
+    if (key == null) return; // runs before first build — no setState needed
+
+    try {
+      final name = nameCt != null ? await decryptTextWithKey(nameCt, key) : null;
+      final desc = descCt != null ? await decryptTextWithKey(descCt, key) : null;
+      if (!mounted) return;
+      setState(() {
+        _decryptedShareName = name;
+        _decryptedShareDescription = desc;
+      });
+    } catch (_) {
+      // Wrong key / tampered ciphertext — _nameUnavailable / _descriptionUnavailable
+      // already read true from the unset decrypted fields; nothing to rebuild.
+    }
   }
 
   @override
@@ -249,6 +296,7 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     if (_activeLang != null && _translationCache.containsKey(_activeLang!)) {
       return _translationCache[_activeLang!]!['name'] as String?;
     }
+    if (_decryptedShareName != null) return _decryptedShareName;
     return _current['name'] as String?;
   }
 
@@ -256,8 +304,20 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
     if (_activeLang != null && _translationCache.containsKey(_activeLang!)) {
       return (_translationCache[_activeLang!]!['description'] as String?) ?? '';
     }
+    if (_decryptedShareDescription != null) return _decryptedShareDescription!;
     return (_current['description'] as String?) ?? '';
   }
+
+  /// True when the server marked the name as E2EE (issue #26) but this
+  /// viewer couldn't recover it — either the owner never generated share
+  /// content (issue #28) for this memory, or this viewer has no/the wrong
+  /// fragment key. Distinct from a memory that simply has no title.
+  bool get _nameUnavailable =>
+      _current['name_encrypted'] == true && _decryptedShareName == null;
+
+  bool get _descriptionUnavailable =>
+      _current['description_encrypted'] == true &&
+      _decryptedShareDescription == null;
 
   Future<void> _loadTranslation(String langCode) async {
     if (_translationCache.containsKey(langCode)) {
@@ -561,6 +621,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                         fontWeight: FontWeight.w700, letterSpacing: -0.3,
                       ),
                     ),
+                  )
+                else if (_nameUnavailable)
+                  const Positioned(
+                    bottom: 12, left: 16, right: 16,
+                    child: Text(
+                      'This memory is private',
+                      style: TextStyle(
+                        color: _kText2, fontSize: 15,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -588,6 +659,13 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                     Text(description,
                         style: const TextStyle(
                             color: _kText2, fontSize: 15, height: 1.7)),
+                  ] else if (_descriptionUnavailable) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Content is unavailable without the share key.',
+                      style: TextStyle(
+                          color: _kDim, fontSize: 13, fontStyle: FontStyle.italic),
+                    ),
                   ],
                   if (photos.length > 1) ...[
                     const SizedBox(height: 12),
@@ -738,12 +816,17 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Text(
-            (name != null && name.isNotEmpty) ? name : _fmtDate(dateStr),
+            (name != null && name.isNotEmpty)
+                ? name
+                : (_nameUnavailable ? 'This memory is private' : _fmtDate(dateStr)),
             style: theme.textTheme.headlineMedium?.copyWith(
               color: _kText1,
               fontWeight: FontWeight.w700,
               fontSize: 22,
               letterSpacing: -0.3,
+              fontStyle: (name == null || name.isEmpty) && _nameUnavailable
+                  ? FontStyle.italic
+                  : FontStyle.normal,
             ),
           ),
         ),
@@ -760,6 +843,13 @@ class _MemoryDetailModalState extends State<_MemoryDetailModal> {
                     description,
                     style: const TextStyle(
                         color: _kText2, fontSize: 15, height: 1.7),
+                  ),
+                  const SizedBox(height: 16),
+                ] else if (_descriptionUnavailable) ...[
+                  const Text(
+                    'Content is unavailable without the share key.',
+                    style: TextStyle(
+                        color: _kDim, fontSize: 13, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
                 ],

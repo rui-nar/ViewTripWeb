@@ -7,8 +7,8 @@ parse, third-party translation) and (b) avoid clobbering an already-encrypted
 row on a background write (Strava/Polarsteps sync, activity enrichment).
 
 Originally lived as a private helper in api/memories.py (issue #26/#27);
-promoted here so api/memories.py and the activity-encryption guards (issue #29)
-share one implementation.
+promoted here so api/memories.py, api/share.py (issue #28), and the
+activity-encryption guards (issue #29) all share one implementation.
 """
 from __future__ import annotations
 

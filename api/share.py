@@ -73,8 +73,11 @@ from fastapi.responses import FileResponse, Response
 from sqlmodel import select
 
 from api.deps import get_optional_current_user
-from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBShareVisit
+from models.project_db import (
+    DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBShareMemoryContent, DBShareVisit,
+)
 from models.user import UserInfo
+from src.utils.encryption_check import is_encrypted_envelope
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 from src.models.great_circle import great_circle_points
@@ -238,6 +241,68 @@ def _record_visit(
         pass
 
 
+def _strip_encrypted_memory_fields(
+    items: List[Dict[str, Any]],
+    share_content: Optional[Dict[int, DBShareMemoryContent]] = None,
+) -> None:
+    """Never leak raw E2EE ciphertext to an anonymous share viewer.
+
+    Memory items whose `name`/`description` are client-side ciphertext
+    envelopes (issue #26) have those fields replaced with None in place —
+    otherwise the raw `v1.<b64>.<b64>` envelope would be rendered as if it
+    were the actual title/notes (issue #28 Part A).
+
+    `share_content` (issue #28 Part B) maps memory_id -> DBShareMemoryContent
+    row. When a stripped field has a matching row, its `share_name_ciphertext`/
+    `share_description_ciphertext` is populated alongside the None so a viewer
+    holding the share-link's URL-fragment key can still decrypt it — these are
+    new keys, distinct from `name`/`description`, so the client can tell
+    "share-encrypted, decrypt with the fragment key" apart from anything else.
+
+    Also sets `name_encrypted`/`description_encrypted` booleans whenever a
+    field is stripped (regardless of whether share content exists for it) —
+    a client-side `null` alone is ambiguous between "genuinely empty" and
+    "encrypted", and the anonymous viewer UI needs to tell those apart to
+    show an explicit "unavailable" state instead of a blank title/notes.
+    """
+    share_content = share_content or {}
+    for item in items:
+        if item.get("item_type") != "memory":
+            continue
+        mem = item.get("memory")
+        if not mem:
+            continue
+        name_enc = is_encrypted_envelope(mem.get("name"))
+        desc_enc = is_encrypted_envelope(mem.get("description"))
+        if not (name_enc or desc_enc):
+            continue
+        content_row = share_content.get(mem.get("id"))
+        if name_enc:
+            mem["name"] = None
+            mem["name_encrypted"] = True
+            if content_row is not None and content_row.name_ciphertext:
+                mem["share_name_ciphertext"] = content_row.name_ciphertext
+        if desc_enc:
+            mem["description"] = None
+            mem["description_encrypted"] = True
+            if content_row is not None and content_row.description_ciphertext:
+                mem["share_description_ciphertext"] = content_row.description_ciphertext
+
+
+def _fetch_share_content(memory_ids: List[int]) -> Dict[int, DBShareMemoryContent]:
+    """Load DBShareMemoryContent rows (token_type="full") for these memory ids."""
+    if not memory_ids:
+        return {}
+    with get_session() as sess:
+        rows = sess.exec(
+            select(DBShareMemoryContent).where(
+                DBShareMemoryContent.memory_id.in_(memory_ids),
+                DBShareMemoryContent.token_type == "full",
+            )
+        ).all()
+    return {row.memory_id: row for row in rows}
+
+
 @router.get("/{token}", summary="Get shared project details")
 def shared_project(
     token: str,
@@ -266,6 +331,11 @@ def shared_project(
                 item for item in result["items"]
                 if item.get("item_type") != "memory"
             ]
+        mem_ids = [
+            item["memory"]["id"] for item in result["items"]
+            if item.get("item_type") == "memory" and item.get("memory")
+        ]
+        _strip_encrypted_memory_fields(result["items"], _fetch_share_content(mem_ids))
         with get_session() as sess:
             owner = sess.exec(
                 select(UserInfo).where(UserInfo.id == owner_uid)
@@ -310,6 +380,11 @@ def shared_project_meta(
             item for item in result["items"]
             if item.get("item_type") != "memory"
         ]
+    mem_ids = [
+        item["memory"]["id"] for item in result["items"]
+        if item.get("item_type") == "memory" and item.get("memory")
+    ]
+    _strip_encrypted_memory_fields(result["items"], _fetch_share_content(mem_ids))
     with get_session() as sess:
         owner = sess.exec(
             select(UserInfo).where(UserInfo.id == owner_uid)
@@ -773,6 +848,11 @@ async def shared_get_translation(token: str, memory_id: int, lang_code: str):
             return {"lang_code": lang_code, "name": cached.name, "description": cached.description}
 
         mem_row = sess.get(DBMemory, memory_id)
+        if is_encrypted_envelope(mem_row.name) or is_encrypted_envelope(mem_row.description):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot translate an encrypted memory",
+            )
 
     try:
         translated_name = await translate_text(mem_row.name, lang_code) if mem_row.name else None
