@@ -2,6 +2,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -12,6 +13,7 @@ import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
+import 'client_geo_builder.dart' as client_geo;
 import 'project_filter_mixin.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
@@ -315,11 +317,27 @@ class ProjectNotifier extends ChangeNotifier
       // Fire both simultaneously.  /meta omits elevation_profile (~12 MB) so
       // the panel becomes interactive in ~1-2 s instead of ~17 s.  Elevation
       // data is fetched separately in the background (see below).
+      //
+      // When E2EE is unlocked the server can't build geo for an encrypted
+      // activity's geometry (issue #29) — skip the parallel low-res fetch
+      // (it would be discarded) and build low-res geo client-side below,
+      // once decrypted activities/items are available.
       final detailsFuture = _service.getDetailsMeta(name);
-      final lowResFuture = _service.getLowResGeo(name);
+      final lowResFuture =
+          encryption.isUnlocked ? null : _service.getLowResGeo(name);
+      // Both futures need a listener from the moment they're created: if
+      // lowResFuture rejects first, the catch below returns before
+      // detailsFuture is ever awaited, leaving it truly unobserved — a later
+      // rejection on it then surfaces as an orphaned, uncatchable async error
+      // instead of being handled here. ignore() is a no-op when we do go on
+      // to await each future normally below.
+      detailsFuture.ignore();
+      lowResFuture?.ignore();
 
-      geo = await lowResFuture;
-      if (_loadKey == name) notifyListeners(); // map visible at ~2.2s
+      if (lowResFuture != null) {
+        geo = await lowResFuture;
+        if (_loadKey == name) notifyListeners(); // map visible at ~2.2s
+      }
 
       final details = await detailsFuture;
       if (_loadKey != name) return;
@@ -331,6 +349,7 @@ class ProjectNotifier extends ChangeNotifier
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()
           : [];
+      await _revealActivities(activities);
       final rawItems = details['items'];
       items = rawItems is List
           ? rawItems.cast<Map<String, dynamic>>()
@@ -380,6 +399,11 @@ class ProjectNotifier extends ChangeNotifier
       final rawLangs = details['languages'];
       if (rawLangs is List) languages = rawLangs.cast<String>();
       _updateStats();
+      if (encryption.isUnlocked) {
+        // Decrypted activities/items are ready now — build the low-res map
+        // client-side (mirrors src/project/repo_core.py's _compute_low_res_geo).
+        geo = client_geo.buildLowResGeo(items, client_geo.activitiesById(activities));
+      }
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
       if (loadOwnerExtras) {
@@ -412,6 +436,22 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _loadFullGeoProgressively(String name) async {
     // Guard: abort if the user navigated away before we finish
     if (_loadKey != name) return;
+
+    if (encryption.isUnlocked) {
+      // Full-res geo is already fully knowable from the decrypted activities
+      // held in memory — the server can't build it for encrypted activities
+      // anyway (issue #29), so there's no progressive server round trip to
+      // race here; build it once, directly, from client_geo_builder.dart.
+      try {
+        geo = client_geo.buildFullGeo(items, client_geo.activitiesById(activities));
+        _buildFullTrack();
+        isGeoLoaded = true;
+      } catch (e) {
+        error = e is Exception ? _msg(e) : e.toString();
+      }
+      notifyListeners();
+      return;
+    }
 
     // Fetch the full-res geo with one retry. A cold-cache miss can be slow
     // enough to time out, but the server finishes computing and caches the
@@ -522,8 +562,10 @@ class ProjectNotifier extends ChangeNotifier
       if (_loadKey != name) return;
       final rawActivities = details['activities'];
       if (rawActivities is List) {
+        final freshActivities = rawActivities.cast<Map<String, dynamic>>();
+        await _revealActivities(freshActivities);
         final byId = <String, Map<String, dynamic>>{};
-        for (final a in rawActivities.cast<Map<String, dynamic>>()) {
+        for (final a in freshActivities) {
           byId[a['id']?.toString() ?? ''] = a;
         }
         activities = [
@@ -532,8 +574,11 @@ class ProjectNotifier extends ChangeNotifier
         _buildFullTrack();
         notifyListeners();
       }
-    } on Exception catch (_) {
-      // Non-fatal — elevation chart simply stays empty.
+    } on Object catch (_) {
+      // Non-fatal — elevation chart simply stays empty. Catch Object (not
+      // just Exception), matching _loadFullGeoProgressively above: a decode
+      // failure can throw an Error (RangeError/TypeError) that would
+      // otherwise escape as an unhandled async exception.
     }
   }
 
@@ -1077,13 +1122,16 @@ class ProjectNotifier extends ChangeNotifier
       activities = rawActivities is List
           ? rawActivities.cast<Map<String, dynamic>>()
           : [];
+      await _revealActivities(activities);
       final rawItems = result['items'];
       items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
       await _revealItems(items);
       _updateStats();
       _buildFullTrack();
       // Refresh GeoJSON so the map polylines reflect the updated track.
-      geo = await _service.getGeo(name);
+      geo = encryption.isUnlocked
+          ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
+          : await _service.getGeo(name);
       notifyListeners();
     } on Exception catch (e) {
       error = _msg(e);
@@ -1294,14 +1342,23 @@ class ProjectNotifier extends ChangeNotifier
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(String name) async {
     try {
-      final results = await Future.wait([
-        _service.getDetailsMeta(name),
-        _service.getGeo(name),
-      ]);
-      final details = results[0];
-      await _applyDetails(details, name);
-      _autoFillDaysToToday();
-      geo = results[1];
+      if (encryption.isUnlocked) {
+        // The server can't build geo for encrypted activities (issue #29) —
+        // build it client-side from the just-reloaded, decrypted activities.
+        final details = await _service.getDetailsMeta(name);
+        await _applyDetails(details, name);
+        _autoFillDaysToToday();
+        geo = client_geo.buildFullGeo(items, client_geo.activitiesById(activities));
+      } else {
+        final results = await Future.wait([
+          _service.getDetailsMeta(name),
+          _service.getGeo(name),
+        ]);
+        final details = results[0];
+        await _applyDetails(details, name);
+        _autoFillDaysToToday();
+        geo = results[1];
+      }
       _updateStats();
       _buildFullTrack();
     } on Exception catch (e) {
@@ -1348,6 +1405,68 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  /// Decrypt in-scope activity fields in [list] in place (issue #29). `name`
+  /// and `map.summary_polyline` are plain string fields — reveal() swaps
+  /// ciphertext for plaintext directly, same as memory name/description.
+  /// `start_latlng`, `end_latlng` and `elevation_profile` can't carry a
+  /// ciphertext *string* in their normal (list / distance-elevation-pairs)
+  /// shape, so the server sends their ciphertext via the sibling
+  /// `start_latlng_enc` / `end_latlng_enc` / `elevation_profile_enc` keys
+  /// instead (see ActivityMixin._row_to_activity and Activity.to_strava_dict
+  /// on the server) — decrypt those, JSON-decode the recovered plaintext, and
+  /// write the result into the normal key so every existing consumer (map,
+  /// elevation chart, _buildFullTrack) needs no changes. No-op when
+  /// encryption is locked/off; idempotent, so it's safe to call after any
+  /// activities load.
+  Future<void> _revealActivities(List<Map<String, dynamic>> list) async {
+    if (!encryption.isUnlocked) return;
+    for (final a in list) {
+      a['name'] = await encryption.reveal(a['name'] as String?);
+      final map = a['map'];
+      if (map is Map) {
+        map['summary_polyline'] =
+            await encryption.reveal(map['summary_polyline'] as String?);
+      }
+
+      final startEnc = a['start_latlng_enc'] as String?;
+      if (startEnc != null) {
+        final revealed = await encryption.reveal(startEnc);
+        if (revealed != null && revealed != startEnc) {
+          try {
+            a['start_latlng'] = jsonDecode(revealed);
+          } catch (_) {
+            // Wrong key / corrupt — leave start_latlng as the None the server
+            // already sent for this encrypted field.
+          }
+        }
+      }
+      final endEnc = a['end_latlng_enc'] as String?;
+      if (endEnc != null) {
+        final revealed = await encryption.reveal(endEnc);
+        if (revealed != null && revealed != endEnc) {
+          try {
+            a['end_latlng'] = jsonDecode(revealed);
+          } catch (_) {}
+        }
+      }
+      final epEnc = a['elevation_profile_enc'] as String?;
+      if (epEnc != null) {
+        final revealed = await encryption.reveal(epEnc);
+        if (revealed != null && revealed != epEnc) {
+          try {
+            final decoded = jsonDecode(revealed) as Map<String, dynamic>;
+            final d = (decoded['distances_km'] as List).cast<num>();
+            final e = (decoded['elevations_m'] as List).cast<num>();
+            final n = d.length < e.length ? d.length : e.length;
+            a['elevation_profile'] = [
+              for (int i = 0; i < n; i++) [d[i], e[i]],
+            ];
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
   Future<void> _applyDetails(dynamic details, String name) async {
     projectName = details['name'] as String? ?? name;
     tripStart   = details['trip_start'] as String?;
@@ -1372,6 +1491,7 @@ class ProjectNotifier extends ChangeNotifier
     activities = rawActivities is List
         ? rawActivities.cast<Map<String, dynamic>>()
         : [];
+    await _revealActivities(activities);
     final rawItems = details['items'];
     items = rawItems is List
         ? rawItems.cast<Map<String, dynamic>>()

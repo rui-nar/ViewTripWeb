@@ -83,6 +83,7 @@ _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 from src.models.great_circle import great_circle_points
 from src.project.project_repo import ProjectRepo, _compute_stats
 from src.tile_renderer import get_cached_tile, get_or_build_features, get_or_create_tile
+from src.utils.encryption_check import is_encrypted_envelope
 
 router = APIRouter(prefix="/api/share", tags=["share"])
 
@@ -401,6 +402,10 @@ def _build_features(project) -> List[Dict[str, Any]]:
         if item.item_type == "activity":
             activity = project.activity_by_id(item.activity_id)
             if activity is None:
+                continue
+            if is_encrypted_envelope(activity.summary_polyline):
+                # Encrypted geometry (issue #29) is out of scope for sharing
+                # (issue #28) — skip it entirely, same as "no geometry".
                 continue
 
             if activity.summary_polyline:

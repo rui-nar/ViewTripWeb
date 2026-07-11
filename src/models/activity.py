@@ -59,6 +59,19 @@ class Activity:
     # API; the pre-edit snapshot itself stays DB-only.
     is_edited: bool = False
 
+    # Client-side E2EE ciphertext passthrough (issue #29). start_latlng/end_latlng/
+    # elevation_profile are parsed structures (list/tuple) — they can't carry a
+    # ciphertext envelope string, so when the corresponding DB column
+    # (start_latlng_json/end_latlng_json/elevation_profile_json, or its low-res
+    # copy as a fallback) holds an encrypted envelope instead of parseable JSON,
+    # the parsed field above is left None and the raw envelope is carried here
+    # instead. The client decrypts these, JSON-decodes the recovered plaintext,
+    # and writes the result back into the plain fields (see
+    # flutter_client/lib/src/projects/project_notifier.dart's activity reveal step).
+    start_latlng_enc: Optional[str] = None
+    end_latlng_enc: Optional[str] = None
+    elevation_profile_enc: Optional[str] = None
+
     def to_strava_dict(self) -> dict:
         """Serialise to a dict that can be round-tripped via from_strava_api()."""
         def _iso(dt: datetime) -> str:
@@ -106,6 +119,9 @@ class Activity:
                 "elevations_m": self.elevation_profile[1],
             } if self.elevation_profile else None,
             "is_edited": self.is_edited,
+            "start_latlng_enc": self.start_latlng_enc,
+            "end_latlng_enc": self.end_latlng_enc,
+            "elevation_profile_enc": self.elevation_profile_enc,
         }
 
     def __str__(self) -> str:
@@ -163,4 +179,7 @@ class Activity:
                 else None
             ),
             is_edited=data.get("is_edited", False),
+            start_latlng_enc=data.get("start_latlng_enc"),
+            end_latlng_enc=data.get("end_latlng_enc"),
+            elevation_profile_enc=data.get("elevation_profile_enc"),
         )

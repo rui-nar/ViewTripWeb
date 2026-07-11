@@ -15,6 +15,7 @@ from models.db import get_session
 from models.project_db import DBActivity, DBProjectItem
 from src.models.activity import Activity
 from src.project.elevation_downsample import downsample_elevation
+from src.utils.encryption_check import is_encrypted_envelope
 
 
 def _low_res_ep_json(ep_json: Optional[str]) -> Optional[str]:
@@ -63,13 +64,19 @@ class ActivityMixin:
         summary_polyline: Optional[str],
         elevation_profile_json: Optional[str],
     ) -> None:
-        """Update only the enrichment columns of an activity row."""
+        """Update only the enrichment columns of an activity row.
+
+        Skips a field whose EXISTING value is already a client-side E2EE
+        ciphertext envelope (issue #29) — once a field is encrypted, a
+        background Strava enrichment pass (which only ever has fresh plaintext
+        streams) must not silently overwrite it back to plaintext.
+        """
         row = sess.get(DBActivity, activity_id)
         if row is None:
             return
-        if summary_polyline is not None:
+        if summary_polyline is not None and not is_encrypted_envelope(row.summary_polyline):
             row.summary_polyline = summary_polyline
-        if elevation_profile_json is not None:
+        if elevation_profile_json is not None and not is_encrypted_envelope(row.elevation_profile_json):
             row.elevation_profile_json = elevation_profile_json
             row.elevation_profile_low_res_json = _low_res_ep_json(elevation_profile_json)
         sess.commit()
@@ -361,7 +368,11 @@ class ActivityMixin:
         """Overwrite ALL columns of an existing activity row (used for re-fetch).
 
         If no row exists, inserts a new one.  Unlike ``_upsert_activity``,
-        this always overwrites enrichment columns (polyline, elevation).
+        this always overwrites enrichment columns (polyline, elevation) —
+        EXCEPT any of the six E2EE-in-scope fields (issue #29) whose EXISTING
+        value is already an encrypted envelope: a "force refresh from Strava"
+        still refreshes plaintext stats (distance, counts, ...) normally, but
+        must not clobber ciphertext back to plaintext geometry/name.
         """
         if act.id is None:
             return
@@ -384,7 +395,8 @@ class ActivityMixin:
             return
 
         existing.user_info_id = user_info_id
-        existing.name = act.name
+        if not is_encrypted_envelope(existing.name):
+            existing.name = act.name
         existing.type = act.type
         existing.distance = act.distance
         existing.moving_time = act.moving_time
@@ -416,11 +428,15 @@ class ActivityMixin:
         existing.max_heartrate = act.max_heartrate
         existing.elev_high = act.elev_high
         existing.elev_low = act.elev_low
-        existing.start_latlng_json = json.dumps(act.start_latlng) if act.start_latlng else None
-        existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
-        existing.summary_polyline = act.summary_polyline
-        existing.elevation_profile_json = ep_json
-        existing.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
+        if not is_encrypted_envelope(existing.start_latlng_json):
+            existing.start_latlng_json = json.dumps(act.start_latlng) if act.start_latlng else None
+        if not is_encrypted_envelope(existing.end_latlng_json):
+            existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
+        if not is_encrypted_envelope(existing.summary_polyline):
+            existing.summary_polyline = act.summary_polyline
+        if not is_encrypted_envelope(existing.elevation_profile_json):
+            existing.elevation_profile_json = ep_json
+            existing.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
         sess.commit()
 
     # ------------------------------------------------------------------
@@ -440,13 +456,20 @@ class ActivityMixin:
             return
         existing = sess.get(DBActivity, act.id)
         if existing is not None:
-            # Update mutable user-visible fields always.
-            existing.name = act.name
+            # Update mutable user-visible fields always — except name, once it's
+            # already a client-side E2EE ciphertext envelope (issue #29): a
+            # plain re-sync must not silently overwrite it back to plaintext.
+            if not is_encrypted_envelope(existing.name):
+                existing.name = act.name
             existing.kudos_count = act.kudos_count
             existing.achievement_count = act.achievement_count
             # If the stored polyline is null but the incoming one is not, take
             # the incoming value — the user may have fixed their Strava map
             # privacy and re-synced, or the first sync happened to return null.
+            # Already safe against clobbering ciphertext without an explicit
+            # guard: an encrypted summary_polyline is never None (it's a
+            # non-empty "v1.…" envelope), so this branch can't fire once the
+            # field is encrypted.
             if existing.summary_polyline is None and act.summary_polyline:
                 existing.summary_polyline = act.summary_polyline
             return
@@ -526,6 +549,48 @@ class ActivityMixin:
                 return datetime.now()
             return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
+        # start_latlng_json / end_latlng_json / elevation_profile*_json may hold a
+        # client-side E2EE ciphertext envelope (issue #29) instead of parseable
+        # JSON once the user has encryption enabled. json.loads() on that string
+        # would raise — every project load goes through here, not just geo
+        # endpoints — so treat an encrypted field as absent for the parsed form
+        # (every consumer of start_latlng/end_latlng/elevation_profile already
+        # has a "no geometry" fallback) and surface the raw ciphertext via the
+        # *_enc fields instead, so the client can decrypt + reconstruct it.
+        start_latlng = None
+        start_latlng_enc = None
+        if row.start_latlng_json:
+            if is_encrypted_envelope(row.start_latlng_json):
+                start_latlng_enc = row.start_latlng_json
+            else:
+                start_latlng = json.loads(row.start_latlng_json)
+
+        end_latlng = None
+        end_latlng_enc = None
+        if row.end_latlng_json:
+            if is_encrypted_envelope(row.end_latlng_json):
+                end_latlng_enc = row.end_latlng_json
+            else:
+                end_latlng = json.loads(row.end_latlng_json)
+
+        elevation_profile = None
+        elevation_profile_enc = None
+        if include_heavy and include_elevation and row.elevation_profile_json:
+            if is_encrypted_envelope(row.elevation_profile_json):
+                elevation_profile_enc = row.elevation_profile_json
+            else:
+                ep = json.loads(row.elevation_profile_json)
+                elevation_profile = (ep["distances_km"], ep["elevations_m"])
+
+        elevation_profile_low_res = None
+        elevation_profile_low_res_enc = None
+        if row.elevation_profile_low_res_json:
+            if is_encrypted_envelope(row.elevation_profile_low_res_json):
+                elevation_profile_low_res_enc = row.elevation_profile_low_res_json
+            else:
+                lr = json.loads(row.elevation_profile_low_res_json)
+                elevation_profile_low_res = (lr["distances_km"], lr["elevations_m"])
+
         return Activity(
             id=row.id,
             name=row.name,
@@ -560,24 +625,18 @@ class ActivityMixin:
             display_hide_heartrate_option=row.display_hide_heartrate_option,
             elev_high=row.elev_high,
             elev_low=row.elev_low,
-            start_latlng=json.loads(row.start_latlng_json) if row.start_latlng_json else None,
-            end_latlng=json.loads(row.end_latlng_json) if row.end_latlng_json else None,
+            start_latlng=start_latlng,
+            end_latlng=end_latlng,
             summary_polyline=row.summary_polyline if include_heavy else None,
-            elevation_profile=(
-                (
-                    ep["distances_km"],
-                    ep["elevations_m"],
-                )
-                if include_heavy and include_elevation and (ep := (json.loads(row.elevation_profile_json) if row.elevation_profile_json else None))
-                else None
-            ),
+            elevation_profile=elevation_profile,
             # Always loaded — lightweight, never deferred — so meta/low-res
             # responses can render the chart before the full profile arrives.
-            elevation_profile_low_res=(
-                (lr["distances_km"], lr["elevations_m"])
-                if (lr := (json.loads(row.elevation_profile_low_res_json)
-                           if row.elevation_profile_low_res_json else None))
-                else None
-            ),
+            elevation_profile_low_res=elevation_profile_low_res,
             is_edited=bool(getattr(row, "is_edited", False)),
+            start_latlng_enc=start_latlng_enc,
+            end_latlng_enc=end_latlng_enc,
+            # Prefer the full profile's ciphertext; fall back to the low-res
+            # ciphertext when the full profile is deferred/unavailable — mirrors
+            # ProjectIO.to_dict()'s _ep_pairs() fallback for the plaintext case.
+            elevation_profile_enc=elevation_profile_enc or elevation_profile_low_res_enc,
         )
