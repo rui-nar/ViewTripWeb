@@ -10,6 +10,8 @@ class _FakeAdminService extends AdminService {
   int? adminToggledFor;
   bool? adminToggledTo;
   Object? setAdminError;
+  int? deleteCalledFor;
+  Object? deleteError;
 
   @override
   Future<Map<String, dynamic>> getStats() async => {
@@ -26,7 +28,13 @@ class _FakeAdminService extends AdminService {
             'id': 1, 'email': 'a@x.com', 'display_name': 'Alice',
             'auth_provider': 'local', 'created_at': 1700000000,
             'project_count': 2, 'activity_count': 10, 'memory_count': 3,
-            'storage_bytes': 1024, 'encryption_tier': 'high',
+            'storage_bytes': 1024, 'encryption_tier': 'high', 'is_admin': false,
+          },
+          {
+            'id': 2, 'email': 'b@x.com', 'display_name': 'Bob',
+            'auth_provider': 'local', 'created_at': 1700000000,
+            'project_count': 1, 'activity_count': 1, 'memory_count': 0,
+            'storage_bytes': 0, 'encryption_tier': 'none', 'is_admin': true,
           },
         ],
       };
@@ -49,6 +57,12 @@ class _FakeAdminService extends AdminService {
     if (setAdminError != null) throw setAdminError!;
     adminToggledFor = userInfoId;
     adminToggledTo = isAdmin;
+  }
+
+  @override
+  Future<void> deleteUser(int userInfoId) async {
+    if (deleteError != null) throw deleteError!;
+    deleteCalledFor = userInfoId;
   }
 }
 
@@ -86,6 +100,15 @@ void main() {
     expect(find.text('3'), findsWidgets); // user total
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('high'), findsWidgets); // tier chip
+    // Bob is admin, Alice isn't: exactly one shield icon in the table.
+    expect(find.byIcon(Icons.shield), findsOneWidget);
+  });
+
+  testWidgets('tier chip carries an explanatory tooltip', (tester) async {
+    await _pump(tester, AdminScreen(service: _FakeAdminService()));
+    final tooltip = tester.widget<Tooltip>(
+        find.ancestor(of: find.text('high'), matching: find.byType(Tooltip)).first);
+    expect(tooltip.message, contains('Zero-knowledge'));
   });
 
   testWidgets('reset is enabled for None/Low, disabled for Medium/High',
@@ -154,6 +177,87 @@ void main() {
     expect(find.text('You cannot remove your own admin access.'), findsOneWidget);
     // Label stays as-is since the call failed.
     expect(find.widgetWithText(OutlinedButton, 'Remove admin'), findsOneWidget);
+  });
+
+  testWidgets('search row shows a shield icon for an admin user', (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {'id': 22, 'email': 'admin2@x.com', 'display_name': 'Admin Two',
+         'encryption_tier': 'none', 'is_admin': true},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+    await tester.enterText(find.byType(TextField), 'admin2');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    // One shield for Bob (admin, in the Users table from getStats) + one for
+    // this search result.
+    expect(find.byIcon(Icons.shield), findsNWidgets(2));
+  });
+
+  testWidgets('delete user prompts for confirmation, cancel makes no call',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {'id': 40, 'email': 'del@x.com', 'display_name': 'Deleteme',
+         'encryption_tier': 'none', 'is_admin': false},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+    await tester.enterText(find.byType(TextField), 'del');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete user?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(svc.deleteCalledFor, isNull);
+    expect(find.text('Deleteme'), findsOneWidget); // row still present
+  });
+
+  testWidgets('delete user confirmed removes the row and calls the service',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {'id': 41, 'email': 'del2@x.com', 'display_name': 'Deleteme2',
+         'encryption_tier': 'none', 'is_admin': false},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+    await tester.enterText(find.byType(TextField), 'del2');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(svc.deleteCalledFor, 41);
+    expect(find.text('Deleteme2'), findsNothing); // row removed
+  });
+
+  testWidgets('delete user failure (e.g. self-delete 409) surfaces a snackbar',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..deleteError = Exception('You cannot delete your own account here.')
+      ..searchResult = [
+        {'id': 42, 'email': 'me2@x.com', 'display_name': 'MeToo',
+         'encryption_tier': 'none', 'is_admin': false},
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+    await tester.enterText(find.byType(TextField), 'me2');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('You cannot delete your own account here.'), findsOneWidget);
+    expect(find.text('MeToo'), findsOneWidget); // row stays since the call failed
   });
 
   testWidgets('search row stays readable (no per-character wrap) on a narrow width',
