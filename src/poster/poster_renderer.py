@@ -33,6 +33,7 @@ from src.poster.tile_stitcher import (
     crop_rect_for_bounds,
     lonlat_to_pixel,
     render_basemap,
+    tile_range_for_bounds,
     zoom_for_target_size,
 )
 from src.project.project_repo import ProjectRepo
@@ -131,13 +132,21 @@ class _Projector:
         self.tile_size = tile_size
         self.zoom = zoom_for_target_size(bounds, target_w, target_h, tile_size, max_zoom)
         left, top, right, bottom = crop_rect_for_bounds(bounds, self.zoom, tile_size)
+        # crop_rect_for_bounds returns a rect relative to the stitched tile
+        # canvas's own origin (the NW corner of tile (x_min, y_min)), not to
+        # the absolute world-pixel frame lonlat_to_pixel returns points in —
+        # fold that origin in here so self.crop_left/crop_top are absolute
+        # world-pixel offsets, matching project()'s px/py.
+        x_min, _, y_min, _ = tile_range_for_bounds(bounds, self.zoom, tile_size)
+        origin_x = x_min * tile_size
+        origin_y = y_min * tile_size
         # round() the crop box exactly like render_basemap does before it
         # crops, or the resize scale below would be a fraction of a percent
         # off from the basemap's actual crop.
-        self.crop_left = round(left)
-        self.crop_top = round(top)
-        crop_w = round(right) - self.crop_left
-        crop_h = round(bottom) - self.crop_top
+        self.crop_left = origin_x + round(left)
+        self.crop_top = origin_y + round(top)
+        crop_w = round(right) - round(left)
+        crop_h = round(bottom) - round(top)
         self.scale_x = target_w / crop_w
         self.scale_y = target_h / crop_h
 

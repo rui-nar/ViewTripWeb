@@ -21,6 +21,8 @@ import models.db as db_module
 from models.project_db import DBProject
 from models.user import UserInfo
 from src.poster.poster_renderer import (
+    _PIN_COLOR,
+    _Projector,
     _pdf_resolution,
     _target_size,
     assemble_card_content,
@@ -149,6 +151,54 @@ def test_pdf_resolution_is_close_to_150_dpi_for_both_orientations():
     assert _pdf_resolution(w, "portrait") == pytest.approx(150.0, abs=0.1)
 
 
+# ── _Projector ────────────────────────────────────────────────────────────────
+# Regression coverage for a real bug found during manual end-to-end testing:
+# _Projector subtracted crop_rect_for_bounds' offset (relative to the stitched
+# tile canvas's own origin) directly from lonlat_to_pixel's *absolute*
+# world-pixel coordinates, without first subtracting the tile canvas's origin
+# (x_min * tile_size). For any bounding box far from the (0, 0) world-pixel
+# origin — i.e. almost any real trip — this placed every projected pin/route
+# point hundreds of thousands of pixels off-canvas, so every memory silently
+# overflowed to the legend and nothing but the legend text ever appeared in
+# the rendered image. The existing golden-path test below never caught this
+# because it only checked file existence/size, not pixel content.
+
+# A multi-country-scale box (unlike the tight ~0.1°-square _PARIS_BOUNDS used
+# elsewhere in this file) — this is the shape of box that actually exposed the
+# bug in manual testing, since the world-pixel origin offset grows with how
+# far the box's tile range sits from world-pixel (0, 0).
+_FRANCE_BOUNDS = {"north": 49.0, "south": 45.5, "east": 5.0, "west": 2.0}
+
+
+@pytest.mark.parametrize("bounds", [_PARIS_BOUNDS, _FRANCE_BOUNDS])
+@pytest.mark.parametrize("target_w, target_h", [(7022, 4967), (4967, 7022)])
+def test_projector_places_points_within_bounds_inside_the_canvas(bounds, target_w, target_h):
+    projector = _Projector(bounds, target_w, target_h)
+    # Points strictly inside the bounds (not exactly on an edge) should
+    # project well within the canvas, not thousands of pixels outside it.
+    mid_lon = (bounds["west"] + bounds["east"]) / 2
+    mid_lat = (bounds["south"] + bounds["north"]) / 2
+    for lon, lat in [
+        (mid_lon, mid_lat),
+        (bounds["west"] + 0.01, bounds["north"] - 0.01),  # near NW corner
+        (bounds["east"] - 0.01, bounds["south"] + 0.01),  # near SE corner
+    ]:
+        x, y = projector.project(lon, lat)
+        assert -1 <= x <= target_w + 1, f"x={x} escaped canvas width {target_w}"
+        assert -1 <= y <= target_h + 1, f"y={y} escaped canvas height {target_h}"
+
+
+def test_projector_orders_points_geographically_nw_before_se():
+    """A point near the bounds' NW corner should project to a smaller (x, y)
+    than one near the SE corner — catches an origin computed with the wrong
+    sign/axis, not just one that's merely out of range."""
+    projector = _Projector(_FRANCE_BOUNDS, 7022, 4967)
+    nw_x, nw_y = projector.project(_FRANCE_BOUNDS["west"] + 0.1, _FRANCE_BOUNDS["north"] - 0.1)
+    se_x, se_y = projector.project(_FRANCE_BOUNDS["east"] - 0.1, _FRANCE_BOUNDS["south"] + 0.1)
+    assert nw_x < se_x
+    assert nw_y < se_y
+
+
 # ── Golden-path render_poster test ───────────────────────────────────────────
 
 @pytest.fixture
@@ -208,6 +258,17 @@ def test_render_poster_writes_png_and_pdf_at_expected_size(tmp_path, project_id)
 
     with Image.open(png_path) as img:
         assert img.size == _target_size("landscape")
+        # At least one pin should actually land on the canvas (regression
+        # coverage for the _Projector origin bug above: a mis-projected pin
+        # draws off-canvas and is silently a no-op, leaving the image with no
+        # pin-colored pixels anywhere).
+        pixels = img.load()
+        w, h = img.size
+        assert any(
+            pixels[x, y][:3] == _PIN_COLOR
+            for x in range(0, w, 8)
+            for y in range(0, h, 8)
+        ), "no pin-colored pixel found anywhere in the rendered poster"
 
     # Some stage progress should have reached the caller beyond a single
     # "rendering" label.
