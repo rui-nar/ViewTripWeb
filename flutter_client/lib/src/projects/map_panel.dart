@@ -262,6 +262,71 @@ List<Marker> _buildActivityMarkersFromGeo(
   ];
 }
 
+/// Owner-only encounter pins (issue #40). Tapping opens the person/group
+/// sheet. Shared by [ManageMapPanelState] and the (owner-only, gated)
+/// view-mode [_MapPanelState] (issue #71) so the pin-classification logic
+/// isn't duplicated between the two maps.
+List<Marker> buildEncounterMarkers(
+  List<Map<String, dynamic>> items,
+  BuildContext context,
+  ProjectNotifier notifier,
+) {
+  // Lookups for pin classification: a grouped person's encounter shows the
+  // group ("People") icon (the individual is masked); an ungrouped person
+  // shows a person icon (issue #50).
+  final peopleById = {
+    for (final p in notifier.people)
+      if (p['id'] is int) p['id'] as int: p,
+  };
+  final groupsById = {
+    for (final g in notifier.groups)
+      if (g['id'] is int) g['id'] as int: g,
+  };
+
+  final markers = <Marker>[];
+  for (final item in items) {
+    if (item['item_type'] != 'encounter') continue;
+    final e = item['encounter'] as Map<String, dynamic>?;
+    if (e == null) continue;
+    final lat = (e['lat'] as num?)?.toDouble();
+    final lon = (e['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) continue;
+
+    final pin = classifyEncounterPin(
+        (e['person_id'] as num?)?.toInt(), (e['group_id'] as num?)?.toInt(),
+        peopleById, groupsById);
+    final isGroup = pin?.kind == 'group';
+    markers.add(Marker(
+      point: LatLng(lat, lon),
+      width: 22,
+      height: 22,
+      child: GestureDetector(
+        onTap: pin == null
+            ? null
+            : () {
+                if (isGroup) {
+                  showGroupDetailSheet(context, notifier, pin.entity);
+                } else {
+                  showPersonDetailSheet(context, notifier, pin.entity);
+                }
+              },
+        child: Container(
+          decoration: BoxDecoration(
+            color: kAccent,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: Center(
+            child: Icon(isGroup ? Icons.groups : Icons.person,
+                size: 12, color: Colors.white),
+          ),
+        ),
+      ),
+    ));
+  }
+  return markers;
+}
+
 // ── MapPanel ──────────────────────────────────────────────────────────────────
 
 class MapPanel extends StatefulWidget {
@@ -291,6 +356,12 @@ class MapPanel extends StatefulWidget {
   final double? initialLng;
   final double? initialZoom;
 
+  /// Owner-only encounter pins + toggle (issue #71). Defaults to `false` so
+  /// the public/shared map (which reuses this same widget) never renders
+  /// encounters — they are strictly owner-only PII (see docs/ENCOUNTERS.md).
+  /// Only the owner-authenticated view-mode screen should ever pass `true`.
+  final bool showEncounters;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -304,6 +375,7 @@ class MapPanel extends StatefulWidget {
     this.initialLat,
     this.initialLng,
     this.initialZoom,
+    this.showEncounters = false,
   });
 
   @override
@@ -334,7 +406,9 @@ class _MapPanelState extends State<MapPanel> {
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
+  List<Marker> _cachedEncounterMarkers = [];
   bool _showMemories = true;
+  bool _showEncounters = true;
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
 
@@ -805,6 +879,9 @@ class _MapPanelState extends State<MapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId, hasSelection, context);
+      _cachedEncounterMarkers = widget.showEncounters
+          ? buildEncounterMarkers(items, context, notifier)
+          : const [];
       // Auto-zoom to selection (issue #34). Previously this always did
       // `_fittedBounds = false` on any selection change, which re-fit the map to
       // the WHOLE trip every time — so view mode "reset to full trip zoom"
@@ -928,6 +1005,9 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedMemoryMarkers),
             if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedJournalMarkers),
+            if (widget.showEncounters && _showEncounters &&
+                _cachedEncounterMarkers.isNotEmpty)
+              MarkerLayer(markers: _cachedEncounterMarkers),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -972,27 +1052,47 @@ class _MapPanelState extends State<MapPanel> {
         ),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
-        if (_cachedMemoryMarkers.isNotEmpty)
+        if (_cachedMemoryMarkers.isNotEmpty ||
+            (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty))
           Positioned(
             top: 12,
             left: 12,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  'Memories',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.white,
+                if (_cachedMemoryMarkers.isNotEmpty) ...[
+                  Text(
+                    'Memories',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.white,
+                    ),
                   ),
-                ),
-                Transform.scale(
-                  scale: 0.7, // Adjust this value to set the size
-                  child: Switch(
-                    value: _showMemories,
-                    onChanged: (v) => setState(() => _showMemories = v),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  Transform.scale(
+                    scale: 0.7, // Adjust this value to set the size
+                    child: Switch(
+                      value: _showMemories,
+                      onChanged: (v) => setState(() => _showMemories = v),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
                   ),
-                ),
+                ],
+                if (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty) ...[
+                  if (_cachedMemoryMarkers.isNotEmpty) const SizedBox(width: 12),
+                  Text(
+                    'Encounters',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.white,
+                    ),
+                  ),
+                  Transform.scale(
+                    scale: 0.7,
+                    child: Switch(
+                      value: _showEncounters,
+                      onChanged: (v) => setState(() => _showEncounters = v),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1238,67 +1338,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             ),
             child: const Center(
               child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
-            ),
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
-
-  /// Owner-only encounter pins (issue #40). Tapping opens the person sheet.
-  List<Marker> _buildEncounterMarkers(
-    List<Map<String, dynamic>> items,
-    BuildContext context,
-  ) {
-    // Lookups for pin classification: a grouped person's encounter shows the
-    // group ("People") icon (the individual is masked); an ungrouped person
-    // shows a person icon (issue #50).
-    final peopleById = {
-      for (final p in widget.notifier.people)
-        if (p['id'] is int) p['id'] as int: p,
-    };
-    final groupsById = {
-      for (final g in widget.notifier.groups)
-        if (g['id'] is int) g['id'] as int: g,
-    };
-
-    final markers = <Marker>[];
-    for (final item in items) {
-      if (item['item_type'] != 'encounter') continue;
-      final e = item['encounter'] as Map<String, dynamic>?;
-      if (e == null) continue;
-      final lat = (e['lat'] as num?)?.toDouble();
-      final lon = (e['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-
-      final pin = classifyEncounterPin(
-          (e['person_id'] as num?)?.toInt(), (e['group_id'] as num?)?.toInt(),
-          peopleById, groupsById);
-      final isGroup = pin?.kind == 'group';
-      markers.add(Marker(
-        point: LatLng(lat, lon),
-        width: 22,
-        height: 22,
-        child: GestureDetector(
-          onTap: pin == null
-              ? null
-              : () {
-                  if (isGroup) {
-                    showGroupDetailSheet(context, widget.notifier, pin.entity);
-                  } else {
-                    showPersonDetailSheet(context, widget.notifier, pin.entity);
-                  }
-                },
-          child: Container(
-            decoration: BoxDecoration(
-              color: kAccent,
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white, width: 2),
-            ),
-            child: Center(
-              child: Icon(isGroup ? Icons.groups : Icons.person,
-                  size: 12, color: Colors.white),
             ),
           ),
         ),
@@ -1678,7 +1717,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId2, hasSelection, context);
-      _cachedEncounterMarkers = _buildEncounterMarkers(items, context);
+      _cachedEncounterMarkers = buildEncounterMarkers(items, context, widget.notifier);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.

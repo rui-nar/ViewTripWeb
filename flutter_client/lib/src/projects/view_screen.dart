@@ -419,6 +419,9 @@ class _ViewLayout extends StatelessWidget {
       initialLat: initialLat,
       initialLng: initialLng,
       initialZoom: initialZoom,
+      // Owner-only — this screen is authenticated, unlike shared_project_screen.dart
+      // which reuses MapPanel for public/unauthenticated links (issue #71).
+      showEncounters: true,
     );
 
     return Column(
