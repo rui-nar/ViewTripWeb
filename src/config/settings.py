@@ -16,6 +16,9 @@ class Config:
             "client_secret": "",
             "redirect_uri": "http://localhost:8000/callback",
         },
+        "mapbox": {
+            "token": "",
+        },
         "app": {
             "debug": False,
             "log_level": "INFO",

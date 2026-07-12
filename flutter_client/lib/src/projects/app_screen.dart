@@ -3,8 +3,10 @@
 library;
 
 // dart:html is intentional — ViewTripWeb targets Flutter Web only.
+import 'dart:async' show unawaited;
 import 'dart:html' as html;
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart' show LatLngBounds;
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
@@ -22,6 +24,8 @@ import 'map_panel.dart';
 import 'project_add_fab.dart';
 import 'image_export.dart';
 import 'image_download.dart';
+import 'poster_config_dialog.dart';
+import 'poster_job_notifier.dart';
 import 'social_share_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
@@ -66,6 +70,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
   bool _isExporting = false;
+
+  // Poster generation flow (issue #14, unit F) — frame-picker overlay toggle.
+  bool _framePickerActive = false;
 
   // Highlighted point set when the user taps an encounter's place icon
   // (issue #72); cleared on the next unrelated map tap/selection.
@@ -213,6 +220,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             ),
           ),
           SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop('poster'),
+            child: const ListTile(
+              leading: Icon(Icons.map),
+              title: Text('Generate poster…'),
+              subtitle: Text('High-resolution A0 poster (PNG/PDF)'),
+            ),
+          ),
+          SimpleDialogOption(
             onPressed: () => Navigator.of(ctx).pop(),
             child: const ListTile(
               leading: Icon(Icons.close),
@@ -233,6 +248,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       await _downloadFile('/api/projects/$enc/export-zip', '$name.zip');
     } else if (choice == 'image') {
       await _exportImage();
+    } else if (choice == 'poster') {
+      setState(() => _framePickerActive = true);
     }
   }
 
@@ -273,6 +290,58 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
+  }
+
+  // ── Poster generation flow (issue #14, unit F) ────────────────────────────
+  // Frame picker (region + orientation) -> config dialog (which sections to
+  // include) -> job dialog (progress, then Download PNG/PDF).
+
+  void _cancelFramePicker() {
+    if (!mounted) return;
+    setState(() => _framePickerActive = false);
+  }
+
+  Future<void> _onFrameConfirmed(LatLngBounds bounds, String orientation) async {
+    if (!mounted) return;
+    setState(() => _framePickerActive = false);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PosterConfigDialog(
+        onConfirm: (opts) => _startPosterJob(bounds, orientation, opts),
+      ),
+    );
+  }
+
+  Future<void> _startPosterJob(
+      LatLngBounds bounds, String orientation, PosterConfigOptions opts) async {
+    if (!mounted) return;
+    final notifier = context.read<ProjectNotifier>();
+    final memories = [
+      for (final item in notifier.items)
+        if (item['item_type'] == 'memory' && item['memory'] is Map)
+          posterMemoryJson(
+              (item['memory'] as Map).cast<String, dynamic>()),
+    ];
+
+    final job = PosterJobNotifier(projectName: widget.projectName);
+    unawaited(showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => ChangeNotifierProvider.value(
+        value: job,
+        child: _PosterJobDialog(
+          projectName: widget.projectName,
+          onDownload: _downloadFile,
+        ),
+      ),
+    ));
+    await job.start(
+      bounds: posterBoundsFromLatLngBounds(bounds),
+      orientation: orientation,
+      config: opts.toJson(),
+      memories: memories,
+    );
   }
 
   void _openSyncDialog(BuildContext context) {
@@ -704,6 +773,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           ),
                         )),
                       ),
+                      if (_framePickerActive)
+                        FramePickerOverlay(
+                          mapController: _mapController,
+                          onNext: _onFrameConfirmed,
+                          onCancel: _cancelFramePicker,
+                        ),
                     ],
                   ),
                 ),
@@ -798,6 +873,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   ),
                 ),
 
+                if (_framePickerActive)
+                  FramePickerOverlay(
+                    mapController: _mapController,
+                    onNext: _onFrameConfirmed,
+                    onCancel: _cancelFramePicker,
+                  ),
+
               ],
             );
           }
@@ -805,6 +887,77 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       )),
         ],
       ),
+    );
+  }
+}
+
+/// Progress/result dialog for a poster generation job (issue #14, unit F).
+/// Shows a [LinearProgressIndicator] + stage label while the job is pending/
+/// running (styled like `sync_import_dialog.dart`'s `_BottomBar`), an error
+/// message on failure, or "Download PNG"/"Download PDF" buttons once done.
+class _PosterJobDialog extends StatelessWidget {
+  final String projectName;
+  final void Function(String apiPath, String fallbackFilename) onDownload;
+
+  const _PosterJobDialog({required this.projectName, required this.onDownload});
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<PosterJobNotifier>(
+      builder: (context, n, __) {
+        return AlertDialog(
+          title: const Text('Generate poster'),
+          content: SizedBox(
+            width: 360,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (n.isBusy) ...[
+                  const LinearProgressIndicator(),
+                  const SizedBox(height: 8),
+                  Text(
+                    n.stage ?? 'Starting…',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ] else if (n.isFailed) ...[
+                  Text(
+                    n.error ?? 'Poster generation failed.',
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    textAlign: TextAlign.center,
+                  ),
+                ] else if (n.isDone) ...[
+                  const Text('Your poster is ready.'),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                        onPressed: () => onDownload(
+                            n.downloadPath('png'), '$projectName-poster.png'),
+                        child: const Text('Download PNG'),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                        onPressed: () => onDownload(
+                            n.downloadPath('pdf'), '$projectName-poster.pdf'),
+                        child: const Text('Download PDF'),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
     );
   }
 }

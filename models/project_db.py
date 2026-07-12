@@ -384,6 +384,32 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     )
 
 
+class DBPosterJob(sqlmodel.SQLModel, table=True):
+    """An async server-side A0 poster-generation job for a project (issue #14).
+
+    Created with status="pending" by POST /api/projects/{name}/poster and
+    advanced by the background runner (src/poster/poster_job_runner.py) through
+    "running" to a terminal "done"/"failed" state. ``request_json`` is the
+    original request body (bounds/orientation/config/memories) so the runner —
+    and later units that replace what it renders — can read the parameters back
+    out from the job id alone.
+    """
+
+    __tablename__ = "posterjob"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    status: str = sqlmodel.Field(default="pending")  # pending | running | done | failed
+    stage: Optional[str] = sqlmodel.Field(default=None)  # human-readable progress label
+    error_message: Optional[str] = sqlmodel.Field(default=None)
+    request_json: str = sqlmodel.Field(default="{}")  # bounds/orientation/config/memories
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+    completed_at: Optional[float] = sqlmodel.Field(default=None)
+    result_png_path: Optional[str] = sqlmodel.Field(default=None)
+    result_pdf_path: Optional[str] = sqlmodel.Field(default=None)
+
+
 class DBShareVisit(sqlmodel.SQLModel, table=True):
     """One visitor record for a shared-project link.
 

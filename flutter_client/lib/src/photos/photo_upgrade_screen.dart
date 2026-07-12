@@ -282,6 +282,7 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
                 const Icon(Icons.check_circle, color: kSuccess)
               else if (!hasPick)
                 OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
                   icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
                   label: const Text('Select picture'),
                   onPressed: busy ? null : () => _pickForRow(row),
@@ -300,6 +301,7 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
                   ),
                   const SizedBox(width: 6),
                   ElevatedButton(
+                    style: ElevatedButton.styleFrom(minimumSize: const Size(0, 36)),
                     onPressed: busy ? null : () => _confirm(row),
                     child: busy
                         ? const SizedBox(

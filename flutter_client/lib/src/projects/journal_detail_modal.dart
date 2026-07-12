@@ -593,6 +593,7 @@ class _JournalDetailModalState extends State<_JournalDetailModal> {
             style: OutlinedButton.styleFrom(
               foregroundColor: _kRed,
               side: const BorderSide(color: _kRed),
+              minimumSize: const Size(0, 36),
             ),
             icon: const Icon(Icons.delete_outline, size: 16),
             label: const Text('Delete'),
@@ -603,6 +604,7 @@ class _JournalDetailModalState extends State<_JournalDetailModal> {
             style: ElevatedButton.styleFrom(
               backgroundColor: _kBlueFill,
               foregroundColor: Colors.white,
+              minimumSize: const Size(0, 36),
             ),
             icon: const Icon(Icons.edit_outlined, size: 16),
             label: const Text('Continue writing'),

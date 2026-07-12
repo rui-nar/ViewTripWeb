@@ -1,6 +1,7 @@
 library;
 
 import 'dart:math' show pow;
+import 'dart:ui' as ui show Path, PathFillType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -2231,6 +2232,181 @@ class ManageMapPanelState extends State<ManageMapPanel> {
 }
 
 // ── _StatChip ─────────────────────────────────────────────────────────────────
+
+// ── Poster frame picker (issue #14, unit F) ──────────────────────────────────
+//
+// A fixed-aspect-ratio frame overlaid on the map to preview what an A0 poster
+// export will capture. The user pans/zooms the real map underneath the frame
+// using normal map gestures — the frame itself is wrapped in [IgnorePointer]
+// and never intercepts touches or drags. Confirming ("Next") reads the map's
+// current viewport bounds (`camera.visibleBounds`) as the capture region (see
+// [posterBoundsFromLatLngBounds]) — the map viewport is generally a different
+// aspect ratio than the drawn frame, so this is a v1 approximation rather than
+// a pixel-exact crop of the frame rectangle.
+
+/// A0 paper aspect ratio (width / height) in portrait orientation (841×1189 mm).
+const double kA0PortraitAspect = 841 / 1189;
+
+/// The frame rectangle centered in [size] with the given orientation's A0
+/// aspect ratio, inset by [padding] on all sides (shrunk to fit if needed).
+@visibleForTesting
+Rect frameRectFor(Size size, String orientation, {double padding = 32}) {
+  final aspect =
+      orientation == 'portrait' ? kA0PortraitAspect : 1 / kA0PortraitAspect;
+  final maxW = (size.width - padding * 2).clamp(0.0, size.width);
+  final maxH = (size.height - padding * 2).clamp(0.0, size.height);
+  double w = maxW;
+  double h = w / aspect;
+  if (h > maxH) {
+    h = maxH;
+    w = h * aspect;
+  }
+  final left = (size.width - w) / 2;
+  final top = (size.height - h) / 2;
+  return Rect.fromLTWH(left, top, w, h);
+}
+
+/// Converts the map's current viewport bounds to the `{north, south, east,
+/// west}` shape the poster API's `bounds` request field expects. Used by
+/// `app_screen.dart` when the frame picker's "Next" is confirmed.
+Map<String, double> posterBoundsFromLatLngBounds(LatLngBounds bounds) => {
+      'north': bounds.north,
+      'south': bounds.south,
+      'east': bounds.east,
+      'west': bounds.west,
+    };
+
+class _FrameMaskPainter extends CustomPainter {
+  final Rect frameRect;
+  final Color maskColor;
+  final Color borderColor;
+
+  const _FrameMaskPainter({
+    required this.frameRect,
+    required this.maskColor,
+    required this.borderColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = ui.Path()
+      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..addRect(frameRect)
+      ..fillType = ui.PathFillType.evenOdd;
+    canvas.drawPath(path, Paint()..color = maskColor);
+    canvas.drawRect(
+      frameRect,
+      Paint()
+        ..color = borderColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _FrameMaskPainter oldDelegate) =>
+      oldDelegate.frameRect != frameRect ||
+      oldDelegate.maskColor != maskColor ||
+      oldDelegate.borderColor != borderColor;
+}
+
+/// Dimmed-mask + fixed-aspect-ratio frame overlay for picking the poster
+/// capture region (issue #14). Placed as a `Stack` sibling on top of a live
+/// [ManageMapPanel] by the parent screen (`app_screen.dart`) when the poster
+/// flow is active — see that file for the on/off toggle wiring.
+class FramePickerOverlay extends StatefulWidget {
+  final AnimatedMapController mapController;
+
+  /// Invoked with the map's current viewport bounds and the chosen
+  /// orientation ('landscape'/'portrait') when the user taps "Next".
+  final void Function(LatLngBounds bounds, String orientation) onNext;
+  final VoidCallback onCancel;
+
+  const FramePickerOverlay({
+    super.key,
+    required this.mapController,
+    required this.onNext,
+    required this.onCancel,
+  });
+
+  @override
+  State<FramePickerOverlay> createState() => _FramePickerOverlayState();
+}
+
+class _FramePickerOverlayState extends State<FramePickerOverlay> {
+  String _orientation = 'landscape';
+
+  void _toggleOrientation() => setState(() =>
+      _orientation = _orientation == 'landscape' ? 'portrait' : 'landscape');
+
+  void _confirm() {
+    final bounds = widget.mapController.mapController.camera.visibleBounds;
+    widget.onNext(bounds, _orientation);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return LayoutBuilder(builder: (context, constraints) {
+      final size = Size(constraints.maxWidth, constraints.maxHeight);
+      final frameRect = frameRectFor(size, _orientation);
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _FrameMaskPainter(
+                  frameRect: frameRect,
+                  maskColor: const Color(0x99000000),
+                  borderColor: Colors.white,
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 24,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: cs.surface.withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: kShadow2(Theme.of(context).brightness),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: _orientation == 'landscape'
+                          ? 'Switch to portrait'
+                          : 'Switch to landscape',
+                      icon: Icon(_orientation == 'landscape'
+                          ? Icons.crop_landscape
+                          : Icons.crop_portrait),
+                      onPressed: _toggleOrientation,
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton(
+                      onPressed: widget.onCancel,
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 4),
+                    FilledButton(
+                      onPressed: _confirm,
+                      child: const Text('Next'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    });
+  }
+}
 
 // ── MobileActivityPanelOverlay ───────────────────────────────────────────────
 // Slide-in activity panel for narrow (mobile) layout. Rendered as a Material
