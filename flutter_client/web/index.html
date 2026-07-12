@@ -59,6 +59,73 @@
 </head>
 <body>
   <div id="fl-loading"></div>
+
+  <!--
+    Android PWA black-screen recovery.
+
+    Flutter web (CanvasKit renderer) paints through a WebGL context. On Android
+    Chrome, when an installed PWA is backgrounded, the OS/Chromium can reclaim
+    that context; Flutter's own restore logic is unreliable and often leaves the
+    canvas permanently black until a full reload. This is a long-standing engine
+    issue (flutter/flutter#164879, #75914, #50721) with no build-flag fix, so we
+    recover with a plain reload from outside the engine.
+  -->
+  <script>
+    (function () {
+      let reloadScheduled = false;
+
+      function scheduleReload() {
+        if (reloadScheduled) return;
+        reloadScheduled = true;
+        // Give Flutter's own context-restore attempt a moment first; we don't try
+        // to detect whether it actually succeeded (no reliable way to check a real
+        // repaint happened from outside the engine), just reload after a delay.
+        setTimeout(function () { location.reload(); }, 3000);
+      }
+
+      var instrumentedCanvases = new WeakSet();
+
+      function instrument(canvas) {
+        if (instrumentedCanvases.has(canvas)) return;
+        instrumentedCanvases.add(canvas);
+        // No preventDefault(): leave Flutter's own restore attempt alone, this
+        // listener is only a backstop for when that attempt doesn't work.
+        canvas.addEventListener('webglcontextlost', scheduleReload);
+      }
+
+      function collectCanvases(root, out) {
+        root.querySelectorAll('canvas').forEach(function (canvas) { out.push(canvas); });
+        // Flutter's host elements (flutter-view / flt-glass-pane) may attach a
+        // shadow root, so descend into any we find too.
+        root.querySelectorAll('*').forEach(function (el) {
+          if (el.shadowRoot) collectCanvases(el.shadowRoot, out);
+        });
+      }
+
+      // Poll instead of a one-shot query: Flutter can create/replace canvas
+      // elements (and shadow roots) throughout the page's lifetime.
+      setInterval(function () {
+        var canvases = [];
+        collectCanvases(document, canvases);
+        canvases.forEach(instrument);
+      }, 2000);
+
+      // Fallback safety net: some Android/Chromium combos never fire
+      // webglcontextlost even though the surface ends up dead, so also reload
+      // after a long-enough backgrounding period.
+      var hiddenAt = null;
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          hiddenAt = Date.now();
+        } else if (hiddenAt !== null) {
+          var hiddenMs = Date.now() - hiddenAt;
+          hiddenAt = null;
+          if (hiddenMs >= 120000) scheduleReload();
+        }
+      });
+    })();
+  </script>
+
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
