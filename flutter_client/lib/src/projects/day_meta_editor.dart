@@ -99,37 +99,6 @@ class _DayContext {
   }
 }
 
-/// Calendar day-of-trip numbering for the hero, matching the activity-panel
-/// headers: day N = whole days from the trip start (gaps counted), total = span
-/// to the last day present. Sort-order independent (uses min/max, not index).
-/// [tripStart] is the optional explicit override (ISO `yyyy-MM-dd`); otherwise
-/// the earliest day in [orderedDateKeys] is the start.
-({int dayNumber, int totalDays}) dayTripNumbering(
-  String dateKey,
-  List<String> orderedDateKeys,
-  String? tripStart,
-) {
-  final thisDate = DateTime.tryParse(dateKey) ?? DateTime.now();
-  DateTime dayOnly(DateTime d) => DateTime.utc(d.year, d.month, d.day);
-  final keyDates = orderedDateKeys
-      .map(DateTime.tryParse)
-      .whereType<DateTime>()
-      .toList();
-  final earliest = keyDates.isEmpty
-      ? thisDate
-      : keyDates.reduce((a, b) => a.isBefore(b) ? a : b);
-  final latest = keyDates.isEmpty
-      ? thisDate
-      : keyDates.reduce((a, b) => a.isAfter(b) ? a : b);
-  final startOverride =
-      tripStart != null ? DateTime.tryParse(tripStart) : null;
-  final startUtc = dayOnly(startOverride ?? earliest);
-  return (
-    dayNumber: dayOnly(thisDate).difference(startUtc).inDays + 1,
-    totalDays: dayOnly(latest).difference(startUtc).inDays + 1,
-  );
-}
-
 // ── Dialog wrapper — stateful for prev/next navigation ─────────────────────
 
 class _DayMetaDialogWrapper extends StatefulWidget {
