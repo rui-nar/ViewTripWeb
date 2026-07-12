@@ -1,8 +1,3 @@
-/// Guards issue #71 (owner sees encounter pins + toggle on the view-mode map)
-/// and, more importantly, the privacy regression it must never introduce:
-/// `MapPanel` is reused by the public/unauthenticated share screen
-/// (shared_project_screen.dart), so encounters must stay invisible there
-/// (see docs/ENCOUNTERS.md — people/encounters are owner-only PII).
 import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +35,11 @@ Future<void> _pump(WidgetTester tester, MapPanel panel) async {
   await tester.pump();
 }
 
+/// Guards issue #71 (owner sees encounter pins + toggle on the view-mode map)
+/// and, more importantly, the privacy regression it must never introduce:
+/// `MapPanel` is reused by the public/unauthenticated share screen
+/// (shared_project_screen.dart), so encounters must stay invisible there
+/// (see docs/ENCOUNTERS.md — people/encounters are owner-only PII).
 void main() {
   testWidgets(
       'showEncounters:true renders the encounter pin and the Encounters toggle',
