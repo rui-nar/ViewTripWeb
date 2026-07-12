@@ -4,6 +4,7 @@ Routes:
     POST /api/projects/{name}/poster                    — start a poster job
     GET  /api/projects/{name}/poster/{job_id}            — poll job status
     GET  /api/projects/{name}/poster/{job_id}/download   — download the rendered file
+    POST /api/projects/{name}/poster/preview             — fast low-res layout preview
 
 This is Unit A of the poster feature: it owns the job row, the API contract,
 and a placeholder renderer (src/poster/poster_job_runner.py). Later units
@@ -17,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from models.db import get_session
 from pydantic import BaseModel, Field
@@ -26,6 +27,7 @@ from api.deps import get_current_user
 from api.project_shared import _get_project_row
 from models.project_db import DBPosterJob
 from src.poster.poster_job_runner import run_poster_job
+from src.poster.poster_renderer import render_poster_preview
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
 
@@ -168,3 +170,25 @@ def download_poster(
 
     media_type = "image/png" if format == "png" else "application/pdf"
     return FileResponse(path_str, media_type=media_type)
+
+
+@router.post("/{name}/poster/preview", summary="Fast low-res poster layout preview")
+def preview_poster(
+    name: str,
+    body: PosterRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Return a small PNG preview of the poster layout (pins/cards/legend)
+    for the given request, synchronously — no job row, no background task,
+    no Mapbox basemap fetch (see ``render_poster_preview``), so this returns
+    in well under a second and never depends on ``MAPBOX_TOKEN``/network.
+    Lets the client show what the layout will look like before committing to
+    the slower full-resolution job.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        project = _get_project_row(sess, user_info_id, name)
+        project_id = project.id
+
+    png_bytes = render_poster_preview(project_id, user_info_id, body.model_dump())
+    return Response(content=png_bytes, media_type="image/png")

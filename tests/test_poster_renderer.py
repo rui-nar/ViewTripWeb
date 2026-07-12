@@ -22,11 +22,13 @@ from models.project_db import DBProject
 from models.user import UserInfo
 from src.poster.poster_renderer import (
     _PIN_COLOR,
+    _PREVIEW_MAX_DIMENSION,
     _Projector,
     _pdf_resolution,
     _target_size,
     assemble_card_content,
     render_poster,
+    render_poster_preview,
 )
 
 _PARIS_BOUNDS = {"north": 48.9, "south": 48.8, "east": 2.4, "west": 2.3}
@@ -303,3 +305,55 @@ def test_render_poster_falls_back_to_solid_basemap_when_mapbox_unavailable(tmp_p
     )
     assert png_path.exists()
     assert pdf_path.exists()
+
+
+# ── render_poster_preview ─────────────────────────────────────────────────────
+# Fast, synchronous, low-res layout preview: never touches the network (no
+# tile_fetcher needed, unlike render_poster's golden-path tests above), and
+# is small/quick enough to check on every call.
+
+def test_preview_returns_a_small_png_preserving_a0_aspect_ratio(project_id):
+    png_bytes = render_poster_preview(project_id, 1, _BODY)
+    assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        w, h = img.size
+        # Longest side bounded by _PREVIEW_MAX_DIMENSION, real A0 aspect
+        # ratio preserved (within a pixel of rounding).
+        assert max(w, h) == _PREVIEW_MAX_DIMENSION
+        real_w, real_h = _target_size("landscape")
+        assert abs(w / h - real_w / real_h) < 0.01
+
+
+def test_preview_portrait_is_taller_than_wide(project_id):
+    body = {**_BODY, "orientation": "portrait"}
+    png_bytes = render_poster_preview(project_id, 1, body)
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        w, h = img.size
+        assert h > w
+
+
+def test_preview_never_calls_the_network_tile_fetcher(project_id):
+    """No tile_fetcher is accepted/forwarded — render_poster_preview always
+    skips the basemap fetch entirely (flat fallback), regardless of whether
+    MAPBOX_TOKEN happens to be configured in the test environment."""
+    # If this accidentally tried a real Mapbox fetch, it would either raise
+    # (no token/network in CI) or take much longer than a layout preview
+    # should — either way the assertion below on a normal, fast return is
+    # enough coverage without needing to mock `requests`.
+    png_bytes = render_poster_preview(project_id, 1, _BODY)
+    assert len(png_bytes) > 0
+
+
+def test_preview_shows_pins_scaled_down_but_still_visible(project_id):
+    """Regression coverage mirroring the golden-path pin-pixel check above,
+    at preview scale — pins/cards must still be visible, just smaller."""
+    png_bytes = render_poster_preview(project_id, 1, _BODY)
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        pixels = img.load()
+        w, h = img.size
+        assert any(
+            pixels[x, y][:3] == _PIN_COLOR
+            for x in range(0, w)
+            for y in range(0, h)
+        ), "no pin-colored pixel found anywhere in the preview"

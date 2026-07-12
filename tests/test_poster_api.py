@@ -9,7 +9,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import api.poster as poster_module
 import models.db as db_module
@@ -152,6 +152,42 @@ def test_status_and_download_404_for_other_users_job(env):
 def test_create_job_404_for_unknown_project(env):
     client, _, _, _ = env
     r = client.post("/api/projects/Nonexistent/poster", json=_BODY)
+    assert r.status_code == 404
+
+
+# ── Preview (fast, synchronous, no job row) ──────────────────────────────────
+
+def test_preview_returns_png_without_creating_a_job(env):
+    client, engine, uid, _ = env
+
+    with Session(engine) as sess:
+        jobs_before = len(sess.exec(select(DBPosterJob)).all())
+
+    r = client.post("/api/projects/My Trip/poster/preview", json=_BODY)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    with Session(engine) as sess:
+        jobs_after = len(sess.exec(select(DBPosterJob)).all())
+    assert jobs_after == jobs_before, "preview must not create a DBPosterJob row"
+
+
+def test_preview_404_for_unknown_project(env):
+    client, _, _, _ = env
+    r = client.post("/api/projects/Nonexistent/poster/preview", json=_BODY)
+    assert r.status_code == 404
+
+
+def test_preview_404_for_project_owned_by_another_user(env):
+    client, _, _, other_uid = env
+
+    other_app = FastAPI()
+    other_app.dependency_overrides[get_current_user] = lambda: {"sub": str(other_uid), "email": "b@e.com"}
+    other_app.include_router(poster_router)
+    other_client = TestClient(other_app)
+
+    r = other_client.post("/api/projects/My Trip/poster/preview", json=_BODY)
     assert r.status_code == 404
 
 
