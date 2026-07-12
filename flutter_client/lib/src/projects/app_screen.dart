@@ -932,12 +932,14 @@ class _PosterJobDialog extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       OutlinedButton(
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
                         onPressed: () => onDownload(
                             n.downloadPath('png'), '$projectName-poster.png'),
                         child: const Text('Download PNG'),
                       ),
                       const SizedBox(width: 12),
                       OutlinedButton(
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
                         onPressed: () => onDownload(
                             n.downloadPath('pdf'), '$projectName-poster.pdf'),
                         child: const Text('Download PDF'),
