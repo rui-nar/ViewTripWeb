@@ -43,6 +43,10 @@ class _EncounterDialogState extends State<EncounterDialog> {
   double? _lon;
   bool _saving = false;
   bool _locating = false;
+  // True while the pin is still a default (day location / device GPS) rather
+  // than something the user picked on the map — controls whether changing
+  // the date is allowed to move the pin.
+  bool _locationAutoSet = true;
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -77,12 +81,52 @@ class _EncounterDialogState extends State<EncounterDialog> {
       }
       _lat = (e['lat'] as num?)?.toDouble();
       _lon = (e['lon'] as num?)?.toDouble();
+      _locationAutoSet = false;
     } else {
-      // New encounter: default the time to now and pre-select the device's
-      // current position as the location (the user can still adjust it).
+      // New encounter: default the time to now, and default the location to
+      // where the trip was on the selected day; fall back to the device's
+      // current position if that day has no GPS data (the user can still
+      // adjust it either way).
       _time = TimeOfDay.now();
-      _fetchDeviceLocation();
+      final dayLoc = _date != null ? _dayLatLng(_toIso(_date!)) : null;
+      if (dayLoc != null) {
+        _lat = dayLoc.lat;
+        _lon = dayLoc.lon;
+      } else {
+        _fetchDeviceLocation();
+      }
     }
+  }
+
+  /// Where the trip was on [dateIso], derived from that day's activities —
+  /// mirrors the server's `_resolve_geo` start-of-day resolution
+  /// (`api/encounters.py`) so the map picker zooms to the same place.
+  ({double lat, double lon})? _dayLatLng(String dateIso) {
+    final dayActs = widget.notifier.activities.where((a) {
+      final ds = (a['start_date_local'] as String?)?.split('T').first;
+      return ds == dateIso;
+    }).toList()
+      ..sort((a, b) => ((a['start_date_local'] as String?) ?? '')
+          .compareTo((b['start_date_local'] as String?) ?? ''));
+    if (dayActs.isEmpty) return null;
+    final ll = dayActs.first['start_latlng'];
+    if (ll is List && ll.length >= 2) {
+      return (lat: (ll[0] as num).toDouble(), lon: (ll[1] as num).toDouble());
+    }
+    return null;
+  }
+
+  void _onDateChanged(DateTime picked) {
+    setState(() {
+      _date = picked;
+      if (_locationAutoSet) {
+        final dayLoc = _dayLatLng(_toIso(picked));
+        if (dayLoc != null) {
+          _lat = dayLoc.lat;
+          _lon = dayLoc.lon;
+        }
+      }
+    });
   }
 
   @override
@@ -139,6 +183,7 @@ class _EncounterDialogState extends State<EncounterDialog> {
       setState(() {
         _lat = result.lat;
         _lon = result.lon;
+        _locationAutoSet = false;
       });
     }
   }
@@ -326,7 +371,7 @@ class _EncounterDialogState extends State<EncounterDialog> {
                     firstDate: DateTime(2000),
                     lastDate: DateTime(2100),
                   );
-                  if (picked != null) setState(() => _date = picked);
+                  if (picked != null) _onDateChanged(picked);
                 },
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),

@@ -164,6 +164,24 @@ void main() {
     expect(n.updated!['personId'], isNull);
   });
 
+  testWidgets(
+      "new encounter defaults the pin to the selected day's activity location, "
+      'not the device GPS', (tester) async {
+    final n = _FakeNotifier()
+      ..people = [person(1, 'Alice')]
+      ..activities = [
+        {
+          'id': 1,
+          'start_date_local': '2024-06-01T08:00:00',
+          'start_latlng': [48.8566, 2.3522],
+        },
+      ];
+    await _pump(tester, n);
+    await _settle(tester);
+
+    expect(find.textContaining('48.85660, 2.35220'), findsOneWidget);
+  });
+
   testWidgets('save is blocked with a snackbar when nothing is selected',
       (tester) async {
     final n = _FakeNotifier()..people = [person(1, 'Alice')];
