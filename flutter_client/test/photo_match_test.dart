@@ -131,6 +131,78 @@ void main() {
     });
   });
 
+  group('classifyDayGeoMatch', () {
+    const zeroOffset = Duration.zero;
+    final sameDay = DateTime.utc(2026, 7, 10, 12, 0);
+
+    test('right day, no geo to check -> none', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        candidate: PhotoCandidate(capturedAt: sameDay),
+      );
+      expect(result, DayGeoMismatch.none);
+    });
+
+    test('right day, within geo tolerance -> none', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        candidate: PhotoCandidate(capturedAt: sameDay, lat: 48.05, lon: 2.0),
+        memoryLat: 48.0,
+        memoryLon: 2.0,
+      );
+      expect(result, DayGeoMismatch.none);
+    });
+
+    test('wrong day is reported as wrongDay, not tooFarAway, even when the '
+        'candidate also has no geo to check', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        candidate: PhotoCandidate(capturedAt: DateTime.utc(2026, 7, 9, 12, 0)),
+      );
+      expect(result, DayGeoMismatch.wrongDay);
+    });
+
+    test('right day but >tolerance away is reported as tooFarAway, not '
+        'wrongDay — this is the case the UI used to mislabel', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        // ~111km north of the memory location.
+        candidate: PhotoCandidate(capturedAt: sameDay, lat: 49.0, lon: 2.0),
+        memoryLat: 48.0,
+        memoryLon: 2.0,
+        geoToleranceKm: 50,
+      );
+      expect(result, DayGeoMismatch.tooFarAway);
+    });
+
+    test('wrong day AND far away is still reported as wrongDay (day check '
+        'short-circuits before geo is even considered)', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        candidate: PhotoCandidate(
+            capturedAt: DateTime.utc(2026, 7, 9, 12, 0), lat: 49.0, lon: 2.0),
+        memoryLat: 48.0,
+        memoryLon: 2.0,
+        geoToleranceKm: 50,
+      );
+      expect(result, DayGeoMismatch.wrongDay);
+    });
+
+    test('memory with no lat/lon does not flag geo at all', () {
+      final result = classifyDayGeoMatch(
+        date: '2026-07-10',
+        localOffset: zeroOffset,
+        candidate: PhotoCandidate(capturedAt: sameDay, lat: 60.0, lon: 100.0),
+      );
+      expect(result, DayGeoMismatch.none);
+    });
+  });
+
   group('pairCandidatesWithThumbnails', () {
     test('a clear-cut single candidate/thumbnail pair is high confidence',
         () {
