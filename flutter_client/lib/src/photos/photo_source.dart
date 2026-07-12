@@ -66,6 +66,21 @@ Future<List<PickedPhoto>> pickPhotosForUpgrade() async {
   return photos;
 }
 
+/// Opens the system file picker for a single image and returns the
+/// resulting [PickedPhoto] with EXIF/pHash metadata already extracted, or
+/// null if the user cancels the picker.
+Future<PickedPhoto?> pickSinglePhotoForUpgrade() async {
+  final result = await FilePicker.pickFiles(
+    allowMultiple: false,
+    type: FileType.image,
+    withData: true,
+  );
+  if (result == null || result.files.isEmpty) return null;
+  final bytes = result.files.single.bytes;
+  if (bytes == null) return null;
+  return buildPickedPhoto(bytes: bytes, filename: result.files.single.name);
+}
+
 /// Builds a [PickedPhoto] from already-read bytes: extracts EXIF and
 /// computes the pHash. Pure computation on [bytes] — no file-picking I/O —
 /// so it's the seam used by unit tests.
@@ -181,7 +196,12 @@ int? computeAverageHash(Uint8List bytes) {
     return null;
   }
   if (decoded == null) return null;
-  final resized = img.copyResize(decoded, width: _kHashSize, height: _kHashSize);
+  // decodeImage never applies the EXIF orientation tag to pixel data (that's
+  // a separate, opt-in `bakeOrientation` transform) — without this, a
+  // portrait phone photo stored as rotated sensor data hashes completely
+  // differently from an already-upright thumbnail of the same shot.
+  final oriented = img.bakeOrientation(decoded);
+  final resized = img.copyResize(oriented, width: _kHashSize, height: _kHashSize);
 
   final luminances = <double>[];
   for (var y = 0; y < _kHashSize; y++) {

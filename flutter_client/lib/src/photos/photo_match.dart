@@ -141,13 +141,17 @@ class MatchResult {
   });
 }
 
+/// Default cap on how different two pHashes may be and still count as the
+/// same photo (tuned for a 64-bit pHash; adjust empirically once real-world
+/// hashes are available).
+const int kDefaultMaxHammingDistance = 12;
+
 /// Pairs [candidates] against [thumbnailPHashes] (the memory's existing
 /// thumbnail pHashes) by Hamming distance, greedily assigning the
 /// closest pairs first so each side is used at most once.
 ///
 /// [maxHammingDistance] caps how different two pHashes may be and still
-/// count as the same photo (default tuned for a 64-bit pHash; adjust
-/// empirically once phases 3/4 land and real hashes are available).
+/// count as the same photo.
 /// [ambiguityMargin] controls when a thumbnail's closest available
 /// candidate is considered "too close to call" against the next-closest
 /// one — such pairings are still made (a pick is still returned for the
@@ -157,7 +161,7 @@ class MatchResult {
 MatchResult pairCandidatesWithThumbnails({
   required List<PhotoCandidate> candidates,
   required List<int> thumbnailPHashes,
-  int maxHammingDistance = 12,
+  int maxHammingDistance = kDefaultMaxHammingDistance,
   int ambiguityMargin = 4,
 }) {
   final pairs = <(int candidateIndex, int thumbnailIndex, int distance)>[];
@@ -213,6 +217,21 @@ MatchResult pairCandidatesWithThumbnails({
     unmatchedCandidateIndices: unmatchedCandidates,
     unmatchedThumbnailIndices: unmatchedThumbnails,
   );
+}
+
+/// Whether a user-picked candidate visually resembles the existing
+/// thumbnail it's meant to replace. Unlike [pairCandidatesWithThumbnails],
+/// there's only ever one candidate on offer here — the user picked it for
+/// this specific memory photo — so there's no rival to weigh, just a
+/// straight distance-vs-threshold check. Returns null when either side has
+/// no pHash to compare (nothing to conclude either way).
+bool? looksLikeSamePhoto(
+  int? candidateHash,
+  int? thumbnailHash, {
+  int maxHammingDistance = kDefaultMaxHammingDistance,
+}) {
+  if (candidateHash == null || thumbnailHash == null) return null;
+  return hammingDistance(candidateHash, thumbnailHash) <= maxHammingDistance;
 }
 
 /// Hamming distance (bit difference count) between two perceptual hashes.
