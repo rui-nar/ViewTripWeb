@@ -8,7 +8,7 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
-import '../core/design_tokens.dart' show kAccent;
+import '../core/design_tokens.dart' show kAccent, kShadow2, monoStyle;
 import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
@@ -358,6 +358,177 @@ List<Marker> buildEncounterMarkers(
     ));
   }
   return markers;
+}
+
+// ── Selection stats overlay (issue #74) ──────────────────────────────────────
+//
+// Shows the distance/climb/day-number of the current activity or day(s)
+// selection on top of the map. Shared by MapPanel (view mode) and
+// ManageMapPanel (manage mode) — both read the same ProjectNotifier selection
+// state (selectedActivityId / selectedDays, mutually exclusive by construction).
+
+/// Distance/climb + a day label for the current map selection, or null when
+/// nothing is selected (the overlay is hidden in that case).
+@visibleForTesting
+class SelectionStatsData {
+  final double distanceKm;
+  final double elevationM;
+  /// "Day N" for a single activity/day, "Days N–M" for a contiguous multi-day
+  /// selection, or "N days selected" for a non-contiguous one.
+  final String dayLabel;
+
+  const SelectionStatsData({
+    required this.distanceKm,
+    required this.elevationM,
+    required this.dayLabel,
+  });
+}
+
+/// Computes the overlay content for the notifier's current selection. Mirrors
+/// [ProjectNotifier.dayStats]'s field names/units/rounding conventions for the
+/// single-activity case (distance in metres → km, elevation already in metres).
+@visibleForTesting
+SelectionStatsData? computeSelectionStats(ProjectNotifier notifier) {
+  final selActId = notifier.selectedActivityId;
+  final selDays = notifier.selectedDays;
+  if (selActId == null && selDays.isEmpty) return null;
+
+  final orderedDays = notifier.orderedDayKeys();
+
+  if (selDays.isEmpty) {
+    // Single activity selected.
+    Map<String, dynamic>? activity;
+    for (final a in notifier.activities) {
+      if (a['id']?.toString() == selActId.toString()) {
+        activity = a;
+        break;
+      }
+    }
+    if (activity == null) return null;
+    final distanceKm = (activity['distance'] as num? ?? 0).toDouble() / 1000.0;
+    final elevationM = (activity['total_elevation_gain'] as num? ?? 0).toDouble();
+    final dateKey = (activity['start_date_local'] as String?)?.split('T').first;
+    final dayLabel = dateKey == null
+        ? ''
+        : 'Day ${dayTripNumbering(dateKey, orderedDays, notifier.tripStart).dayNumber}';
+    return SelectionStatsData(
+        distanceKm: distanceKm, elevationM: elevationM, dayLabel: dayLabel);
+  }
+
+  if (selDays.length == 1) {
+    final dateKey = selDays.first;
+    final stats = notifier.dayStats(dateKey);
+    final n = dayTripNumbering(dateKey, orderedDays, notifier.tripStart);
+    return SelectionStatsData(
+        distanceKm: stats.distanceKm,
+        elevationM: stats.elevationM,
+        dayLabel: 'Day ${n.dayNumber}');
+  }
+
+  // Multiple days selected: sum distance/climb across every selected date.
+  double distanceKm = 0, elevationM = 0;
+  for (final d in selDays) {
+    final s = notifier.dayStats(d);
+    distanceKm += s.distanceKm;
+    elevationM += s.elevationM;
+  }
+  final sortedDays = selDays.toList()..sort();
+  final indices = sortedDays.map((d) => orderedDays.indexOf(d)).toList()..sort();
+  final contiguous = !indices.contains(-1) &&
+      indices.last - indices.first + 1 == indices.length;
+  final String dayLabel;
+  if (contiguous) {
+    final first = dayTripNumbering(sortedDays.first, orderedDays, notifier.tripStart).dayNumber;
+    final last = dayTripNumbering(sortedDays.last, orderedDays, notifier.tripStart).dayNumber;
+    dayLabel = 'Days $first–$last';
+  } else {
+    dayLabel = '${selDays.length} days selected';
+  }
+  return SelectionStatsData(distanceKm: distanceKm, elevationM: elevationM, dayLabel: dayLabel);
+}
+
+/// Small mono-numeral "LABEL / value+unit" cell, matching the day-meta
+/// editor's stat styling (see `_EDStat` in day_meta_editor.dart).
+class _StatCell extends StatelessWidget {
+  final String label;
+  final String value;
+  final String unit;
+
+  const _StatCell({required this.label, required this.value, required this.unit});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(label,
+            style: monoStyle(
+              fontSize: 9.5, fontWeight: FontWeight.w600,
+              color: cs.onSurfaceVariant, letterSpacing: 1.2,
+            )),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text(value,
+                style: monoStyle(
+                  fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface,
+                )),
+            const SizedBox(width: 1),
+            Text(unit, style: monoStyle(fontSize: 9.5, color: cs.onSurfaceVariant)),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Positioned badge (top-right corner) showing distance/climb/day for the
+/// current activity or day(s) selection. Hidden entirely when nothing is
+/// selected — see [computeSelectionStats].
+class SelectionStatsOverlay extends StatelessWidget {
+  final ProjectNotifier notifier;
+
+  const SelectionStatsOverlay({super.key, required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    final stats = computeSelectionStats(notifier);
+    if (stats == null) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: cs.surface.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: kShadow2(Theme.of(context).brightness),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (stats.dayLabel.isNotEmpty) ...[
+            Icon(Icons.today, size: 14, color: cs.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Text(stats.dayLabel,
+                style: monoStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.w600, color: cs.onSurface,
+                )),
+            const SizedBox(width: 12),
+            Container(width: 1, height: 22, color: cs.outlineVariant),
+            const SizedBox(width: 12),
+          ],
+          _StatCell(
+              label: 'DIST', value: stats.distanceKm.round().toString(), unit: 'km'),
+          const SizedBox(width: 14),
+          _StatCell(
+              label: 'CLIMB', value: stats.elevationM.round().toString(), unit: 'm'),
+        ],
+      ),
+    );
+  }
 }
 
 // ── MapPanel ──────────────────────────────────────────────────────────────────
@@ -1148,6 +1319,11 @@ class _MapPanelState extends State<MapPanel> {
               ],
             ),
           ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: SelectionStatsOverlay(notifier: notifier),
+        ),
       ],
     );
   }
@@ -2029,6 +2205,11 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               ),
             ),
           ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: SelectionStatsOverlay(notifier: notifier),
+        ),
       ],
     );
     if (perfSw != null) {
