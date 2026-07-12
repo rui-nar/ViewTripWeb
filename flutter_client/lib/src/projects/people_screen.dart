@@ -275,6 +275,65 @@ Widget _encounterPlaceIcon(
   );
 }
 
+/// An encounter's note, clamped to 2 lines with a "Read more" that opens the
+/// full text in a dialog — but only when it actually overflows 2 lines
+/// (issue #73). Shared by the person and group detail sheets.
+class _EncounterDescription extends StatelessWidget {
+  final String text;
+  const _EncounterDescription({required this.text});
+
+  void _showFullText(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        content: SingleChildScrollView(child: Text(text)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = DefaultTextStyle.of(context).style;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final overflowing = (TextPainter(
+          text: TextSpan(text: text, style: style),
+          maxLines: 2,
+          textDirection: Directionality.of(context),
+        )..layout(maxWidth: constraints.maxWidth))
+            .didExceedMaxLines;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(text, maxLines: 2, overflow: TextOverflow.ellipsis, style: style),
+            if (overflowing)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: TextButton(
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    alignment: Alignment.centerLeft,
+                  ),
+                  onPressed: () => _showFullText(context),
+                  child: const Text('Read more'),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _PersonDetailSheet extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> person;
@@ -463,7 +522,7 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
                       leading: _encounterPlaceIcon(e, widget.onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
                       subtitle: (e['description'] as String?)?.isNotEmpty ?? false
-                          ? Text(e['description'] as String)
+                          ? _EncounterDescription(text: e['description'] as String)
                           : null,
                     ),
                 ],
@@ -755,7 +814,7 @@ class _GroupDetailSheet extends StatelessWidget {
                       leading: _encounterPlaceIcon(e, onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
                       subtitle: (e['description'] as String?)?.isNotEmpty ?? false
-                          ? Text(e['description'] as String)
+                          ? _EncounterDescription(text: e['description'] as String)
                           : null,
                     ),
                 ],
