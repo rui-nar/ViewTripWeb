@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/current_location.dart';
 import '../core/design_tokens.dart';
@@ -12,6 +13,57 @@ import 'location_picker_dialog.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
 import 'project_notifier.dart';
+
+bool _isAsciiLetter(String ch) => RegExp(r'^[A-Za-z]$').hasMatch(ch);
+
+/// Sentence-cases [input]: uppercases the first letter of the whole string,
+/// and the first letter found after each '.' followed by whitespace (issue
+/// #77). Pure and idempotent — safe to reapply on every keystroke/paste, and
+/// never touches letters that aren't at a sentence start.
+String sentenceCase(String input) {
+  if (input.isEmpty) return input;
+  final buffer = StringBuffer();
+  bool capitalizeNext = true;
+  bool afterPeriod = false;
+  for (int i = 0; i < input.length; i++) {
+    final ch = input.substring(i, i + 1);
+    if (afterPeriod) {
+      if (ch.trim().isEmpty) {
+        // Whitespace run right after the period — keep waiting for the
+        // first non-whitespace character to capitalize.
+        buffer.write(ch);
+        capitalizeNext = true;
+        continue;
+      }
+      afterPeriod = false;
+    }
+    if (capitalizeNext && _isAsciiLetter(ch)) {
+      buffer.write(ch.toUpperCase());
+      capitalizeNext = false;
+    } else {
+      buffer.write(ch);
+    }
+    if (ch == '.') afterPeriod = true;
+  }
+  return buffer.toString();
+}
+
+/// Applies [sentenceCase] to the field's text on every edit. Case-only
+/// changes never alter string length, so the existing selection stays valid.
+class _SentenceCaseFormatter extends TextInputFormatter {
+  const _SentenceCaseFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    return newValue.copyWith(
+      text: sentenceCase(newValue.text),
+      selection: newValue.selection,
+    );
+  }
+}
 
 class EncounterDialog extends StatefulWidget {
   final ProjectNotifier notifier;
@@ -433,6 +485,7 @@ class _EncounterDialogState extends State<EncounterDialog> {
                 ),
                 minLines: 2,
                 maxLines: 6,
+                inputFormatters: const [_SentenceCaseFormatter()],
               ),
               const SizedBox(height: 16),
               Text('Location', style: theme.textTheme.labelMedium),
