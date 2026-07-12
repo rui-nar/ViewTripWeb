@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/design_tokens.dart';
+import 'package:viewtrip_client/src/core/theme.dart';
 import 'package:viewtrip_client/src/photos/photo_match.dart';
 import 'package:viewtrip_client/src/photos/photo_source.dart';
 import 'package:viewtrip_client/src/photos/photo_upgrade_screen.dart';
@@ -81,6 +82,7 @@ Future<_FakeNotifier> _openDialog(
 }) async {
   final notifier = _FakeNotifier();
   await tester.pumpWidget(MaterialApp(
+    theme: lightTheme,
     home: Scaffold(
       body: Builder(
         builder: (context) => Center(
