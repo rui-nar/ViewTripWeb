@@ -72,3 +72,5 @@ viewtripweb.db-wal
 
 # Claude Code transient worktree state (harness-managed, not project content)
 .claude/worktrees/
+viewtrip.db.bak-preexisting
+viewtripweb.db.bak-preexisting
