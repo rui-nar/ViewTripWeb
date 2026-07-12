@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
@@ -155,6 +156,25 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   bool _autoZoom = false;
 
+  // Highlighted point set when the user taps an encounter's place icon
+  // (issue #72); cleared on the next unrelated map tap/selection.
+  LatLng? _focusedLatLng;
+
+  /// Zooms the map in on (lat, lon) and drops a highlighted pin there.
+  void _focusLocation(double lat, double lon) {
+    final target = LatLng(lat, lon);
+    final currentZoom = _mapController.mapController.camera.zoom;
+    setState(() => _focusedLatLng = target);
+    _mapController.centerOnPoint(
+      target,
+      zoom: currentZoom < 15 ? 15 : currentZoom,
+    );
+  }
+
+  void _clearFocusedLocation() {
+    if (_focusedLatLng != null) setState(() => _focusedLatLng = null);
+  }
+
   void _openSyncDialog(BuildContext context) {
     final notifier = context.read<ViewProjectNotifier>();
     final pending = notifier.pendingSync;
@@ -243,10 +263,20 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
           IconButton(
             tooltip: 'Encounters',
             icon: const Icon(Icons.groups_outlined),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-              builder: (_) => PeopleScreen(
-                  notifier: context.read<ViewProjectNotifier>()),
-            )),
+            onPressed: () async {
+              final result = await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => PeopleScreen(
+                    notifier: context.read<ViewProjectNotifier>()),
+              ));
+              if (!mounted) return;
+              // A location tapped inside PeopleScreen (issue #72) — focus it
+              // on this screen's map.
+              if (result is Map) {
+                final lat = (result['lat'] as num?)?.toDouble();
+                final lon = (result['lon'] as num?)?.toDouble();
+                if (lat != null && lon != null) _focusLocation(lat, lon);
+              }
+            },
           ),
 
           Consumer<ViewProjectNotifier>(
@@ -362,6 +392,9 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   initialLat: widget.initialLat,
                   initialLng: widget.initialLng,
                   initialZoom: widget.initialZoom,
+                  focusedLatLng: _focusedLatLng,
+                  onLocationTap: _focusLocation,
+                  onClearFocusedLocation: _clearFocusedLocation,
                 );
               },
             ),
@@ -381,6 +414,9 @@ class _ViewLayout extends StatelessWidget {
   final double? initialLat;
   final double? initialLng;
   final double? initialZoom;
+  final LatLng? focusedLatLng;
+  final void Function(double lat, double lon)? onLocationTap;
+  final VoidCallback? onClearFocusedLocation;
 
   const _ViewLayout({
     required this.notifier,
@@ -389,6 +425,9 @@ class _ViewLayout extends StatelessWidget {
     this.initialLat,
     this.initialLng,
     this.initialZoom,
+    this.focusedLatLng,
+    this.onLocationTap,
+    this.onClearFocusedLocation,
   });
 
   @override
@@ -422,6 +461,9 @@ class _ViewLayout extends StatelessWidget {
       // Owner-only — this screen is authenticated, unlike shared_project_screen.dart
       // which reuses MapPanel for public/unauthenticated links (issue #71).
       showEncounters: true,
+      focusedLatLng: focusedLatLng,
+      onLocationTap: onLocationTap,
+      onClearFocusedLocation: onClearFocusedLocation,
     );
 
     return Column(

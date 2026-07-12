@@ -7,6 +7,7 @@ import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -65,6 +66,25 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void _togglePanel() => setState(() => _panelOpen = !_panelOpen);
   bool _autoZoom = false;
   bool _isExporting = false;
+
+  // Highlighted point set when the user taps an encounter's place icon
+  // (issue #72); cleared on the next unrelated map tap/selection.
+  LatLng? _focusedLatLng;
+
+  /// Zooms the map in on (lat, lon) and drops a highlighted pin there.
+  void _focusLocation(double lat, double lon) {
+    final target = LatLng(lat, lon);
+    final currentZoom = _mapController.mapController.camera.zoom;
+    setState(() => _focusedLatLng = target);
+    _mapController.centerOnPoint(
+      target,
+      zoom: currentZoom < 15 ? 15 : currentZoom,
+    );
+  }
+
+  void _clearFocusedLocation() {
+    if (_focusedLatLng != null) setState(() => _focusedLatLng = null);
+  }
 
   // Width of the wide-layout activity panel; drag the divider to resize.
   static const String _kPanelWidthPref = 'activity_panel_width';
@@ -361,10 +381,20 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           IconButton(
             tooltip: 'Encounters',
             icon: const Icon(Icons.groups_outlined),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-              builder: (_) =>
-                  PeopleScreen(notifier: context.read<ProjectNotifier>()),
-            )),
+            onPressed: () async {
+              final result = await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    PeopleScreen(notifier: context.read<ProjectNotifier>()),
+              ));
+              if (!mounted) return;
+              // A location tapped inside PeopleScreen (issue #72) — focus it
+              // on this screen's map.
+              if (result is Map) {
+                final lat = (result['lat'] as num?)?.toDouble();
+                final lon = (result['lon'] as num?)?.toDouble();
+                if (lat != null && lon != null) _focusLocation(lat, lon);
+              }
+            },
           ),
 
           // Filter — always visible
@@ -591,6 +621,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                       notifier: n,
                       mapController: _mapController,
                       scrollController: _activityScrollController,
+                      onLocationTap: _focusLocation,
                     ),
                   ),
                 ),
@@ -620,6 +651,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           initialLat: widget.initialLat,
                           initialLng: widget.initialLng,
                           initialZoom: widget.initialZoom,
+                          focusedLatLng: _focusedLatLng,
+                          onLocationTap: _focusLocation,
+                          onClearFocusedLocation: _clearFocusedLocation,
                         ),
                       )),
                       Positioned(
@@ -696,6 +730,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     initialLat: widget.initialLat,
                     initialLng: widget.initialLng,
                     initialZoom: widget.initialZoom,
+                    focusedLatLng: _focusedLatLng,
+                    onLocationTap: _focusLocation,
+                    onClearFocusedLocation: _clearFocusedLocation,
                   ),
                 )),
 
@@ -755,6 +792,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                         height: mapHeight,
                         scrollController: _mobileActivityScrollController,
                         isVisible: _panelOpen,
+                        onLocationTap: _focusLocation,
                       ),
                     ),
                   ),

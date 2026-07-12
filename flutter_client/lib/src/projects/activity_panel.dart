@@ -33,12 +33,17 @@ class ActivityPanel extends StatefulWidget {
   /// false→true the panel reveals the current selection — see issue #21.
   final bool panelVisible;
 
+  /// Invoked when an encounter row's opened sheet's place icon is tapped
+  /// (issue #72) — the parent screen re-focuses/zooms the map to that point.
+  final void Function(double lat, double lon)? onLocationTap;
+
   const ActivityPanel({
     super.key,
     required this.notifier,
     this.mapController,
     this.scrollController,
     this.panelVisible = true,
+    this.onLocationTap,
   });
 
   @override
@@ -1017,10 +1022,19 @@ class _ActivityPanelState extends State<ActivityPanel> {
         onTap: _multiSelect
             ? null
             : () {
+                final onLocationTap = widget.onLocationTap;
+                final sheetLocationTap = onLocationTap == null
+                    ? null
+                    : (double lat, double lon) {
+                        Navigator.of(context).pop(); // close the sheet
+                        onLocationTap(lat, lon);
+                      };
                 if (group != null) {
-                  showGroupDetailSheet(context, notifier, group);
+                  showGroupDetailSheet(context, notifier, group,
+                      onLocationTap: sheetLocationTap);
                 } else if (person != null) {
-                  showPersonDetailSheet(context, notifier, person);
+                  showPersonDetailSheet(context, notifier, person,
+                      onLocationTap: sheetLocationTap);
                 }
               },
       ),

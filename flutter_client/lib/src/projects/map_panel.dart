@@ -71,6 +71,27 @@ IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
 const Color _kStartMarkerColor = Color(0xFF22C55E); // green-500
 const Color _kEndMarkerColor   = Color(0xFFEF4444); // red-500
 
+// Focused-location marker (issue #72) — tapping an encounter's place icon
+// zooms in and drops this pin, distinct from the (red) encounter pins.
+const Color _kFocusMarkerColor = Color(0xFFF59E0B); // amber-500
+
+/// A single highlighted pin at [point] — rendered by both map widgets when
+/// [MapPanel.focusedLatLng] / [ManageMapPanel.focusedLatLng] is set (issue #72).
+Marker focusedLocationMarker(LatLng point) => Marker(
+      point: point,
+      width: 30,
+      height: 30,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: _kFocusMarkerColor,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+        ),
+        child: const Icon(Icons.place, size: 16, color: Colors.white),
+      ),
+    );
+
 LatLng? _coordToLatLng(dynamic c) {
   if (c is! List || c.length < 2) return null;
   return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
@@ -269,8 +290,12 @@ List<Marker> _buildActivityMarkersFromGeo(
 List<Marker> buildEncounterMarkers(
   List<Map<String, dynamic>> items,
   BuildContext context,
-  ProjectNotifier notifier,
-) {
+  ProjectNotifier notifier, {
+  /// Invoked when the opened sheet's encounter-location icon is tapped
+  /// (issue #72). The pin's own sheet is closed first, then this fires so the
+  /// caller can re-focus/zoom the map to that point.
+  void Function(double lat, double lon)? onLocationTap,
+}) {
   // Lookups for pin classification: a grouped person's encounter shows the
   // group ("People") icon (the individual is masked); an ungrouped person
   // shows a person icon (issue #50).
@@ -296,6 +321,12 @@ List<Marker> buildEncounterMarkers(
         (e['person_id'] as num?)?.toInt(), (e['group_id'] as num?)?.toInt(),
         peopleById, groupsById);
     final isGroup = pin?.kind == 'group';
+    final sheetLocationTap = onLocationTap == null
+        ? null
+        : (double lat2, double lon2) {
+            Navigator.of(context).pop();
+            onLocationTap(lat2, lon2);
+          };
     markers.add(Marker(
       point: LatLng(lat, lon),
       width: 22,
@@ -305,9 +336,11 @@ List<Marker> buildEncounterMarkers(
             ? null
             : () {
                 if (isGroup) {
-                  showGroupDetailSheet(context, notifier, pin.entity);
+                  showGroupDetailSheet(context, notifier, pin.entity,
+                      onLocationTap: sheetLocationTap);
                 } else {
-                  showPersonDetailSheet(context, notifier, pin.entity);
+                  showPersonDetailSheet(context, notifier, pin.entity,
+                      onLocationTap: sheetLocationTap);
                 }
               },
         child: Container(
@@ -362,6 +395,18 @@ class MapPanel extends StatefulWidget {
   /// Only the owner-authenticated view-mode screen should ever pass `true`.
   final bool showEncounters;
 
+  /// A single point to highlight with [focusedLocationMarker] (issue #72),
+  /// set by the parent screen when the user taps an encounter's place icon.
+  final LatLng? focusedLatLng;
+
+  /// Invoked when an encounter pin's sheet's place icon is tapped (issue #72)
+  /// — the parent screen re-focuses/zooms the map to that point.
+  final void Function(double lat, double lon)? onLocationTap;
+
+  /// Invoked on any other map tap/selection, so the parent can clear
+  /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
+  final VoidCallback? onClearFocusedLocation;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -376,6 +421,9 @@ class MapPanel extends StatefulWidget {
     this.initialLng,
     this.initialZoom,
     this.showEncounters = false,
+    this.focusedLatLng,
+    this.onLocationTap,
+    this.onClearFocusedLocation,
   });
 
   @override
@@ -756,6 +804,7 @@ class _MapPanelState extends State<MapPanel> {
   }
 
   void _onMapTap(LatLng latlng) {
+    widget.onClearFocusedLocation?.call();
     // ── Activity + segment hit-test ──────────────────────────────────────────
     // Single pass over all GeoJSON features; pick the closest one within a
     // 15-pixel radius. Activity and segment hits both select their panel item.
@@ -880,7 +929,8 @@ class _MapPanelState extends State<MapPanel> {
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId, hasSelection, context);
       _cachedEncounterMarkers = widget.showEncounters
-          ? buildEncounterMarkers(items, context, notifier)
+          ? buildEncounterMarkers(items, context, notifier,
+              onLocationTap: widget.onLocationTap)
           : const [];
       // Auto-zoom to selection (issue #34). Previously this always did
       // `_fittedBounds = false` on any selection change, which re-fit the map to
@@ -1008,6 +1058,8 @@ class _MapPanelState extends State<MapPanel> {
             if (widget.showEncounters && _showEncounters &&
                 _cachedEncounterMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedEncounterMarkers),
+            if (widget.focusedLatLng != null)
+              MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -1120,6 +1172,18 @@ class ManageMapPanel extends StatefulWidget {
   final double? initialLng;
   final double? initialZoom;
 
+  /// A single point to highlight with [focusedLocationMarker] (issue #72),
+  /// set by the parent screen when the user taps an encounter's place icon.
+  final LatLng? focusedLatLng;
+
+  /// Invoked when an encounter pin's sheet's place icon is tapped (issue #72)
+  /// — the parent screen re-focuses/zooms the map to that point.
+  final void Function(double lat, double lon)? onLocationTap;
+
+  /// Invoked on any other map tap/selection, so the parent can clear
+  /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
+  final VoidCallback? onClearFocusedLocation;
+
   const ManageMapPanel({
     super.key,
     required this.notifier,
@@ -1132,6 +1196,9 @@ class ManageMapPanel extends StatefulWidget {
     this.initialLat,
     this.initialLng,
     this.initialZoom,
+    this.focusedLatLng,
+    this.onLocationTap,
+    this.onClearFocusedLocation,
   });
 
   @override
@@ -1404,6 +1471,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   }
 
   void _onMapTap(LatLng latlng) {
+    widget.onClearFocusedLocation?.call();
     // ── Activity + segment hit-test ──────────────────────────────────────────
     final geo = widget.notifier.geo;
     if (geo != null) {
@@ -1717,7 +1785,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId2, hasSelection, context);
-      _cachedEncounterMarkers = buildEncounterMarkers(items, context, widget.notifier);
+      _cachedEncounterMarkers = buildEncounterMarkers(items, context,
+          widget.notifier, onLocationTap: widget.onLocationTap);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
@@ -1822,6 +1891,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedJournalMarkers),
             if (_cachedEncounterMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedEncounterMarkers),
+            if (widget.focusedLatLng != null)
+              MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             // Owner-only, view-only Polarsteps trip overlay for a person (#40).
             if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
               PolylineLayer(
@@ -1997,6 +2068,9 @@ class MobileActivityPanelOverlay extends StatelessWidget {
   /// [ActivityPanel.panelVisible] so it reveals the current selection on open.
   final bool isVisible;
 
+  /// Forwarded to [ActivityPanel.onLocationTap] (issue #72).
+  final void Function(double lat, double lon)? onLocationTap;
+
   const MobileActivityPanelOverlay({
     super.key,
     required this.notifier,
@@ -2004,6 +2078,7 @@ class MobileActivityPanelOverlay extends StatelessWidget {
     required this.height,
     this.scrollController,
     this.isVisible = true,
+    this.onLocationTap,
   });
 
   @override
@@ -2019,6 +2094,7 @@ class MobileActivityPanelOverlay extends StatelessWidget {
           mapController: mapController,
           scrollController: scrollController,
           panelVisible: isVisible,
+          onLocationTap: onLocationTap,
         ),
       ),
     );

@@ -190,7 +190,13 @@ class _PersonTile extends StatelessWidget {
       leading: PersonAvatar(notifier: notifier, person: person, radius: 22),
       title: Text(personDisplayName(person)),
       subtitle: subtitleParts.isEmpty ? null : Text(subtitleParts.join('  •  ')),
-      onTap: () => showPersonDetailSheet(context, notifier, person),
+      onTap: () => showPersonDetailSheet(context, notifier, person,
+          onLocationTap: (lat, lon) {
+            // Close the sheet, then close PeopleScreen itself with the picked
+            // point so the caller (map/activity panel) can focus it (#72).
+            Navigator.of(context).pop();
+            Navigator.of(context).pop({'lat': lat, 'lon': lon});
+          }),
     );
   }
 }
@@ -231,23 +237,53 @@ class PersonAvatar extends StatelessWidget {
 }
 
 /// Show the per-person detail sheet: info + every place/date you met them.
+///
+/// [onLocationTap], when given, is invoked with an encounter's coordinates
+/// when its place icon is tapped (issue #72); the caller decides whether/how
+/// to dismiss any sheet(s) — see call sites for the pop conventions used.
 Future<void> showPersonDetailSheet(
   BuildContext context,
   ProjectNotifier notifier,
-  Map<String, dynamic> person,
-) {
+  Map<String, dynamic> person, {
+  void Function(double lat, double lon)? onLocationTap,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) => _PersonDetailSheet(notifier: notifier, person: person),
+    builder: (_) => _PersonDetailSheet(
+        notifier: notifier, person: person, onLocationTap: onLocationTap),
+  );
+}
+
+/// The tappable "place" leading icon for an encounter list tile (issue #72):
+/// tappable only when [onLocationTap] is given and the encounter has both
+/// coordinates; otherwise a plain (non-interactive) icon.
+Widget _encounterPlaceIcon(
+  Map<String, dynamic> encounter,
+  void Function(double lat, double lon)? onLocationTap,
+) {
+  final lat = (encounter['lat'] as num?)?.toDouble();
+  final lon = (encounter['lon'] as num?)?.toDouble();
+  if (onLocationTap == null || lat == null || lon == null) {
+    return const Icon(Icons.place_outlined, size: 18);
+  }
+  return InkWell(
+    borderRadius: BorderRadius.circular(14),
+    onTap: () => onLocationTap(lat, lon),
+    child: const Icon(Icons.place_outlined, size: 18),
   );
 }
 
 class _PersonDetailSheet extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> person;
-  const _PersonDetailSheet({required this.notifier, required this.person});
+  final void Function(double lat, double lon)? onLocationTap;
+  const _PersonDetailSheet({
+    required this.notifier,
+    required this.person,
+    this.onLocationTap,
+  });
 
   @override
   State<_PersonDetailSheet> createState() => _PersonDetailSheetState();
@@ -424,7 +460,7 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
                   for (final e in encounters)
                     ListTile(
                       dense: true,
-                      leading: const Icon(Icons.place_outlined, size: 18),
+                      leading: _encounterPlaceIcon(e, widget.onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
                       subtitle: (e['description'] as String?)?.isNotEmpty ?? false
                           ? Text(e['description'] as String)
@@ -531,29 +567,44 @@ class _GroupTile extends StatelessWidget {
       ),
       title: Text(groupDisplayName(group)),
       subtitle: Text(subtitleParts.join('  •  ')),
-      onTap: () => showGroupDetailSheet(context, notifier, group),
+      onTap: () => showGroupDetailSheet(context, notifier, group,
+          onLocationTap: (lat, lon) {
+            // Close the sheet, then close PeopleScreen itself with the picked
+            // point so the caller (map/activity panel) can focus it (#72).
+            Navigator.of(context).pop();
+            Navigator.of(context).pop({'lat': lat, 'lon': lon});
+          }),
     );
   }
 }
 
 /// Per-group detail sheet: info + members (tap a member → their sheet).
+///
+/// [onLocationTap] — see [showPersonDetailSheet].
 Future<void> showGroupDetailSheet(
   BuildContext context,
   ProjectNotifier notifier,
-  Map<String, dynamic> group,
-) {
+  Map<String, dynamic> group, {
+  void Function(double lat, double lon)? onLocationTap,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) => _GroupDetailSheet(notifier: notifier, group: group),
+    builder: (_) => _GroupDetailSheet(
+        notifier: notifier, group: group, onLocationTap: onLocationTap),
   );
 }
 
 class _GroupDetailSheet extends StatelessWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> group;
-  const _GroupDetailSheet({required this.notifier, required this.group});
+  final void Function(double lat, double lon)? onLocationTap;
+  const _GroupDetailSheet({
+    required this.notifier,
+    required this.group,
+    this.onLocationTap,
+  });
 
   int get _groupId => (group['id'] as num).toInt();
 
@@ -675,7 +726,8 @@ class _GroupDetailSheet extends StatelessWidget {
                       title: Text(personDisplayName(p)),
                       onTap: () {
                         Navigator.of(context).pop();
-                        showPersonDetailSheet(context, notifier, p);
+                        showPersonDetailSheet(context, notifier, p,
+                            onLocationTap: onLocationTap);
                       },
                     ),
                 ],
@@ -700,7 +752,7 @@ class _GroupDetailSheet extends StatelessWidget {
                   for (final e in encounters)
                     ListTile(
                       dense: true,
-                      leading: const Icon(Icons.place_outlined, size: 18),
+                      leading: _encounterPlaceIcon(e, onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
                       subtitle: (e['description'] as String?)?.isNotEmpty ?? false
                           ? Text(e['description'] as String)
