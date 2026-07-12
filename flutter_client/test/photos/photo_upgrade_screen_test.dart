@@ -79,6 +79,7 @@ BoxDecoration _decorationOf(WidgetTester tester, Finder finder) =>
 Future<_FakeNotifier> _openDialog(
   WidgetTester tester, {
   required Future<PickedPhoto?> Function() pickSinglePhoto,
+  Map<String, dynamic>? memory,
 }) async {
   final notifier = _FakeNotifier();
   await tester.pumpWidget(MaterialApp(
@@ -90,7 +91,7 @@ Future<_FakeNotifier> _openDialog(
             onPressed: () => showPhotoUpgradeDialog(
               context,
               notifier,
-              _memory,
+              memory ?? _memory,
               pickSinglePhotoOverride: pickSinglePhoto,
               fetchThumbnailHashOverride: _fakeThumbnailHash,
             ),
@@ -185,6 +186,37 @@ void main() {
     expect(
       find.descendant(of: _row('thumb-high-uuid'), matching: find.text("Doesn't look like this day.")),
       findsOneWidget,
+    );
+  });
+
+  testWidgets(
+      'a pick on the right day but far from the memory location is flagged '
+      'as too far away, not as the wrong day', (tester) async {
+    final memoryWithGeo = <String, dynamic>{..._memory, 'lat': 48.0, 'lon': 2.0};
+    await _openDialog(
+      tester,
+      memory: memoryWithGeo,
+      pickSinglePhoto: () async => PickedPhoto(
+        bytes: Uint8List.fromList([4]),
+        filename: 'far-away.jpg',
+        // Same day as the memory, but ~111km from its lat/lon.
+        candidate: PhotoCandidate(
+            capturedAt: _day, lat: 49.0, lon: 2.0, pHash: _clearJpgHash),
+      ),
+    );
+
+    await _selectPictureFor(tester, 'thumb-high-uuid');
+
+    expect(
+      find.descendant(
+        of: _row('thumb-high-uuid'),
+        matching: find.text("Taken more than 50 km from this memory's location."),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text("Doesn't look like this day.")),
+      findsNothing,
     );
   });
 

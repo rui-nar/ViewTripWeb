@@ -53,7 +53,7 @@ class _UpgradeRow {
   int? thumbHash;
   bool thumbHashChecked = false;
   bool? looksSame;
-  bool dateMismatch = false;
+  DayGeoMismatch dayGeoMismatch = DayGeoMismatch.none;
   bool comparing = false;
   _RowStatus status = _RowStatus.empty;
 
@@ -123,19 +123,19 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
 
       final date = widget.memory['date'] as String?;
       final candidate = picked.candidate;
-      final dateMismatch = date != null &&
-          candidate != null &&
-          selectCandidatesForDay(
-            date: date,
-            localOffset: Duration.zero,
-            candidates: [candidate],
-            memoryLat: (widget.memory['lat'] as num?)?.toDouble(),
-            memoryLon: (widget.memory['lon'] as num?)?.toDouble(),
-          ).isEmpty;
+      final dayGeoMismatch = (date == null || candidate == null)
+          ? DayGeoMismatch.none
+          : classifyDayGeoMatch(
+              date: date,
+              localOffset: Duration.zero,
+              candidate: candidate,
+              memoryLat: (widget.memory['lat'] as num?)?.toDouble(),
+              memoryLon: (widget.memory['lon'] as num?)?.toDouble(),
+            );
 
       setState(() {
         row.picked = picked;
-        row.dateMismatch = dateMismatch;
+        row.dayGeoMismatch = dayGeoMismatch;
         row.looksSame = looksLikeSamePhoto(candidate?.pHash, row.thumbHash);
         row.status = _RowStatus.picked;
         row.comparing = false;
@@ -207,7 +207,9 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
 
     final warnings = [
       if (hasPick && row.picked!.candidate == null) 'No date info found in this photo.',
-      if (hasPick && row.dateMismatch) "Doesn't look like this day.",
+      if (hasPick && row.dayGeoMismatch == DayGeoMismatch.wrongDay) "Doesn't look like this day.",
+      if (hasPick && row.dayGeoMismatch == DayGeoMismatch.tooFarAway)
+        "Taken more than ${kDefaultGeoToleranceKm.round()} km from this memory's location.",
       if (hasPick && row.looksSame == false) 'Looks different from the current photo.',
     ];
     final flagged = warnings.isNotEmpty;

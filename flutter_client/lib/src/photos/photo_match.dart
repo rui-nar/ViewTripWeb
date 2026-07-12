@@ -59,16 +59,80 @@ List<PhotoCandidate> selectCandidatesForDay({
   double? memoryLon,
   double geoToleranceKm = kDefaultGeoToleranceKm,
 }) {
-  final dayStartUtc = _parseDateUtc(date).subtract(localOffset);
-  final dayEndUtc = dayStartUtc.add(const Duration(days: 1));
+  final bounds = _DayBounds(date, localOffset);
   final hasMemoryGeo = memoryLat != null && memoryLon != null;
 
   return candidates.where((c) {
-    final utc = c.capturedAt.toUtc();
-    if (utc.isBefore(dayStartUtc) || !utc.isBefore(dayEndUtc)) return false;
+    if (!bounds.contains(c.capturedAt)) return false;
     if (!hasMemoryGeo || !c.hasGeo) return true;
     return haversineKm(memoryLat, memoryLon, c.lat!, c.lon!) <= geoToleranceKm;
   }).toList();
+}
+
+/// Why a single candidate doesn't belong to a memory's day/place, or [none]
+/// if it does. [selectCandidatesForDay] folds the same two checks (day,
+/// then geo) into a single kept/filtered-out result, which is all a bulk
+/// filter needs — but a single-candidate review UI (the photo-upgrade
+/// dialog, issue #33) needs to tell the user *which* check failed, since
+/// "doesn't look like this day" is a misleading message for a photo that's
+/// on the right day but was taken somewhere far from the memory's stored
+/// location.
+enum DayGeoMismatch {
+  /// Candidate matches (or there's nothing to check against).
+  none,
+
+  /// Candidate's capture time falls outside the memory's local day.
+  wrongDay,
+
+  /// Candidate is on the right day, but its own GPS is further than
+  /// [kDefaultGeoToleranceKm] (or the caller's override) from the memory's
+  /// stored location.
+  tooFarAway,
+}
+
+/// Classifies a single [candidate] against a memory's [date]/location — see
+/// [DayGeoMismatch] for what each outcome means. Shares its day-boundary
+/// math with [selectCandidatesForDay] (same [_DayBounds] helper) so the two
+/// can never silently drift apart on what counts as "the same day".
+DayGeoMismatch classifyDayGeoMatch({
+  required String date,
+  required Duration localOffset,
+  required PhotoCandidate candidate,
+  double? memoryLat,
+  double? memoryLon,
+  double geoToleranceKm = kDefaultGeoToleranceKm,
+}) {
+  if (!_DayBounds(date, localOffset).contains(candidate.capturedAt)) {
+    return DayGeoMismatch.wrongDay;
+  }
+
+  final hasMemoryGeo = memoryLat != null && memoryLon != null;
+  if (!hasMemoryGeo || !candidate.hasGeo) return DayGeoMismatch.none;
+
+  final withinRange =
+      haversineKm(memoryLat, memoryLon, candidate.lat!, candidate.lon!) <= geoToleranceKm;
+  return withinRange ? DayGeoMismatch.none : DayGeoMismatch.tooFarAway;
+}
+
+/// A memory's local-day window, expressed as a UTC instant range — computed
+/// once and reused per-candidate rather than shifting every candidate's
+/// clock and re-deriving a date, which is the classic source of an
+/// off-by-one-day bug right around midnight.
+class _DayBounds {
+  final DateTime startUtc;
+  final DateTime endUtc;
+
+  factory _DayBounds(String date, Duration localOffset) {
+    final start = _parseDateUtc(date).subtract(localOffset);
+    return _DayBounds._(start, start.add(const Duration(days: 1)));
+  }
+
+  _DayBounds._(this.startUtc, this.endUtc);
+
+  bool contains(DateTime capturedAt) {
+    final utc = capturedAt.toUtc();
+    return !utc.isBefore(startUtc) && utc.isBefore(endUtc);
+  }
 }
 
 DateTime _parseDateUtc(String date) {
