@@ -2,12 +2,11 @@
 
 ``run_poster_job`` is invoked via ``BackgroundTasks.add_task`` from
 ``api/poster.py`` right after a ``DBPosterJob`` row is created with
-status="pending". This unit only stubs the render: it draws a solid-colour
-placeholder sized for the requested orientation and saves it as both PNG and
-PDF. A later unit swaps the body of the "render" step for real tile-fetching +
-compositing (see api/poster.py's ``_poster_dir`` for the on-disk layout this
-writes into) without changing this function's signature — callers never
-change.
+status="pending". The actual rendering (basemap + route + memory pins/cards)
+lives in ``src/poster/poster_renderer.py`` (Unit E) — this module owns only
+the job-row lifecycle: marking it "running", invoking the renderer with a
+``progress`` callback that updates ``job.stage`` between steps, and marking it
+"done"/"failed" with the resulting file paths or error.
 """
 from __future__ import annotations
 
@@ -16,22 +15,13 @@ import logging
 import time
 from pathlib import Path
 
-from PIL import Image
-
 from models.db import get_session
 from models.project_db import DBPosterJob
+from src.poster.poster_renderer import render_poster
 
 _log = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
-
-# Placeholder dimensions per orientation — not A0-sized yet; a later unit
-# replaces this stub with the real tile-stitched render.
-_STUB_SIZE = {
-    "landscape": (800, 600),
-    "portrait": (600, 800),
-}
-_STUB_COLOR = (230, 230, 230)  # light grey
 
 
 def _poster_dir(user_id: str, job_id: int) -> Path:
@@ -43,33 +33,43 @@ def _poster_dir(user_id: str, job_id: int) -> Path:
 def run_poster_job(job_id: int) -> None:
     """Render the poster for *job_id*, updating its status as it progresses.
 
-    Looks up the job row, marks it "running", renders a placeholder image, and
-    marks it "done" with the resulting file paths. Any exception is caught and
-    recorded as a "failed" status with ``error_message`` rather than propagating
-    (this runs detached, as a FastAPI background task).
+    Looks up the job row, marks it "running", renders the real poster (real
+    basemap + pins/cards/route), and marks it "done" with the resulting file
+    paths. Any exception is caught and recorded as a "failed" status with
+    ``error_message`` rather than propagating (this runs detached, as a
+    FastAPI background task).
     """
     with get_session() as sess:
         job = sess.get(DBPosterJob, job_id)
         if job is None:
             return
         job.status = "running"
-        job.stage = "rendering"
+        job.stage = "starting"
         sess.add(job)
         sess.commit()
         user_info_id = job.user_info_id
+        project_id = job.project_id
         request = json.loads(job.request_json or "{}")
 
+    def _progress(stage: str) -> None:
+        """Persist a progress label onto the job row for polling clients."""
+        with get_session() as s:
+            j = s.get(DBPosterJob, job_id)
+            if j is not None:
+                j.stage = stage
+                s.add(j)
+                s.commit()
+
     try:
-        orientation = request.get("orientation", "landscape")
-        size = _STUB_SIZE.get(orientation, _STUB_SIZE["landscape"])
-
         poster_dir = _poster_dir(str(user_info_id), job_id)
-        png_path = poster_dir / "poster.png"
-        pdf_path = poster_dir / "poster.pdf"
-
-        img = Image.new("RGB", size, _STUB_COLOR)
-        img.save(str(png_path), "PNG")
-        img.save(str(pdf_path), "PDF", resolution=300.0)
+        png_path, pdf_path = render_poster(
+            job_id=job_id,
+            user_info_id=user_info_id,
+            project_id=project_id,
+            request=request,
+            poster_dir=poster_dir,
+            progress=_progress,
+        )
 
         with get_session() as sess:
             job = sess.get(DBPosterJob, job_id)
