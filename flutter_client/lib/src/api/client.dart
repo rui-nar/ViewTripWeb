@@ -84,6 +84,25 @@ class ApiClient {
     throw ApiException(res.statusCode, res.body);
   }
 
+  /// POST a JSON body and return the raw response (binary, e.g. an image) —
+  /// the POST counterpart to [getRaw] for endpoints that return bytes rather
+  /// than JSON (e.g. the poster layout preview).
+  Future<http.Response> postRaw(
+    String path,
+    Map<String, dynamic> body, {
+    Duration timeout = _kDefaultTimeout,
+  }) async {
+    final res = await _client
+        .post(
+          Uri.parse('$baseUrl$path'),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(timeout);
+    if (res.statusCode >= 200 && res.statusCode < 300) return res;
+    throw ApiException(res.statusCode, res.body);
+  }
+
   dynamic _handle(http.Response res) {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (res.body.isEmpty) return null;

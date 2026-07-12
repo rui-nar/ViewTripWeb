@@ -4,6 +4,7 @@
 ///   POST /api/projects/{name}/poster                  -> {job_id}
 ///   GET  /api/projects/{name}/poster/{job_id}          -> {status, stage, error_message}
 ///   GET  /api/projects/{name}/poster/{job_id}/download  -> file bytes
+///   POST /api/projects/{name}/poster/preview           -> PNG bytes (fast, no job)
 library;
 
 import 'package:flutter/foundation.dart';
@@ -21,6 +22,25 @@ Map<String, dynamic> posterMemoryJson(Map<String, dynamic> memory) => {
       'description': memory['description'],
       'photo_uuids': (memory['photos'] as List?)?.cast<String>() ?? const [],
     };
+
+/// Fetches a fast, low-resolution layout preview PNG for the given poster
+/// request — same request shape as [PosterJobNotifier.start], but synchronous
+/// (no job created, no polling): the server skips the Mapbox basemap fetch
+/// entirely for this endpoint, so it returns in well under a second.
+Future<Uint8List> fetchPosterPreview({
+  required String projectName,
+  required Map<String, double> bounds,
+  required String orientation,
+  required Map<String, bool> config,
+  required List<Map<String, dynamic>> memories,
+  ApiClient? client,
+}) async {
+  final res = await (client ?? api).postRaw(
+    '/api/projects/${Uri.encodeComponent(projectName)}/poster/preview',
+    {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
+  );
+  return res.bodyBytes;
+}
 
 /// Creates a poster job, then polls its status on a bounded interval until it
 /// reaches a terminal state ('done'/'failed') or [maxPollAttempts] is

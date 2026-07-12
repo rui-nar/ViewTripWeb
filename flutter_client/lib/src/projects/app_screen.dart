@@ -5,6 +5,7 @@ library;
 // dart:html is intentional — ViewTripWeb targets Flutter Web only.
 import 'dart:async' show unawaited;
 import 'dart:html' as html;
+import 'dart:typed_data' show Uint8List;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart' show LatLngBounds;
 import 'package:flutter_map_animations/flutter_map_animations.dart';
@@ -308,21 +309,41 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       context: context,
       barrierDismissible: false,
       builder: (_) => PosterConfigDialog(
-        onConfirm: (opts) => _startPosterJob(bounds, orientation, opts),
+        onConfirm: (opts) => _showPosterPreview(bounds, orientation, opts),
       ),
     );
   }
 
-  Future<void> _startPosterJob(
-      LatLngBounds bounds, String orientation, PosterConfigOptions opts) async {
-    if (!mounted) return;
+  List<Map<String, dynamic>> _posterMemoriesPayload() {
     final notifier = context.read<ProjectNotifier>();
-    final memories = [
+    return [
       for (final item in notifier.items)
         if (item['item_type'] == 'memory' && item['memory'] is Map)
-          posterMemoryJson(
-              (item['memory'] as Map).cast<String, dynamic>()),
+          posterMemoryJson((item['memory'] as Map).cast<String, dynamic>()),
     ];
+  }
+
+  Future<void> _showPosterPreview(
+      LatLngBounds bounds, String orientation, PosterConfigOptions opts) async {
+    if (!mounted) return;
+    final memories = _posterMemoriesPayload();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _PosterPreviewDialog(
+        projectName: widget.projectName,
+        bounds: bounds,
+        orientation: orientation,
+        opts: opts,
+        memories: memories,
+        onGenerate: () => _startPosterJob(bounds, orientation, opts, memories),
+      ),
+    );
+  }
+
+  Future<void> _startPosterJob(LatLngBounds bounds, String orientation,
+      PosterConfigOptions opts, List<Map<String, dynamic>> memories) async {
+    if (!mounted) return;
 
     final job = PosterJobNotifier(projectName: widget.projectName);
     unawaited(showDialog<void>(
@@ -958,6 +979,109 @@ class _PosterJobDialog extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// Fast, low-resolution layout preview shown between the config dialog and
+/// actually generating the poster (issue #14) — fetches
+/// `POST .../poster/preview` (no basemap imagery, just pins/cards/legend at
+/// a small size) so the user can sanity-check card placement/overlap before
+/// committing to the slower full-resolution job.
+class _PosterPreviewDialog extends StatefulWidget {
+  final String projectName;
+  final LatLngBounds bounds;
+  final String orientation;
+  final PosterConfigOptions opts;
+  final List<Map<String, dynamic>> memories;
+  final VoidCallback onGenerate;
+
+  const _PosterPreviewDialog({
+    required this.projectName,
+    required this.bounds,
+    required this.orientation,
+    required this.opts,
+    required this.memories,
+    required this.onGenerate,
+  });
+
+  @override
+  State<_PosterPreviewDialog> createState() => _PosterPreviewDialogState();
+}
+
+class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
+  Uint8List? _bytes;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final bytes = await fetchPosterPreview(
+        projectName: widget.projectName,
+        bounds: posterBoundsFromLatLngBounds(widget.bounds),
+        orientation: widget.orientation,
+        config: widget.opts.toJson(),
+        memories: widget.memories,
+      );
+      if (!mounted) return;
+      setState(() => _bytes = bytes);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Could not load the preview.');
+    }
+  }
+
+  void _generate() {
+    Navigator.of(context).pop();
+    widget.onGenerate();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Poster layout preview'),
+      content: SizedBox(
+        width: 420,
+        child: _error != null
+            ? Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              )
+            : _bytes == null
+                ? const SizedBox(
+                    height: 200,
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Image.memory(_bytes!, fit: BoxFit.contain),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Low-resolution layout only — the real poster uses a full '
+                        'map basemap and print resolution.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Back'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(minimumSize: const Size(0, 36)),
+          onPressed: (_bytes != null || _error != null) ? _generate : null,
+          child: const Text('Generate poster'),
+        ),
+      ],
     );
   }
 }

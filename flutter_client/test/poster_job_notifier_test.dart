@@ -147,4 +147,59 @@ void main() {
       expect(n.error, contains('timed out'));
     });
   });
+
+  group('fetchPosterPreview', () {
+    test('POSTs the request shape to the preview endpoint and returns the '
+        'raw PNG bytes', () async {
+      final pngBytes = [0x89, 0x50, 0x4E, 0x47];
+      Map<String, dynamic>? capturedBody;
+      final mock = MockClient((req) async {
+        expect(req.method, 'POST');
+        expect(req.url.path, '/api/projects/Trip/poster/preview');
+        capturedBody = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response.bytes(pngBytes, 200,
+            headers: {'content-type': 'image/png'});
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final bytes = await fetchPosterPreview(
+        projectName: 'Trip',
+        bounds: {'north': 1, 'south': 0, 'east': 1, 'west': 0},
+        orientation: 'landscape',
+        config: {'distance': true},
+        memories: const [
+          {'id': 1, 'lat': 0.5, 'lon': 0.5, 'date': '2024-01-01'}
+        ],
+        client: client,
+      );
+
+      expect(bytes, pngBytes);
+      expect(capturedBody, {
+        'bounds': {'north': 1, 'south': 0, 'east': 1, 'west': 0},
+        'orientation': 'landscape',
+        'config': {'distance': true},
+        'memories': [
+          {'id': 1, 'lat': 0.5, 'lon': 0.5, 'date': '2024-01-01'}
+        ],
+      });
+    });
+
+    test('a non-2xx response throws ApiException rather than returning bytes',
+        () async {
+      final mock = MockClient((req) async => http.Response('boom', 500));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      expect(
+        () => fetchPosterPreview(
+          projectName: 'Trip',
+          bounds: const {},
+          orientation: 'landscape',
+          config: const {},
+          memories: const [],
+          client: client,
+        ),
+        throwsA(isA<ApiException>()),
+      );
+    });
+  });
 }

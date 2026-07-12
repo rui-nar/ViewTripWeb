@@ -6,16 +6,20 @@ Unit D's per-day metrics (``day_metrics.compute_day_metrics``) into the actual
 PNG/PDF poster that ``poster_job_runner.run_poster_job`` used to fill with a
 solid-grey placeholder.
 
-Two layers, mirroring ``tile_stitcher``'s own split:
+Three layers:
   - ``assemble_card_content`` is pure Python (no Pillow) — given the request's
     ``config`` flags, one memory dict, and its computed day metrics, it
     returns an ordered list of content blocks. Fully unit-testable.
-  - Everything else (``render_poster`` and its drawing helpers) turns those
-    blocks, the stitched basemap, and the placed card rectangles into actual
-    pixels.
+  - ``_compose_poster_image`` turns those blocks, a stitched (or skipped)
+    basemap, and the placed card rectangles into actual pixels, at whatever
+    target size/``scale`` its caller asks for.
+  - ``render_poster`` (full-resolution, saves PNG+PDF to disk) and
+    ``render_poster_preview`` (small/fast, returns PNG bytes, no basemap
+    network fetch) are both thin callers of ``_compose_poster_image``.
 """
 from __future__ import annotations
 
+import io
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +63,10 @@ _A0_LONG_IN = 1189.0 / 25.4
 # comfortable margin under that cap, while also halving the in-memory
 # uncompressed RGB canvas size versus 300 DPI.
 _DPI = 150.0
+
+# Longest side (px) of the low-res layout preview (render_poster_preview) —
+# small enough to render in well under a second with zero network calls.
+_PREVIEW_MAX_DIMENSION = 900
 
 _CARD_SIZE = (620, 760)  # px at _DPI (~4.1in x 5.1in) — fits a thumbnail + a few text lines
 _CARD_BG = (255, 255, 255)
@@ -107,6 +115,21 @@ def _pdf_resolution(width_px: int, orientation: str) -> float:
     """
     width_in = _A0_LONG_IN if orientation == "landscape" else _A0_SHORT_IN
     return width_px / width_in
+
+
+def _s(value: float, scale: float) -> int:
+    """Scale a reference pixel constant by *scale*, floored at 1px.
+
+    Used throughout drawing so a low-res preview (``scale`` < 1) keeps the
+    same visual proportions as the real render rather than drawing
+    full-size pins/borders/text onto a tiny canvas.
+    """
+    return max(1, round(value * scale))
+
+
+def _notify(progress: Optional[ProgressFn], stage: str) -> None:
+    if progress is not None:
+        progress(stage)
 
 
 # ── Projection: lon/lat -> the same pixel frame render_basemap produced ──────
@@ -219,8 +242,8 @@ class _Fonts:
     small: ImageFont.FreeTypeFont
 
 
-def _load_fonts() -> _Fonts:
-    """Load fonts for card/legend text.
+def _load_fonts(scale: float = 1.0) -> _Fonts:
+    """Load fonts for card/legend text, sized proportionally to *scale*.
 
     This repo doesn't bundle a TTF anywhere (no existing Pillow text-drawing
     code to match), so per the brief's guidance this falls back to Pillow's
@@ -229,9 +252,9 @@ def _load_fonts() -> _Fonts:
     scalable-enough result at poster resolution.
     """
     return _Fonts(
-        title=ImageFont.load_default(size=30),
-        body=ImageFont.load_default(size=20),
-        small=ImageFont.load_default(size=16),
+        title=ImageFont.load_default(size=_s(30, scale)),
+        body=ImageFont.load_default(size=_s(20, scale)),
+        small=ImageFont.load_default(size=_s(16, scale)),
     )
 
 
@@ -270,7 +293,7 @@ def _render_basemap_safe(
         return Image.new("RGB", (target_w, target_h), _FALLBACK_BASEMAP_COLOR)
 
 
-def _draw_route(draw: ImageDraw.ImageDraw, project: Any, projector: _Projector) -> bool:
+def _draw_route(draw: ImageDraw.ImageDraw, project: Any, projector: _Projector, scale: float = 1.0) -> bool:
     """Draw the project's track geometry onto the basemap.
 
     Reuses ``api.geo``'s own server-side GeoJSON feature builder (the same
@@ -291,20 +314,24 @@ def _draw_route(draw: ImageDraw.ImageDraw, project: Any, projector: _Projector) 
         if len(coords) < 2:
             continue
         points = [projector.project(lon, lat) for lon, lat in coords]
-        draw.line(points, fill=_ROUTE_COLOR, width=_ROUTE_WIDTH, joint="curve")
+        draw.line(points, fill=_ROUTE_COLOR, width=_s(_ROUTE_WIDTH, scale), joint="curve")
         drawn = True
     return drawn
 
 
-def _draw_pin(draw: ImageDraw.ImageDraw, x: float, y: float) -> None:
-    r = _PIN_RADIUS
-    draw.ellipse([x - r, y - r, x + r, y + r], fill=_PIN_COLOR, outline=_PIN_OUTLINE, width=2)
+def _draw_pin(draw: ImageDraw.ImageDraw, x: float, y: float, scale: float = 1.0) -> None:
+    # A floor of 1px (via the generic _s helper) isn't enough here: at small
+    # scale the outline can end up as wide as the whole circle, swallowing
+    # the fill entirely and leaving no visible pin at all. Pins get their own
+    # higher floor so a filled dot is always visible, however small the scale.
+    r = max(3, round(_PIN_RADIUS * scale))
+    draw.ellipse([x - r, y - r, x + r, y + r], fill=_PIN_COLOR, outline=_PIN_OUTLINE, width=_s(2, scale))
 
 
-def _draw_leader(draw: ImageDraw.ImageDraw, x: float, y: float, rect: Rect) -> None:
+def _draw_leader(draw: ImageDraw.ImageDraw, x: float, y: float, rect: Rect, scale: float = 1.0) -> None:
     cx = (rect.left + rect.right) / 2
     cy = (rect.top + rect.bottom) / 2
-    draw.line([(x, y), (cx, cy)], fill=_LEADER_COLOR, width=2)
+    draw.line([(x, y), (cx, cy)], fill=_LEADER_COLOR, width=_s(2, scale))
 
 
 def _draw_card(
@@ -315,6 +342,7 @@ def _draw_card(
     fonts: _Fonts,
     user_id: str,
     memory_id: Any,
+    scale: float = 1.0,
 ) -> None:
     """Render one card's assembled content blocks into ``rect``.
 
@@ -325,12 +353,16 @@ def _draw_card(
     """
     from api.memories import _photo_dir
 
-    draw.rectangle([rect.left, rect.top, rect.right, rect.bottom], fill=_CARD_BG, outline=_CARD_BORDER, width=2)
+    draw.rectangle(
+        [rect.left, rect.top, rect.right, rect.bottom],
+        fill=_CARD_BG, outline=_CARD_BORDER, width=_s(2, scale),
+    )
 
-    x = rect.left + _CARD_PADDING
-    y = rect.top + _CARD_PADDING
-    max_w = (rect.right - rect.left) - 2 * _CARD_PADDING
-    bottom_limit = rect.bottom - _CARD_PADDING
+    padding = _s(_CARD_PADDING, scale)
+    x = rect.left + padding
+    y = rect.top + padding
+    max_w = (rect.right - rect.left) - 2 * padding
+    bottom_limit = rect.bottom - padding
 
     for block in blocks:
         if y >= bottom_limit:
@@ -339,14 +371,14 @@ def _draw_card(
 
         if kind == "name":
             draw.text((x, y), block["text"], font=fonts.title, fill=(20, 20, 20))
-            y += fonts.title.size + 6
+            y += fonts.title.size + _s(6, scale)
 
         elif kind == "description":
             for line in _wrap_text(block["text"], fonts.body, max_w, draw):
                 if y >= bottom_limit:
                     break
                 draw.text((x, y), line, font=fonts.body, fill=(50, 50, 50))
-                y += fonts.body.size + 4
+                y += fonts.body.size + _s(4, scale)
 
         elif kind in ("hero_photo", "photos"):
             uuids = [block["uuid"]] if kind == "hero_photo" else block["uuids"]
@@ -363,33 +395,33 @@ def _draw_card(
                     continue
                 thumb.thumbnail((max_w, bottom_limit - y), Image.LANCZOS)
                 canvas.paste(thumb, (int(x), int(y)))
-                y += thumb.height + 6
+                y += thumb.height + _s(6, scale)
 
         elif kind == "distance":
             draw.text((x, y), f"Distance: {block['value_m'] / 1000.0:.1f} km", font=fonts.body, fill=(30, 30, 30))
-            y += fonts.body.size + 4
+            y += fonts.body.size + _s(4, scale)
 
         elif kind == "elevation":
             draw.text((x, y), f"Elevation: {block['value_m']:.0f} m", font=fonts.body, fill=(30, 30, 30))
-            y += fonts.body.size + 4
+            y += fonts.body.size + _s(4, scale)
 
         elif kind == "counters":
             for item in block["items"]:
                 if y >= bottom_limit:
                     break
                 draw.text((x, y), f"{item['name']}: {item['value']}", font=fonts.small, fill=(30, 30, 30))
-                y += fonts.small.size + 3
+                y += fonts.small.size + _s(3, scale)
 
         elif kind == "tag_pie":
             for tag, dist in sorted(block["data"].items(), key=lambda kv: -kv[1]):
                 if y >= bottom_limit:
                     break
                 draw.text((x, y), f"{tag}: {dist / 1000.0:.1f} km", font=fonts.small, fill=(30, 30, 30))
-                y += fonts.small.size + 3
+                y += fonts.small.size + _s(3, scale)
 
         elif kind == "encounters":
             draw.text((x, y), f"Encounters: {block['count']}", font=fonts.body, fill=(30, 30, 30))
-            y += fonts.body.size + 4
+            y += fonts.body.size + _s(4, scale)
 
 
 def _draw_legend(
@@ -398,21 +430,106 @@ def _draw_legend(
     pin_xy: Dict[Any, Tuple[float, float]],
     fonts: _Fonts,
     target_h: int,
+    scale: float = 1.0,
 ) -> None:
     """Number overflowed pins on the map and list them in a small legend
     in the bottom-left margin (``entries`` is memory dicts, in placement
     order, whose card overflowed — see ``card_placement.CardPlacement``)."""
-    line_h = fonts.small.size + 6
-    y = max(_LEGEND_MARGIN, target_h - _LEGEND_MARGIN - len(entries) * line_h)
+    margin = _s(_LEGEND_MARGIN, scale)
+    pin_r = _s(_PIN_RADIUS, scale)
+    line_h = fonts.small.size + _s(6, scale)
+    y = max(margin, target_h - margin - len(entries) * line_h)
     for i, memory in enumerate(entries, start=1):
         px, py = pin_xy[memory["id"]]
-        draw.text((px + _PIN_RADIUS + 2, py - fonts.small.size), str(i), font=fonts.small, fill=(20, 20, 20))
+        draw.text((px + pin_r + 2, py - fonts.small.size), str(i), font=fonts.small, fill=(20, 20, 20))
         label = memory.get("name") or memory.get("date", "")
-        draw.text((_LEGEND_MARGIN, y), f"{i}. {label}", font=fonts.small, fill=(20, 20, 20))
+        draw.text((margin, y), f"{i}. {label}", font=fonts.small, fill=(20, 20, 20))
         y += line_h
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Composition (shared by the full render and the low-res preview) ─────────
+
+def _compose_poster_image(
+    project_id: int,
+    user_info_id: int,
+    request: Dict[str, Any],
+    target_w: int,
+    target_h: int,
+    *,
+    scale: float = 1.0,
+    tile_fetcher: Optional[TileFetcher] = None,
+    skip_basemap: bool = False,
+    progress: Optional[ProgressFn] = None,
+) -> Image.Image:
+    """Build the composited poster image: basemap (or a flat fallback), route,
+    pins, non-overlapping cards, and an overflow legend.
+
+    ``scale`` is the ratio of this render's pixel size to the real A0 output
+    (1.0 for the real render; < 1 for ``render_poster_preview``'s small, fast
+    layout preview) — card size, pin/line widths, and fonts all scale with it
+    so a preview keeps the same visual proportions rather than drawing
+    full-size elements onto a tiny canvas. ``skip_basemap`` bypasses the
+    Mapbox tile fetch entirely (used by the preview so it never depends on
+    network/``MAPBOX_TOKEN`` and stays fast).
+    """
+    bounds = request["bounds"]
+    config = request.get("config", {})
+    memories: List[Dict[str, Any]] = request.get("memories", [])
+    user_id = str(user_info_id)
+
+    _notify(progress, "fetching basemap")
+    if skip_basemap:
+        canvas = Image.new("RGB", (target_w, target_h), _FALLBACK_BASEMAP_COLOR)
+    else:
+        canvas = _render_basemap_safe(bounds, target_w, target_h, tile_fetcher=tile_fetcher)
+    draw = ImageDraw.Draw(canvas)
+    projector = _Projector(bounds, target_w, target_h)
+
+    _notify(progress, "loading project")
+    with get_session() as sess:
+        project = _repo.get_project_by_id(sess, project_id)
+
+    if project is not None:
+        _notify(progress, "plotting route")
+        _draw_route(draw, project, projector, scale)
+
+    _notify(progress, "placing cards")
+    card_size = (_s(_CARD_SIZE[0], scale), _s(_CARD_SIZE[1], scale))
+    pin_xy: Dict[Any, Tuple[float, float]] = {}
+    pins: List[PinSpec] = []
+    for memory in memories:
+        x, y = projector.project(memory["lon"], memory["lat"])
+        pin_xy[memory["id"]] = (x, y)
+        pins.append(PinSpec(id=memory["id"], x=x, y=y, sort_key=memory.get("date", "")))
+    placements = place_cards(pins, card_size, (target_w, target_h))
+
+    _notify(progress, "rendering cards")
+    memories_by_id = {m["id"]: m for m in memories}
+    fonts = _load_fonts(scale)
+    legend_entries: List[Dict[str, Any]] = []
+
+    for placement in placements:
+        memory = memories_by_id.get(placement.pin_id)
+        if memory is None:
+            continue
+        x, y = pin_xy[placement.pin_id]
+        _draw_pin(draw, x, y, scale)
+
+        if placement.placed and placement.card_rect is not None:
+            metrics = compute_day_metrics(project, memory["date"]) if project is not None else _EMPTY_METRICS
+            blocks = assemble_card_content(config, memory, metrics)
+            _draw_leader(draw, x, y, placement.card_rect, scale)
+            _draw_card(draw, canvas, placement.card_rect, blocks, fonts, user_id, memory["id"], scale)
+        else:
+            legend_entries.append(memory)
+
+    if legend_entries:
+        _draw_legend(draw, legend_entries, pin_xy, fonts, target_h, scale)
+
+    return canvas
+
+
+# ── Entry points ───────────────────────────────────────────────────────────────
 
 def render_poster(
     job_id: int,
@@ -442,62 +559,51 @@ def render_poster(
     tests inject a fake one to avoid network calls.
     """
     orientation = request.get("orientation", "landscape")
-    bounds = request["bounds"]
-    config = request.get("config", {})
-    memories: List[Dict[str, Any]] = request.get("memories", [])
-    user_id = str(user_info_id)
-
     target_w, target_h = _target_size(orientation)
 
-    progress("fetching basemap")
-    canvas = _render_basemap_safe(bounds, target_w, target_h, tile_fetcher=tile_fetcher)
-    draw = ImageDraw.Draw(canvas)
-    projector = _Projector(bounds, target_w, target_h)
+    canvas = _compose_poster_image(
+        project_id, user_info_id, request, target_w, target_h,
+        scale=1.0, tile_fetcher=tile_fetcher, skip_basemap=False, progress=progress,
+    )
 
-    progress("loading project")
-    with get_session() as sess:
-        project = _repo.get_project_by_id(sess, project_id)
-
-    if project is not None:
-        progress("plotting route")
-        _draw_route(draw, project, projector)
-
-    progress("placing cards")
-    pin_xy: Dict[Any, Tuple[float, float]] = {}
-    pins: List[PinSpec] = []
-    for memory in memories:
-        x, y = projector.project(memory["lon"], memory["lat"])
-        pin_xy[memory["id"]] = (x, y)
-        pins.append(PinSpec(id=memory["id"], x=x, y=y, sort_key=memory.get("date", "")))
-    placements = place_cards(pins, _CARD_SIZE, (target_w, target_h))
-
-    progress("rendering cards")
-    memories_by_id = {m["id"]: m for m in memories}
-    fonts = _load_fonts()
-    legend_entries: List[Dict[str, Any]] = []
-
-    for placement in placements:
-        memory = memories_by_id.get(placement.pin_id)
-        if memory is None:
-            continue
-        x, y = pin_xy[placement.pin_id]
-        _draw_pin(draw, x, y)
-
-        if placement.placed and placement.card_rect is not None:
-            metrics = compute_day_metrics(project, memory["date"]) if project is not None else _EMPTY_METRICS
-            blocks = assemble_card_content(config, memory, metrics)
-            _draw_leader(draw, x, y, placement.card_rect)
-            _draw_card(draw, canvas, placement.card_rect, blocks, fonts, user_id, memory["id"])
-        else:
-            legend_entries.append(memory)
-
-    if legend_entries:
-        _draw_legend(draw, legend_entries, pin_xy, fonts, target_h)
-
-    progress("encoding pdf")
+    _notify(progress, "encoding pdf")
     png_path = poster_dir / "poster.png"
     pdf_path = poster_dir / "poster.pdf"
     canvas.save(str(png_path), "PNG")
     canvas.save(str(pdf_path), "PDF", resolution=_pdf_resolution(target_w, orientation))
 
     return png_path, pdf_path
+
+
+def render_poster_preview(
+    project_id: int,
+    user_info_id: int,
+    request: Dict[str, Any],
+    *,
+    max_dimension: int = _PREVIEW_MAX_DIMENSION,
+) -> bytes:
+    """Fast, low-resolution layout preview — same card-placement/content
+    logic as the real render (scaled down), but always skips the Mapbox
+    basemap fetch (flat fallback colour) so it returns in well under a
+    second regardless of ``MAPBOX_TOKEN``/network. For checking card
+    layout/overlap and which fields show before committing to the real,
+    slower job — not a preview of basemap imagery.
+
+    Synchronous (no ``DBPosterJob`` row, no background task): returns PNG
+    bytes directly. ``max_dimension`` bounds the longer side of the preview
+    image, preserving the real render's A0 aspect ratio for the requested
+    orientation.
+    """
+    orientation = request.get("orientation", "landscape")
+    real_w, real_h = _target_size(orientation)
+    scale = max_dimension / max(real_w, real_h)
+    preview_w = max(1, round(real_w * scale))
+    preview_h = max(1, round(real_h * scale))
+
+    canvas = _compose_poster_image(
+        project_id, user_info_id, request, preview_w, preview_h,
+        scale=scale, tile_fetcher=None, skip_basemap=True, progress=None,
+    )
+    buf = io.BytesIO()
+    canvas.save(buf, "PNG")
+    return buf.getvalue()
