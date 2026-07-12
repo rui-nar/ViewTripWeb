@@ -115,6 +115,32 @@ class TestForcedChange:
         )
         assert relogin.json()["user"]["password_change_required"] is False
 
+    def test_change_password_response_itself_carries_cleared_flag(self, engine, auth_client):
+        """Regression (issue #67): the client never re-logs in after a forced
+        change — it re-fetches /me with the *old* token, which just echoes the
+        old JWT's baked-in claim and never clears. change-password must return
+        a fresh token/user reflecting the change directly, with no re-login."""
+        seed_admin()
+        login = auth_client.post("/api/auth/token",
+                                 json={"username": "admin", "password": "admin"})
+        old_token = login.json()["access_token"]
+
+        resp = auth_client.post(
+            "/api/auth/change-password",
+            headers={"Authorization": f"Bearer {old_token}"},
+            json={"current_password": "admin", "new_password": "brand-new-pw"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["user"]["password_change_required"] is False
+        new_token = body["access_token"]
+        assert new_token != old_token
+
+        # The freshly issued token, used immediately, also reflects the change —
+        # no re-login required for the router redirect to unblock.
+        me = auth_client.get("/api/auth/me", headers={"Authorization": f"Bearer {new_token}"})
+        assert me.json()["password_change_required"] is False
+
 
 # ── 9. ADMIN_EMAILS promotion ─────────────────────────────────────────────────
 

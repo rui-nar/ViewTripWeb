@@ -34,4 +34,10 @@ class AdminService {
   Future<void> setAdmin(int userInfoId, bool isAdmin) async {
     await api.post('/api/admin/users/$userInfoId/set-admin', {'is_admin': isAdmin});
   }
+
+  /// Permanently delete a user and all their data.
+  /// Throws [ApiException] (409) when deleting your own account this way.
+  Future<void> deleteUser(int userInfoId) async {
+    await api.delete('/api/admin/users/$userInfoId');
+  }
 }

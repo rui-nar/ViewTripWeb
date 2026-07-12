@@ -278,12 +278,17 @@ def update_me(
         return _token_response(user_info)
 
 
-@router.post("/change-password", response_model=OkOut, summary="Change password")
+@router.post("/change-password", response_model=TokenResponse, summary="Change password")
 def change_password(
     body: ChangePasswordRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Change password — local (email) accounts only. Returns 403 for Google accounts."""
+    """Change password — local (email) accounts only. Returns 403 for Google accounts.
+
+    Returns a fresh JWT (like PUT /me) rather than just {"ok": true}: the old
+    token still carries password_change_required=True as a baked-in claim, so
+    without a new token the client has no way to learn the flag cleared.
+    """
     if current_user.get("auth_provider") != "local":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -307,61 +312,19 @@ def change_password(
         local_user.password_change_required = False
         sess.add(local_user)
         sess.commit()
-    return {"ok": True}
+        sess.refresh(user_info)
+        return _token_response(user_info, local_user.password_change_required)
 
 
 @router.delete("/me", response_model=OkOut, summary="Delete account")
 def delete_account(current_user: Annotated[dict, Depends(get_current_user)]):
     """Permanently delete the current user's account and all associated data."""
-    from models.project_db import DBActivity, DBProject, DBProjectItem, DBStravaCache
-    from models.user import StravaToken
+    from src.auth.account_deletion import delete_user_and_data, purge_user_files
 
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        user_info = sess.get(UserInfo, user_info_id)
-        if user_info is None:
+        if sess.get(UserInfo, user_info_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-        # Delete project items and projects
-        project_rows = sess.exec(
-            select(DBProject).where(DBProject.user_info_id == user_info_id)
-        ).all()
-        for proj in project_rows:
-            items = sess.exec(
-                select(DBProjectItem).where(DBProjectItem.project_id == proj.id)
-            ).all()
-            for item in items:
-                sess.delete(item)
-        for proj in project_rows:
-            sess.delete(proj)
-
-        # Delete activities
-        for act in sess.exec(
-            select(DBActivity).where(DBActivity.user_info_id == user_info_id)
-        ).all():
-            sess.delete(act)
-
-        # Delete Strava cache
-        cache = sess.get(DBStravaCache, user_info_id)
-        if cache:
-            sess.delete(cache)
-
-        # Delete Strava token
-        token = sess.exec(
-            select(StravaToken).where(StravaToken.user_info_id == user_info_id)
-        ).first()
-        if token:
-            sess.delete(token)
-
-        # Delete UserInfo then LocalUser
-        local_auth_id = user_info.local_auth_id
-        sess.delete(user_info)
-        sess.flush()
-
-        if local_auth_id:
-            local_user = sess.get(LocalUser, local_auth_id)
-            if local_user:
-                sess.delete(local_user)
-
-        sess.commit()
+        delete_user_and_data(sess, user_info_id)
+    purge_user_files(user_info_id)
     return {"ok": True}

@@ -89,15 +89,18 @@ _ADMIN_ROUTES = [
     ("get", "/api/admin/users/search?q=a"),
     ("post", "/api/admin/users/1/reset-password"),
     ("post", "/api/admin/users/1/set-admin"),
+    ("delete", "/api/admin/users/999999"),
 ]
 
 
 class TestGating:
     def _call(self, client, method, path):
-        if method != "get":
-            body = {"is_admin": True} if "set-admin" in path else {}
-            return client.post(path, json=body)
-        return client.get(path)
+        if method == "get":
+            return client.get(path)
+        if method == "delete":
+            return client.delete(path)
+        body = {"is_admin": True} if "set-admin" in path else {}
+        return client.post(path, json=body)
 
     @pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
     def test_admin_reaches_route(self, admin_client, engine, method, path):
@@ -399,3 +402,54 @@ class TestSetAdmin:
         assert res[0]["is_admin"] is False
         res = client.get("/api/admin/users/search?q=other-admin").json()
         assert res[0]["is_admin"] is True
+
+
+# ── 17. Delete user ────────────────────────────────────────────────────────────
+
+class TestDeleteUser:
+    @pytest.fixture
+    def ctx(self, engine):
+        with Session(engine) as sess:
+            admin, _ = _mk_user(sess, display_name="admin", email="admin@x.io",
+                                is_admin=True)
+            target, _ = _mk_user(sess, display_name="Target", email="target@x.io")
+            tid = target.id
+            sess.add(DBProject(user_info_id=tid, name="Trip"))
+            sess.commit()
+            proj = sess.exec(select(DBProject).where(DBProject.user_info_id == tid)).first()
+            sess.add(DBMemory(project_id=proj.id, date="2025-01-01"))
+            sess.add(DBActivity(id=42, user_info_id=tid, name="ride"))
+            sess.commit()
+            aid = admin.id
+        payload = {"sub": str(aid), "email": "admin@x.io", "auth_provider": "local"}
+        return TestClient(_admin_app(engine, payload)), engine, aid, tid
+
+    def test_delete_removes_user_and_owned_data(self, ctx):
+        client, engine, _, tid = ctx
+        resp = client.delete(f"/api/admin/users/{tid}")
+        assert resp.status_code == 200
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, tid) is None
+            assert sess.exec(select(DBProject).where(DBProject.user_info_id == tid)).first() is None
+            assert sess.exec(select(DBMemory)).first() is None  # target was the only owner
+            assert sess.exec(select(DBActivity).where(DBActivity.user_info_id == tid)).first() is None
+
+    def test_delete_purges_storage(self, ctx, tmp_path):
+        client, _, _, tid = ctx
+        d = tmp_path / "users" / str(tid)
+        d.mkdir(parents=True)
+        (d / "photo.jpg").write_bytes(b"x")
+        client.delete(f"/api/admin/users/{tid}")
+        assert not d.exists()
+
+    def test_cannot_delete_self(self, ctx):
+        client, engine, aid, _ = ctx
+        resp = client.delete(f"/api/admin/users/{aid}")
+        assert resp.status_code == 409
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, aid) is not None
+
+    def test_delete_unknown_user_404(self, ctx):
+        client, *_ = ctx
+        resp = client.delete("/api/admin/users/999999")
+        assert resp.status_code == 404

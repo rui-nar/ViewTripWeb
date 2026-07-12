@@ -56,6 +56,7 @@ class UserRow(BaseModel):
     memory_count: int
     storage_bytes: int
     encryption_tier: str
+    is_admin: bool
 
 
 class Totals(BaseModel):
@@ -132,14 +133,14 @@ def stats(_admin: Annotated[dict, Depends(require_admin)]):
         # Snapshot the plain profile fields before leaving the session so the
         # (potentially slow) storage walk below holds no DB connection.
         profiles = [
-            (u.id, u.email, u.display_name, u.auth_provider, u.created_at)
+            (u.id, u.email, u.display_name, u.auth_provider, u.created_at, bool(u.is_admin))
             for u in users
         ]
 
     # Storage walk happens OUTSIDE the session (see src.admin.storage).
     rows: list[UserRow] = []
     total_storage = 0
-    for uid, email, display_name, auth_provider, created_at in profiles:
+    for uid, email, display_name, auth_provider, created_at, is_admin in profiles:
         storage = cached_user_storage(str(uid), now=now)
         total_storage += storage
         rows.append(UserRow(
@@ -153,10 +154,11 @@ def stats(_admin: Annotated[dict, Depends(require_admin)]):
             memory_count=memory_counts.get(uid, 0),
             storage_bytes=storage,
             encryption_tier=tiers.get(uid, "none"),
+            is_admin=is_admin,
         ))
 
     recent = sum(
-        1 for _, _, _, _, created_at in profiles
+        1 for _, _, _, _, created_at, _ in profiles
         if created_at and (now - created_at) < _RECENT_SIGNUP_WINDOW_SECONDS
     )
 
@@ -296,3 +298,31 @@ def reset_password(
         "Admin reset password for user_info_id=%s (tier=%s)", user_info_id, tier
     )
     return ResetPasswordResponse(temp_password=temp_password)
+
+
+@router.delete("/users/{user_info_id}", response_model=OkResponse,
+               summary="Permanently delete a user and all their data")
+def delete_user(
+    user_info_id: int,
+    admin: Annotated[dict, Depends(require_admin)],
+):
+    """Irreversibly delete a user's account, projects, and every row/file they
+    own. An admin cannot delete their own account this way — use account
+    settings for that, so there's always an admin left to act."""
+    if str(user_info_id) == str(admin.get("sub")):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You cannot delete your own account here.",
+        )
+    from src.auth.account_deletion import delete_user_and_data, purge_user_files
+
+    with get_session() as sess:
+        if sess.get(UserInfo, user_info_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+        delete_user_and_data(sess, user_info_id)
+    purge_user_files(user_info_id)
+
+    _log.info("Admin deleted user_info_id=%s", user_info_id)
+    return {"ok": True}

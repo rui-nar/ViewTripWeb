@@ -73,6 +73,7 @@ class _AdminScreenState extends State<AdminScreen> {
   bool _searching = false;
   final Set<int> _resetting = {};
   final Set<int> _togglingAdmin = {};
+  final Set<int> _deleting = {};
 
   @override
   void initState() {
@@ -168,6 +169,49 @@ class _AdminScreenState extends State<AdminScreen> {
       }
     } finally {
       if (mounted) setState(() => _togglingAdmin.remove(id));
+    }
+  }
+
+  Future<void> _deleteUser(Map<String, dynamic> user) async {
+    final id = user['id'] as int;
+    final label = (user['display_name'] as String?)?.isNotEmpty == true
+        ? user['display_name'] as String
+        : (user['email'] as String? ?? '#$id');
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Delete user?'),
+            content: Text(
+                'This permanently deletes $label\'s account, projects, and all '
+                'associated data. This cannot be undone.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+
+    setState(() => _deleting.add(id));
+    try {
+      await widget.service.deleteUser(id);
+      if (mounted) setState(() => _results.removeWhere((u) => u['id'] == id));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _deleting.remove(id));
     }
   }
 
@@ -331,8 +375,10 @@ class _AdminScreenState extends State<AdminScreen> {
                 user: u,
                 busyReset: _resetting.contains(u['id']),
                 busyAdmin: _togglingAdmin.contains(u['id']),
+                busyDelete: _deleting.contains(u['id']),
                 onReset: () => _resetPassword(u),
                 onToggleAdmin: () => _toggleAdmin(u),
+                onDelete: () => _deleteUser(u),
               )),
       ],
     );
@@ -389,10 +435,20 @@ class _UserTable extends StatelessWidget {
         ],
         rows: users.map((u) {
           final tier = u['encryption_tier'] as String? ?? 'none';
+          final name = (u['display_name'] as String?)?.isNotEmpty == true
+              ? u['display_name'] as String
+              : (u['email'] as String? ?? '#${u['id']}');
           return DataRow(cells: [
-            DataCell(Text((u['display_name'] as String?)?.isNotEmpty == true
-                ? u['display_name'] as String
-                : (u['email'] as String? ?? '#${u['id']}'))),
+            DataCell(Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (u['is_admin'] == true) ...[
+                  const _AdminShieldIcon(),
+                  const SizedBox(width: 6),
+                ],
+                Text(name),
+              ],
+            )),
             DataCell(Text(u['auth_provider'] as String? ?? 'local')),
             DataCell(Text(formatSignup((u['created_at'] as num?) ?? 0))),
             DataCell(Text('${u['project_count'] ?? 0}')),
@@ -407,6 +463,30 @@ class _UserTable extends StatelessWidget {
   }
 }
 
+/// Marks an admin user, both in the Users table and search results.
+class _AdminShieldIcon extends StatelessWidget {
+  const _AdminShieldIcon();
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Admin',
+      child: Icon(Icons.shield, size: 16, color: Theme.of(context).colorScheme.primary),
+    );
+  }
+}
+
+const Map<String, String> _tierExplanations = {
+  'none': 'No encryption. Content is stored and searchable in plaintext.',
+  'low': 'Server-recoverable encryption. An admin can still reset this '
+      'password without losing data.',
+  'medium': 'Zero-knowledge encryption. An admin password reset would '
+      'destroy this user\'s encrypted data — resets are blocked.',
+  'high': 'Zero-knowledge encryption with device-only recovery. An admin '
+      'password reset would destroy this user\'s encrypted data — resets '
+      'are blocked.',
+};
+
 class _TierChip extends StatelessWidget {
   final String tier;
   const _TierChip({required this.tier});
@@ -414,13 +494,16 @@ class _TierChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = tierColor(tier);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(8),
+    return Tooltip(
+      message: 'Encryption tier: ${_tierExplanations[tier] ?? tier}',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(tier, style: TextStyle(color: c, fontSize: 12)),
       ),
-      child: Text(tier, style: TextStyle(color: c, fontSize: 12)),
     );
   }
 }
@@ -429,15 +512,19 @@ class _SearchRow extends StatelessWidget {
   final Map<String, dynamic> user;
   final bool busyReset;
   final bool busyAdmin;
+  final bool busyDelete;
   final VoidCallback onReset;
   final VoidCallback onToggleAdmin;
+  final VoidCallback onDelete;
 
   const _SearchRow({
     required this.user,
     required this.busyReset,
     required this.busyAdmin,
+    required this.busyDelete,
     required this.onReset,
     required this.onToggleAdmin,
+    required this.onDelete,
   });
 
   @override
@@ -455,7 +542,16 @@ class _SearchRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(label, style: theme.textTheme.bodyMedium),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isAdmin) ...[const _AdminShieldIcon(), const SizedBox(width: 6)],
+            Flexible(
+              child: Text(label,
+                  style: theme.textTheme.bodyMedium, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
         Text(user['email'] as String? ?? '', style: theme.textTheme.bodySmall),
       ],
     );
@@ -476,6 +572,16 @@ class _SearchRow extends StatelessWidget {
             child: Text(isAdmin ? 'Remove admin' : 'Make admin'),
           );
 
+    final deleteButton = busyDelete
+        ? const SizedBox(
+            width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+        : OutlinedButton(
+            style: OutlinedButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error),
+            onPressed: onDelete,
+            child: const Text('Delete user'),
+          );
+
     // A Wrap (not a Row of fixed-width buttons) so on narrow widths the
     // controls reflow onto a second line instead of squeezing `info` to zero.
     final controls = Wrap(
@@ -485,6 +591,7 @@ class _SearchRow extends StatelessWidget {
       children: [
         _TierChip(tier: tier),
         adminButton,
+        deleteButton,
         canReset
             ? resetButton
             : Tooltip(

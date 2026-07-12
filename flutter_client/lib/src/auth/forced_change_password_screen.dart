@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import '../settings/settings_service.dart';
 import 'auth_notifier.dart';
+import 'auth_service.dart';
 import 'password_rules.dart';
 
 class ForcedChangePasswordScreen extends StatefulWidget {
@@ -48,11 +49,17 @@ class _ForcedChangePasswordScreenState
       _error = null;
     });
     try {
-      await _service.changePassword(current: _current.text, next: _next.text);
+      final result = await _service.changePassword(
+          current: _current.text, next: _next.text);
+      // The old token still carries password_change_required=true as a baked-in
+      // claim, so a stale-token refetch of /me would never see it clear. Store
+      // the fresh token the server just issued instead; the router redirect
+      // then re-evaluates against the current user and lets the user through.
+      if (result.token != null) {
+        await AuthService().persistToken(result.token!);
+      }
       if (!mounted) return;
-      // Clear the flag by re-fetching the profile; the router redirect then
-      // lets the user through.
-      await context.read<AuthNotifier>().refreshProfile();
+      context.read<AuthNotifier>().updateUser(result.user);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString().replaceFirst('Exception: ', ''));

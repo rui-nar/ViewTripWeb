@@ -1,8 +1,7 @@
 /// Authentication service — wraps /api/auth/* endpoints.
-// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 library;
 
-import 'dart:html' as html;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/client.dart';
 
@@ -11,7 +10,8 @@ class AuthService {
 
   /// Restore a persisted token on app start.
   Future<bool> restoreSession() async {
-    final token = html.window.localStorage[_tokenKey];
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString(_tokenKey);
     if (token != null) {
       api.setToken(token);
       return true;
@@ -25,13 +25,13 @@ class AuthService {
       'username': username,
       'password': password,
     });
-    _persist(data['access_token'] as String);
+    await _persist(data['access_token'] as String);
     return data['user'] as Map<String, dynamic>;
   }
 
   Future<Map<String, dynamic>> loginWithGoogle(String idToken) async {
     final data = await api.post('/api/auth/google', {'id_token': idToken});
-    _persist(data['access_token'] as String);
+    await _persist(data['access_token'] as String);
     return data['user'] as Map<String, dynamic>;
   }
 
@@ -47,7 +47,7 @@ class AuthService {
       'display_name': displayName,
       if (email.isNotEmpty) 'email': email,
     });
-    _persist(data['access_token'] as String);
+    await _persist(data['access_token'] as String);
     return data['user'] as Map<String, dynamic>;
   }
 
@@ -60,14 +60,16 @@ class AuthService {
 
   Future<void> logout() async {
     api.clearToken();
-    html.window.localStorage.remove(_tokenKey);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_tokenKey);
   }
 
   /// Persist a token returned by a mid-session API call (e.g. profile update).
-  Future<void> persistToken(String token) async => _persist(token);
+  Future<void> persistToken(String token) => _persist(token);
 
-  void _persist(String token) {
+  Future<void> _persist(String token) async {
     api.setToken(token);
-    html.window.localStorage[_tokenKey] = token;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_tokenKey, token);
   }
 }

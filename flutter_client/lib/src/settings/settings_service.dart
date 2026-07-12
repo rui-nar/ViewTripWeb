@@ -20,15 +20,19 @@ class SettingsService {
     }
   }
 
-  Future<void> changePassword({
+  Future<({String? token, Map<String, dynamic> user})> changePassword({
     required String current,
     required String next,
   }) async {
     try {
-      await api.post('/api/auth/change-password', {
+      final data = await api.post('/api/auth/change-password', {
         'current_password': current,
         'new_password': next,
-      });
+      }) as Map<String, dynamic>;
+      return (
+        token: data['access_token'] as String?,
+        user: data['user'] as Map<String, dynamic>? ?? {},
+      );
     } on ApiException catch (e) {
       throw Exception(_detail(e.body));
     }
