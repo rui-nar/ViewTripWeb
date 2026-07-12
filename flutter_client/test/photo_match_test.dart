@@ -203,6 +203,21 @@ void main() {
     });
   });
 
+  group('looksLikeSamePhoto', () {
+    test('returns null when either side has no pHash', () {
+      expect(looksLikeSamePhoto(null, 0x00), isNull);
+      expect(looksLikeSamePhoto(0x00, null), isNull);
+    });
+
+    test('true when within the distance threshold', () {
+      expect(looksLikeSamePhoto(0x00, 0x03), isTrue); // distance 2
+    });
+
+    test('false when past the distance threshold', () {
+      expect(looksLikeSamePhoto(0x00, 0x7FFFFFFFFFFFFFFF), isFalse);
+    });
+  });
+
   group('hammingDistance', () {
     test('identical hashes have distance 0', () {
       expect(hammingDistance(0x1234, 0x1234), 0);

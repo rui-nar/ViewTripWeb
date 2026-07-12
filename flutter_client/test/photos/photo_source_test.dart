@@ -110,6 +110,21 @@ Uint8List _checkerboardPngBytes({int size = 32, int block = 4, bool invert = fal
   return Uint8List.fromList(img.encodePng(image));
 }
 
+/// An image that's visibly different under rotation (bright top-left
+/// quadrant, dark elsewhere) — unlike an evenly alternating checkerboard,
+/// this can't coincidentally hash the same when rotated, so it actually
+/// exercises orientation-correction rather than a rotation-symmetric image.
+img.Image _asymmetricQuadrantImage({int size = 32}) {
+  final image = img.Image(width: size, height: size);
+  for (var y = 0; y < size; y++) {
+    for (var x = 0; x < size; x++) {
+      final v = (x < size / 2 && y < size / 2) ? 255 : 0;
+      image.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  return image;
+}
+
 void main() {
   group('extractExifCaptureInfo', () {
     test('reads capture timestamp and GPS from EXIF data', () async {
@@ -185,6 +200,25 @@ void main() {
 
     test('undecodable bytes return null instead of throwing', () {
       expect(computeAverageHash(Uint8List.fromList([9, 9, 9])), isNull);
+    });
+
+    test('bakes EXIF orientation before hashing, so a sensor-rotated photo '
+        'still matches its upright reference', () {
+      final upright = _asymmetricQuadrantImage();
+      final uprightHash =
+          computeAverageHash(Uint8List.fromList(img.encodePng(upright)));
+
+      // Simulate a portrait photo stored as rotated sensor data (as real
+      // camera JPEGs do) with orientation 6 recording that a 90° CW rotation
+      // is needed to reach the upright display orientation.
+      final sensorRotated = img.copyRotate(upright, angle: -90);
+      sensorRotated.exif.imageIfd.orientation = 6;
+      final rotatedBytes = Uint8List.fromList(img.encodeJpg(sensorRotated));
+      final rotatedHash = computeAverageHash(rotatedBytes);
+
+      expect(uprightHash, isNotNull);
+      expect(rotatedHash, isNotNull);
+      expect(hammingDistance(uprightHash!, rotatedHash!), lessThan(4));
     });
   });
 

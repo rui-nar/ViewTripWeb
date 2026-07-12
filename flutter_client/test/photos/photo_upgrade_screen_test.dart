@@ -35,33 +35,12 @@ class _FakeNotifier extends ProjectNotifier {
 }
 
 final _day = DateTime.utc(2026, 7, 10, 12, 0);
+final _otherDay = DateTime.utc(2026, 6, 1, 12, 0);
 
-// Two disjoint bit-pattern groups so the high/low fixtures below can never
-// cross-match each other (kept simply-provable rather than relying on
-// pairCandidatesWithThumbnails' greedy tie-breaking across groups).
-const _thumbHighHash = 0x0F; // existing "high confidence" thumbnail
-const _clearJpgHash = 0x0D; // distance 1 from _thumbHighHash -> no rival
-const _thumbLowHash = 0xF00000000; // existing "low confidence" thumbnail
-const _candAHash = 0xF00000001; // distance 1 from _thumbLowHash
-const _candBHash = 0xF00000003; // distance 2 from _thumbLowHash -> rival for candA
-
-List<PickedPhoto> _fakePicked() => [
-      PickedPhoto(
-        bytes: Uint8List.fromList([1]),
-        filename: 'clear.jpg',
-        candidate: PhotoCandidate(capturedAt: _day, pHash: _clearJpgHash),
-      ),
-      PickedPhoto(
-        bytes: Uint8List.fromList([2]),
-        filename: 'candidate-a.jpg',
-        candidate: PhotoCandidate(capturedAt: _day, pHash: _candAHash),
-      ),
-      PickedPhoto(
-        bytes: Uint8List.fromList([3]),
-        filename: 'candidate-b.jpg',
-        candidate: PhotoCandidate(capturedAt: _day, pHash: _candBHash),
-      ),
-    ];
+const _thumbHighHash = 0x0F; // existing thumbnail for the "looks the same" row
+const _clearJpgHash = 0x0D; // distance 1 from _thumbHighHash -> looks the same
+const _thumbLowHash = 0x00; // existing thumbnail for the "looks different" row
+const _farHash = 0x7FFFFFFFFFFFFFFF; // distance 63 from _thumbLowHash -> flagged
 
 Future<int?> _fakeThumbnailHash(String uuid) async {
   switch (uuid) {
@@ -82,7 +61,7 @@ final _memory = <String, dynamic>{
   'lon': null,
 };
 
-/// Bounded settle: while matching runs, an indeterminate
+/// Bounded settle: while a pick/compare is running, an indeterminate
 /// `CircularProgressIndicator` is showing, so `pumpAndSettle` would hang.
 /// Pump a fixed number of frames instead (mirrors encounter_dialog_test.dart).
 Future<void> _settle(WidgetTester tester) async {
@@ -91,7 +70,15 @@ Future<void> _settle(WidgetTester tester) async {
   }
 }
 
-Future<_FakeNotifier> _openDialog(WidgetTester tester) async {
+Finder _row(String uuid) => find.byKey(ValueKey('upgrade-row-$uuid'));
+
+BoxDecoration _decorationOf(WidgetTester tester, Finder finder) =>
+    (tester.widget<Container>(finder).decoration as BoxDecoration);
+
+Future<_FakeNotifier> _openDialog(
+  WidgetTester tester, {
+  required Future<PickedPhoto?> Function() pickSinglePhoto,
+}) async {
   final notifier = _FakeNotifier();
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -102,7 +89,7 @@ Future<_FakeNotifier> _openDialog(WidgetTester tester) async {
               context,
               notifier,
               _memory,
-              pickPhotosOverride: () async => _fakePicked(),
+              pickSinglePhotoOverride: pickSinglePhoto,
               fetchThumbnailHashOverride: _fakeThumbnailHash,
             ),
             child: const Text('open'),
@@ -115,54 +102,106 @@ Future<_FakeNotifier> _openDialog(WidgetTester tester) async {
   await tester.tap(find.text('open'));
   await _settle(tester);
 
-  await tester.tap(find.text('Pick photos'));
-  await _settle(tester);
-
   return notifier;
 }
 
-Finder _tile(String uuid) => find.byKey(ValueKey('swap-tile-$uuid'));
-
-BoxDecoration _decorationOf(WidgetTester tester, Finder finder) =>
-    (tester.widget<Container>(finder).decoration as BoxDecoration);
+Future<void> _selectPictureFor(WidgetTester tester, String uuid) async {
+  await tester.tap(find.descendant(
+    of: _row(uuid),
+    matching: find.widgetWithText(OutlinedButton, 'Select picture'),
+  ));
+  await _settle(tester);
+}
 
 void main() {
-  testWidgets('a high-confidence pair renders un-flagged', (tester) async {
-    await _openDialog(tester);
+  testWidgets('each existing photo shows its own row with a picker button', (tester) async {
+    await _openDialog(tester, pickSinglePhoto: () async => null);
 
-    expect(_tile('thumb-high-uuid'), findsOneWidget);
+    expect(_row('thumb-high-uuid'), findsOneWidget);
+    expect(_row('thumb-low-uuid'), findsOneWidget);
     expect(
-      find.descendant(of: _tile('thumb-high-uuid'), matching: find.text('High confidence')),
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('Select picture')),
       findsOneWidget,
     );
+  });
 
-    final border = _decorationOf(tester, _tile('thumb-high-uuid')).border as Border;
+  testWidgets('a closely-matching pick renders un-flagged', (tester) async {
+    await _openDialog(
+      tester,
+      pickSinglePhoto: () async => PickedPhoto(
+        bytes: Uint8List.fromList([1]),
+        filename: 'clear.jpg',
+        candidate: PhotoCandidate(capturedAt: _day, pHash: _clearJpgHash),
+      ),
+    );
+
+    await _selectPictureFor(tester, 'thumb-high-uuid');
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
+      findsOneWidget,
+    );
+    final border = _decorationOf(tester, _row('thumb-high-uuid')).border as Border;
     expect(border.top.color, isNot(kWarning));
   });
 
-  testWidgets('a low-confidence pair renders visually flagged', (tester) async {
-    await _openDialog(tester);
-
-    expect(_tile('thumb-low-uuid'), findsOneWidget);
-    expect(
-      find.descendant(of: _tile('thumb-low-uuid'), matching: find.text('Low confidence')),
-      findsOneWidget,
+  testWidgets('a pick that looks visually different is flagged', (tester) async {
+    await _openDialog(
+      tester,
+      pickSinglePhoto: () async => PickedPhoto(
+        bytes: Uint8List.fromList([2]),
+        filename: 'different.jpg',
+        candidate: PhotoCandidate(capturedAt: _day, pHash: _farHash),
+      ),
     );
 
-    final border = _decorationOf(tester, _tile('thumb-low-uuid')).border as Border;
+    await _selectPictureFor(tester, 'thumb-low-uuid');
+
+    expect(
+      find.descendant(
+        of: _row('thumb-low-uuid'),
+        matching: find.text('Looks different from the current photo.'),
+      ),
+      findsOneWidget,
+    );
+    final border = _decorationOf(tester, _row('thumb-low-uuid')).border as Border;
     expect(border.top.color, kWarning);
   });
 
-  testWidgets('confirming a swap fires the expected replace call', (tester) async {
-    final notifier = await _openDialog(tester);
-
-    final confirmButton = find.descendant(
-      of: _tile('thumb-high-uuid'),
-      matching: find.widgetWithText(ElevatedButton, 'Confirm'),
+  testWidgets('a pick captured on a different day is flagged', (tester) async {
+    await _openDialog(
+      tester,
+      pickSinglePhoto: () async => PickedPhoto(
+        bytes: Uint8List.fromList([3]),
+        filename: 'other-day.jpg',
+        candidate: PhotoCandidate(capturedAt: _otherDay, pHash: _clearJpgHash),
+      ),
     );
-    expect(confirmButton, findsOneWidget);
 
-    await tester.tap(confirmButton);
+    await _selectPictureFor(tester, 'thumb-high-uuid');
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text("Doesn't look like this day.")),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('confirming a pick fires the expected replace call', (tester) async {
+    final notifier = await _openDialog(
+      tester,
+      pickSinglePhoto: () async => PickedPhoto(
+        bytes: Uint8List.fromList([1]),
+        filename: 'clear.jpg',
+        candidate: PhotoCandidate(capturedAt: _day, pHash: _clearJpgHash),
+      ),
+    );
+
+    await _selectPictureFor(tester, 'thumb-high-uuid');
+
+    await tester.tap(find.descendant(
+      of: _row('thumb-high-uuid'),
+      matching: find.widgetWithText(ElevatedButton, 'Confirm'),
+    ));
     await _settle(tester);
 
     expect(notifier.replaceCalls, hasLength(1));
@@ -170,31 +209,29 @@ void main() {
     expect(notifier.replaceCalls.single['memoryId'], '1');
     expect(notifier.replaceCalls.single['filename'], 'clear.jpg');
 
-    // Applied rows drop their Confirm/Skip buttons in favour of a checkmark.
+    // Applied rows drop their Confirm/Change buttons in favour of a checkmark.
     expect(
-      find.descendant(of: _tile('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
       findsNothing,
     );
     expect(
-      find.descendant(of: _tile('thumb-high-uuid'), matching: find.byIcon(Icons.check_circle)),
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.byIcon(Icons.check_circle)),
       findsOneWidget,
     );
   });
 
-  testWidgets('skipping a swap does not fire a replace call', (tester) async {
-    final notifier = await _openDialog(tester);
+  testWidgets('cancelling the picker leaves the row untouched', (tester) async {
+    await _openDialog(tester, pickSinglePhoto: () async => null);
 
-    final skipButton = find.descendant(
-      of: _tile('thumb-low-uuid'),
-      matching: find.widgetWithText(TextButton, 'Skip'),
+    await _selectPictureFor(tester, 'thumb-high-uuid');
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('Select picture')),
+      findsOneWidget,
     );
-    expect(skipButton, findsOneWidget);
-
-    await tester.tap(skipButton);
-    await _settle(tester);
-
-    expect(notifier.replaceCalls, isEmpty);
-    // A skipped row is hidden from the review list.
-    expect(_tile('thumb-low-uuid'), findsNothing);
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
+      findsNothing,
+    );
   });
 }
