@@ -48,6 +48,11 @@ const kMapboxViewUrl =
     'https://api.mapbox.com/styles/v1/port82/cmot5rk5l007301sfe4g2fyqz/tiles/256/{z}/{x}/{y}'
     '?access_token=$kMapboxToken';
 
+// This custom style's `place_label` source only has continent/country/state
+// layers (maxzoom <= 10) — no settlement/city layer at all (verified against
+// the live style JSON, issue #75) — so a separate labels overlay is required
+// to ever show a city name, however far in you zoom.
+
 /// Mapbox outdoors — labelled street/terrain map for manage mode (raster tile path).
 const kMapboxManageUrl =
     'https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/tiles/256/{z}/{x}/{y}'
@@ -99,12 +104,18 @@ const kActiveViewBasemapUrl =
 const String kActiveViewLabelsUrl = kViewLabelsUrl;
 
 /// Labels overlay for the VIEW map raster path.
-/// Null when Mapbox is selected: the Mapbox Styles API tiles already bake
-/// labels into the rendered PNG — a separate overlay would double them.
-const String? kActiveViewLabelsOverlayUrl = kUseMapbox ? null : kViewLabelsUrl;
+/// The Mapbox custom style has no city/settlement label layer (see
+/// kMapboxViewUrl), so it always needs the CartoDB labels-only overlay
+/// stacked on top; the ESRI path gets its labels from kViewLabelsUrl instead.
+const String kActiveViewLabelsOverlayUrl =
+    kUseMapbox ? kCartoDblLabelsUrl : kViewLabelsUrl;
 
 const List<String> kActiveViewLabelsSubdomains =
     kUseMapbox ? kCartoDblLabelsSubdomains : [];
+
+/// CartoDB labels are @2x (512px) tiles; ESRI labels are standard 256px.
+const int kActiveViewLabelsTileDimension = kUseMapbox ? 512 : 256;
+const double kActiveViewLabelsZoomOffset = kUseMapbox ? 1 : 0;
 
 const kActiveManageBasemapUrl =
     kUseMapbox ? kMapboxManageUrl : kManageBasemapUrl;
