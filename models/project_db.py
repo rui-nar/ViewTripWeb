@@ -59,6 +59,11 @@ class DBProject(sqlmodel.SQLModel, table=True):
     # Elevation chart style
     elevation_chart_color: Optional[str] = sqlmodel.Field(default=None)  # "#RRGGBB" or None = use black
     elevation_chart_show_line: bool = sqlmodel.Field(default=True)
+    # Per-activity/segment-type colour+style overrides (issue #95). Off by
+    # default so existing projects keep today's flat track_color rendering.
+    color_by_type: bool = sqlmodel.Field(default=False)
+    # JSON dict: {"ride": {"color": "#RRGGBB", "style": "solid"|"dashed"|"dotted"}, ...}
+    type_styles_json: str = sqlmodel.Field(default="{}")
     # JSON array of ISO 639-1 language codes for memory translations, e.g. '["fr","de"]'
     languages_json: Optional[str] = sqlmodel.Field(default=None)
 
@@ -92,6 +97,8 @@ _PROJECT_SERIALIZED_FIELDS: frozenset[str] = frozenset({
     "elevation_chart_color",
     "elevation_chart_show_line",
     "languages_json",
+    "color_by_type",
+    "type_styles_json",
 })
 
 _PROJECT_INFRA_FIELDS: frozenset[str] = frozenset({

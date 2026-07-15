@@ -158,6 +158,15 @@ class ProjectNotifier extends ChangeNotifier
   Color? elevationChartColor; // null = "auto" → match the map track line (#22)
   bool elevationChartShowLine = true;
 
+  /// Opt-in per-type colouring (issue #95). Off by default so existing
+  /// projects keep today's flat trackColor line rendering unchanged.
+  bool colorByType = false;
+  /// Per-bucket overrides, keyed by activity bucket ("ride"/"run"/"hike"/
+  /// "other") or segment type ("flight"/"train"/"bus"/"boat"). Each value
+  /// e.g. {"color": "#RRGGBB", "style": "solid"|"dashed"|"dotted"}. Missing
+  /// bucket = built-in default (see design_tokens.dart resolveTypeStyle).
+  Map<String, Map<String, dynamic>> typeStyles = {};
+
   /// Colour the elevation chart actually renders with: the user's explicit
   /// override, or — when unset ("auto") — the map track line colour, so the
   /// chart matches the line on the map by default (issue #22).
@@ -173,6 +182,8 @@ class ProjectNotifier extends ChangeNotifier
     bool? alternating,
     Object? elevationColor = _kUnset, // pass null explicitly to clear
     bool? elevationShowLine,
+    bool? colorByTypeEnabled,
+    Map<String, Map<String, dynamic>>? typeStyleOverrides,
   }) async {
     if (color != null) trackColor = color;
     if (secondaryColor != _kUnset) trackSecondaryColor = secondaryColor as Color?;
@@ -180,6 +191,8 @@ class ProjectNotifier extends ChangeNotifier
     if (alternating != null) alternatingTrackColors = alternating;
     if (elevationColor != _kUnset) elevationChartColor = elevationColor as Color?;
     if (elevationShowLine != null) elevationChartShowLine = elevationShowLine;
+    if (colorByTypeEnabled != null) colorByType = colorByTypeEnabled;
+    if (typeStyleOverrides != null) typeStyles = typeStyleOverrides;
     notifyListeners();
     final name = projectName;
     if (name == null) return;
@@ -196,6 +209,8 @@ class ProjectNotifier extends ChangeNotifier
             ? (elevationColor != null ? _colorToHex(elevationColor as Color) : null)
             : _kUnset,
         elevationChartShowLine: elevationShowLine,
+        colorByType: colorByTypeEnabled,
+        typeStyles: typeStyleOverrides,
       );
     } on Exception catch (e) {
       error = _msg(e);
@@ -433,6 +448,13 @@ class ProjectNotifier extends ChangeNotifier
       if (rawElLine != null) elevationChartShowLine = rawElLine;
       final rawLangs = details['languages'];
       if (rawLangs is List) languages = rawLangs.cast<String>();
+      final rawColorByType = details['color_by_type'] as bool?;
+      if (rawColorByType != null) colorByType = rawColorByType;
+      final rawTypeStyles = details['type_styles'];
+      typeStyles = rawTypeStyles is Map
+          ? rawTypeStyles.map((k, v) =>
+              MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
+          : {};
       _updateStats();
       if (encryption.isUnlocked) {
         // Decrypted activities/items are ready now — build the low-res map
@@ -1521,6 +1543,13 @@ class ProjectNotifier extends ChangeNotifier
     if (rawElLine != null) elevationChartShowLine = rawElLine;
     final rawLangs = details['languages'];
     if (rawLangs is List) languages = rawLangs.cast<String>();
+    final rawColorByType = details['color_by_type'] as bool?;
+    if (rawColorByType != null) colorByType = rawColorByType;
+    final rawTypeStyles = details['type_styles'];
+    typeStyles = rawTypeStyles is Map
+        ? rawTypeStyles.map((k, v) =>
+            MapEntry(k as String, Map<String, dynamic>.from(v as Map)))
+        : {};
     tripEnd     = details['trip_end']   as String?;
     final rawActivities = details['activities'];
     activities = rawActivities is List

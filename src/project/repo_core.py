@@ -229,6 +229,8 @@ class ProjectCoreMixin:
         row.alternating_track_colors = project.alternating_track_colors
         row.elevation_chart_color = project.elevation_chart_color
         row.elevation_chart_show_line = project.elevation_chart_show_line
+        row.color_by_type = project.color_by_type
+        row.type_styles_json = json.dumps(project.type_styles)
         row.languages_json = json.dumps(project.languages)
         row.low_res_geo_json = _compute_low_res_geo(project)
         row.updated_at = time.time()
@@ -519,6 +521,8 @@ class ProjectCoreMixin:
             alternating_track_colors=bool(getattr(row, 'alternating_track_colors', False)),
             elevation_chart_color=getattr(row, 'elevation_chart_color', None),
             elevation_chart_show_line=bool(getattr(row, 'elevation_chart_show_line', True)),
+            color_by_type=bool(getattr(row, 'color_by_type', False)),
+            type_styles=json.loads(getattr(row, 'type_styles_json', None) or "{}"),
             languages=json.loads(getattr(row, 'languages_json', None) or "[]"),
         )
         project.rebuild_map()

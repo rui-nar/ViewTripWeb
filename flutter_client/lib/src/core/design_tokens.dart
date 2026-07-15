@@ -28,6 +28,87 @@ const kColorHike  = Color(0xFF66BB6A);
 const kColorOther = Color(0xFFAB47BC);
 const kColorAlt   = Color(0xFFFFA726);
 
+// ── Segment type colours (connecting flight/train/bus/boat legs) ─────────────
+const kColorFlight = Color(0xFF42A5F5);
+const kColorTrain  = Color(0xFF8D6E63);
+const kColorBus    = Color(0xFFFFB300);
+const kColorBoat   = Color(0xFF26C6DA);
+
+/// Line-rendering style for a per-type override (issue #95).
+enum LineStyleKind { solid, dashed, dotted }
+
+LineStyleKind lineStyleFromName(String? name) => switch (name) {
+      'dashed' => LineStyleKind.dashed,
+      'dotted' => LineStyleKind.dotted,
+      _        => LineStyleKind.solid,
+    };
+
+String lineStyleName(LineStyleKind style) => switch (style) {
+      LineStyleKind.solid  => 'solid',
+      LineStyleKind.dashed => 'dashed',
+      LineStyleKind.dotted => 'dotted',
+    };
+
+/// Bucket key for an activity's raw Strava `sport_type` — collapses the many
+/// Strava sub-types into the same 4 groups already used for the panel's
+/// activity icon colours.
+String activityTypeBucket(String? sportType) => switch (sportType?.toLowerCase()) {
+      'ride' || 'virtualride' || 'ebikeride' => 'ride',
+      'run' || 'virtualrun'                  => 'run',
+      'hike' || 'walk'                       => 'hike',
+      _                                      => 'other',
+    };
+
+/// Bucket key for a connecting segment's `segment_type`. Unrecognised/null
+/// types fall back to 'other_segment' (matches [_iconForSegmentType]'s
+/// generic route icon).
+String segmentTypeBucket(String? segmentType) => switch (segmentType?.toLowerCase()) {
+      'flight' => 'flight',
+      'train'  => 'train',
+      'bus'    => 'bus',
+      'boat'   => 'boat',
+      _        => 'other_segment',
+    };
+
+/// Built-in default colour for a bucket key, used both as the panel's
+/// always-on icon colour and as the map's per-type colour once a project
+/// opts into `color_by_type` (issue #95).
+Color defaultTypeColor(String bucket) => switch (bucket) {
+      'ride'  => kColorRide,
+      'run'   => kColorRun,
+      'hike'  => kColorHike,
+      'flight' => kColorFlight,
+      'train'  => kColorTrain,
+      'bus'    => kColorBus,
+      'boat'   => kColorBoat,
+      _        => kColorAlt,
+    };
+
+/// Built-in default line style for a bucket — solid for activities, dashed
+/// for segments, matching today's (pre-issue-#95) map rendering.
+LineStyleKind defaultTypeLineStyle(String bucket, {required bool isSegment}) =>
+    isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
+
+/// Resolves the effective (colour, line style) for [bucket], applying a
+/// project's `type_styles` override (if any) over the built-in default.
+/// [overrides] is the raw per-bucket map decoded from the API, e.g.
+/// `{"color": "#RRGGBB", "style": "solid"|"dashed"|"dotted"}`.
+({Color color, LineStyleKind style}) resolveTypeStyle(
+  String bucket, {
+  required bool isSegment,
+  Map<String, dynamic>? overrides,
+}) {
+  final rawColor = overrides?['color'] as String?;
+  final color = (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#'))
+      ? Color(int.parse(rawColor.substring(1), radix: 16) | 0xFF000000)
+      : defaultTypeColor(bucket);
+  final rawStyle = overrides?['style'] as String?;
+  final style = rawStyle != null
+      ? lineStyleFromName(rawStyle)
+      : defaultTypeLineStyle(bucket, isSegment: isSegment);
+  return (color: color, style: style);
+}
+
 Color iconBoxBg(Color c) => c.withValues(alpha: 0.15);
 
 Color iconBoxFg(Color c, {bool dark = false}) => dark

@@ -326,6 +326,11 @@ class TrackStyleUpdateRequest(BaseModel):
     alternating_track_colors: Optional[bool] = None
     elevation_chart_color: Optional[str] = None  # "#RRGGBB" hex; null = use default
     elevation_chart_show_line: Optional[bool] = None
+    color_by_type: Optional[bool] = None
+    # Keyed by activity bucket ("ride"/"run"/"hike"/"other") or segment type
+    # ("flight"/"train"/"bus"/"boat"); each value e.g. {"color": "#RRGGBB",
+    # "style": "solid"|"dashed"|"dotted"}.
+    type_styles: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 @router.put("/{name}/track-style", status_code=status.HTTP_204_NO_CONTENT,
@@ -350,6 +355,10 @@ def update_track_style(
             row.elevation_chart_color = body.elevation_chart_color
         if body.elevation_chart_show_line is not None:
             row.elevation_chart_show_line = body.elevation_chart_show_line
+        if body.color_by_type is not None:
+            row.color_by_type = body.color_by_type
+        if body.type_styles is not None:
+            row.type_styles_json = json.dumps(body.type_styles)
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()

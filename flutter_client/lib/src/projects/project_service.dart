@@ -109,6 +109,8 @@ class ProjectService {
     bool? alternating,
     Object? elevationChartColor = _kUnset, // null = clear, _kUnset = don't send
     bool? elevationChartShowLine,
+    bool? colorByType,
+    Map<String, Map<String, dynamic>>? typeStyles,
   }) async {
     final enc = Uri.encodeComponent(name);
     await api.put('/api/projects/$enc/track-style', {
@@ -118,6 +120,8 @@ class ProjectService {
       if (alternating != null) 'alternating_track_colors': alternating,
       if (elevationChartColor != _kUnset) 'elevation_chart_color': elevationChartColor,
       if (elevationChartShowLine != null) 'elevation_chart_show_line': elevationChartShowLine,
+      if (colorByType != null) 'color_by_type': colorByType,
+      if (typeStyles != null) 'type_styles': typeStyles,
     });
   }
 
