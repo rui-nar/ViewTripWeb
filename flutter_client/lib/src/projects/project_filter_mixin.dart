@@ -27,6 +27,11 @@ mixin ProjectFilterMixin on ChangeNotifier {
   Set<String> get selectedDays;
   set selectedDays(Set<String> v);
 
+  // ── Abstract: UI-state persistence hook (issue #76 follow-up) ─────────────
+  // Implemented by ProjectNotifier — persists selection + filter state to
+  // shared_preferences so a forced reload doesn't lose it.
+  void saveUiState();
+
   // ── Filter state (owned by this mixin) ───────────────────────────────────
   ProjectFilters _filters = ProjectFilters.empty;
 
@@ -120,6 +125,7 @@ mixin ProjectFilterMixin on ChangeNotifier {
     selectedActivityId = null;
     selectedSegmentId = null;
     selectedMemoryId = null;
+    saveUiState();
     notifyListeners();
   }
 
@@ -130,6 +136,14 @@ mixin ProjectFilterMixin on ChangeNotifier {
   void resetFilters() {
     _filters = ProjectFilters.empty;
     selectedDays = {};
+  }
+
+  /// Applies a filter set restored from shared_preferences (issue #76
+  /// follow-up) without the selection-clearing side effect [setFilters] has —
+  /// restore needs to apply filters and selections independently.
+  void restoreFilters(ProjectFilters restored) {
+    _filters = restored;
+    _recomputeSelectedDays();
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

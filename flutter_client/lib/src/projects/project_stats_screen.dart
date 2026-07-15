@@ -3,7 +3,9 @@ library;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import 'project_notifier.dart';
 import 'project_service.dart';
 
 part 'project_stats_body.dart';
@@ -165,15 +167,22 @@ class _CountRow extends StatelessWidget {
 
 class ProjectStatsScreen extends StatefulWidget {
   final String projectName;
-  final List<String> availableTags;
-  final Map<String, String> sleepingOptionGroups;
   final ProjectService? service;
+
+  /// Explicit override, used only by the public/anonymous shared-project view
+  /// (shared_project_screen.dart), which has its own SharedProjectNotifier and
+  /// must not read the ambient (authenticated, manage-mode) ProjectNotifier
+  /// singleton. When null — the authenticated /stats route case — tags/groups
+  /// are read from that ambient notifier instead (issue #76 follow-up:
+  /// GoRouterState.extra isn't URL-encoded, so it doesn't survive a reload).
+  final List<String>? availableTags;
+  final Map<String, String>? sleepingOptionGroups;
 
   const ProjectStatsScreen({
     super.key,
     required this.projectName,
-    this.availableTags = const [],
-    this.sleepingOptionGroups = const {},
+    this.availableTags,
+    this.sleepingOptionGroups,
     this.service,
   });
 
@@ -189,7 +198,24 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
   @override
   void initState() {
     super.initState();
-    _tagOptions = List.of(widget.availableTags);
+    final overrideTags = widget.availableTags;
+    if (overrideTags != null) {
+      _tagOptions = List.of(overrideTags);
+    } else {
+      // Authenticated /stats route path — on a direct reload of the /stats
+      // URL the (singleton, manage-mode) ProjectNotifier may not have this
+      // project loaded yet — load it first, mirroring what
+      // AppScreen.initState() already does. Deferred to a post-frame callback
+      // (like AppScreen) since load() calls notifyListeners() synchronously
+      // before its first await, which would otherwise fire mid-build here.
+      final notifier = context.read<ProjectNotifier>();
+      if (notifier.projectName != widget.projectName) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) context.read<ProjectNotifier>().load(widget.projectName);
+        });
+      }
+      _tagOptions = List.of(notifier.availableTags);
+    }
     _load();
   }
 
@@ -208,6 +234,8 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final sleepingOptionGroups = widget.sleepingOptionGroups ??
+        context.watch<ProjectNotifier>().sleepingOptionGroups;
     return Scaffold(
       appBar: AppBar(title: Text('${widget.projectName} — Statistics')),
       body: Column(
@@ -274,7 +302,7 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
                 return _StatsBody(
                   stats: s,
                   projectName: widget.projectName,
-                  sleepingOptionGroups: widget.sleepingOptionGroups,
+                  sleepingOptionGroups: sleepingOptionGroups,
                 );
               },
             ),

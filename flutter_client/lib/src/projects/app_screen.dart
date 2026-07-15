@@ -3,11 +3,11 @@
 library;
 
 // dart:html is intentional — ViewTripWeb targets Flutter Web only.
-import 'dart:async' show unawaited;
+import 'dart:async' show unawaited, Timer, StreamSubscription;
 import 'dart:html' as html;
 import 'dart:typed_data' show Uint8List;
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart' show LatLngBounds;
+import 'package:flutter_map/flutter_map.dart' show LatLngBounds, MapEvent;
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
@@ -33,6 +33,7 @@ import 'poster_job_notifier.dart';
 import 'social_share_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
+import 'viewport_sync.dart';
 
 // ── AppScreen ─────────────────────────────────────────────────────────────────
 
@@ -81,6 +82,30 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   // Highlighted point set when the user taps an encounter's place icon
   // (issue #72); cleared on the next unrelated map tap/selection.
   LatLng? _focusedLatLng;
+
+  // Debounced camera → URL sync (issue #76 follow-up) so a forced reload (the
+  // black-screen JS backstop) or a normal browser refresh restores the
+  // viewport the user was actually looking at, not just the position carried
+  // over from the last mode-toggle switch.
+  StreamSubscription<MapEvent>? _mapEventSub;
+  Timer? _viewportSyncTimer;
+
+  void _onMapEvent(MapEvent event) {
+    _viewportSyncTimer?.cancel();
+    _viewportSyncTimer = Timer(const Duration(milliseconds: 700), () {
+      // Guards against a missing GoRouter ancestor (e.g. this widget under
+      // test in isolation) — context.replace() would otherwise throw.
+      if (!mounted || GoRouter.maybeOf(context) == null) return;
+      final cam = _mapController.mapController.camera;
+      context.replace(viewportSyncPath(
+        basePath: '/app',
+        projectName: widget.projectName,
+        lat: cam.center.latitude,
+        lng: cam.center.longitude,
+        zoom: cam.zoom,
+      ));
+    });
+  }
 
   /// Zooms the map in on (lat, lon) and drops a highlighted pin there.
   void _focusLocation(double lat, double lon) {
@@ -154,10 +179,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             saved.clamp(kMinPanelWidth, kMaxPanelWidth).toDouble());
       }
     });
+    _mapEventSub =
+        _mapController.mapController.mapEventStream.listen(_onMapEvent);
   }
 
   @override
   void dispose() {
+    _mapEventSub?.cancel();
+    _viewportSyncTimer?.cancel();
     _mapController.dispose();
     _mapFitted.dispose();
     _activityScrollController.dispose();
@@ -555,10 +584,6 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               tooltip: 'Statistics',
               onPressed: isLoading ? null : () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-                extra: {
-                  'tags': context.read<ProjectNotifier>().availableTags,
-                  'groups': context.read<ProjectNotifier>().sleepingOptionGroups,
-                },
               ),
             ),
             IconButton(
@@ -667,10 +692,6 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               tooltip: 'Statistics',
               onPressed: isLoading ? null : () => context.push(
                 '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-                extra: {
-                  'tags': context.read<ProjectNotifier>().availableTags,
-                  'groups': context.read<ProjectNotifier>().sleepingOptionGroups,
-                },
               ),
             ),
             IconButton(

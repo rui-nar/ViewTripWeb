@@ -160,15 +160,10 @@ GoRouter buildRouter(BuildContext context) {
         builder: (context, state) {
           final projectName =
               state.uri.queryParameters['project'] ?? '';
-          final extra = state.extra as Map<String, dynamic>? ?? {};
-          final availableTags =
-              (extra['tags'] as List?)?.cast<String>() ?? const <String>[];
-          final sleepingOptionGroups =
-              (extra['groups'] as Map?)?.cast<String, String>() ?? const <String, String>{};
-          return ProjectStatsScreen(
-              projectName: projectName,
-              availableTags: availableTags,
-              sleepingOptionGroups: sleepingOptionGroups);
+          // Tags/groups come from the ambient ProjectNotifier, not
+          // GoRouterState.extra — extra isn't URL-encoded, so it's lost on a
+          // forced reload (issue #76 follow-up). See ProjectStatsScreen.
+          return ProjectStatsScreen(projectName: projectName);
         },
       ),
       GoRoute(
