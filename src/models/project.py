@@ -221,6 +221,13 @@ class Project:
     # Elevation chart style
     elevation_chart_color: Optional[str] = None  # None = use black
     elevation_chart_show_line: bool = True
+    # Per-activity/segment-type colour+style overrides (issue #95). Off by
+    # default — existing projects keep the flat track_color line rendering.
+    color_by_type: bool = False
+    # Keyed by activity bucket ("ride"/"run"/"hike"/"other") or segment type
+    # ("flight"/"train"/"bus"/"boat"); each value e.g. {"color": "#RRGGBB",
+    # "style": "solid"|"dashed"|"dotted"}. Missing key/field = built-in default.
+    type_styles: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # ISO 639-1 language codes available for memory translation, e.g. ["fr", "de"]
     languages: List[str] = field(default_factory=list)
     # Derived lookup — rebuilt after load, not serialised

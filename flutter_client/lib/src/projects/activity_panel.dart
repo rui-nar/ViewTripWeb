@@ -99,14 +99,11 @@ class _PanelItem {
 
 class _ActivityIconBox extends StatelessWidget {
   final String? type;
-  const _ActivityIconBox({this.type});
-
-  static Color _color(String? t) => switch (t?.toLowerCase()) {
-        'ride' || 'virtualride' || 'ebikeride' => kColorRide,
-        'run' || 'virtualrun'                  => kColorRun,
-        'hike' || 'walk'                       => kColorHike,
-        _                                      => kColorAlt,
-      };
+  /// Project-level per-type overrides (issue #95), keyed by bucket
+  /// ("ride"/"run"/"hike"/"other"). Null/missing entries fall back to the
+  /// built-in [defaultTypeColor] palette — same as before this field existed.
+  final Map<String, Map<String, dynamic>>? typeStyles;
+  const _ActivityIconBox({this.type, this.typeStyles});
 
   static IconData _icon(String? t) => switch (t?.toLowerCase()) {
         'run' || 'virtualrun'  => Icons.directions_run,
@@ -117,7 +114,8 @@ class _ActivityIconBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = _color(type);
+    final bucket = activityTypeBucket(type);
+    final c = resolveTypeStyle(bucket, isSegment: false, overrides: typeStyles?[bucket]).color;
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       width: 32,
@@ -1588,7 +1586,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   ? theme.colorScheme.primaryContainer
                                       .withValues(alpha: 0.45)
                                   : null,
-                              leading: _ActivityIconBox(type: type),
+                              leading: _ActivityIconBox(
+                                  type: type, typeStyles: notifier.typeStyles),
                               title: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
@@ -1981,7 +1980,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
                           child: Selector<ProjectNotifier, bool>(
                             selector: (_, n) =>
                                 n.selectedSegmentId?.toString() == segId,
-                            builder: (_, isSelected, __) => ListTile(
+                            builder: (_, isSelected, __) {
+                              // Segments stay grey unless the project has opted
+                              // into per-type colouring (issue #95) — matches
+                              // the map's colorByType-gated behaviour, so the
+                              // panel never changes appearance on its own.
+                              final effectiveSegType = segType ??
+                                  (seg['route_mode'] == 'rail' ? 'train' : null);
+                              final segColor = notifier.colorByType
+                                  ? resolveTypeStyle(
+                                      segmentTypeBucket(effectiveSegType),
+                                      isSegment: true,
+                                      overrides: notifier
+                                          .typeStyles[segmentTypeBucket(effectiveSegType)],
+                                    ).color
+                                  : const Color(0xFF94A3B8);
+                              return ListTile(
                               dense: true,
                               tileColor: isSelected
                                   ? theme.colorScheme.secondaryContainer
@@ -1992,16 +2006,17 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   width: 32,
                                   height: 32,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF94A3B8)
-                                        .withValues(alpha: 0.15),
+                                    color: segColor.withValues(alpha: 0.15),
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: Icon(
-                                    _iconForSegmentType(
-                                      segType ?? (seg['route_mode'] == 'rail' ? 'train' : null),
-                                    ),
+                                    _iconForSegmentType(effectiveSegType),
                                     size: 17,
-                                    color: const Color(0xFF64748B),
+                                    color: notifier.colorByType
+                                        ? iconBoxFg(segColor,
+                                            dark: Theme.of(context).brightness ==
+                                                Brightness.dark)
+                                        : const Color(0xFF64748B),
                                   ),
                                 ),
                                 const SizedBox(width: 8),
@@ -2043,7 +2058,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToSegment(seg),
-                            ),
+                            );
+                            },
                           ),
                         );
                       }

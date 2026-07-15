@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart';
+import '../core/design_tokens.dart' show LineStyleKind, resolveTypeStyle, lineStyleName;
 import 'project_notifier.dart';
 
 const _kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
@@ -68,6 +69,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   Color? _elevationChartColor; // null = use black
   late bool _elevationChartShowLine;
   late List<String> _languages;
+  late bool _colorByType;
+  late Map<String, Map<String, dynamic>> _typeStyles;
 
   // Local deep-copy of dayMeta so tag edits are applied immediately and
   // passed to saveDayMeta on Save without touching the notifier until then.
@@ -118,6 +121,10 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     _elevationChartColor = n.elevationChartColor;
     _elevationChartShowLine = n.elevationChartShowLine;
     _languages = List<String>.from(n.languages);
+    _colorByType = n.colorByType;
+    _typeStyles = {
+      for (final e in n.typeStyles.entries) e.key: Map<String, dynamic>.from(e.value)
+    };
     _dayMeta = {
       for (final e in n.dayMeta.entries)
         e.key: {
@@ -275,6 +282,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       alternating: _alternating,
       elevationColor: _elevationChartColor,
       elevationShowLine: _elevationChartShowLine,
+      colorByTypeEnabled: _colorByType,
+      typeStyleOverrides: _typeStyles,
     );
     n.saveLanguages(_languages);
     n.saveSyncMeta(
@@ -319,6 +328,68 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     );
   }
 
+  static String _colorToHex(Color c) =>
+      '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+  /// One row of the "Per-type styling" subsection (issue #95): a colour
+  /// swatch + solid/dashed/dotted picker for [bucket], falling back to the
+  /// built-in default (see design_tokens.dart resolveTypeStyle) until the
+  /// user overrides it.
+  Widget _typeStyleRow(String bucket, String label, {required bool isSegment}) {
+    final override = _typeStyles[bucket];
+    final resolved = resolveTypeStyle(bucket, isSegment: isSegment, overrides: override);
+    void updateOverride(void Function(Map<String, dynamic> entry) mutate) {
+      setState(() {
+        final entry = Map<String, dynamic>.from(_typeStyles[bucket] ?? {});
+        mutate(entry);
+        _typeStyles[bucket] = entry;
+      });
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Divider(height: 1, color: _kBorder),
+          const SizedBox(height: 14),
+          _ColorPickerRow(
+            label: label,
+            color: resolved.color,
+            badge: override == null ? 'default' : null,
+            onTap: () => _pickColor(
+              current: resolved.color,
+              title: '$label colour',
+              onPicked: (c) =>
+                  updateOverride((entry) => entry['color'] = _colorToHex(c)),
+            ),
+            onClear: override != null
+                ? () => setState(() => _typeStyles.remove(bucket))
+                : null,
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              for (final s in LineStyleKind.values)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ChoiceChip(
+                    label: Text(
+                      lineStyleName(s)[0].toUpperCase() + lineStyleName(s).substring(1),
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    selected: resolved.style == s,
+                    onSelected: (_) => updateOverride(
+                        (entry) => entry['style'] = lineStyleName(s)),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
   // ── Section content ──────────────────────────────────────────────────────────
 
@@ -805,6 +876,47 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ],
             ),
           ),
+
+          // ── Per-type styling (issue #95) ────────────────────────────────
+          const Divider(height: 1, color: _kBorder),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 14, 22, 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => setState(() => _colorByType = !_colorByType),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Colour by activity type',
+                            style: TextStyle(color: _kText2, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                        SizedBox(height: 2),
+                        Text('Each activity/segment type gets its own colour and line style.',
+                            style: TextStyle(color: _kDim, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Switch(
+                  value: _colorByType,
+                  activeThumbColor: _kBlueActive,
+                  onChanged: (v) => setState(() => _colorByType = v),
+                ),
+              ],
+            ),
+          ),
+          if (_colorByType) ...[
+            _typeStyleRow('ride', 'Ride', isSegment: false),
+            _typeStyleRow('run', 'Run', isSegment: false),
+            _typeStyleRow('hike', 'Hike / walk', isSegment: false),
+            _typeStyleRow('other', 'Other activity', isSegment: false),
+            _typeStyleRow('flight', 'Flight', isSegment: true),
+            _typeStyleRow('train', 'Train', isSegment: true),
+            _typeStyleRow('bus', 'Bus', isSegment: true),
+            _typeStyleRow('boat', 'Boat', isSegment: true),
+          ],
         ],
       ),
     );

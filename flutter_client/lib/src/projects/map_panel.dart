@@ -9,7 +9,9 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
-import '../core/design_tokens.dart' show kAccent, kShadow2, monoStyle;
+import '../core/design_tokens.dart'
+    show kAccent, kShadow2, monoStyle, activityTypeBucket, segmentTypeBucket,
+        resolveTypeStyle, LineStyleKind;
 import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
@@ -297,6 +299,8 @@ List<Marker> _buildActivityMarkersFromGeo(
   bool hasSelection,
   Color trackColor, {
   Set<String> dayStartActivityIds = const {},
+  bool colorByType = false,
+  Map<String, Map<String, dynamic>> typeStyles = const {},
 }) {
   final features = geo['features'];
   if (features is! List) return const [];
@@ -316,11 +320,15 @@ List<Marker> _buildActivityMarkersFromGeo(
     final isSelected = selectedActivityId != null &&
         actId == selectedActivityId.toString();
 
+    final baseColor = colorByType
+        ? resolveTypeStyle(activityTypeBucket(sportType), isSegment: false,
+            overrides: typeStyles[activityTypeBucket(sportType)]).color
+        : trackColor;
     final bgColor = isSelected
-        ? trackColor
+        ? baseColor
         : hasSelection
-            ? trackColor.withAlpha(0x60)
-            : trackColor;
+            ? baseColor.withAlpha(0x60)
+            : baseColor;
 
     markers.add(Marker(
       point: point,
@@ -346,6 +354,72 @@ List<Marker> _buildActivityMarkersFromGeo(
     ...buildDayBreakpointMarkers(geo, dayStartActivityIds, trackColor),
     ...markers,
   ];
+}
+
+IconData _iconForSegmentType(String? type) {
+  switch (type?.toLowerCase()) {
+    case 'flight': return Icons.flight;
+    case 'train':  return Icons.train;
+    case 'bus':    return Icons.directions_bus;
+    case 'boat':   return Icons.directions_boat;
+    default:       return Icons.route;
+  }
+}
+
+// Shared by _MapPanelState and ManageMapPanelState (mirrors
+// _buildActivityMarkersFromGeo above).
+List<Marker> _buildSegmentMarkers(
+  Map<String, dynamic> geo,
+  dynamic selectedSegmentId,
+  bool hasSelection,
+  Color trackColor, {
+  bool colorByType = false,
+  Map<String, Map<String, dynamic>> typeStyles = const {},
+}) {
+  final features = geo['features'];
+  if (features is! List) return [];
+  final markers = <Marker>[];
+  for (final feature in features) {
+    if (feature is! Map) continue;
+    final props = feature['properties'] as Map? ?? {};
+    if (props['type'] != 'segment') continue;
+    final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is! List || coords.isEmpty) continue;
+
+    final point = memoArcMidpoint(coords);
+    if (point == null) continue;
+
+    final segId = props['segment_id']?.toString();
+    final isSelected = selectedSegmentId != null &&
+        segId == selectedSegmentId.toString();
+    final segType = (props['segment_type'] as String?) ??
+        (props['route_mode'] == 'rail' ? 'train' : null);
+
+    final baseColor = colorByType
+        ? resolveTypeStyle(segmentTypeBucket(segType), isSegment: true,
+            overrides: typeStyles[segmentTypeBucket(segType)]).color
+        : trackColor;
+    final bgColor = isSelected
+        ? baseColor
+        : hasSelection
+            ? baseColor.withAlpha(0x60)
+            : baseColor;
+
+    markers.add(Marker(
+      point: point,
+      width: 22,
+      height: 22,
+      child: Container(
+        decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+        child: Icon(
+          _iconForSegmentType(segType),
+          color: Colors.white,
+          size: 13,
+        ),
+      ),
+    ));
+  }
+  return markers;
 }
 
 /// Owner-only encounter pins (issue #40). Tapping opens the person/group
@@ -707,6 +781,8 @@ class _MapPanelState extends State<MapPanel> {
   double? _lastTrackWidth;
   bool? _lastAlternating;
   bool? _lastShowJournals;
+  bool? _lastColorByType;
+  Map<String, Map<String, dynamic>>? _lastTypeStyles;
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedActivityMarkers = [];
@@ -761,65 +837,6 @@ class _MapPanelState extends State<MapPanel> {
       pts.addAll(memoCoordsToLatLng(coords));
     }
     return pts;
-  }
-
-  static IconData _iconForSegmentType(String? type) {
-    switch (type?.toLowerCase()) {
-      case 'flight': return Icons.flight;
-      case 'train':  return Icons.train;
-      case 'bus':    return Icons.directions_bus;
-      case 'boat':   return Icons.directions_boat;
-      default:       return Icons.route;
-    }
-  }
-
-  List<Marker> _buildSegmentMarkers(
-    Map<String, dynamic> geo,
-    dynamic selectedSegmentId,
-    bool hasSelection,
-    Color trackColor,
-  ) {
-    final features = geo['features'];
-    if (features is! List) return [];
-    final markers = <Marker>[];
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      if (props['type'] != 'segment') continue;
-      final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
-      if (coords is! List || coords.isEmpty) continue;
-
-      final point = memoArcMidpoint(coords);
-      if (point == null) continue;
-
-      final segId = props['segment_id']?.toString();
-      final isSelected = selectedSegmentId != null &&
-          segId == selectedSegmentId.toString();
-
-      final bgColor = isSelected
-          ? trackColor
-          : hasSelection
-              ? trackColor.withAlpha(0x60)
-              : trackColor;
-
-      markers.add(Marker(
-        point: point,
-        width: 22,
-        height: 22,
-        child: Container(
-          decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-          child: Icon(
-            _iconForSegmentType(
-              (props['segment_type'] as String?) ??
-              (props['route_mode'] == 'rail' ? 'train' : null),
-            ),
-            color: Colors.white,
-            size: 13,
-          ),
-        ),
-      ));
-    }
-    return markers;
   }
 
   List<Marker> _buildMemoryMarkers(
@@ -1063,7 +1080,9 @@ class _MapPanelState extends State<MapPanel> {
         selMemId?.toString() != _lastSelectedMemId?.toString() ||
         selJournalId?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged = trackColor != _lastTrackColor ||
-        trackWidth != _lastTrackWidth || alternating != _lastAlternating;
+        trackWidth != _lastTrackWidth || alternating != _lastAlternating ||
+        notifier.colorByType != _lastColorByType ||
+        !identical(notifier.typeStyles, _lastTypeStyles);
     if (!identical(geo, _lastGeo) || selectionChanged || styleChanged ||
         !identical(items, _lastItems) || showJournals != _lastShowJournals) {
       _lastGeo = geo;
@@ -1076,11 +1095,14 @@ class _MapPanelState extends State<MapPanel> {
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
       _lastShowJournals = showJournals;
+      _lastColorByType = notifier.colorByType;
+      _lastTypeStyles = notifier.typeStyles;
       final tilesActive = widget.trackTileUrlTemplate != null;
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
               alternating, items,
-              selectedOnly: tilesActive, trackSecondaryColor: trackSecondaryColor)
+              selectedOnly: tilesActive, trackSecondaryColor: trackSecondaryColor,
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
@@ -1091,10 +1113,12 @@ class _MapPanelState extends State<MapPanel> {
           items, {for (final a in notifier.activities) a['id']: a});
       _cachedActivityMarkers = geo != null
           ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
-              dayStartActivityIds: dayStartIds)
+              dayStartActivityIds: dayStartIds,
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor,
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, context);
@@ -1356,6 +1380,8 @@ List<Polyline> _buildPolylines(
   Color? trackSecondaryColor,
   Set<String>? dayActIds,
   Set<String>? daySegIds,
+  bool colorByType = false,
+  Map<String, Map<String, dynamic>> typeStyles = const {},
 }) {
   final features = geo['features'];
   if (features is! List) return [];
@@ -1408,41 +1434,47 @@ List<Polyline> _buildPolylines(
 
     // When tile layer handles the base rendering, only draw the selected item.
     if (selectedOnly && !isHighlighted) continue;
-    final isOdd = alternating && !isSegment && featureId != null &&
+    // Alternating is a stand-in for per-type colour, so it's superseded once
+    // a project opts into colorByType (issue #95).
+    final isOdd = !colorByType && alternating && !isSegment && featureId != null &&
         (actIdx[featureId] ?? 0).isOdd;
+
+    final bucket = isSegment
+        ? segmentTypeBucket(props['segment_type'] as String?)
+        : activityTypeBucket(props['sport_type'] as String?);
+    final Color baseColor;
+    final LineStyleKind lineStyle;
+    if (colorByType) {
+      final resolved = resolveTypeStyle(bucket,
+          isSegment: isSegment, overrides: typeStyles[bucket]);
+      baseColor = resolved.color;
+      lineStyle = resolved.style;
+    } else {
+      baseColor = isOdd ? altColor : trackColor;
+      lineStyle = isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
+    }
 
     final Color color;
     final double strokeWidth;
-    if (isSegment) {
-      if (isHighlighted) {
-        color = trackColor;
-        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-      } else if (hasSelection) {
-        color = trackColor.withAlpha(0x60);
-        strokeWidth = trackWidth;
-      } else {
-        color = trackColor;
-        strokeWidth = trackWidth;
-      }
+    if (isHighlighted) {
+      color = baseColor;
+      strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
+    } else if (hasSelection) {
+      color = baseColor.withAlpha(0x60);
+      strokeWidth = trackWidth;
     } else {
-      if (isHighlighted) {
-        color = trackColor;
-        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-      } else if (hasSelection) {
-        color = trackColor.withAlpha(0x60);
-        strokeWidth = trackWidth;
-      } else {
-        color = isOdd ? altColor : trackColor;
-        strokeWidth = trackWidth;
-      }
+      color = baseColor;
+      strokeWidth = trackWidth;
     }
     polylines.add(Polyline(
       points: points,
       color: color,
       strokeWidth: strokeWidth,
-      pattern: isSegment
-          ? StrokePattern.dashed(segments: const [12, 8])
-          : const StrokePattern.solid(),
+      pattern: switch (lineStyle) {
+        LineStyleKind.dashed => StrokePattern.dashed(segments: const [12, 8]),
+        LineStyleKind.dotted => const StrokePattern.dotted(),
+        LineStyleKind.solid  => const StrokePattern.solid(),
+      },
     ));
   }
   return polylines;
@@ -1544,70 +1576,13 @@ class ManageMapPanelState extends State<ManageMapPanel> {
   double? _lastTrackWidth;
   bool? _lastAlternating;
   bool? _lastShowJournals;
+  bool? _lastColorByType;
+  Map<String, Map<String, dynamic>>? _lastTypeStyles;
 
   static const _sentinel = Object();
 
   static bool setEquals(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
-
-  static IconData _iconForSegmentType(String? type) {
-    switch (type?.toLowerCase()) {
-      case 'flight': return Icons.flight;
-      case 'train':  return Icons.train;
-      case 'bus':    return Icons.directions_bus;
-      case 'boat':   return Icons.directions_boat;
-      default:       return Icons.route;
-    }
-  }
-
-  List<Marker> _buildSegmentMarkers(
-    Map<String, dynamic> geo,
-    dynamic selectedSegmentId,
-    bool hasSelection,
-    Color trackColor,
-  ) {
-    final features = geo['features'];
-    if (features is! List) return [];
-    final markers = <Marker>[];
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      if (props['type'] != 'segment') continue;
-      final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
-      if (coords is! List || coords.isEmpty) continue;
-
-      final point = memoArcMidpoint(coords);
-      if (point == null) continue;
-
-      final segId = props['segment_id']?.toString();
-      final isSelected = selectedSegmentId != null &&
-          segId == selectedSegmentId.toString();
-
-      final bgColor = isSelected
-          ? trackColor
-          : hasSelection
-              ? trackColor.withAlpha(0x60)
-              : trackColor;
-
-      markers.add(Marker(
-        point: point,
-        width: 22,
-        height: 22,
-        child: Container(
-          decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-          child: Icon(
-            _iconForSegmentType(
-              (props['segment_type'] as String?) ??
-              (props['route_mode'] == 'rail' ? 'train' : null),
-            ),
-            color: Colors.white,
-            size: 13,
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
 
   List<Marker> _buildMemoryMarkers(
     List<Map<String, dynamic>> items,
@@ -1941,7 +1916,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
         selMemId?.toString() != (_lastSelectedMemId as dynamic)?.toString() ||
         selJournalId2?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged2 = trackColor != _lastTrackColor ||
-        trackWidth != _lastTrackWidth || alternating != _lastAlternating;
+        trackWidth != _lastTrackWidth || alternating != _lastAlternating ||
+        notifier.colorByType != _lastColorByType ||
+        !identical(notifier.typeStyles, _lastTypeStyles);
     final perfGeoChg = !identical(geo, _lastGeo);
     final perfItemsChg = !identical(items, _lastItems);
     final perfJournalsChg = showJournals2 != _lastShowJournals;
@@ -1962,6 +1939,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       _lastTrackWidth = trackWidth;
       _lastAlternating = alternating;
       _lastShowJournals = showJournals2;
+      _lastColorByType = notifier.colorByType;
+      _lastTypeStyles = notifier.typeStyles;
       // Multi-select takes priority over single-day selection.
       final effectiveDays = selDays.isNotEmpty
           ? selDays
@@ -1986,16 +1965,19 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
               alternating, items,
               trackSecondaryColor: trackSecondaryColor2,
-              dayActIds: dayActIds, daySegIds: daySegIds)
+              dayActIds: dayActIds, daySegIds: daySegIds,
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
       _cachedActivityMarkers = geo != null
           ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
-              dayStartActivityIds: dayStartActivityIds(items, actById))
+              dayStartActivityIds: dayStartActivityIds(items, actById),
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor)
+          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor,
+              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
