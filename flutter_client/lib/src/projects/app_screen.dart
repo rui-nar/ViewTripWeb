@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
+import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
@@ -92,6 +93,28 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   void _clearFocusedLocation() {
     if (_focusedLatLng != null) setState(() => _focusedLatLng = null);
+  }
+
+  // Locate-me pin (issue #88); replaced (not accumulated) on each tap.
+  LatLng? _hereLatLng;
+  bool _locatingHere = false;
+
+  /// Fetches the device's current location and pans the map to it at the
+  /// CURRENT zoom (iso-zoom — unlike [_focusLocation], no zoom floor).
+  /// Silent-fail on denied/unavailable/timed-out location, matching this
+  /// app's established convention (see `current_location.dart`).
+  Future<void> _locateMe() async {
+    setState(() => _locatingHere = true);
+    final here = await currentDeviceLatLng();
+    if (!mounted) return;
+    setState(() {
+      _locatingHere = false;
+      if (here != null) _hereLatLng = here;
+    });
+    if (here != null) {
+      final currentZoom = _mapController.mapController.camera.zoom;
+      _mapController.centerOnPoint(here, zoom: currentZoom);
+    }
   }
 
   // Width of the wide-layout activity panel; drag the divider to resize.
@@ -744,6 +767,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           focusedLatLng: _focusedLatLng,
                           onLocationTap: _focusLocation,
                           onClearFocusedLocation: _clearFocusedLocation,
+                          hereLatLng: _hereLatLng,
+                          locatingHere: _locatingHere,
+                          onLocateMe: _locateMe,
                         ),
                       )),
                       Positioned(
@@ -829,6 +855,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     focusedLatLng: _focusedLatLng,
                     onLocationTap: _focusLocation,
                     onClearFocusedLocation: _clearFocusedLocation,
+                    hereLatLng: _hereLatLng,
+                    locatingHere: _locatingHere,
+                    onLocateMe: _locateMe,
                   ),
                 )),
 
