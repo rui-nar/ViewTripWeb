@@ -106,9 +106,15 @@ class PolarstepsClient:
         Only an explicit ``type == 0`` is dropped; a missing/unknown type is
         treated as published so a future step kind is never silently hidden.
         Pass ``include_drafts=True`` to keep drafts (used by diagnostics).
+
+        Reads ``all_steps`` as a fallback if ``steps`` is absent/empty (issue
+        #86) — ``format_trip`` already handles this same key variability for
+        the trip list, but this call site was missed when the v61 API client
+        was written, silently truncating the track for any trip whose detail
+        response uses the older key.
         """
         data = self._get(f"/trips/{trip_id}")
-        raw_steps: list[dict[str, Any]] = data.get("steps", [])
+        raw_steps: list[dict[str, Any]] = data.get("steps") or data.get("all_steps") or []
         if not include_drafts:
             raw_steps = [s for s in raw_steps if s.get("type") != _STEP_TYPE_DRAFT]
         raw_steps.sort(key=lambda s: s.get("start_time") or s.get("creation_time") or "")
