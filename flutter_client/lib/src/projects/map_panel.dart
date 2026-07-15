@@ -1288,8 +1288,6 @@ class _MapPanelState extends State<MapPanel> {
                     subdomains: kActiveViewLabelsSubdomains,
                     userAgentPackageName: 'com.viewtrip.client',
                     tileProvider: _tileProvider!,
-                    tileDimension: kActiveViewLabelsTileDimension,
-                    zoomOffset: kActiveViewLabelsZoomOffset,
                     maxNativeZoom: 22,
                   ),
                 ),

@@ -89,8 +89,8 @@ const kViewLabelsUrl =
 
 /// CartoDB labels-only overlay — country names, capitals, major cities on a
 /// transparent background. No streets. Stacked on top of satellite in Mapbox mode.
-/// @2x retina tiles (512 px) — use with tileSize:512 + zoomOffset:1 for crisp,
-/// smaller labels.
+/// @2x is baked into the URL (same z/x/y grid as the 1x tiles, just denser
+/// pixels) — leave tileDimension/zoomOffset at their TileLayer defaults.
 const kCartoDblLabelsUrl =
     'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}@2x.png';
 const kCartoDblLabelsSubdomains = ['a', 'b', 'c', 'd'];
@@ -112,10 +112,6 @@ const String kActiveViewLabelsOverlayUrl =
 
 const List<String> kActiveViewLabelsSubdomains =
     kUseMapbox ? kCartoDblLabelsSubdomains : [];
-
-/// CartoDB labels are @2x (512px) tiles; ESRI labels are standard 256px.
-const int kActiveViewLabelsTileDimension = kUseMapbox ? 512 : 256;
-const double kActiveViewLabelsZoomOffset = kUseMapbox ? 1 : 0;
 
 const kActiveManageBasemapUrl =
     kUseMapbox ? kMapboxManageUrl : kManageBasemapUrl;
