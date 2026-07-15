@@ -93,6 +93,70 @@ Marker focusedLocationMarker(LatLng point) => Marker(
       ),
     );
 
+// "You are here" marker (issue #88) — dropped by the locate-me button, a
+// plain dot (no icon glyph) so it's visually distinct from the amber
+// focused-location pin above and from the locate-me button itself, which
+// both use icon-in-circle styling.
+const Color _kHereMarkerColor = Color(0xFF2563EB); // blue-600
+
+/// The device-location pin dropped by the locate-me button (issue #88),
+/// rendered by both map widgets when [MapPanel.hereLatLng] /
+/// [ManageMapPanel.hereLatLng] is set.
+Marker youAreHereMarker(LatLng point) => Marker(
+      point: point,
+      width: 20,
+      height: 20,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: _kHereMarkerColor,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+        ),
+      ),
+    );
+
+/// Locate-me button (issue #88) — overlaid on the map, shared by [MapPanel]
+/// and [ManageMapPanel]. Purely presentational: the async device-location
+/// fetch and camera pan are owned by the parent screen (mirrors how
+/// [focusedLocationMarker] taps bubble up via `onLocationTap` instead of
+/// being handled inside this file), so this widget just renders the button
+/// and reports taps via [onPressed].
+class LocateMeButton extends StatelessWidget {
+  final bool locating;
+  final VoidCallback onPressed;
+
+  const LocateMeButton({super.key, required this.locating, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.surface.withValues(alpha: 0.94),
+      shape: const CircleBorder(),
+      elevation: 0,
+      child: Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          boxShadow: kShadow2(Theme.of(context).brightness),
+        ),
+        child: IconButton(
+          icon: locating
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: cs.onSurfaceVariant),
+                )
+              : Icon(Icons.my_location, color: cs.onSurfaceVariant),
+          tooltip: 'Center on my location',
+          onPressed: locating ? null : onPressed,
+        ),
+      ),
+    );
+  }
+}
+
 LatLng? _coordToLatLng(dynamic c) {
   if (c is! List || c.length < 2) return null;
   return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
@@ -579,6 +643,25 @@ class MapPanel extends StatefulWidget {
   /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
   final VoidCallback? onClearFocusedLocation;
 
+  /// Owner-only locate-me button (issue #88). Defaults to `false` so the
+  /// public/shared map (which reuses this same widget) never prompts
+  /// anonymous visitors for their location — mirrors [showEncounters].
+  /// Only the owner-authenticated view-mode screen should ever pass `true`.
+  final bool showLocateMe;
+
+  /// The device-location pin to render via [youAreHereMarker] (issue #88),
+  /// set by the parent screen after a successful locate-me fetch.
+  final LatLng? hereLatLng;
+
+  /// True while the parent screen is fetching the device's location, so the
+  /// locate-me button can show a busy state.
+  final bool locatingHere;
+
+  /// Invoked when the locate-me button is tapped — the parent screen owns
+  /// the actual device-location fetch and camera pan, mirroring how
+  /// [onLocationTap] is owned by the parent rather than this widget.
+  final VoidCallback? onLocateMe;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -596,6 +679,10 @@ class MapPanel extends StatefulWidget {
     this.focusedLatLng,
     this.onLocationTap,
     this.onClearFocusedLocation,
+    this.showLocateMe = false,
+    this.hereLatLng,
+    this.locatingHere = false,
+    this.onLocateMe,
   });
 
   @override
@@ -1232,6 +1319,8 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
+            if (widget.hereLatLng != null)
+              MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -1325,6 +1414,15 @@ class _MapPanelState extends State<MapPanel> {
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),
+        if (widget.showLocateMe && widget.onLocateMe != null)
+          Positioned(
+            bottom: 16,
+            right: 12,
+            child: LocateMeButton(
+              locating: widget.locatingHere,
+              onPressed: widget.onLocateMe!,
+            ),
+          ),
       ],
     );
   }
@@ -1361,6 +1459,20 @@ class ManageMapPanel extends StatefulWidget {
   /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
   final VoidCallback? onClearFocusedLocation;
 
+  /// The device-location pin to render via [youAreHereMarker] (issue #88),
+  /// set by the parent screen after a successful locate-me fetch.
+  final LatLng? hereLatLng;
+
+  /// True while the parent screen is fetching the device's location, so the
+  /// locate-me button can show a busy state.
+  final bool locatingHere;
+
+  /// Invoked when the locate-me button is tapped — the parent screen owns
+  /// the actual device-location fetch and camera pan. Edit mode is always
+  /// owner-only, so unlike [MapPanel.showLocateMe] there's no separate gate:
+  /// the button renders whenever this is non-null.
+  final VoidCallback? onLocateMe;
+
   const ManageMapPanel({
     super.key,
     required this.notifier,
@@ -1376,6 +1488,9 @@ class ManageMapPanel extends StatefulWidget {
     this.focusedLatLng,
     this.onLocationTap,
     this.onClearFocusedLocation,
+    this.hereLatLng,
+    this.locatingHere = false,
+    this.onLocateMe,
   });
 
   @override
@@ -2070,6 +2185,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
+            if (widget.hereLatLng != null)
+              MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
             // Owner-only, view-only Polarsteps trip overlay for a person (#40).
             if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
               PolylineLayer(
@@ -2211,6 +2328,15 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),
+        if (widget.onLocateMe != null)
+          Positioned(
+            bottom: 16,
+            right: 12,
+            child: LocateMeButton(
+              locating: widget.locatingHere,
+              onPressed: widget.onLocateMe!,
+            ),
+          ),
       ],
     );
     if (perfSw != null) {
