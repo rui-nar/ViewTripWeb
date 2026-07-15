@@ -5,7 +5,10 @@
 /// and with the Esri World Imagery (satellite) basemap.
 library;
 
+import 'dart:async' show Timer, StreamSubscription;
+
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart' show MapEvent;
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
@@ -22,6 +25,7 @@ import 'project_notifier.dart';
 import 'project_service.dart';
 import 'sync_import_dialog.dart';
 import 'sync_import_notifier.dart';
+import 'viewport_sync.dart';
 
 // ── Service — calls /api/projects/{name}/meta first, full details in background
 
@@ -175,6 +179,27 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     if (_focusedLatLng != null) setState(() => _focusedLatLng = null);
   }
 
+  // Debounced camera → URL sync (issue #76 follow-up) — mirrors app_screen.dart.
+  StreamSubscription<MapEvent>? _mapEventSub;
+  Timer? _viewportSyncTimer;
+
+  void _onMapEvent(MapEvent event) {
+    _viewportSyncTimer?.cancel();
+    _viewportSyncTimer = Timer(const Duration(milliseconds: 700), () {
+      // Guards against a missing GoRouter ancestor (e.g. this widget under
+      // test in isolation) — context.replace() would otherwise throw.
+      if (!mounted || GoRouter.maybeOf(context) == null) return;
+      final cam = _mapController.mapController.camera;
+      context.replace(viewportSyncPath(
+        basePath: '/view',
+        projectName: widget.projectName,
+        lat: cam.center.latitude,
+        lng: cam.center.longitude,
+        zoom: cam.zoom,
+      ));
+    });
+  }
+
   void _openSyncDialog(BuildContext context) {
     final notifier = context.read<ViewProjectNotifier>();
     final pending = notifier.pendingSync;
@@ -202,10 +227,14 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ViewProjectNotifier>().loadView(widget.projectName);
     });
+    _mapEventSub =
+        _mapController.mapController.mapEventStream.listen(_onMapEvent);
   }
 
   @override
   void dispose() {
+    _mapEventSub?.cancel();
+    _viewportSyncTimer?.cancel();
     _mapController.dispose();
     super.dispose();
   }
@@ -314,12 +343,14 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
           IconButton(
             icon: const Icon(Icons.bar_chart_outlined),
             tooltip: 'Statistics',
+            // The /stats route no longer reads GoRouterState.extra (issue #76
+            // follow-up) — ProjectStatsScreen now sources tags/groups from the
+            // ambient (manage-mode) ProjectNotifier singleton, loading this
+            // project into it first if needed. That happens unconditionally
+            // here since view mode's ViewProjectNotifier is a separate
+            // instance the singleton doesn't share.
             onPressed: isLoading ? null : () => context.push(
               '/stats?project=${Uri.encodeComponent(widget.projectName)}',
-              extra: {
-                'tags': context.read<ViewProjectNotifier>().availableTags,
-                'groups': context.read<ViewProjectNotifier>().sleepingOptionGroups,
-              },
             ),
           ),
           IconButton(

@@ -8,6 +8,7 @@ import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../api/client.dart';
 import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
@@ -15,6 +16,7 @@ import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
 import 'client_geo_builder.dart' as client_geo;
 import 'project_filter_mixin.dart';
+import 'project_filters.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
 import 'project_people_crud_mixin.dart';
@@ -240,6 +242,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
+    saveUiState();
     notifyListeners();
   }
 
@@ -251,6 +254,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
+    saveUiState();
     notifyListeners();
   }
 
@@ -262,6 +266,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedJournalId = null;
     selectedDay = null;
     selectedDays = {};
+    saveUiState();
     notifyListeners();
   }
 
@@ -287,6 +292,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedSegmentId = null;
     selectedMemoryId = null;
     selectedDays = {};
+    saveUiState();
     notifyListeners();
   }
 
@@ -296,7 +302,108 @@ class ProjectNotifier extends ChangeNotifier
     selectedSegmentId = null;
     selectedMemoryId = null;
     selectedDay = null;
+    saveUiState();
     notifyListeners();
+  }
+
+  // ── UI-state persistence (issue #76 follow-up) ─────────────────────────────
+  // A forced page reload (the black-screen JS backstop) wipes all in-memory
+  // Dart state. Selection + filters are cheap to round-trip through
+  // shared_preferences, keyed per project so switching projects on this
+  // (singleton, manage-mode) notifier doesn't cross-write between them.
+
+  static String _uiStateKey(String projectName) => 'project_ui_state_$projectName';
+
+  @override
+  void saveUiState() => unawaited(_saveUiState());
+
+  Future<void> _saveUiState() async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      final data = <String, dynamic>{
+        'selectedDay': selectedDay,
+        'selectedActivityId': selectedActivityId?.toString(),
+        'selectedSegmentId': selectedSegmentId?.toString(),
+        'selectedMemoryId': selectedMemoryId?.toString(),
+        'tags': filters.tags.toList(),
+        'sleeping': filters.sleeping.toList(),
+        'activityTypes': filters.activityTypes.toList(),
+        'transport': filters.transport.toList(),
+      };
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_uiStateKey(name), jsonEncode(data));
+    } catch (_) {
+      // Best-effort only — this is fire-and-forget from every selection/filter
+      // mutator, so a plugin/storage failure here must never surface as an
+      // unhandled async error (e.g. a browser blocking storage access).
+    }
+  }
+
+  /// Restores selection + filters persisted by [_saveUiState] for the
+  /// just-loaded project, dropping any reference that no longer resolves to
+  /// real data (e.g. a deleted activity/segment/memory or a day that's no
+  /// longer in [dayMeta]) so a stale selection can't resurrect as a dangling
+  /// reference. Silently no-ops on missing/malformed prefs.
+  Future<void> _restoreUiState() async {
+    final name = projectName;
+    if (name == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_loadKey != name) return; // navigated away while awaiting prefs
+      final raw = prefs.getString(_uiStateKey(name));
+      if (raw == null) return;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+
+      restoreFilters(ProjectFilters(
+        tags: (data['tags'] as List?)?.cast<String>().toSet() ?? const {},
+        sleeping:
+            (data['sleeping'] as List?)?.cast<String>().toSet() ?? const {},
+        activityTypes:
+            (data['activityTypes'] as List?)?.cast<String>().toSet() ?? const {},
+        transport:
+            (data['transport'] as List?)?.cast<String>().toSet() ?? const {},
+      ));
+
+      final savedDay = data['selectedDay'] as String?;
+      if (savedDay != null && dayMeta.containsKey(savedDay)) {
+        selectedDay = savedDay;
+      }
+
+      final savedActivityId = data['selectedActivityId'] as String?;
+      if (savedActivityId != null) {
+        final activityIds = activities.map((a) => a['id']?.toString()).toSet();
+        if (activityIds.contains(savedActivityId)) {
+          selectedActivityId = savedActivityId;
+        }
+      }
+
+      final savedSegmentId = data['selectedSegmentId'] as String?;
+      if (savedSegmentId != null) {
+        final segmentIds = items
+            .where((i) => i['item_type'] == 'segment')
+            .map((i) => (i['segment'] as Map?)?['id']?.toString())
+            .whereType<String>()
+            .toSet();
+        if (segmentIds.contains(savedSegmentId)) {
+          selectedSegmentId = savedSegmentId;
+        }
+      }
+
+      final savedMemoryId = data['selectedMemoryId'] as String?;
+      if (savedMemoryId != null) {
+        final memoryIds = items
+            .where((i) => i['item_type'] == 'memory')
+            .map((i) => (i['memory'] as Map?)?['id']?.toString())
+            .whereType<String>()
+            .toSet();
+        if (memoryIds.contains(savedMemoryId)) {
+          selectedMemoryId = savedMemoryId;
+        }
+      }
+    } catch (_) {
+      // Malformed/missing prefs — restore is best-effort only.
+    }
   }
 
   // Cached aggregate stats — computed once in load(), not on every build.
@@ -441,6 +548,7 @@ class ProjectNotifier extends ChangeNotifier
       }
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
+      await _restoreUiState();  // issue #76 follow-up: reapply persisted selection/filters
       if (loadOwnerExtras) {
         await Future.wait([_loadSyncMeta(name), _loadShareInfo(name)]);
       }
