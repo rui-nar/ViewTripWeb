@@ -264,6 +264,63 @@ void main() {
       await _tapSave(tester);
       expect(h.saved!.containsKey('counters'), isFalse);
     });
+
+    testWidgets('typing a value directly updates the saved amount', (tester) async {
+      final h = await _pump(tester,
+          counters: [{'name': 'Snacks'}],
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
+
+      await tester.enterText(find.byKey(const ValueKey('ctr_val_0_Snacks')), '12');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(find.text('12'), findsOneWidget);
+
+      await _tapSave(tester);
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [{'name': 'Snacks', 'value': 12.0}]);
+    });
+
+    testWidgets('a comma decimal separator is accepted', (tester) async {
+      final h = await _pump(tester,
+          counters: [{'name': 'Snacks'}],
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
+
+      await tester.enterText(find.byKey(const ValueKey('ctr_val_0_Snacks')), '3,5');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(find.text('3.5'), findsOneWidget);
+
+      await _tapSave(tester);
+      final counters = h.saved!['counters'] as List;
+      expect(counters, [{'name': 'Snacks', 'value': 3.5}]);
+    });
+
+    testWidgets('invalid text reverts to the previous value', (tester) async {
+      await _pump(tester,
+          counters: [{'name': 'Snacks'}],
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
+
+      await tester.enterText(find.byKey(const ValueKey('ctr_val_0_Snacks')), 'abc');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(find.text('3'), findsOneWidget);
+      expect(_saveEnabled(tester), isFalse); // rejected edit, still clean
+    });
+
+    testWidgets('the field stays in sync when the +/- steppers change the value',
+        (tester) async {
+      await _pump(tester,
+          counters: [{'name': 'Snacks'}],
+          initialMeta: {'counters': [{'name': 'Snacks', 'value': 3}]});
+
+      await _tapVisible(tester, find.byKey(const ValueKey('ctr_inc_0_Snacks')));
+      expect(find.text('4'), findsOneWidget);
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('ctr_val_0_Snacks')));
+      expect(field.controller!.text, '4');
+    });
   });
 
   group('Footer', () {

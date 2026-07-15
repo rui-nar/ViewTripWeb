@@ -93,6 +93,70 @@ Marker focusedLocationMarker(LatLng point) => Marker(
       ),
     );
 
+// "You are here" marker (issue #88) — dropped by the locate-me button, a
+// plain dot (no icon glyph) so it's visually distinct from the amber
+// focused-location pin above and from the locate-me button itself, which
+// both use icon-in-circle styling.
+const Color _kHereMarkerColor = Color(0xFF2563EB); // blue-600
+
+/// The device-location pin dropped by the locate-me button (issue #88),
+/// rendered by both map widgets when [MapPanel.hereLatLng] /
+/// [ManageMapPanel.hereLatLng] is set.
+Marker youAreHereMarker(LatLng point) => Marker(
+      point: point,
+      width: 20,
+      height: 20,
+      alignment: Alignment.center,
+      child: Container(
+        decoration: BoxDecoration(
+          color: _kHereMarkerColor,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+        ),
+      ),
+    );
+
+/// Locate-me button (issue #88) — overlaid on the map, shared by [MapPanel]
+/// and [ManageMapPanel]. Purely presentational: the async device-location
+/// fetch and camera pan are owned by the parent screen (mirrors how
+/// [focusedLocationMarker] taps bubble up via `onLocationTap` instead of
+/// being handled inside this file), so this widget just renders the button
+/// and reports taps via [onPressed].
+class LocateMeButton extends StatelessWidget {
+  final bool locating;
+  final VoidCallback onPressed;
+
+  const LocateMeButton({super.key, required this.locating, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.surface.withValues(alpha: 0.94),
+      shape: const CircleBorder(),
+      elevation: 0,
+      child: Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          boxShadow: kShadow2(Theme.of(context).brightness),
+        ),
+        child: IconButton(
+          icon: locating
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: cs.onSurfaceVariant),
+                )
+              : Icon(Icons.my_location, color: cs.onSurfaceVariant),
+          tooltip: 'Center on my location',
+          onPressed: locating ? null : onPressed,
+        ),
+      ),
+    );
+  }
+}
+
 LatLng? _coordToLatLng(dynamic c) {
   if (c is! List || c.length < 2) return null;
   return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
@@ -579,6 +643,25 @@ class MapPanel extends StatefulWidget {
   /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
   final VoidCallback? onClearFocusedLocation;
 
+  /// Owner-only locate-me button (issue #88). Defaults to `false` so the
+  /// public/shared map (which reuses this same widget) never prompts
+  /// anonymous visitors for their location — mirrors [showEncounters].
+  /// Only the owner-authenticated view-mode screen should ever pass `true`.
+  final bool showLocateMe;
+
+  /// The device-location pin to render via [youAreHereMarker] (issue #88),
+  /// set by the parent screen after a successful locate-me fetch.
+  final LatLng? hereLatLng;
+
+  /// True while the parent screen is fetching the device's location, so the
+  /// locate-me button can show a busy state.
+  final bool locatingHere;
+
+  /// Invoked when the locate-me button is tapped — the parent screen owns
+  /// the actual device-location fetch and camera pan, mirroring how
+  /// [onLocationTap] is owned by the parent rather than this widget.
+  final VoidCallback? onLocateMe;
+
   const MapPanel({
     super.key,
     required this.notifier,
@@ -596,6 +679,10 @@ class MapPanel extends StatefulWidget {
     this.focusedLatLng,
     this.onLocationTap,
     this.onClearFocusedLocation,
+    this.showLocateMe = false,
+    this.hereLatLng,
+    this.locatingHere = false,
+    this.onLocateMe,
   });
 
   @override
@@ -674,93 +761,6 @@ class _MapPanelState extends State<MapPanel> {
       pts.addAll(memoCoordsToLatLng(coords));
     }
     return pts;
-  }
-
-  List<Polyline> _buildPolylines(
-    Map<String, dynamic> geo,
-    dynamic selectedActivityId,
-    dynamic selectedSegmentId,
-    Color trackColor,
-    double trackWidth,
-    bool alternating,
-    List<Map<String, dynamic>> items, {
-    bool selectedOnly = false,
-    Color? trackSecondaryColor,
-  }) {
-    final features = geo['features'];
-    if (features is! List) return [];
-
-    // Build activity-index map for alternating colours.
-    final actIdx = <String, int>{};
-    int ai = 0;
-    for (final item in items) {
-      if (item['item_type'] == 'activity') {
-        final id = item['activity_id']?.toString();
-        if (id != null) actIdx[id] = ai++;
-      }
-    }
-    final altColor = trackSecondaryColor ?? _alternateColor(trackColor);
-
-    final polylines = <Polyline>[];
-    final hasSelection = selectedActivityId != null || selectedSegmentId != null;
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      final geometry = feature['geometry'] as Map? ?? {};
-      final coords = geometry['coordinates'];
-      if (coords is! List) continue;
-
-      final points = memoCoordsToLatLng(coords);
-      // A LineString needs ≥2 points; a single-point polyline can throw deep in
-      // flutter_map's paint path, so skip it (and empty ones) defensively.
-      if (points.length < 2) continue;
-
-      final isSegment = props['type'] == 'segment';
-      final actId = props['activity_id']?.toString();
-      final isSelAct = selectedActivityId != null &&
-          actId == selectedActivityId.toString();
-      final isSelSeg = selectedSegmentId != null &&
-          props['segment_id']?.toString() == selectedSegmentId.toString();
-
-      // When tile layer handles the base rendering, only draw the selected item.
-      if (selectedOnly && !isSelAct && !isSelSeg) continue;
-      final isOdd = alternating && actId != null && (actIdx[actId] ?? 0).isOdd;
-
-      final Color color;
-      final double strokeWidth;
-      if (isSegment) {
-        if (isSelSeg) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = trackColor;
-          strokeWidth = trackWidth;
-        }
-      } else {
-        if (isSelAct) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = isOdd ? altColor : trackColor;
-          strokeWidth = trackWidth;
-        }
-      }
-      polylines.add(Polyline(
-        points: points,
-        color: color,
-        strokeWidth: strokeWidth,
-        pattern: isSegment
-            ? StrokePattern.dashed(segments: const [12, 8])
-            : const StrokePattern.solid(),
-      ));
-    }
-    return polylines;
   }
 
   static IconData _iconForSegmentType(String? type) {
@@ -1201,8 +1201,6 @@ class _MapPanelState extends State<MapPanel> {
                     subdomains: kActiveViewLabelsSubdomains,
                     userAgentPackageName: 'com.viewtrip.client',
                     tileProvider: _tileProvider!,
-                    tileDimension: kActiveViewLabelsTileDimension,
-                    zoomOffset: kActiveViewLabelsZoomOffset,
                     maxNativeZoom: 22,
                   ),
                 ),
@@ -1232,6 +1230,8 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
+            if (widget.hereLatLng != null)
+              MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -1325,9 +1325,127 @@ class _MapPanelState extends State<MapPanel> {
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),
+        if (widget.showLocateMe && widget.onLocateMe != null)
+          Positioned(
+            bottom: 16,
+            right: 12,
+            child: LocateMeButton(
+              locating: widget.locatingHere,
+              onPressed: widget.onLocateMe!,
+            ),
+          ),
       ],
     );
   }
+}
+
+// Shared by _MapPanelState and ManageMapPanelState. Highlighting is either a
+// single selected activity/segment, or (dayActIds/daySegIds set) the union of
+// items across one or more selected days — callers resolve day membership via
+// ManageMapPanelState._dayItemIds before calling in, so this stays agnostic to
+// which widget is asking.
+List<Polyline> _buildPolylines(
+  Map<String, dynamic> geo,
+  dynamic selectedActivityId,
+  dynamic selectedSegmentId,
+  Color trackColor,
+  double trackWidth,
+  bool alternating,
+  List<Map<String, dynamic>> items, {
+  bool selectedOnly = false,
+  Color? trackSecondaryColor,
+  Set<String>? dayActIds,
+  Set<String>? daySegIds,
+}) {
+  final features = geo['features'];
+  if (features is! List) return [];
+
+  // Build activity-index map for alternating colours.
+  final actIdx = <String, int>{};
+  int ai = 0;
+  for (final item in items) {
+    if (item['item_type'] == 'activity') {
+      final id = item['activity_id']?.toString();
+      if (id != null) actIdx[id] = ai++;
+    }
+  }
+  final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
+
+  final usingDaySelection = dayActIds != null || daySegIds != null;
+  final polylines = <Polyline>[];
+  final hasSelection = selectedActivityId != null ||
+      selectedSegmentId != null ||
+      usingDaySelection;
+  for (final feature in features) {
+    if (feature is! Map) continue;
+    final props = feature['properties'] as Map? ?? {};
+    final geometry = feature['geometry'] as Map? ?? {};
+    final coords = geometry['coordinates'];
+    if (coords is! List) continue;
+
+    final points = memoCoordsToLatLng(coords);
+    // A LineString needs ≥2 points; a single-point polyline can throw deep in
+    // flutter_map's paint path, so skip it (and empty ones) defensively.
+    if (points.length < 2) continue;
+
+    final isSegment = props['type'] == 'segment';
+    final featureId = isSegment
+        ? props['segment_id']?.toString()
+        : props['activity_id']?.toString();
+
+    final bool isHighlighted;
+    if (usingDaySelection) {
+      isHighlighted = isSegment
+          ? (daySegIds?.contains(featureId) ?? false)
+          : (dayActIds?.contains(featureId) ?? false);
+    } else if (isSegment) {
+      isHighlighted = selectedSegmentId != null &&
+          featureId == selectedSegmentId.toString();
+    } else {
+      isHighlighted = selectedActivityId != null &&
+          featureId == selectedActivityId.toString();
+    }
+
+    // When tile layer handles the base rendering, only draw the selected item.
+    if (selectedOnly && !isHighlighted) continue;
+    final isOdd = alternating && !isSegment && featureId != null &&
+        (actIdx[featureId] ?? 0).isOdd;
+
+    final Color color;
+    final double strokeWidth;
+    if (isSegment) {
+      if (isHighlighted) {
+        color = trackColor;
+        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
+      } else if (hasSelection) {
+        color = trackColor.withAlpha(0x60);
+        strokeWidth = trackWidth;
+      } else {
+        color = trackColor;
+        strokeWidth = trackWidth;
+      }
+    } else {
+      if (isHighlighted) {
+        color = trackColor;
+        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
+      } else if (hasSelection) {
+        color = trackColor.withAlpha(0x60);
+        strokeWidth = trackWidth;
+      } else {
+        color = isOdd ? altColor : trackColor;
+        strokeWidth = trackWidth;
+      }
+    }
+    polylines.add(Polyline(
+      points: points,
+      color: color,
+      strokeWidth: strokeWidth,
+      pattern: isSegment
+          ? StrokePattern.dashed(segments: const [12, 8])
+          : const StrokePattern.solid(),
+    ));
+  }
+  return polylines;
 }
 
 // ── ManageMapPanel — bare TileLayer, no controller, no polylines ─────────────
@@ -1361,6 +1479,20 @@ class ManageMapPanel extends StatefulWidget {
   /// [focusedLatLng] (issue #72) — no timer, cleared on the next interaction.
   final VoidCallback? onClearFocusedLocation;
 
+  /// The device-location pin to render via [youAreHereMarker] (issue #88),
+  /// set by the parent screen after a successful locate-me fetch.
+  final LatLng? hereLatLng;
+
+  /// True while the parent screen is fetching the device's location, so the
+  /// locate-me button can show a busy state.
+  final bool locatingHere;
+
+  /// Invoked when the locate-me button is tapped — the parent screen owns
+  /// the actual device-location fetch and camera pan. Edit mode is always
+  /// owner-only, so unlike [MapPanel.showLocateMe] there's no separate gate:
+  /// the button renders whenever this is non-null.
+  final VoidCallback? onLocateMe;
+
   const ManageMapPanel({
     super.key,
     required this.notifier,
@@ -1376,6 +1508,9 @@ class ManageMapPanel extends StatefulWidget {
     this.focusedLatLng,
     this.onLocationTap,
     this.onClearFocusedLocation,
+    this.hereLatLng,
+    this.locatingHere = false,
+    this.onLocateMe,
   });
 
   @override
@@ -1779,115 +1914,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return points;
   }
 
-  List<Polyline> _buildPolylines(
-    Map<String, dynamic> geo,
-    dynamic selectedActivityId,
-    dynamic selectedSegmentId,
-    Set<String> effectiveDays,
-    Map<dynamic, Map<String, dynamic>> activityById,
-    List<Map<String, dynamic>> items,
-    Color trackColor,
-    double trackWidth,
-    bool alternating, {
-    Color? trackSecondaryColor,
-  }) {
-    final features = geo['features'];
-    if (features is! List) return [];
-
-    // Build activity-index map for alternating colours.
-    final actIdx = <String, int>{};
-    int ai = 0;
-    for (final item in items) {
-      if (item['item_type'] == 'activity') {
-        final id = item['activity_id']?.toString();
-        if (id != null) actIdx[id] = ai++;
-      }
-    }
-    final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
-
-    // For day selection, union ids across all selected days.
-    Set<String>? dayActIds;
-    Set<String>? daySegIds;
-    if (effectiveDays.isNotEmpty) {
-      dayActIds = {};
-      daySegIds = {};
-      for (final dk in effectiveDays) {
-        final r = _dayItemIds(items, activityById, dk);
-        dayActIds.addAll(r.actIds);
-        daySegIds.addAll(r.segIds);
-      }
-    }
-
-    final polylines = <Polyline>[];
-    final hasSelection = selectedActivityId != null ||
-        selectedSegmentId != null ||
-        effectiveDays.isNotEmpty;
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      final geometry = feature['geometry'] as Map? ?? {};
-      final coords = geometry['coordinates'];
-      if (coords is! List) continue;
-      final points = memoCoordsToLatLng(coords);
-      if (points.isEmpty) continue;
-      final isSegment = props['type'] == 'segment';
-      final featureId = isSegment
-          ? props['segment_id']?.toString()
-          : props['activity_id']?.toString();
-
-      final bool isHighlighted;
-      if (effectiveDays.isNotEmpty) {
-        isHighlighted = isSegment
-            ? (daySegIds?.contains(featureId) ?? false)
-            : (dayActIds?.contains(featureId) ?? false);
-      } else if (isSegment) {
-        isHighlighted = selectedSegmentId != null &&
-            featureId == selectedSegmentId.toString();
-      } else {
-        isHighlighted = selectedActivityId != null &&
-            featureId == selectedActivityId.toString();
-      }
-
-      final isOdd = alternating && !isSegment && featureId != null &&
-          (actIdx[featureId] ?? 0).isOdd;
-
-      final Color color;
-      final double strokeWidth;
-      if (isSegment) {
-        if (isHighlighted) {
-          color = trackColor;
-          strokeWidth = 4.0;
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = 2.0;
-        } else {
-          color = trackColor;
-          strokeWidth = 2.0;
-        }
-      } else {
-        if (isHighlighted) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = isOdd ? altColor : trackColor;
-          strokeWidth = trackWidth;
-        }
-      }
-      polylines.add(Polyline(
-        points: points,
-        color: color,
-        strokeWidth: strokeWidth,
-        pattern: isSegment
-            ? StrokePattern.dashed(segments: const [12, 8])
-            : const StrokePattern.solid(),
-      ));
-    }
-    return polylines;
-  }
-
   @override
   Widget build(BuildContext context) {
     // Dev-only build timer (PERF_TIMING) — pins whether map rebuilds are the
@@ -1944,10 +1970,23 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final actById = <dynamic, Map<String, dynamic>>{
         for (final a in notifier.activities) a['id']: a
       };
+      // For day selection, union ids across all selected days.
+      Set<String>? dayActIds;
+      Set<String>? daySegIds;
+      if (effectiveDays.isNotEmpty) {
+        dayActIds = {};
+        daySegIds = {};
+        for (final dk in effectiveDays) {
+          final r = _dayItemIds(items, actById, dk);
+          dayActIds.addAll(r.actIds);
+          daySegIds.addAll(r.segIds);
+        }
+      }
       _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById,
-              items, trackColor, trackWidth, alternating,
-              trackSecondaryColor: trackSecondaryColor2)
+          ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
+              alternating, items,
+              trackSecondaryColor: trackSecondaryColor2,
+              dayActIds: dayActIds, daySegIds: daySegIds)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
@@ -1969,17 +2008,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
       if (selectionChanged2 && widget.autoZoom && geo != null &&
           (effectiveDays.isNotEmpty || selActId != null || selSegId != null)) {
-        Set<String>? dayActIds;
-        Set<String>? daySegIds;
-        if (effectiveDays.isNotEmpty) {
-          dayActIds = {};
-          daySegIds = {};
-          for (final dk in effectiveDays) {
-            final r = _dayItemIds(items, actById, dk);
-            dayActIds.addAll(r.actIds);
-            daySegIds.addAll(r.segIds);
-          }
-        }
         _pendingAutoZoomPts = extractSelectedPoints(
             geo, selActId, selSegId, dayActIds, daySegIds);
       } else if (selectionChanged2) {
@@ -2070,6 +2098,8 @@ class ManageMapPanelState extends State<ManageMapPanel> {
               MarkerLayer(markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
+            if (widget.hereLatLng != null)
+              MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
             // Owner-only, view-only Polarsteps trip overlay for a person (#40).
             if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
               PolylineLayer(
@@ -2211,6 +2241,15 @@ class ManageMapPanelState extends State<ManageMapPanel> {
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),
+        if (widget.onLocateMe != null)
+          Positioned(
+            bottom: 16,
+            right: 12,
+            child: LocateMeButton(
+              locating: widget.locatingHere,
+              onPressed: widget.onLocateMe!,
+            ),
+          ),
       ],
     );
     if (perfSw != null) {

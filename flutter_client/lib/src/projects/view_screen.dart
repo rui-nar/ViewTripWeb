@@ -15,6 +15,9 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
+import '../auth/auth_notifier.dart';
+import '../core/current_location.dart' show currentDeviceLatLng;
+import '../core/last_opened_project.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -200,6 +203,28 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     });
   }
 
+  // Locate-me pin (issue #88); replaced (not accumulated) on each tap.
+  LatLng? _hereLatLng;
+  bool _locatingHere = false;
+
+  /// Fetches the device's current location and pans the map to it at the
+  /// CURRENT zoom (iso-zoom — unlike [_focusLocation], no zoom floor).
+  /// Silent-fail on denied/unavailable/timed-out location, matching this
+  /// app's established convention (see `current_location.dart`).
+  Future<void> _locateMe() async {
+    setState(() => _locatingHere = true);
+    final here = await currentDeviceLatLng();
+    if (!mounted) return;
+    setState(() {
+      _locatingHere = false;
+      if (here != null) _hereLatLng = here;
+    });
+    if (here != null) {
+      final currentZoom = _mapController.mapController.camera.zoom;
+      _mapController.centerOnPoint(here, zoom: currentZoom);
+    }
+  }
+
   void _openSyncDialog(BuildContext context) {
     final notifier = context.read<ViewProjectNotifier>();
     final pending = notifier.pendingSync;
@@ -225,7 +250,12 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ViewProjectNotifier>().loadView(widget.projectName);
+      final notifier = context.read<ViewProjectNotifier>();
+      notifier.loadView(widget.projectName).then((_) {
+        if (!mounted || notifier.error != null) return;
+        saveLastOpenedProject(
+            context.read<AuthNotifier>().user?.id, widget.projectName);
+      });
     });
     _mapEventSub =
         _mapController.mapController.mapEventStream.listen(_onMapEvent);
@@ -426,6 +456,9 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   focusedLatLng: _focusedLatLng,
                   onLocationTap: _focusLocation,
                   onClearFocusedLocation: _clearFocusedLocation,
+                  hereLatLng: _hereLatLng,
+                  locatingHere: _locatingHere,
+                  onLocateMe: _locateMe,
                 );
               },
             ),
@@ -448,6 +481,9 @@ class _ViewLayout extends StatelessWidget {
   final LatLng? focusedLatLng;
   final void Function(double lat, double lon)? onLocationTap;
   final VoidCallback? onClearFocusedLocation;
+  final LatLng? hereLatLng;
+  final bool locatingHere;
+  final VoidCallback? onLocateMe;
 
   const _ViewLayout({
     required this.notifier,
@@ -459,6 +495,9 @@ class _ViewLayout extends StatelessWidget {
     this.focusedLatLng,
     this.onLocationTap,
     this.onClearFocusedLocation,
+    this.hereLatLng,
+    this.locatingHere = false,
+    this.onLocateMe,
   });
 
   @override
@@ -495,6 +534,12 @@ class _ViewLayout extends StatelessWidget {
       focusedLatLng: focusedLatLng,
       onLocationTap: onLocationTap,
       onClearFocusedLocation: onClearFocusedLocation,
+      // Owner-only, same reasoning as showEncounters above (issue #88) —
+      // shared_project_screen.dart's public MapPanel never sets this.
+      showLocateMe: true,
+      hereLatLng: hereLatLng,
+      locatingHere: locatingHere,
+      onLocateMe: onLocateMe,
     );
 
     return Column(

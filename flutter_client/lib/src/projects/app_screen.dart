@@ -16,6 +16,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
+import '../auth/auth_notifier.dart';
+import '../core/current_location.dart' show currentDeviceLatLng;
+import '../core/last_opened_project.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
@@ -119,6 +122,28 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     if (_focusedLatLng != null) setState(() => _focusedLatLng = null);
   }
 
+  // Locate-me pin (issue #88); replaced (not accumulated) on each tap.
+  LatLng? _hereLatLng;
+  bool _locatingHere = false;
+
+  /// Fetches the device's current location and pans the map to it at the
+  /// CURRENT zoom (iso-zoom — unlike [_focusLocation], no zoom floor).
+  /// Silent-fail on denied/unavailable/timed-out location, matching this
+  /// app's established convention (see `current_location.dart`).
+  Future<void> _locateMe() async {
+    setState(() => _locatingHere = true);
+    final here = await currentDeviceLatLng();
+    if (!mounted) return;
+    setState(() {
+      _locatingHere = false;
+      if (here != null) _hereLatLng = here;
+    });
+    if (here != null) {
+      final currentZoom = _mapController.mapController.camera.zoom;
+      _mapController.centerOnPoint(here, zoom: currentZoom);
+    }
+  }
+
   // Width of the wide-layout activity panel; drag the divider to resize.
   static const String _kPanelWidthPref = 'activity_panel_width';
   double _panelWidth = 280;
@@ -140,7 +165,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ProjectNotifier>().load(widget.projectName);
+      final notifier = context.read<ProjectNotifier>();
+      notifier.load(widget.projectName).then((_) {
+        if (!mounted || notifier.error != null) return;
+        saveLastOpenedProject(
+            context.read<AuthNotifier>().user?.id, widget.projectName);
+      });
     });
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getDouble(_kPanelWidthPref);
@@ -548,7 +578,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           ),
 
           if (isNarrow) ...[
-            // ── Narrow: stats + strava + polarsteps visible; rest in overflow ──
+            // ── Narrow: stats + strava visible; rest in overflow (#94) ──
             IconButton(
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
@@ -562,24 +592,20 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               onPressed: () => context.push(
                   '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
             ),
-            IconButton(
-              icon: const Icon(Icons.explore_outlined),
-              tooltip: 'Import steps from Polarsteps',
-              onPressed: () => context.push(
-                  '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}'),
-            ),
             PopupMenuButton<int>(
               icon: const Icon(Icons.more_vert),
               tooltip: 'More options',
               onSelected: (v) {
                 switch (v) {
                   case 0: if (!_isExporting) _exportOptions();
-                  case 1: _showShareDialog();
-                  case 2: context.push(
+                  case 1: context.push(
+                      '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}');
+                  case 2: _showShareDialog();
+                  case 3: context.push(
                     '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
                   );
-                  case 3: context.push('/settings');
-                  case 4: context.go('/projects');
+                  case 4: context.push('/settings');
+                  case 5: context.go('/projects');
                 }
               },
               itemBuilder: (_) => [
@@ -598,12 +624,19 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 const PopupMenuItem(
                   value: 1,
                   child: ListTile(
+                    leading: Icon(Icons.explore_outlined),
+                    title: Text('Import steps from Polarsteps'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 2,
+                  child: ListTile(
                     leading: Icon(Icons.share_outlined),
                     title: Text('Share'),
                   ),
                 ),
                 PopupMenuItem(
-                  value: 2,
+                  value: 3,
                   enabled: !isLoading,
                   child: ListTile(
                     leading: const Icon(Icons.tune),
@@ -612,14 +645,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 3,
+                  value: 4,
                   child: ListTile(
                     leading: Icon(Icons.settings_outlined),
                     title: Text('Settings'),
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 4,
+                  value: 5,
                   child: ListTile(
                     leading: Icon(Icons.arrow_back),
                     title: Text('Back to projects'),
@@ -765,6 +798,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           focusedLatLng: _focusedLatLng,
                           onLocationTap: _focusLocation,
                           onClearFocusedLocation: _clearFocusedLocation,
+                          hereLatLng: _hereLatLng,
+                          locatingHere: _locatingHere,
+                          onLocateMe: _locateMe,
                         ),
                       )),
                       Positioned(
@@ -850,6 +886,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     focusedLatLng: _focusedLatLng,
                     onLocationTap: _focusLocation,
                     onClearFocusedLocation: _clearFocusedLocation,
+                    hereLatLng: _hereLatLng,
+                    locatingHere: _locatingHere,
+                    onLocateMe: _locateMe,
                   ),
                 )),
 

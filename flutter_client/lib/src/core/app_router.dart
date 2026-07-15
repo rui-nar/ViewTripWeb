@@ -12,6 +12,7 @@ import '../auth/forced_change_password_screen.dart';
 import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../auth/welcome_screen.dart';
+import 'last_opened_project.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/view_screen.dart';
@@ -41,7 +42,7 @@ GoRouter buildRouter(BuildContext context) {
     // Re-evaluate redirect whenever auth state changes (login / logout / init).
     refreshListenable: authNotifier,
 
-    redirect: (BuildContext ctx, GoRouterState state) {
+    redirect: (BuildContext ctx, GoRouterState state) async {
       final auth = ctx.read<AuthNotifier>();
 
       // Wait for restoreSession to complete before making routing decisions.
@@ -59,8 +60,14 @@ GoRouter buildRouter(BuildContext context) {
       final isPublicPage = loc == '/' || loc == '/login' || loc == '/register';
       if (!isLoggedIn && !isPublicPage) return '/';
 
-      // Redirect authenticated users away from public pages.
-      if (isLoggedIn && isPublicPage) return '/projects';
+      // Redirect authenticated users away from public pages. Bare root goes
+      // straight to the user's last-opened project (issue #93) instead of
+      // /projects, if one was recorded; otherwise falls through to /projects
+      // as before.
+      if (isLoggedIn && isPublicPage) {
+        if (loc == '/') return rootRedirectTarget(auth.user?.id);
+        return '/projects';
+      }
 
       // Force a password change when required (seeded admin / admin-reset users).
       if (isLoggedIn && auth.user!.passwordChangeRequired) {
