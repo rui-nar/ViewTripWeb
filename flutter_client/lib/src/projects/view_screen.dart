@@ -12,7 +12,9 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
+import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
+import '../core/last_opened_project.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -223,7 +225,12 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ViewProjectNotifier>().loadView(widget.projectName);
+      final notifier = context.read<ViewProjectNotifier>();
+      notifier.loadView(widget.projectName).then((_) {
+        if (!mounted || notifier.error != null) return;
+        saveLastOpenedProject(
+            context.read<AuthNotifier>().user?.id, widget.projectName);
+      });
     });
   }
 

@@ -16,7 +16,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'basemaps.dart';
 import 'elevation_chart.dart';
+import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
+import '../core/last_opened_project.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
 import 'project_notifier.dart';
 import 'activity_panel.dart';
@@ -138,7 +140,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ProjectNotifier>().load(widget.projectName);
+      final notifier = context.read<ProjectNotifier>();
+      notifier.load(widget.projectName).then((_) {
+        if (!mounted || notifier.error != null) return;
+        saveLastOpenedProject(
+            context.read<AuthNotifier>().user?.id, widget.projectName);
+      });
     });
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getDouble(_kPanelWidthPref);
