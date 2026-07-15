@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/design_tokens.dart';
 import 'project_notifier.dart';
@@ -888,6 +889,7 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: _EDCounterRow(
+                key: ValueKey('ctr_row_$i'),
                 index: i,
                 name: _counterMods[i].name,
                 value: _counterMods[i].value,
@@ -1289,7 +1291,7 @@ class _EDNotSetChip extends StatelessWidget {
   }
 }
 
-class _EDCounterRow extends StatelessWidget {
+class _EDCounterRow extends StatefulWidget {
   final int index;
   final String name;
   final double value;
@@ -1297,6 +1299,7 @@ class _EDCounterRow extends StatelessWidget {
   final VoidCallback onRemove;
 
   const _EDCounterRow({
+    super.key,
     required this.index,
     required this.name,
     required this.value,
@@ -1304,8 +1307,59 @@ class _EDCounterRow extends StatelessWidget {
     required this.onRemove,
   });
 
-  String get _display =>
-      value == value.truncateToDouble() ? value.toInt().toString() : value.toString();
+  @override
+  State<_EDCounterRow> createState() => _EDCounterRowState();
+}
+
+class _EDCounterRowState extends State<_EDCounterRow> {
+  late final TextEditingController _ctrl;
+  late final FocusNode _focusNode;
+
+  static String _display(double v) =>
+      v == v.truncateToDouble() ? v.toInt().toString() : v.toString();
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: _display(widget.value));
+    _focusNode = FocusNode()..addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus) _submit();
+  }
+
+  @override
+  void didUpdateWidget(_EDCounterRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Keep the field in sync with external changes (the +/- steppers), but
+    // don't clobber text the user is actively typing.
+    if (oldWidget.value != widget.value && !_focusNode.hasFocus) {
+      _ctrl.text = _display(widget.value);
+    }
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  /// Parses the field (accepting "." or "," as the decimal separator) and
+  /// commits it, or reverts to the last valid value if it isn't a valid
+  /// non-negative number.
+  void _submit() {
+    final normalized = _ctrl.text.trim().replaceAll(',', '.');
+    final parsed = double.tryParse(normalized);
+    if (parsed == null) {
+      _ctrl.text = _display(widget.value);
+      return;
+    }
+    _ctrl.text = _display(parsed);
+    if (parsed != widget.value) widget.onChanged(parsed);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1320,7 +1374,7 @@ class _EDCounterRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text(name,
+            child: Text(widget.name,
                 maxLines: 1, overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 13.5)),
           ),
@@ -1334,19 +1388,33 @@ class _EDCounterRow extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _stepBtn(context, Icons.remove, ValueKey('ctr_dec_${index}_$name'),
-                    value <= 0 ? null : () => onChanged((value - 1).clamp(0, double.infinity))),
+                _stepBtn(context, Icons.remove, ValueKey('ctr_dec_${widget.index}_${widget.name}'),
+                    widget.value <= 0
+                        ? null
+                        : () => widget.onChanged((widget.value - 1).clamp(0, double.infinity))),
                 SizedBox(
-                  width: 30,
-                  child: Text(_display,
-                      textAlign: TextAlign.center,
-                      style: monoStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600,
-                        color: value == 0 ? cs.onSurfaceVariant : cs.onSurface,
-                      )),
+                  width: 46,
+                  child: TextField(
+                    key: ValueKey('ctr_val_${widget.index}_${widget.name}'),
+                    controller: _ctrl,
+                    focusNode: _focusNode,
+                    textAlign: TextAlign.center,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                    onSubmitted: (_) => _submit(),
+                    style: monoStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600,
+                      color: widget.value == 0 ? cs.onSurfaceVariant : cs.onSurface,
+                    ),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 4),
+                      border: InputBorder.none,
+                    ),
+                  ),
                 ),
-                _stepBtn(context, Icons.add, ValueKey('ctr_inc_${index}_$name'),
-                    () => onChanged(value + 1)),
+                _stepBtn(context, Icons.add, ValueKey('ctr_inc_${widget.index}_${widget.name}'),
+                    () => widget.onChanged(widget.value + 1)),
               ],
             ),
           ),
@@ -1355,7 +1423,7 @@ class _EDCounterRow extends StatelessWidget {
             tooltip: 'Remove counter',
             visualDensity: VisualDensity.compact,
             color: cs.onSurfaceVariant,
-            onPressed: onRemove,
+            onPressed: widget.onRemove,
           ),
         ],
       ),
