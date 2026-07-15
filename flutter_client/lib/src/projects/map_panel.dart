@@ -763,93 +763,6 @@ class _MapPanelState extends State<MapPanel> {
     return pts;
   }
 
-  List<Polyline> _buildPolylines(
-    Map<String, dynamic> geo,
-    dynamic selectedActivityId,
-    dynamic selectedSegmentId,
-    Color trackColor,
-    double trackWidth,
-    bool alternating,
-    List<Map<String, dynamic>> items, {
-    bool selectedOnly = false,
-    Color? trackSecondaryColor,
-  }) {
-    final features = geo['features'];
-    if (features is! List) return [];
-
-    // Build activity-index map for alternating colours.
-    final actIdx = <String, int>{};
-    int ai = 0;
-    for (final item in items) {
-      if (item['item_type'] == 'activity') {
-        final id = item['activity_id']?.toString();
-        if (id != null) actIdx[id] = ai++;
-      }
-    }
-    final altColor = trackSecondaryColor ?? _alternateColor(trackColor);
-
-    final polylines = <Polyline>[];
-    final hasSelection = selectedActivityId != null || selectedSegmentId != null;
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      final geometry = feature['geometry'] as Map? ?? {};
-      final coords = geometry['coordinates'];
-      if (coords is! List) continue;
-
-      final points = memoCoordsToLatLng(coords);
-      // A LineString needs ≥2 points; a single-point polyline can throw deep in
-      // flutter_map's paint path, so skip it (and empty ones) defensively.
-      if (points.length < 2) continue;
-
-      final isSegment = props['type'] == 'segment';
-      final actId = props['activity_id']?.toString();
-      final isSelAct = selectedActivityId != null &&
-          actId == selectedActivityId.toString();
-      final isSelSeg = selectedSegmentId != null &&
-          props['segment_id']?.toString() == selectedSegmentId.toString();
-
-      // When tile layer handles the base rendering, only draw the selected item.
-      if (selectedOnly && !isSelAct && !isSelSeg) continue;
-      final isOdd = alternating && actId != null && (actIdx[actId] ?? 0).isOdd;
-
-      final Color color;
-      final double strokeWidth;
-      if (isSegment) {
-        if (isSelSeg) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = trackColor;
-          strokeWidth = trackWidth;
-        }
-      } else {
-        if (isSelAct) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = isOdd ? altColor : trackColor;
-          strokeWidth = trackWidth;
-        }
-      }
-      polylines.add(Polyline(
-        points: points,
-        color: color,
-        strokeWidth: strokeWidth,
-        pattern: isSegment
-            ? StrokePattern.dashed(segments: const [12, 8])
-            : const StrokePattern.solid(),
-      ));
-    }
-    return polylines;
-  }
-
   static IconData _iconForSegmentType(String? type) {
     switch (type?.toLowerCase()) {
       case 'flight': return Icons.flight;
@@ -1426,6 +1339,115 @@ class _MapPanelState extends State<MapPanel> {
   }
 }
 
+// Shared by _MapPanelState and ManageMapPanelState. Highlighting is either a
+// single selected activity/segment, or (dayActIds/daySegIds set) the union of
+// items across one or more selected days — callers resolve day membership via
+// ManageMapPanelState._dayItemIds before calling in, so this stays agnostic to
+// which widget is asking.
+List<Polyline> _buildPolylines(
+  Map<String, dynamic> geo,
+  dynamic selectedActivityId,
+  dynamic selectedSegmentId,
+  Color trackColor,
+  double trackWidth,
+  bool alternating,
+  List<Map<String, dynamic>> items, {
+  bool selectedOnly = false,
+  Color? trackSecondaryColor,
+  Set<String>? dayActIds,
+  Set<String>? daySegIds,
+}) {
+  final features = geo['features'];
+  if (features is! List) return [];
+
+  // Build activity-index map for alternating colours.
+  final actIdx = <String, int>{};
+  int ai = 0;
+  for (final item in items) {
+    if (item['item_type'] == 'activity') {
+      final id = item['activity_id']?.toString();
+      if (id != null) actIdx[id] = ai++;
+    }
+  }
+  final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
+
+  final usingDaySelection = dayActIds != null || daySegIds != null;
+  final polylines = <Polyline>[];
+  final hasSelection = selectedActivityId != null ||
+      selectedSegmentId != null ||
+      usingDaySelection;
+  for (final feature in features) {
+    if (feature is! Map) continue;
+    final props = feature['properties'] as Map? ?? {};
+    final geometry = feature['geometry'] as Map? ?? {};
+    final coords = geometry['coordinates'];
+    if (coords is! List) continue;
+
+    final points = memoCoordsToLatLng(coords);
+    // A LineString needs ≥2 points; a single-point polyline can throw deep in
+    // flutter_map's paint path, so skip it (and empty ones) defensively.
+    if (points.length < 2) continue;
+
+    final isSegment = props['type'] == 'segment';
+    final featureId = isSegment
+        ? props['segment_id']?.toString()
+        : props['activity_id']?.toString();
+
+    final bool isHighlighted;
+    if (usingDaySelection) {
+      isHighlighted = isSegment
+          ? (daySegIds?.contains(featureId) ?? false)
+          : (dayActIds?.contains(featureId) ?? false);
+    } else if (isSegment) {
+      isHighlighted = selectedSegmentId != null &&
+          featureId == selectedSegmentId.toString();
+    } else {
+      isHighlighted = selectedActivityId != null &&
+          featureId == selectedActivityId.toString();
+    }
+
+    // When tile layer handles the base rendering, only draw the selected item.
+    if (selectedOnly && !isHighlighted) continue;
+    final isOdd = alternating && !isSegment && featureId != null &&
+        (actIdx[featureId] ?? 0).isOdd;
+
+    final Color color;
+    final double strokeWidth;
+    if (isSegment) {
+      if (isHighlighted) {
+        color = trackColor;
+        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
+      } else if (hasSelection) {
+        color = trackColor.withAlpha(0x60);
+        strokeWidth = trackWidth;
+      } else {
+        color = trackColor;
+        strokeWidth = trackWidth;
+      }
+    } else {
+      if (isHighlighted) {
+        color = trackColor;
+        strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
+      } else if (hasSelection) {
+        color = trackColor.withAlpha(0x60);
+        strokeWidth = trackWidth;
+      } else {
+        color = isOdd ? altColor : trackColor;
+        strokeWidth = trackWidth;
+      }
+    }
+    polylines.add(Polyline(
+      points: points,
+      color: color,
+      strokeWidth: strokeWidth,
+      pattern: isSegment
+          ? StrokePattern.dashed(segments: const [12, 8])
+          : const StrokePattern.solid(),
+    ));
+  }
+  return polylines;
+}
+
 // ── ManageMapPanel — bare TileLayer, no controller, no polylines ─────────────
 
 class ManageMapPanel extends StatefulWidget {
@@ -1892,115 +1914,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
     return points;
   }
 
-  List<Polyline> _buildPolylines(
-    Map<String, dynamic> geo,
-    dynamic selectedActivityId,
-    dynamic selectedSegmentId,
-    Set<String> effectiveDays,
-    Map<dynamic, Map<String, dynamic>> activityById,
-    List<Map<String, dynamic>> items,
-    Color trackColor,
-    double trackWidth,
-    bool alternating, {
-    Color? trackSecondaryColor,
-  }) {
-    final features = geo['features'];
-    if (features is! List) return [];
-
-    // Build activity-index map for alternating colours.
-    final actIdx = <String, int>{};
-    int ai = 0;
-    for (final item in items) {
-      if (item['item_type'] == 'activity') {
-        final id = item['activity_id']?.toString();
-        if (id != null) actIdx[id] = ai++;
-      }
-    }
-    final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
-
-    // For day selection, union ids across all selected days.
-    Set<String>? dayActIds;
-    Set<String>? daySegIds;
-    if (effectiveDays.isNotEmpty) {
-      dayActIds = {};
-      daySegIds = {};
-      for (final dk in effectiveDays) {
-        final r = _dayItemIds(items, activityById, dk);
-        dayActIds.addAll(r.actIds);
-        daySegIds.addAll(r.segIds);
-      }
-    }
-
-    final polylines = <Polyline>[];
-    final hasSelection = selectedActivityId != null ||
-        selectedSegmentId != null ||
-        effectiveDays.isNotEmpty;
-    for (final feature in features) {
-      if (feature is! Map) continue;
-      final props = feature['properties'] as Map? ?? {};
-      final geometry = feature['geometry'] as Map? ?? {};
-      final coords = geometry['coordinates'];
-      if (coords is! List) continue;
-      final points = memoCoordsToLatLng(coords);
-      if (points.isEmpty) continue;
-      final isSegment = props['type'] == 'segment';
-      final featureId = isSegment
-          ? props['segment_id']?.toString()
-          : props['activity_id']?.toString();
-
-      final bool isHighlighted;
-      if (effectiveDays.isNotEmpty) {
-        isHighlighted = isSegment
-            ? (daySegIds?.contains(featureId) ?? false)
-            : (dayActIds?.contains(featureId) ?? false);
-      } else if (isSegment) {
-        isHighlighted = selectedSegmentId != null &&
-            featureId == selectedSegmentId.toString();
-      } else {
-        isHighlighted = selectedActivityId != null &&
-            featureId == selectedActivityId.toString();
-      }
-
-      final isOdd = alternating && !isSegment && featureId != null &&
-          (actIdx[featureId] ?? 0).isOdd;
-
-      final Color color;
-      final double strokeWidth;
-      if (isSegment) {
-        if (isHighlighted) {
-          color = trackColor;
-          strokeWidth = 4.0;
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = 2.0;
-        } else {
-          color = trackColor;
-          strokeWidth = 2.0;
-        }
-      } else {
-        if (isHighlighted) {
-          color = trackColor;
-          strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
-        } else if (hasSelection) {
-          color = trackColor.withAlpha(0x60);
-          strokeWidth = trackWidth;
-        } else {
-          color = isOdd ? altColor : trackColor;
-          strokeWidth = trackWidth;
-        }
-      }
-      polylines.add(Polyline(
-        points: points,
-        color: color,
-        strokeWidth: strokeWidth,
-        pattern: isSegment
-            ? StrokePattern.dashed(segments: const [12, 8])
-            : const StrokePattern.solid(),
-      ));
-    }
-    return polylines;
-  }
-
   @override
   Widget build(BuildContext context) {
     // Dev-only build timer (PERF_TIMING) — pins whether map rebuilds are the
@@ -2057,10 +1970,23 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       final actById = <dynamic, Map<String, dynamic>>{
         for (final a in notifier.activities) a['id']: a
       };
+      // For day selection, union ids across all selected days.
+      Set<String>? dayActIds;
+      Set<String>? daySegIds;
+      if (effectiveDays.isNotEmpty) {
+        dayActIds = {};
+        daySegIds = {};
+        for (final dk in effectiveDays) {
+          final r = _dayItemIds(items, actById, dk);
+          dayActIds.addAll(r.actIds);
+          daySegIds.addAll(r.segIds);
+        }
+      }
       _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, effectiveDays, actById,
-              items, trackColor, trackWidth, alternating,
-              trackSecondaryColor: trackSecondaryColor2)
+          ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
+              alternating, items,
+              trackSecondaryColor: trackSecondaryColor2,
+              dayActIds: dayActIds, daySegIds: daySegIds)
           : [];
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
@@ -2082,17 +2008,6 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
       if (selectionChanged2 && widget.autoZoom && geo != null &&
           (effectiveDays.isNotEmpty || selActId != null || selSegId != null)) {
-        Set<String>? dayActIds;
-        Set<String>? daySegIds;
-        if (effectiveDays.isNotEmpty) {
-          dayActIds = {};
-          daySegIds = {};
-          for (final dk in effectiveDays) {
-            final r = _dayItemIds(items, actById, dk);
-            dayActIds.addAll(r.actIds);
-            daySegIds.addAll(r.segIds);
-          }
-        }
         _pendingAutoZoomPts = extractSelectedPoints(
             geo, selActId, selSegId, dayActIds, daySegIds);
       } else if (selectionChanged2) {
