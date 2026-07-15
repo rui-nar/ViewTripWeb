@@ -542,7 +542,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           ),
 
           if (isNarrow) ...[
-            // ── Narrow: stats + strava + polarsteps visible; rest in overflow ──
+            // ── Narrow: stats + strava visible; rest in overflow (#94) ──
             IconButton(
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
@@ -560,24 +560,20 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               onPressed: () => context.push(
                   '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
             ),
-            IconButton(
-              icon: const Icon(Icons.explore_outlined),
-              tooltip: 'Import steps from Polarsteps',
-              onPressed: () => context.push(
-                  '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}'),
-            ),
             PopupMenuButton<int>(
               icon: const Icon(Icons.more_vert),
               tooltip: 'More options',
               onSelected: (v) {
                 switch (v) {
                   case 0: if (!_isExporting) _exportOptions();
-                  case 1: _showShareDialog();
-                  case 2: context.push(
+                  case 1: context.push(
+                      '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}');
+                  case 2: _showShareDialog();
+                  case 3: context.push(
                     '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
                   );
-                  case 3: context.push('/settings');
-                  case 4: context.go('/projects');
+                  case 4: context.push('/settings');
+                  case 5: context.go('/projects');
                 }
               },
               itemBuilder: (_) => [
@@ -596,12 +592,19 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 const PopupMenuItem(
                   value: 1,
                   child: ListTile(
+                    leading: Icon(Icons.explore_outlined),
+                    title: Text('Import steps from Polarsteps'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 2,
+                  child: ListTile(
                     leading: Icon(Icons.share_outlined),
                     title: Text('Share'),
                   ),
                 ),
                 PopupMenuItem(
-                  value: 2,
+                  value: 3,
                   enabled: !isLoading,
                   child: ListTile(
                     leading: const Icon(Icons.tune),
@@ -610,14 +613,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 3,
+                  value: 4,
                   child: ListTile(
                     leading: Icon(Icons.settings_outlined),
                     title: Text('Settings'),
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 4,
+                  value: 5,
                   child: ListTile(
                     leading: Icon(Icons.arrow_back),
                     title: Text('Back to projects'),
