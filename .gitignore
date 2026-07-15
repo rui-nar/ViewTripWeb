@@ -74,3 +74,4 @@ viewtripweb.db-wal
 .claude/worktrees/
 viewtrip.db.bak-preexisting
 viewtripweb.db.bak-preexisting
+.claude/scheduled_tasks.lock
