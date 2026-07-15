@@ -1,10 +1,8 @@
 /// Main app screen — map + activity panel for an open project.
-// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
+// ignore_for_file: deprecated_member_use
 library;
 
-// dart:html is intentional — ViewTripWeb targets Flutter Web only.
 import 'dart:async' show unawaited, Timer, StreamSubscription;
-import 'dart:html' as html;
 import 'dart:typed_data' show Uint8List;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart' show LatLngBounds, MapEvent;
@@ -15,6 +13,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'basemaps.dart';
+import 'download_stub.dart' if (dart.library.html) 'download_web.dart';
 import 'elevation_chart.dart';
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
@@ -208,12 +207,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
       final mimeType =
           res.headers['content-type'] ?? 'application/octet-stream';
-      final blob = html.Blob([res.bodyBytes], mimeType);
-      final url = html.Url.createObjectUrlFromBlob(blob);
-      html.AnchorElement(href: url)
-        ..setAttribute('download', filename)
-        ..click();
-      html.Url.revokeObjectUrl(url);
+      triggerBrowserDownload(res.bodyBytes, mimeType, filename);
 
       if (mounted) {
         ScaffoldMessenger.of(context)
