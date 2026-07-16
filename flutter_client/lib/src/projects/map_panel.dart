@@ -1213,20 +1213,12 @@ class _MapPanelState extends State<MapPanel> {
                 retinaMode: RetinaMode.isHighDensity(context),
               ),
               if (widget.labelsUrl != null)
-                ColorFiltered(
-                  colorFilter: ColorFilter.matrix(<double>[
-                    1, 0, 0, 0, 0,
-                    0, 1, 0, 0, 0,
-                    0, 0, 1, 0, 0,
-                    0, 0, 0, 0.5, 0,
-                  ]),
-                  child: TileLayer(
-                    urlTemplate: widget.labelsUrl!,
-                    subdomains: kActiveViewLabelsSubdomains,
-                    userAgentPackageName: 'com.viewtrip.client',
-                    tileProvider: _tileProvider!,
-                    maxNativeZoom: 22,
-                  ),
+                TileLayer(
+                  urlTemplate: widget.labelsUrl!,
+                  subdomains: kActiveViewLabelsSubdomains,
+                  userAgentPackageName: 'com.viewtrip.client',
+                  tileProvider: _tileProvider!,
+                  maxNativeZoom: 22,
                 ),
             ],
             if (widget.trackTileUrlTemplate != null)
