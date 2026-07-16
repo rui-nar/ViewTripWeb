@@ -15,10 +15,15 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
+import 'package:viewtrip_client/src/core/app_router.dart';
 import 'package:viewtrip_client/src/core/last_opened_project.dart';
 import 'package:viewtrip_client/src/projects/app_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
+import 'package:viewtrip_client/src/projects/projects_notifier.dart';
+import 'package:viewtrip_client/src/projects/projects_service.dart';
+import 'package:viewtrip_client/src/settings/settings_screen.dart';
+import 'package:viewtrip_client/src/settings/theme_notifier.dart';
 
 AuthNotifier _loggedInAuth(String userId) {
   final auth = AuthNotifier(AuthService());
@@ -112,19 +117,17 @@ void main() {
   // same builder body as app_router.dart's `/app` GoRoute — resolves to a
   // mounted AppScreen with no compile/platform error.
   //
-  // This intentionally does NOT import app_router.dart / call buildRouter()
-  // itself: while writing this test, `lib/src/settings/settings_screen.dart`
-  // (reachable from buildRouter() via its `/settings` route) turned out to
-  // unconditionally import `dart:js_interop` / `package:web` for a Strava
-  // OAuth popup flow (`window.open` + a `postMessage` listener stored as a
-  // `JSFunction` state field) — a second, separate VM-compile blocker the
-  // original dart:html investigation didn't catch (it only searched for
-  // dart:html, not dart:js_interop/package:web). Fixing that is a materially
-  // bigger, riskier refactor than the one this task scoped (it needs a real
-  // design for the popup/postMessage handshake, not just moving 4 lines) and
-  // was left out of scope — so buildRouter() itself still can't be exercised
-  // end-to-end under `flutter test` yet. See this task's final report / a
-  // follow-up issue for closing that gap too.
+  // Historically this group did NOT import app_router.dart / call
+  // buildRouter() itself: `lib/src/settings/settings_screen.dart` (reachable
+  // from buildRouter() via its `/settings` route) unconditionally imported
+  // `dart:js_interop` / `package:web` for a Strava OAuth popup flow
+  // (`window.open` + a `postMessage` listener stored as a `JSFunction` state
+  // field) — a second, separate VM-compile blocker (issue #99) the original
+  // dart:html investigation didn't catch. That's now fixed too (the popup +
+  // postMessage handshake moved into a conditional-import pair,
+  // strava_oauth_popup_stub.dart / strava_oauth_popup_web.dart), so
+  // buildRouter() itself is exercised end-to-end below in the
+  // "buildRouter() end-to-end" group.
   group('/app route (GoRouter, mirroring app_router.dart)', () {
     testWidgets('/app?project=<name> resolves to a mounted AppScreen',
         (tester) async {
@@ -160,6 +163,70 @@ void main() {
       await tester.pump();
 
       expect(find.byType(AppScreen), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  // Proves issue #99 is closed: the real buildRouter() from app_router.dart
+  // — including its `/settings` route, which used to drag in
+  // settings_screen.dart's unconditional dart:js_interop/package:web imports
+  // — now compiles and mounts under flutter_test's VM platform, for both the
+  // `/app` and `/settings` routes.
+  group('buildRouter() end-to-end (real router)', () {
+    testWidgets('/app and /settings both mount with no compile/platform error',
+        (tester) async {
+      final auth = _loggedInAuth('user-1');
+      late GoRouter router;
+
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<AuthNotifier>.value(value: auth),
+            ChangeNotifierProvider<ProjectNotifier>(
+                create: (_) => _TestProjectNotifier(_FakeProjectService())),
+            ChangeNotifierProvider<ThemeNotifier>(
+                create: (_) => ThemeNotifier()),
+            // No last-opened-project pref is saved for this user, so the
+            // initial `/` redirect (rootRedirectTarget) lands on /projects
+            // before we navigate away below — ProjectsScreen needs a
+            // ProjectsNotifier in the tree to mount. Its .load() is never
+            // triggered here (that's normally wired via a
+            // ChangeNotifierProxyProvider in main.dart, not present in this
+            // test), so ProjectsService.list() is never actually called.
+            ChangeNotifierProvider<ProjectsNotifier>(
+                create: (_) => ProjectsNotifier(ProjectsService())),
+          ],
+          child: Builder(
+            builder: (context) {
+              router = buildRouter(context);
+              return MaterialApp.router(routerConfig: router);
+            },
+          ),
+        ),
+      );
+      // Let the initial `/` redirect (rootRedirectTarget) settle.
+      await tester.pump();
+      await tester.pump();
+
+      router.go('/app?project=${Uri.encodeComponent('Trip A')}');
+      // Deliberately not pumpAndSettle(): AppScreen mounts a real map (tile
+      // fetches, animation controllers) that never fully quiesces under
+      // flutter_test — same reasoning as the /app group above. Unlike that
+      // group (whose initialLocation is /app with nothing to transition
+      // from), this navigates away from the /projects page the initial `/`
+      // redirect landed on, so it's a real push transition — pump with a
+      // duration a few times so it progresses far enough to mount the page.
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.byType(AppScreen), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      router.go('/settings');
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.byType(SettingsScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   });
