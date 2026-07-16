@@ -14,6 +14,7 @@ placement, day metrics, rendering) without changing this contract.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, List, Optional
@@ -30,6 +31,8 @@ from src.poster.poster_job_runner import run_poster_job
 from src.poster.poster_renderer import render_poster_preview
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
+
+_log = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
@@ -190,5 +193,16 @@ def preview_poster(
         project = _get_project_row(sess, user_info_id, name)
         project_id = project.id
 
-    png_bytes = render_poster_preview(project_id, user_info_id, body.model_dump())
+    try:
+        png_bytes = render_poster_preview(project_id, user_info_id, body.model_dump())
+    except Exception as exc:
+        # Unlike the async job (whose failure lands in job.error_message), a
+        # preview failure would otherwise surface as a bare 500 with no
+        # detail — issue #14 feedback point 9 ("preview was not available")
+        # was undiagnosable for exactly that reason.
+        _log.exception("Poster preview render failed for project %s", name)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Preview render failed: {exc}",
+        )
     return Response(content=png_bytes, media_type="image/png")
