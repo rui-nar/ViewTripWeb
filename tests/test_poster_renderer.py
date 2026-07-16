@@ -18,8 +18,10 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
+import src.poster.tile_stitcher as tile_stitcher
 from models.project_db import DBProject
 from models.user import UserInfo
+from src.exceptions.errors import APIError
 from src.poster.poster_renderer import (
     _PIN_COLOR,
     _PREVIEW_MAX_DIMENSION,
@@ -292,19 +294,40 @@ def test_render_poster_portrait_orientation_transposes_size(tmp_path, project_id
         assert img.size == _target_size("portrait")
 
 
-def test_render_poster_falls_back_to_solid_basemap_when_mapbox_unavailable(tmp_path, project_id):
-    """No tile_fetcher and no MAPBOX_TOKEN configured -> render_basemap raises
-    -> render_poster should still complete (graceful fallback), not raise."""
-    png_path, pdf_path = render_poster(
-        job_id=3,
-        user_info_id=1,
-        project_id=project_id,
-        request=_BODY,
-        poster_dir=tmp_path,
-        progress=lambda s: None,
-    )
-    assert png_path.exists()
-    assert pdf_path.exists()
+def test_render_poster_raises_when_mapbox_token_missing(tmp_path, project_id, monkeypatch):
+    """No tile_fetcher injected and no MAPBOX_TOKEN configured -> the render
+    must fail with an actionable error, not silently complete on a grey
+    background (issue #14 feedback, point 1 — the silent fallback made a
+    misconfigured token undiagnosable)."""
+    monkeypatch.setattr(tile_stitcher, "_mapbox_token", lambda: "")
+    with pytest.raises(APIError, match="MAPBOX_TOKEN"):
+        render_poster(
+            job_id=3,
+            user_info_id=1,
+            project_id=project_id,
+            request=_BODY,
+            poster_dir=tmp_path,
+            progress=lambda s: None,
+        )
+
+
+def test_render_poster_propagates_tile_fetch_failure(tmp_path, project_id):
+    """A tile fetch that fails mid-render (bad token, Mapbox outage) must
+    propagate with the underlying error message intact so the job runner can
+    record it on the job row."""
+    def _failing_fetcher(z, x, y):
+        raise APIError("Mapbox tile fetch failed (401): Not Authorized")
+
+    with pytest.raises(APIError, match="Not Authorized"):
+        render_poster(
+            job_id=4,
+            user_info_id=1,
+            project_id=project_id,
+            request=_BODY,
+            poster_dir=tmp_path,
+            progress=lambda s: None,
+            tile_fetcher=_failing_fetcher,
+        )
 
 
 # ── render_poster_preview ─────────────────────────────────────────────────────
