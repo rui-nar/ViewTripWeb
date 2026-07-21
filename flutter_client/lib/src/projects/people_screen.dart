@@ -4,6 +4,7 @@ library;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../core/countries.dart';
 import '../core/design_tokens.dart';
@@ -495,7 +496,7 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
           ),
           const SizedBox(height: 8),
           _detailRow(Icons.email_outlined, person['email']),
-          _detailRow(Icons.phone_outlined, person['phone']),
+          _detailRow(Icons.phone_outlined, person['phone'], copyable: true),
           _detailRow(Icons.travel_explore_outlined, person['polarsteps']),
           _detailRow(Icons.notes_outlined, person['notes']),
           const SizedBox(height: 12),
@@ -580,18 +581,30 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
     );
   }
 
-  Widget _detailRow(IconData icon, Object? value) {
+  Widget _detailRow(IconData icon, Object? value, {bool copyable = false}) {
     final text = value?.toString().trim();
     if (text == null || text.isEmpty) return const SizedBox.shrink();
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
+        const SizedBox(width: 10),
+        Expanded(child: Text(text)),
+      ],
+    );
+    if (!copyable) {
+      return Padding(padding: const EdgeInsets.symmetric(vertical: 3), child: row);
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
-          const SizedBox(width: 10),
-          Expanded(child: Text(text)),
-        ],
+      child: InkWell(
+        onTap: () {
+          Clipboard.setData(ClipboardData(text: text));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Phone number copied')),
+          );
+        },
+        child: row,
       ),
     );
   }
