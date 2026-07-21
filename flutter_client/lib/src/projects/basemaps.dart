@@ -41,17 +41,14 @@ const kUseMapbox = _kProvider == 'MAPBOX';
 const kMapboxToken = String.fromEnvironment('MAPBOX_TOKEN');
 
 /// Mapbox Styles API raster tiles for the custom satellite style.
-/// Used in view / share mode. Labels are baked into the style tiles, so no
-/// separate labels overlay is needed (see kActiveViewLabelsOverlayUrl).
+/// Used in view / share mode. City/town/village labels are baked into the
+/// style itself (added directly in Mapbox Studio, issue #75 — the original
+/// style only had continent/country/state layers, so no separate client-side
+/// labels overlay is needed).
 /// RetinaMode in TileLayer fetches zoom+1 tiles on high-DPI screens → sharp.
 const kMapboxViewUrl =
-    'https://api.mapbox.com/styles/v1/port82/cmot5rk5l007301sfe4g2fyqz/tiles/256/{z}/{x}/{y}'
+    'https://api.mapbox.com/styles/v1/port82/cmruthwat00eq01sc6q7qdtya/tiles/256/{z}/{x}/{y}'
     '?access_token=$kMapboxToken';
-
-// This custom style's `place_label` source only has continent/country/state
-// layers (maxzoom <= 10) — no settlement/city layer at all (verified against
-// the live style JSON, issue #75) — so a separate labels overlay is required
-// to ever show a city name, however far in you zoom.
 
 /// Mapbox outdoors — labelled street/terrain map for manage mode (raster tile path).
 const kMapboxManageUrl =
@@ -63,7 +60,7 @@ const kMapboxManageUrl =
 /// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
 //const kMapboxViewStyleUri =
 //    'mapbox://styles/mapbox/satellite-streets-v12?access_token={key}';
-const kMapboxViewStyleUri = 'mapbox://styles/port82/cmot5rk5l007301sfe4g2fyqz?access_token={key}';
+const kMapboxViewStyleUri = 'mapbox://styles/port82/cmruthwat00eq01sc6q7qdtya?access_token={key}';
 /// Mapbox outdoors vector style — terrain + streets for manage mode.
 /// Used in manage mode (vector tile path via VectorTileLayer).
 /// {key} is replaced at runtime by StyleUriMapper with kMapboxToken.
@@ -87,31 +84,18 @@ const kViewBasemapUrl =
 const kViewLabelsUrl =
     'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}';
 
-/// CartoDB labels-only overlay — country names, capitals, major cities on a
-/// transparent background. No streets. Stacked on top of satellite in Mapbox mode.
-/// @2x is baked into the URL (same z/x/y grid as the 1x tiles, just denser
-/// pixels) — leave tileDimension/zoomOffset at their TileLayer defaults.
-const kCartoDblLabelsUrl =
-    'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}@2x.png';
-const kCartoDblLabelsSubdomains = ['a', 'b', 'c', 'd'];
-
 // ── Resolved raster URLs (consumed by all screens) ────────────────────────────
 
 const kActiveViewBasemapUrl =
     kUseMapbox ? kMapboxViewUrl : kViewBasemapUrl;
 
-/// Labels overlay stacked on top of the satellite basemap (raster path only).
-const String kActiveViewLabelsUrl = kViewLabelsUrl;
-
 /// Labels overlay for the VIEW map raster path.
-/// The Mapbox custom style has no city/settlement label layer (see
-/// kMapboxViewUrl), so it always needs the CartoDB labels-only overlay
-/// stacked on top; the ESRI path gets its labels from kViewLabelsUrl instead.
-const String kActiveViewLabelsOverlayUrl =
-    kUseMapbox ? kCartoDblLabelsUrl : kViewLabelsUrl;
+/// Null on the Mapbox path — labels are baked into kMapboxViewUrl's own style
+/// now (issue #75). Still needed on the ESRI fallback path, since Esri World
+/// Imagery is bare satellite imagery with no labels of its own.
+const String? kActiveViewLabelsOverlayUrl = kUseMapbox ? null : kViewLabelsUrl;
 
-const List<String> kActiveViewLabelsSubdomains =
-    kUseMapbox ? kCartoDblLabelsSubdomains : [];
+const List<String> kActiveViewLabelsSubdomains = [];
 
 const kActiveManageBasemapUrl =
     kUseMapbox ? kMapboxManageUrl : kManageBasemapUrl;
