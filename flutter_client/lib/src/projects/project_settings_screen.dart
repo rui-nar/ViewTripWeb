@@ -98,13 +98,13 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
 
   /// Section tabs, keyed so [_sectionContent] can switch on a stable id
   /// rather than a position that shifts when a tab is hidden. The Sharing
-  /// tab (create/revoke links, per-share content) is owner-only — issue #106
-  /// editors get 403s from those endpoints, so it's hidden rather than shown
-  /// disabled.
+  /// tab (create/revoke links, per-share content) is co-owner+ (issue #109)
+  /// — editors/viewers get 403s from those endpoints, so it's hidden rather
+  /// than shown disabled.
   List<({IconData icon, String label, int key})> get _sectionLabels =>
-      _notifier.isEditor
-          ? [for (final s in _allSectionLabels) if (s.key != 2) s]
-          : _allSectionLabels;
+      _notifier.canManageTrip
+          ? _allSectionLabels
+          : [for (final s in _allSectionLabels) if (s.key != 2) s];
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -265,7 +265,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
 
     final n = _notifier;
     final newName = _nameCtrl.text.trim();
-    if (!n.isEditor && newName.isNotEmpty && newName != n.projectName) {
+    if (n.canManageTrip && newName.isNotEmpty && newName != n.projectName) {
       await n.renameProject(newName);
     }
 
@@ -431,9 +431,9 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     return _SectionCard(
       eyebrow: '08',
       title: 'Travel companions',
-      subtitle: _notifier.isEditor
-          ? 'People with access to this trip.'
-          : 'Invite people to add and edit trip content with you.',
+      subtitle: _notifier.canManageTrip
+          ? 'Invite people to add and edit trip content with you.'
+          : 'People with access to this trip.',
       child: const TravelCompanionsSection(),
     );
   }
@@ -457,9 +457,9 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
                 const SizedBox(height: 8),
                 TextField(
                   controller: _nameCtrl,
-                  // Rename is owner-only (issue #106) — editors get a 403
-                  // from the server, so the field is read-only for them.
-                  readOnly: _notifier.isEditor,
+                  // Rename is co-owner+ (issue #109) — editors/viewers get a
+                  // 403 from the server, so the field is read-only for them.
+                  readOnly: !_notifier.canManageTrip,
                   style: const TextStyle(
                     color: _kText1, fontSize: 15, fontWeight: FontWeight.w600),
                   decoration: InputDecoration(
@@ -1313,6 +1313,11 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
                 wide: wide,
                 projectName: _nameCtrl.text,
                 saving: _saving,
+                // A pure viewer (issue #109) can't persist any of these
+                // settings — day-meta, track-style, languages, sync-meta,
+                // and rename/sharing all require editor+ (or co-owner+).
+                // Disable rather than let every field silently fail to save.
+                canSave: _notifier.canEditContent,
                 onSelect: (i) => setState(() => _section = i),
                 onCancel: () => context.pop(),
                 onSave: _save,
@@ -1346,6 +1351,11 @@ class _Sidebar extends StatelessWidget {
   final bool wide;
   final String projectName;
   final bool saving;
+
+  /// False for a pure viewer (issue #109) — every setting in this screen
+  /// requires editor+ to persist, so Save is disabled outright rather than
+  /// letting each field fail silently.
+  final bool canSave;
   final void Function(int) onSelect;
   final VoidCallback onCancel;
   final VoidCallback onSave;
@@ -1356,6 +1366,7 @@ class _Sidebar extends StatelessWidget {
     required this.wide,
     required this.projectName,
     required this.saving,
+    required this.canSave,
     required this.onSelect,
     required this.onCancel,
     required this.onSave,
@@ -1463,14 +1474,14 @@ class _Sidebar extends StatelessWidget {
                     children: [
                       Expanded(child: _cancelBtn(onCancel)),
                       const SizedBox(width: 6),
-                      Expanded(child: _saveBtn(saving, onSave)),
+                      Expanded(child: _saveBtn(saving, canSave, onSave)),
                     ],
                   )
                 : Column(
                     children: [
                       _iconBtn(Icons.close, 'Cancel', onCancel),
                       const SizedBox(height: 6),
-                      _iconSaveBtn(saving, onSave),
+                      _iconSaveBtn(saving, canSave, onSave),
                     ],
                   ),
           ),
@@ -1514,12 +1525,13 @@ class _Sidebar extends StatelessWidget {
     );
   }
 
-  static Widget _saveBtn(bool saving, VoidCallback onSave) {
+  static Widget _saveBtn(bool saving, bool canSave, VoidCallback onSave) {
+    final disabled = saving || !canSave;
     return SizedBox(
       height: 38,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: saving ? null : const LinearGradient(
+          gradient: disabled ? null : const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [Color(0xFF60A5FA), Color(0xFF1D4ED8)],
@@ -1528,28 +1540,30 @@ class _Sidebar extends StatelessWidget {
         ),
         child: ElevatedButton(
           style: ElevatedButton.styleFrom(
-            backgroundColor: saving ? const Color(0xFF2D4A6A) : Colors.transparent,
+            backgroundColor: disabled ? const Color(0xFF2D4A6A) : Colors.transparent,
             shadowColor: Colors.transparent,
             foregroundColor: Colors.white,
             padding: EdgeInsets.zero,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           ),
-          onPressed: saving ? null : onSave,
+          onPressed: disabled ? null : onSave,
           child: saving
               ? const SizedBox(width: 16, height: 16,
                   child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-              : const Text('Save', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
+              : Text(canSave ? 'Save' : 'View only',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)),
         ),
       ),
     );
   }
 
-  static Widget _iconSaveBtn(bool saving, VoidCallback onSave) {
+  static Widget _iconSaveBtn(bool saving, bool canSave, VoidCallback onSave) {
+    final disabled = saving || !canSave;
     return SizedBox(
       width: 34, height: 34,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: saving ? null : const LinearGradient(
+          gradient: disabled ? null : const LinearGradient(
             colors: [Color(0xFF60A5FA), Color(0xFF1D4ED8)],
           ),
           borderRadius: BorderRadius.circular(8),
@@ -1559,8 +1573,8 @@ class _Sidebar extends StatelessWidget {
           icon: saving
               ? const SizedBox(width: 14, height: 14,
                   child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-              : const Icon(Icons.check, size: 18, color: Colors.white),
-          onPressed: saving ? null : onSave,
+              : Icon(canSave ? Icons.check : Icons.lock_outline, size: 18, color: Colors.white),
+          onPressed: disabled ? null : onSave,
           tooltip: 'Save',
         ),
       ),

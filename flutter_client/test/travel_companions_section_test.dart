@@ -1,8 +1,10 @@
-// Widget tests for the "Travel companions" settings section (issue #106):
-// role gating (owner sees remove + invite controls, editor sees a read-only
-// list plus Leave trip), the invite create → copy URL → revoke block, the
-// inline 409 (E2EE) message, and the remove/leave confirm flows. Services are
-// mocked by subclassing, like projects_screen_shared_test.dart.
+// Widget tests for the "Travel companions" settings section (issue #106;
+// roles: issue #109): capability gating (owner/co-owner see remove + invite
+// controls with a role picker, editor/viewer see a read-only list plus
+// Leave trip), the invite create → copy URL → revoke block, the inline 409
+// (E2EE) message, the remove/leave confirm flows, and the co-owner-can't-
+// remove-a-co-owner guard. Services are mocked by subclassing, like
+// projects_screen_shared_test.dart.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,11 +31,14 @@ class _FakeMembersService extends MembersService {
   @override
   Future<List<ProjectMember>> listMembers(ProjectRef ref) async => members;
 
+  String? lastRequestedRole;
+
   @override
-  Future<String> createInvite(ProjectRef ref) async {
+  Future<CreatedInvite> createInvite(ProjectRef ref, {String role = 'editor'}) async {
+    lastRequestedRole = role;
     final err = createError;
     if (err != null) throw err;
-    return 'tok123';
+    return (token: 'tok123', role: role);
   }
 
   @override
@@ -62,6 +67,10 @@ const _owner = ProjectMember(
     userId: 1, displayName: 'Alice', avatarUrl: '', role: 'owner');
 const _editor = ProjectMember(
     userId: 7, displayName: 'Bob', avatarUrl: '', role: 'editor');
+const _coowner = ProjectMember(
+    userId: 3, displayName: 'Cara', avatarUrl: '', role: 'co-owner');
+const _viewer = ProjectMember(
+    userId: 9, displayName: 'Vic', avatarUrl: '', role: 'viewer');
 
 ProjectNotifier _notifierWith(_FakeMembersService svc, ProjectRef ref) {
   final notifier = ProjectNotifier(ProjectService(), membersService: svc);
@@ -232,5 +241,95 @@ void main() {
 
     expect(svc.removedIds, [7]);
     expect(find.text('PROJECTS LIST'), findsOneWidget);
+  });
+
+  // ── Roles (issue #109) ────────────────────────────────────────────────────
+
+  testWidgets('viewer sees a read-only member list and Leave trip — same as '
+      'editor', (tester) async {
+    final svc = _FakeMembersService([_owner, _viewer]);
+    final notifier = _notifierWith(
+        svc, const ProjectRef(name: 'Trip', ownerId: 1, role: 'viewer'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '9'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byIcon(Icons.person_remove_outlined), findsNothing);
+    expect(find.text('Create invite link'), findsNothing);
+    expect(find.text('Leave trip'), findsOneWidget);
+  });
+
+  testWidgets('co-owner sees the invite/remove controls like an owner, but '
+      'the role picker has no Co-owner option', (tester) async {
+    final svc = _FakeMembersService([_owner, _coowner, _editor]);
+    final notifier = _notifierWith(
+        svc, const ProjectRef(name: 'Trip', ownerId: 1, role: 'co-owner'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '3'));
+    await tester.pump();
+    await tester.pump();
+
+    // Bob (editor) is removable; Alice (owner) and the caller's own row are not.
+    expect(find.byIcon(Icons.person_remove_outlined), findsOneWidget);
+    expect(find.text('Create invite link'), findsOneWidget);
+    // A co-owner is not the strict owner, so they can still leave too.
+    expect(find.text('Leave trip'), findsOneWidget);
+    // …and isn't allowed to grant co-owner access via invite (member-row
+    // role badges can also read "Editor"/"Viewer", so scope to the chips).
+    expect(find.widgetWithText(ChoiceChip, 'Viewer'), findsOneWidget);
+    expect(find.widgetWithText(ChoiceChip, 'Editor'), findsOneWidget);
+    expect(find.widgetWithText(ChoiceChip, 'Co-owner'), findsNothing);
+  });
+
+  testWidgets('owner sees a Co-owner invite option; selecting it requests '
+      'role=co-owner', (tester) async {
+    final svc = _FakeMembersService([_owner]);
+    final notifier = _notifierWith(svc, const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '1'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Co-owner'), findsOneWidget);
+    await tester.tap(find.text('Co-owner'));
+    await tester.pump();
+    await tester.tap(find.text('Create invite link'));
+    await tester.pumpAndSettle();
+
+    expect(svc.lastRequestedRole, 'co-owner');
+  });
+
+  testWidgets('selecting Viewer before creating requests role=viewer',
+      (tester) async {
+    final svc = _FakeMembersService([_owner]);
+    final notifier = _notifierWith(svc, const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '1'));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.text('Viewer'));
+    await tester.pump();
+    await tester.tap(find.text('Create invite link'));
+    await tester.pumpAndSettle();
+
+    expect(svc.lastRequestedRole, 'viewer');
+  });
+
+  testWidgets('co-owner cannot remove another co-owner (owner-only)',
+      (tester) async {
+    final svc = _FakeMembersService([_owner, _coowner, const ProjectMember(
+        userId: 5, displayName: 'Dee', avatarUrl: '', role: 'co-owner')]);
+    final notifier = _notifierWith(
+        svc, const ProjectRef(name: 'Trip', ownerId: 1, role: 'co-owner'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '3'));
+    await tester.pump();
+    await tester.pump();
+
+    // Neither the owner row, the caller's own co-owner row, nor Dee's
+    // co-owner row is removable by a fellow (non-strict-owner) co-owner.
+    expect(find.byIcon(Icons.person_remove_outlined), findsNothing);
   });
 }

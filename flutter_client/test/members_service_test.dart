@@ -67,19 +67,38 @@ void main() {
       expect(url!.queryParameters['owner'], '3');
     });
 
-    test('createInvite POSTs and returns the token', () async {
+    test('createInvite POSTs the requested role and returns the granted one',
+        () async {
       http.Request? seen;
       final mock = MockClient((req) async {
         seen = req;
-        return http.Response(jsonEncode({'token': 'tok123'}), 200);
+        return http.Response(
+            jsonEncode({'token': 'tok123', 'role': 'viewer'}), 200);
       });
       final svc = MembersService(ApiClient(baseUrl: '', httpClient: mock));
 
-      final token = await svc.createInvite(const ProjectRef(name: 'Trip'));
+      final created = await svc.createInvite(const ProjectRef(name: 'Trip'),
+          role: 'viewer');
 
-      expect(token, 'tok123');
+      expect(created.token, 'tok123');
+      expect(created.role, 'viewer');
       expect(seen!.method, 'POST');
       expect(seen!.url.path, '/api/projects/Trip/members/invite');
+      expect(jsonDecode(seen!.body), {'role': 'viewer'});
+    });
+
+    test('createInvite defaults to requesting editor', () async {
+      http.Request? seen;
+      final mock = MockClient((req) async {
+        seen = req;
+        return http.Response(
+            jsonEncode({'token': 'tok123', 'role': 'editor'}), 200);
+      });
+      final svc = MembersService(ApiClient(baseUrl: '', httpClient: mock));
+
+      await svc.createInvite(const ProjectRef(name: 'Trip'));
+
+      expect(jsonDecode(seen!.body), {'role': 'editor'});
     });
 
     test('createInvite surfaces a 409 (E2EE account) as ApiException with '
@@ -130,7 +149,12 @@ void main() {
       final mock = MockClient((req) async {
         url = req.url;
         return http.Response(
-            jsonEncode({'project_name': 'Alps', 'owner_name': 'Alice'}), 200);
+            jsonEncode({
+              'project_name': 'Alps',
+              'owner_name': 'Alice',
+              'role': 'co-owner',
+            }),
+            200);
       });
       final svc = MembersService(ApiClient(baseUrl: '', httpClient: mock));
 
@@ -139,6 +163,7 @@ void main() {
       expect(url!.path, '/api/invites/tok123');
       expect(preview.projectName, 'Alps');
       expect(preview.ownerName, 'Alice');
+      expect(preview.role, 'co-owner');
     });
 
     test('previewInvite propagates 404 (unknown/revoked token)', () async {
@@ -153,7 +178,8 @@ void main() {
       );
     });
 
-    test('acceptInvite POSTs and returns an editor ProjectRef', () async {
+    test('acceptInvite POSTs and returns an editor ProjectRef by default',
+        () async {
       http.Request? seen;
       final mock = MockClient((req) async {
         seen = req;
@@ -166,7 +192,19 @@ void main() {
       expect(seen!.method, 'POST');
       expect(seen!.url.path, '/api/invites/tok123/accept');
       expect(ref, const ProjectRef(name: 'Alps', ownerId: 3, role: 'editor'));
-      expect(ref.isEditor, isTrue);
+      expect(ref.canEditContent, isTrue);
+    });
+
+    test('acceptInvite carries the role passed by the caller (issue #109) — '
+        'the accept response itself has no role field', () async {
+      final mock = MockClient((req) async =>
+          http.Response(jsonEncode({'name': 'Alps', 'owner_id': 3}), 200));
+      final svc = MembersService(ApiClient(baseUrl: '', httpClient: mock));
+
+      final ref = await svc.acceptInvite('tok123', role: 'viewer');
+
+      expect(ref, const ProjectRef(name: 'Alps', ownerId: 3, role: 'viewer'));
+      expect(ref.isViewer, isTrue);
     });
 
     test('acceptInvite propagates 409 (caller owns the trip)', () async {

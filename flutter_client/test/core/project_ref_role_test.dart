@@ -12,7 +12,7 @@ void main() {
     test('no ownerId → owner (own project)', () {
       const ref = ProjectRef(name: 'Trip');
       expect(ref.resolveRoleFor('1').role, 'owner');
-      expect(ref.resolveRoleFor('1').isEditor, isFalse);
+      expect(ref.resolveRoleFor('1').isOwner, isTrue);
     });
 
     test("ownerId equal to the caller's id → owner (own list entries carry "
@@ -25,7 +25,8 @@ void main() {
       const ref = ProjectRef(name: 'Trip', ownerId: 7);
       final resolved = ref.resolveRoleFor('1');
       expect(resolved.role, 'editor');
-      expect(resolved.isEditor, isTrue);
+      expect(resolved.canEditContent, isTrue);
+      expect(resolved.canManageTrip, isFalse);
       // Addressing fields are untouched.
       expect(resolved.name, 'Trip');
       expect(resolved.ownerId, 7);

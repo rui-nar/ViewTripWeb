@@ -178,8 +178,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ProjectNotifier>();
       // The URL-derived ref carries no role — resolve it against the signed-in
-      // user so owner-only UI gating (ProjectNotifier.isEditor) is correct for
-      // shared projects (issue #106).
+      // user so capability-gated UI (ProjectNotifier.canEditContent etc.,
+      // issue #109) is correct for shared projects (issue #106).
       final projectRef = widget.projectRef
           .resolveRoleFor(context.read<AuthNotifier>().user?.id);
       notifier.load(projectRef).then((_) {

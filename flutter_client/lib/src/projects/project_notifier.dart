@@ -85,10 +85,15 @@ class ProjectNotifier extends ChangeNotifier
 
   String? get projectName => ref?.name;
 
-  /// True when the caller only has editor (not owner) access to the open
-  /// project — screens use this to hide owner-only actions (rename, delete,
-  /// share, members-manage).
-  bool get isEditor => ref?.isEditor ?? false;
+  /// Capability getters (issue #109) — screens gate UI on these rather than
+  /// a single editor/owner boolean. Default to the most permissive tier when
+  /// no ref is set yet (mirrors [ProjectRef]'s own-project default), so a
+  /// pre-load screen doesn't flash a locked-down UI for what will turn out
+  /// to be the caller's own project.
+  bool get isViewer => ref?.isViewer ?? false;
+  bool get canEditContent => ref?.canEditContent ?? true;
+  bool get canManageTrip => ref?.canManageTrip ?? true;
+  bool get isProjectOwner => ref?.isOwner ?? true;
 
   @override List<Map<String, dynamic>> activities = [];
   @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
@@ -493,6 +498,7 @@ class ProjectNotifier extends ChangeNotifier
     pendingSync = null;
     members = [];
     memberInviteToken = null;
+    memberInviteRole = null;
     notifyListeners();
 
     try {
@@ -524,7 +530,13 @@ class ProjectNotifier extends ChangeNotifier
       final details = await detailsFuture;
       if (_loadKey != ref) return;
 
-      this.ref = ref.copyWith(name: details['name'] as String? ?? name);
+      // caller_role (issue #109) is the server's authoritative answer to
+      // "what's my tier here" — corrects the resolveRoleFor() placeholder
+      // guess (own projects don't send it; role stays "owner").
+      this.ref = ref.copyWith(
+        name: details['name'] as String? ?? name,
+        role: details['caller_role'] as String? ?? ref.role,
+      );
       tripStart = details['trip_start'] as String?;
       tripEnd = details['trip_end'] as String?;
       final rawActivities = details['activities'];
@@ -963,6 +975,7 @@ class ProjectNotifier extends ChangeNotifier
     sleepingOptions = [];
     members = [];
     memberInviteToken = null;
+    memberInviteRole = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
@@ -1160,11 +1173,16 @@ class ProjectNotifier extends ChangeNotifier
   /// demand by the settings screen's Travel companions section.
   List<ProjectMember> members = [];
 
-  /// The project's invite token, once the owner has created (or re-fetched)
-  /// it this session. There is no GET endpoint for it — POST is idempotent
-  /// and returns the existing token — so this stays null until
+  /// The project's invite token, once the owner/co-owner has created (or
+  /// re-fetched) it this session. There is no GET endpoint for it — POST is
+  /// idempotent and returns the existing token — so this stays null until
   /// [createMemberInvite] is called.
   String? memberInviteToken;
+
+  /// The role [memberInviteToken] grants on accept — the actual role
+  /// returned by the server, which can differ from what was last requested
+  /// if an invite already existed (creation is idempotent).
+  String? memberInviteRole;
 
   /// GET members into [members]. Throws ([ApiException] passes through) so
   /// the caller can show an inline error.
@@ -1175,22 +1193,26 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
   }
 
-  /// Create (or re-fetch — idempotent) the invite token. Owner-only.
+  /// Create (or re-fetch — idempotent) the invite token with the given
+  /// [role]. Co-owner+; only the strict owner may request "co-owner".
   /// Rethrows [ApiException] unchanged — a 409 means the account has E2EE
   /// enabled and carries the server's explanation in its detail.
-  Future<void> createMemberInvite() async {
+  Future<void> createMemberInvite({String role = 'editor'}) async {
     final ref = this.ref;
     if (ref == null) throw Exception('No project open');
-    memberInviteToken = await _membersService.createInvite(ref);
+    final created = await _membersService.createInvite(ref, role: role);
+    memberInviteToken = created.token;
+    memberInviteRole = created.role;
     notifyListeners();
   }
 
-  /// Revoke the invite link. Owner-only. Existing members are unaffected.
+  /// Revoke the invite link. Co-owner+. Existing members are unaffected.
   Future<void> revokeMemberInvite() async {
     final ref = this.ref;
     if (ref == null) return;
     await _membersService.revokeInvite(ref);
     memberInviteToken = null;
+    memberInviteRole = null;
     notifyListeners();
   }
 
@@ -1710,7 +1732,10 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> _applyDetails(dynamic details, ProjectRef ref) async {
-    this.ref = ref.copyWith(name: details['name'] as String? ?? ref.name);
+    this.ref = ref.copyWith(
+      name: details['name'] as String? ?? ref.name,
+      role: details['caller_role'] as String? ?? ref.role,
+    );
     tripStart   = details['trip_start'] as String?;
     final rawColor = details['track_color'] as String?;
     if (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#')) {

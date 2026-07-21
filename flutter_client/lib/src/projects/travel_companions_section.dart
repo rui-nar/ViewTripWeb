@@ -1,10 +1,13 @@
-/// "Travel companions" settings section (issue #106).
+/// "Travel companions" settings section (issue #106; roles: issue #109).
 ///
-/// Rendered inside ProjectSettingsScreen's section card. Owner view: member
-/// list with per-member remove, plus an invite-link block (create → copy URL →
-/// revoke; a 409 from an E2EE-enabled account surfaces the server's message
-/// inline). Editor view: read-only member list plus a "Leave trip" action
-/// that removes the caller's own membership and returns to the projects list.
+/// Rendered inside ProjectSettingsScreen's section card. Co-owner+ view:
+/// member list with per-member remove (a co-owner can't remove another
+/// co-owner — owner-only, to avoid co-owners locking each other out), plus
+/// an invite-link block with a role picker (viewer/editor, and co-owner for
+/// the strict owner only) — create → copy URL → revoke; a 409 from an
+/// E2EE-enabled account surfaces the server's message inline. Editor/viewer
+/// view: read-only member list plus a "Leave trip" action that removes the
+/// caller's own membership and returns to the projects list.
 library;
 
 import 'package:flutter/material.dart';
@@ -40,6 +43,22 @@ String companionErrorMessage(Object e) {
   return m?.group(1) ?? s.replaceFirst('Exception: ', '');
 }
 
+/// Display label for a member/invite role (issue #109).
+String roleLabel(String role) => switch (role) {
+      'viewer' => 'Viewer',
+      'co-owner' => 'Co-owner',
+      'owner' => 'Owner',
+      _ => 'Editor',
+    };
+
+String _roleHint(String role) => switch (role) {
+      'viewer' => 'Anyone with the link who signs in can view this trip (read-only).',
+      'co-owner' =>
+        'Anyone with the link who signs in can join as co-owner — full '
+            'access except delete/transfer.',
+      _ => 'Anyone with the link who signs in can join as editor.',
+    };
+
 class TravelCompanionsSection extends StatefulWidget {
   const TravelCompanionsSection({super.key});
 
@@ -56,6 +75,10 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
   String? _inviteError;
   bool _inviteBusy = false;
   bool _leaving = false;
+
+  // Role picked for the *next* invite creation (issue #109) — not the role
+  // of an already-created link, which is memberInviteRole on the notifier.
+  String _inviteRoleChoice = 'editor';
 
   @override
   void initState() {
@@ -102,7 +125,9 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
       _inviteError = null;
     });
     try {
-      await context.read<ProjectNotifier>().createMemberInvite();
+      await context
+          .read<ProjectNotifier>()
+          .createMemberInvite(role: _inviteRoleChoice);
     } on Exception catch (e) {
       // 409 (E2EE-enabled account) and any other failure surface inline —
       // no dialog.
@@ -221,7 +246,8 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
   Widget build(BuildContext context) {
     final notifier = context.watch<ProjectNotifier>();
     final selfId = context.watch<AuthNotifier>().user?.id;
-    final isEditor = notifier.isEditor;
+    final canManage = notifier.canManageTrip;
+    final isOwner = notifier.isProjectOwner;
     final members = notifier.members;
     final ownRow = [
       for (final m in members)
@@ -251,15 +277,19 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
               _MemberRow(
                 member: m,
                 isSelf: m.userId.toString() == selfId,
-                // Owner can remove any non-owner member; editors see a
-                // read-only list.
-                onRemove: !isEditor && !m.isOwner ? () => _removeMember(m) : null,
+                // Co-owner+ can remove editors/viewers; removing a co-owner
+                // is strict-owner-only (server also enforces this).
+                onRemove: canManage &&
+                        !m.isOwner &&
+                        (m.role != 'co-owner' || isOwner)
+                    ? () => _removeMember(m)
+                    : null,
               ),
-            if (!isEditor) ...[
+            if (canManage) ...[
               const SizedBox(height: 8),
               _inviteBlock(notifier),
             ],
-            if (isEditor && ownRow.isNotEmpty) ...[
+            if (!isOwner && ownRow.isNotEmpty) ...[
               const SizedBox(height: 12),
               const Divider(height: 1, color: _kBorder),
               const SizedBox(height: 12),
@@ -286,6 +316,7 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
 
   Widget _inviteBlock(ProjectNotifier notifier) {
     final token = notifier.memberInviteToken;
+    final grantedRole = notifier.memberInviteRole ?? _inviteRoleChoice;
     return Container(
       decoration: BoxDecoration(
         color: _kBg,
@@ -298,18 +329,18 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Invite link',
+                    const Text('Invite link',
                         style: TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 14,
                             color: _kText1)),
                     Text(
-                      'Anyone with the link who signs in can join as editor.',
-                      style: TextStyle(fontSize: 12, color: _kDim),
+                      _roleHint(grantedRole),
+                      style: const TextStyle(fontSize: 12, color: _kDim),
                     ),
                   ],
                 ),
@@ -328,7 +359,30 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
             ],
           ),
           const SizedBox(height: 10),
-          if (token == null)
+          if (token == null) ...[
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final role in [
+                  'viewer',
+                  'editor',
+                  if (notifier.isProjectOwner) 'co-owner',
+                ])
+                  ChoiceChip(
+                    label: Text(roleLabel(role),
+                        style: const TextStyle(fontSize: 12)),
+                    selected: _inviteRoleChoice == role,
+                    visualDensity: VisualDensity.compact,
+                    onSelected: (_) =>
+                        setState(() => _inviteRoleChoice = role),
+                    backgroundColor: _kBgCard,
+                    selectedColor: _kBlueActive.withAlpha(40),
+                    side: const BorderSide(color: _kBorder),
+                    labelStyle: const TextStyle(color: _kText2),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kBlueActive,
@@ -343,8 +397,8 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
                   : const Icon(Icons.person_add_alt, size: 15),
               label: const Text('Create invite link'),
               onPressed: _inviteBusy ? null : _createInvite,
-            )
-          else
+            ),
+          ] else
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
@@ -449,7 +503,7 @@ class _MemberRow extends StatelessWidget {
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Text(
-                member.role,
+                roleLabel(member.role),
                 style: TextStyle(
                   color: member.isOwner ? _kBlueActive : _kMuted,
                   fontSize: 11,
