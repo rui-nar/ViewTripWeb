@@ -139,6 +139,7 @@ image with a Dockerfile `ENV`; the published image is public.
 - **Journals** — private day notes with photos.
 - **Encounters & Groups** — a per-project directory of people (and groups of people) you meet — name, social links, nationalities, residence city, avatar — and where/when you met them, shown inline on their day and as owner-only map pins. People, groups, and encounters are never included in shared views.
 - **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.
+- **Travel companions** — invite other accounts to a trip as viewer (read-only), editor (full content access), or co-owner (editor + rename/sharing/member management); each companion's journal stays private to them. Invite links are copyable or, once SMTP is configured, emailed directly.
 - **Sharing** — read-only public links (with or without memories); social-media composer that posts a memory's photos, a trip map image, and a durable deep link via the OS share sheet / WhatsApp / Facebook.
 - **Zero-knowledge encryption (optional)** — encrypt memory/journal text and activity GPS/name client-side so the server admin can't read it. Device-key based (passwordless daily use across trusted devices) with a recovery key or security-Q&A backstop. Sharing an encrypted memory uses a per-share content key embedded in the link's URL fragment, never sent to the server.
 - **Export** — GPX, `.viewtrip` (JSON), or ZIP (`.viewtrip` + photos).
@@ -164,6 +165,7 @@ Routes are grouped by tag (router prefix):
 | `geo` | `/api/geo` | full + low-res GeoJSON FeatureCollections for the map |
 | `memories` | `/api/memories` | memory CRUD, photos, comments, likes, translations |
 | `journal` | `/api/journal` | journal entry CRUD + photos |
+| `members` | `/api/projects/{name}/members`, `/api/invites` | travel-companion invites (viewer/editor/co-owner), member list/removal, invite email |
 | `encounters` | `/api/encounters` | people-you-met CRUD, tied to a day/place |
 | `people` | `/api/people` | per-project people directory CRUD, avatars |
 | `groups` | `/api/groups` | groups of people CRUD + membership |
