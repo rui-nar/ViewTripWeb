@@ -19,6 +19,7 @@ import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/last_opened_project.dart';
 import '../core/project_ref.dart';
+import '../core/stale_shared_ref.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -269,7 +270,15 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
       final projectRef = widget.projectRef
           .resolveRoleFor(context.read<AuthNotifier>().user?.id);
       notifier.loadView(projectRef).then((_) {
-        if (!mounted || notifier.error != null) return;
+        if (!mounted) return;
+        if (notifier.error != null) {
+          // Stale shared-project ref (owner renamed the trip) — issue #111.
+          if (notifier.loadErrorStatus == 404 && !projectRef.isOwn) {
+            recoverFromStaleSharedRef(context,
+                staleRef: projectRef, routePath: '/view');
+          }
+          return;
+        }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
       });

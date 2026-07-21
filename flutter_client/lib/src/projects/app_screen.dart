@@ -20,6 +20,7 @@ import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/last_opened_project.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
 import '../core/project_ref.dart';
+import '../core/stale_shared_ref.dart';
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'panel_resize.dart';
@@ -182,7 +183,15 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       final projectRef = widget.projectRef
           .resolveRoleFor(context.read<AuthNotifier>().user?.id);
       notifier.load(projectRef).then((_) {
-        if (!mounted || notifier.error != null) return;
+        if (!mounted) return;
+        if (notifier.error != null) {
+          // Stale shared-project ref (owner renamed the trip) — issue #111.
+          if (notifier.loadErrorStatus == 404 && !projectRef.isOwn) {
+            recoverFromStaleSharedRef(context,
+                staleRef: projectRef, routePath: '/app');
+          }
+          return;
+        }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
       });

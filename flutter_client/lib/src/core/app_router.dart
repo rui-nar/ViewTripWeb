@@ -13,6 +13,7 @@ import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../auth/welcome_screen.dart';
 import 'last_opened_project.dart';
+import 'return_to.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/join_trip_screen.dart';
@@ -75,10 +76,9 @@ Future<String?> authRedirectTarget(AuthNotifier auth, Uri uri) async {
   if (isLoggedIn && isPublicPage) {
     // Honour a pending return_to (share links, /join invites) so the
     // deep link survives even when this redirect wins the race against
-    // LoginScreen._navigateAfterLogin. Relative paths only — a single
-    // leading slash, since '//host' is scheme-relative in a browser.
-    final ret = uri.queryParameters['return_to'];
-    if (ret != null && ret.startsWith('/') && !ret.startsWith('//')) return ret;
+    // LoginScreen._navigateAfterLogin (which applies the same guard).
+    final ret = safeReturnTo(uri.queryParameters['return_to']);
+    if (ret != null) return ret;
     if (loc == '/') return rootRedirectTarget(auth.user?.id);
     return '/projects';
   }

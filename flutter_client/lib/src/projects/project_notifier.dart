@@ -98,6 +98,12 @@ class ProjectNotifier extends ChangeNotifier
   bool isLoading = false;
   @override String? error;
 
+  /// HTTP status of the [ApiException] that failed the last [load], or null
+  /// when the load succeeded / failed for a non-API reason. Lets screens
+  /// distinguish a 404 (stale shared-project ref after an owner rename —
+  /// issue #111) from other errors.
+  int? loadErrorStatus;
+
   /// Progressive-loading flags — default true so manage-mode screens that use
   /// the base load() see no behaviour change.  Set to false at the start of
   /// loadShared() / loadView() and flipped to true as each phase completes.
@@ -474,6 +480,7 @@ class ProjectNotifier extends ChangeNotifier
     this.ref = ref;
     isLoading = true;
     error = null;
+    loadErrorStatus = null;
     activities = [];
     items = [];
     geo = null;
@@ -594,6 +601,7 @@ class ProjectNotifier extends ChangeNotifier
       }
     } on Exception catch (e) {
       error = _msg(e);
+      if (e is ApiException) loadErrorStatus = e.statusCode;
     } finally {
       isLoading = false;
       notifyListeners();   // map appears here with low-res straight lines
