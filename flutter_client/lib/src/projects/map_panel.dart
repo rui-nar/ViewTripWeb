@@ -1212,6 +1212,9 @@ class _MapPanelState extends State<MapPanel> {
                 maxNativeZoom: 22,
                 retinaMode: RetinaMode.isHighDensity(context),
               ),
+              // ESRI fallback path only — the Mapbox path's labels are baked
+              // directly into its own satellite style now (issue #75), so
+              // widget.labelsUrl is null there and this never renders.
               if (widget.labelsUrl != null)
                 TileLayer(
                   urlTemplate: widget.labelsUrl!,
@@ -1219,10 +1222,8 @@ class _MapPanelState extends State<MapPanel> {
                   userAgentPackageName: 'com.viewtrip.client',
                   tileProvider: _tileProvider!,
                   maxNativeZoom: 22,
-                  // Below city scale the overlay is one raster image bundling
-                  // country/state/city labels together — no way to keep just
-                  // country names, so hide it entirely until zoomed in close
-                  // enough that region-name clutter (#75) isn't the tradeoff.
+                  // Bundles country/state/city labels in one raster image —
+                  // hide it below city scale to avoid region-name clutter.
                   minZoom: 10,
                 ),
             ],
