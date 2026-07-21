@@ -24,6 +24,7 @@ class RowMappersMixin:
         return JournalEntry(
             id=row.id,
             project_id=row.project_id,
+            user_info_id=row.user_info_id,
             date=row.date,
             time=row.time,
             description=row.description,

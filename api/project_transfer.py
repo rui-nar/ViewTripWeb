@@ -239,6 +239,7 @@ def export_project_viewtrip(
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -265,12 +266,15 @@ def export_project_zip(
 ):
     """Download a ZIP containing the .viewtrip file and all memory photos."""
     user_info_id = int(current_user["sub"])
-    user_id = current_user["sub"]
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
+        # Memory photos live under the project OWNER's data dir (issue #106) —
+        # not the caller's, who may be a companion.
+        owner_dir_id = str(row.user_info_id)
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -302,7 +306,7 @@ def export_project_zip(
 
     zip_buffer = io.BytesIO()
     safe = _SAFE_NAME.sub("_", project.name)
-    memories_base = Path(_DATA_DIR) / "users" / user_id / "memories"
+    memories_base = Path(_DATA_DIR) / "users" / owner_dir_id / "memories"
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{safe}.viewtrip", viewtrip_bytes)
         for item in project.items:

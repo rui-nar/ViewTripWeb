@@ -12,12 +12,12 @@ Access model: the owner has full access; a ``projectmember`` row grants
 """
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional, Sequence
 
 from fastapi import HTTPException, Query, status
 from sqlmodel import select
 
-from models.project_db import DBProject, DBProjectMember
+from models.project_db import DBJournalEntry, DBProject, DBProjectItem, DBProjectMember
 
 # Shared ``?owner=`` query-param dependency for project-scoped routes. Absent
 # (None) means "my own project"; a companion passes the owner's user id.
@@ -110,3 +110,71 @@ def assert_project_access(
     if require_owner or not _is_member(sess, project_id, caller_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return row
+
+
+# ── Per-user journal visibility (issue #106) ─────────────────────────────────
+#
+# Journal entries are private to their author, so the item list a client sees
+# is a *projection* of the full timeline: everything except other users'
+# journal items. Index-based operations (delete-at-index, reorder,
+# insert_after_index) therefore arrive as indices into the caller's visible
+# list and must be translated to positions in the full list before mutating —
+# otherwise one user's edit lands on the wrong item whenever another user has
+# journal entries in the project. When nobody else has journal entries the
+# mapping is the identity, preserving historical behavior exactly.
+
+def journal_visible_positions(items, caller_id: int, owner_id: int) -> List[int]:
+    """Positions (into a domain ``project.items`` list) visible to *caller_id*.
+
+    Keeps every non-journal item plus the caller's own journal entries; a
+    journal entry with ``user_info_id`` None is a legacy row owned by the
+    project owner.
+    """
+    positions: List[int] = []
+    for pos, item in enumerate(items):
+        if item.item_type == "journal" and item.journal is not None:
+            author = item.journal.user_info_id
+            if (author if author is not None else owner_id) != caller_id:
+                continue
+        positions.append(pos)
+    return positions
+
+
+def journal_visible_row_positions(
+    sess, item_rows: Sequence[DBProjectItem], caller_id: int, owner_id: int
+) -> List[int]:
+    """Like :func:`journal_visible_positions` but for raw ``DBProjectItem`` rows
+    (routes that insert into the item table without loading the domain Project).
+    """
+    journal_ids = [
+        r.journal_id for r in item_rows
+        if r.item_type == "journal" and r.journal_id is not None
+    ]
+    authors = {}
+    if journal_ids:
+        for jr in sess.exec(
+            select(DBJournalEntry).where(DBJournalEntry.id.in_(journal_ids))
+        ).all():
+            authors[jr.id] = jr.user_info_id if jr.user_info_id is not None else owner_id
+    positions: List[int] = []
+    for pos, r in enumerate(item_rows):
+        if r.item_type == "journal" and r.journal_id is not None:
+            if authors.get(r.journal_id, owner_id) != caller_id:
+                continue
+        positions.append(pos)
+    return positions
+
+
+def translate_insert_after(
+    visible_positions: List[int], insert_after_index: Optional[int], total: int
+) -> int:
+    """Turn a caller-visible ``insert_after_index`` into a full-list position.
+
+    Mirrors the historical clamping (``max(0, min(total, idx + 1))``): None or
+    past-the-end append at the very end; negative inserts at the front.
+    """
+    if insert_after_index is None or insert_after_index >= len(visible_positions):
+        return total
+    if insert_after_index < 0:
+        return 0
+    return visible_positions[insert_after_index] + 1

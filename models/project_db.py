@@ -313,12 +313,19 @@ class DBMemory(sqlmodel.SQLModel, table=True):
 
 
 class DBJournalEntry(sqlmodel.SQLModel, table=True):
-    """A private, owner-only journal entry attached to a project and a specific date."""
+    """A private, per-user journal entry attached to a project and a specific date.
+
+    ``user_info_id`` is the entry's author (issue #106): with travel companions
+    a shared project can hold journal entries from several users, and each user
+    only ever sees their own. NULL = legacy row created before the column
+    existed, owned by the project owner.
+    """
 
     __tablename__ = "journalentry"
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="userinfo.id", index=True)
     date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
     time: Optional[str] = sqlmodel.Field(default=None)
     description: Optional[str] = sqlmodel.Field(default=None)

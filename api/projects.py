@@ -134,6 +134,7 @@ def get_project(
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -157,6 +158,7 @@ def get_project_meta(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
             include_heavy=False,
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

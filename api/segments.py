@@ -20,7 +20,12 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
-from api.project_access import OwnerParam, resolve_project
+from api.project_access import (
+    OwnerParam,
+    journal_visible_positions,
+    resolve_project,
+    translate_insert_after,
+)
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_repo import StaleWriteError
@@ -264,9 +269,10 @@ def create_segment(
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        insert_at = len(project.items)
-        if body.insert_after_index is not None:
-            insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
+        # insert_after_index is an index into the caller's *visible* item list
+        # (other users' journal items are hidden) — translate it (issue #106).
+        visible = journal_visible_positions(project.items, user_info_id, owner_id)
+        insert_at = translate_insert_after(visible, body.insert_after_index, len(project.items))
         project.items.insert(insert_at, item)
         _repo.save_project(sess, owner_id, project, check_version=True)
     bust_geo_cache(owner_id, name)

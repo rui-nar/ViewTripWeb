@@ -36,7 +36,13 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from api.project_access import OwnerParam, assert_project_access, resolve_project
+from api.project_access import (
+    OwnerParam,
+    assert_project_access,
+    journal_visible_row_positions,
+    resolve_project,
+    translate_insert_after,
+)
 from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
@@ -98,6 +104,18 @@ def _photo_dir(user_id: str, memory_id: int) -> Path:
     p = Path(_DATA_DIR) / "users" / user_id / "memories" / str(memory_id)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _owner_dir_id(sess, mem_row: DBMemory) -> str:
+    """Canonical photo-dir key for a memory: the project OWNER's user id.
+
+    With travel companions (issue #106) the caller may not be the owner, but
+    all editors and viewers must resolve the same directory — keying on the
+    caller would scatter one memory's photos across several users' dirs.
+    ``sess.get`` hits the identity map, so this is free after
+    ``assert_project_access``/``resolve_project`` already loaded the project.
+    """
+    return str(sess.get(DBProject, mem_row.project_id).user_info_id)
 
 
 def _resolve_geo(
@@ -162,11 +180,6 @@ def _row_to_memory(row: DBMemory) -> Memory:
         lat=row.lat,
         lon=row.lon,
     )
-
-
-def _get_project_id(sess, user_info_id: int, project_name: str,
-                    owner_id: int | None = None) -> int:
-    return resolve_project(sess, user_info_id, project_name, owner_id).id
 
 
 def _get_owned_memory(sess, memory_id: int, user_info_id: int) -> DBMemory:
@@ -259,7 +272,9 @@ def create_memory(
     """Create a new memory in a project and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name, owner)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_id = project_row.id
+        owner_id = project_row.user_info_id
 
         if body.polarsteps_step_id is not None:
             # Exact step-id re-import is idempotent: return the existing row
@@ -272,7 +287,7 @@ def create_memory(
             # creating a second copy. This is the split-brain fix.
             adopt = _find_namedate_match(sess, project_id, body)
             if adopt is not None:
-                return {"id": _adopt_and_refresh(sess, current_user["sub"], adopt, body)}
+                return {"id": _adopt_and_refresh(sess, str(owner_id), adopt, body)}
 
         lat, lon = _resolve_body_geo(sess, project_id, body)
 
@@ -296,9 +311,10 @@ def create_memory(
             .where(DBProjectItem.project_id == project_id)
             .order_by(DBProjectItem.position)
         ).all()
-        insert_at = len(existing_items)
-        if body.insert_after_index is not None:
-            insert_at = max(0, min(len(existing_items), body.insert_after_index + 1))
+        # insert_after_index is an index into the caller's *visible* item list
+        # (other users' journal items are hidden) — translate it (issue #106).
+        visible = journal_visible_row_positions(sess, existing_items, user_info_id, owner_id)
+        insert_at = translate_insert_after(visible, body.insert_after_index, len(existing_items))
 
         for item in existing_items:
             if item.position >= insert_at:
@@ -377,7 +393,7 @@ def delete_memory(
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
 
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
-        photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "memories" / str(memory_id)
+        photo_path = Path(_DATA_DIR) / "users" / _owner_dir_id(sess, mem_row) / "memories" / str(memory_id)
         for photo_uuid in photos:
             for suffix in ["", "_thumb"]:
                 f = photo_path / f"{photo_uuid}{suffix}.jpg"
@@ -469,10 +485,11 @@ async def upload_photo(
     """Upload a JPEG photo; a 400×400 thumbnail is generated automatically."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        owner_dir = _owner_dir_id(sess, mem_row)
     raw = await file.read()
     photo_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(current_user["sub"], memory_id, photo_uuid, raw)
+    _save_photo_files(owner_dir, memory_id, photo_uuid, raw)
     _append_photo_to_memory(memory_id, photo_uuid)
     return {"uuid": photo_uuid}
 
@@ -488,8 +505,9 @@ async def queue_photo_from_url(
     """Enqueue a background download of a photo from a public URL."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
-    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, current_user["sub"])
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        owner_dir = _owner_dir_id(sess, mem_row)
+    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, owner_dir)
     return {"queued": True}
 
 
@@ -508,7 +526,7 @@ def delete_photo(
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-        _delete_photo_files(current_user["sub"], memory_id, [photo_uuid])
+        _delete_photo_files(_owner_dir_id(sess, mem_row), memory_id, [photo_uuid])
 
         photos.remove(photo_uuid)
         mem_row.photos_json = json.dumps(photos)
@@ -528,13 +546,14 @@ async def replace_photo(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        owner_dir = _owner_dir_id(sess, mem_row)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if old_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
     new_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(current_user["sub"], memory_id, new_uuid, raw)
+    _save_photo_files(owner_dir, memory_id, new_uuid, raw)
 
     with get_session() as sess:
         mem_row = sess.get(DBMemory, memory_id)
@@ -545,7 +564,7 @@ async def replace_photo(
         sess.add(mem_row)
         sess.commit()
 
-    _delete_photo_files(current_user["sub"], memory_id, [old_uuid])
+    _delete_photo_files(owner_dir, memory_id, [old_uuid])
     return {"uuid": new_uuid}
 
 
@@ -559,11 +578,12 @@ def serve_photo(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        owner_dir = _owner_dir_id(sess, mem_row)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-    photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "memories" / str(memory_id)
+    photo_path = Path(_DATA_DIR) / "users" / owner_dir / "memories" / str(memory_id)
     full_path = photo_path / f"{photo_uuid}.jpg"
     if not full_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -580,11 +600,12 @@ def serve_photo_thumb(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        owner_dir = _owner_dir_id(sess, mem_row)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-    photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "memories" / str(memory_id)
+    photo_path = Path(_DATA_DIR) / "users" / owner_dir / "memories" / str(memory_id)
     thumb_path = photo_path / f"{photo_uuid}_thumb.jpg"
     if not thumb_path.exists():
         full_path = photo_path / f"{photo_uuid}.jpg"
