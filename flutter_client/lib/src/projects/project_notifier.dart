@@ -1195,12 +1195,15 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Create (or re-fetch — idempotent) the invite token with the given
   /// [role]. Co-owner+; only the strict owner may request "co-owner".
-  /// Rethrows [ApiException] unchanged — a 409 means the account has E2EE
-  /// enabled and carries the server's explanation in its detail.
-  Future<void> createMemberInvite({String role = 'editor'}) async {
+  /// [email] (issue #113), when set, also queues the join link to be emailed
+  /// to that address — pass it again on a later call to (re)send to a new
+  /// address without creating a second invite. Rethrows [ApiException]
+  /// unchanged — 409 means the account has E2EE enabled, 422 a malformed
+  /// [email].
+  Future<void> createMemberInvite({String role = 'editor', String? email}) async {
     final ref = this.ref;
     if (ref == null) throw Exception('No project open');
-    final created = await _membersService.createInvite(ref, role: role);
+    final created = await _membersService.createInvite(ref, role: role, email: email);
     memberInviteToken = created.token;
     memberInviteRole = created.role;
     notifyListeners();

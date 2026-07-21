@@ -82,9 +82,21 @@ class MembersService {
   /// actually granted. Only the strict owner may request "co-owner"; a
   /// co-owner requesting it gets a 403. Throws [ApiException] 409 when the
   /// owner's account has E2EE enabled.
-  Future<CreatedInvite> createInvite(ProjectRef ref, {String role = 'editor'}) async {
-    final data = await _api.post(ref.path('/members/invite'), {'role': role})
-        as Map<String, dynamic>;
+  ///
+  /// [email], when set, queues the join link to be emailed to that address
+  /// (issue #113) — in the background, so this call's latency/success is
+  /// unaffected either way. Calling this again with a different [email]
+  /// re-sends to the new address without creating a second invite. Throws
+  /// [ApiException] 422 for a malformed [email].
+  Future<CreatedInvite> createInvite(
+    ProjectRef ref, {
+    String role = 'editor',
+    String? email,
+  }) async {
+    final data = await _api.post(ref.path('/members/invite'), {
+      'role': role,
+      if (email != null) 'email': email,
+    }) as Map<String, dynamic>;
     return (
       token: data['token'] as String? ?? '',
       role: data['role'] as String? ?? role,

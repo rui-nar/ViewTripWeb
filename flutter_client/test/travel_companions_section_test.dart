@@ -32,10 +32,13 @@ class _FakeMembersService extends MembersService {
   Future<List<ProjectMember>> listMembers(ProjectRef ref) async => members;
 
   String? lastRequestedRole;
+  String? lastRequestedEmail;
 
   @override
-  Future<CreatedInvite> createInvite(ProjectRef ref, {String role = 'editor'}) async {
+  Future<CreatedInvite> createInvite(ProjectRef ref,
+      {String role = 'editor', String? email}) async {
     lastRequestedRole = role;
+    lastRequestedEmail = email;
     final err = createError;
     if (err != null) throw err;
     return (token: 'tok123', role: role);

@@ -101,6 +101,23 @@ void main() {
       expect(jsonDecode(seen!.body), {'role': 'editor'});
     });
 
+    test('createInvite includes email in the body only when given (issue '
+        '#113)', () async {
+      http.Request? seen;
+      final mock = MockClient((req) async {
+        seen = req;
+        return http.Response(
+            jsonEncode({'token': 'tok123', 'role': 'editor'}), 200);
+      });
+      final svc = MembersService(ApiClient(baseUrl: '', httpClient: mock));
+
+      await svc.createInvite(const ProjectRef(name: 'Trip'),
+          email: 'friend@example.com');
+
+      expect(jsonDecode(seen!.body),
+          {'role': 'editor', 'email': 'friend@example.com'});
+    });
+
     test('createInvite surfaces a 409 (E2EE account) as ApiException with '
         'the server detail intact', () async {
       final mock = MockClient((req) async => http.Response(
