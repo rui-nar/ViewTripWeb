@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/people_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 ProjectNotifier _notifier() {
-  final n = ProjectNotifier(ProjectService())..projectName = 'Trip';
+  final n = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
   n.people = [
     {'id': 1, 'name': 'Alice', 'email': 'alice@x.com'},
     {'id': 2, 'name': 'Bob'},
@@ -48,7 +49,7 @@ void main() {
 
   testWidgets('Groups tab lists groups with member counts (#50)',
       (tester) async {
-    final n = ProjectNotifier(ProjectService())..projectName = 'Trip';
+    final n = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
     n.people = [
       {'id': 1, 'name': 'Alice', 'group_id': 5},
       {'id': 2, 'name': 'Bob', 'group_id': 5},

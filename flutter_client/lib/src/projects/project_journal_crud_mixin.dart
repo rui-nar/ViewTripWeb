@@ -5,17 +5,18 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 
 mixin ProjectJournalCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
-  String? get projectName;
+  ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
   set items(List<Map<String, dynamic>> v);
   String? get error;
   set error(String? v);
 
-  Future<void> reloadDetailsOnly(String name);
+  Future<void> reloadDetailsOnly(ProjectRef ref);
   String errorMessage(Exception e);
 
   // ── Journal CRUD ──────────────────────────────────────────────────────────
@@ -29,8 +30,8 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
     double? lon,
     int? insertAfterIndex,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     final placeholder = {
       'item_type': 'journal',
       'journal': {
@@ -51,8 +52,8 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       final encDescription = await encryption.protect(description);
-      await api.post('/api/journal/', {
-        'project_name': projectName,
+      await api.post(ref.withOwner('/api/journal/'), {
+        'project_name': ref.name,
         'date': date,
         'geo_mode': geoMode,
         if (time != null) 'time': time,
@@ -61,7 +62,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -77,8 +78,8 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
     double? lat,
     double? lon,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     for (final item in items) {
       if (item['item_type'] == 'journal' &&
           item['journal']?['id']?.toString() == journalId) {
@@ -104,7 +105,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -121,15 +122,15 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
   }
 
   Future<void> deleteJournal(String journalId) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     items.removeWhere((item) =>
         item['item_type'] == 'journal' &&
         item['journal']?['id']?.toString() == journalId);
     notifyListeners();
     try {
       await api.delete('/api/journal/$journalId');
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -165,10 +166,10 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
     String photoUuid, {
     bool reload = true,
   }) async {
-    final projectName = this.projectName;
+    final ref = projectRef;
     try {
       await api.delete('/api/journal/$journalId/photos/$photoUuid');
-      if (reload && projectName != null) await reloadDetailsOnly(projectName);
+      if (reload && ref != null) await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();

@@ -4,33 +4,49 @@
 /// browser/device doesn't leak user A's last trip into user B's session.
 library;
 
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'project_ref.dart';
 
 String _prefKey(String userId) => 'last_opened_project_$userId';
 
-/// Records [projectName] as [userId]'s last successfully opened project.
+/// Records [ref] as [userId]'s last successfully opened project (name +
+/// owner — issue #106, so a shared project's owner survives a reload).
 /// No-op if [userId] is null (not logged in / auth not resolved yet).
-Future<void> saveLastOpenedProject(String? userId, String projectName) async {
+Future<void> saveLastOpenedProject(String? userId, ProjectRef ref) async {
   if (userId == null) return;
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setString(_prefKey(userId), projectName);
+  await prefs.setString(_prefKey(userId), jsonEncode(ref.toJson()));
 }
 
-/// Reads [userId]'s last-opened project name, or null if none is recorded.
-/// No-op (returns null) if [userId] is null.
-Future<String?> readLastOpenedProject(String? userId) async {
+/// Reads [userId]'s last-opened project ref, or null if none is recorded.
+/// No-op (returns null) if [userId] is null. Backward compatible with the
+/// pre-#106 format, which stored the bare project name as a plain string.
+Future<ProjectRef?> readLastOpenedProject(String? userId) async {
   if (userId == null) return null;
   final prefs = await SharedPreferences.getInstance();
-  return prefs.getString(_prefKey(userId));
+  final raw = prefs.getString(_prefKey(userId));
+  if (raw == null || raw.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is Map) {
+      return ProjectRef.fromJson(decoded.cast<String, dynamic>());
+    }
+  } catch (_) {
+    // Not JSON — pre-#106 plain project-name string.
+  }
+  return ProjectRef(name: raw);
 }
 
 /// Resolves where the bare-root route (`/`) should send a logged-in user:
-/// their last-opened project (`/view?project=<name>`) if one is recorded
-/// for [userId], otherwise `/projects`.
+/// their last-opened project (`/view?project=<name>[&owner=<id>]`) if one is
+/// recorded for [userId], otherwise `/projects`.
 Future<String> rootRedirectTarget(String? userId) async {
-  final lastProject = await readLastOpenedProject(userId);
-  if (lastProject != null && lastProject.isNotEmpty) {
-    return '/view?project=${Uri.encodeComponent(lastProject)}';
+  final lastRef = await readLastOpenedProject(userId);
+  if (lastRef != null && lastRef.name.isNotEmpty) {
+    return lastRef.withOwner('/view?project=${Uri.encodeComponent(lastRef.name)}');
   }
   return '/projects';
 }

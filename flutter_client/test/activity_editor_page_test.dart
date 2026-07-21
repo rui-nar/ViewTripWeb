@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/map/geo_point.dart';
 import 'package:viewtrip_client/src/projects/activity_editor_page.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
@@ -59,7 +60,7 @@ Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity) async {
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 
-  final notifier = ProjectNotifier(ProjectService())..projectName = 'Trip';
+  final notifier = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
   await tester.pumpWidget(MaterialApp(
     home: ActivityEditorPage(notifier: notifier, activity: activity),
   ));

@@ -12,6 +12,7 @@
 library;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import '../crypto/e2ee_crypto.dart' show EncryptedField;
 import '../crypto/share_crypto.dart';
 
@@ -19,7 +20,7 @@ class ShareContentGenerator {
   final ApiClient _api;
   ShareContentGenerator(this._api);
 
-  /// Encrypts every actually-encrypted memory in project [projectName] under
+  /// Encrypts every actually-encrypted memory in project [ref] under
   /// a fresh share key and PUTs the envelopes to the share/content endpoint.
   ///
   /// [decryptedItems] is the caller's already-decrypted `items` list (e.g.
@@ -32,11 +33,10 @@ class ShareContentGenerator {
   /// or null if the project has no encrypted memories to include. Requires a
   /// "full" share token to already exist — content only ever attaches to it.
   Future<String?> generate(
-    String projectName,
+    ProjectRef ref,
     List<Map<String, dynamic>> decryptedItems,
   ) async {
-    final raw = await _api.get('/api/projects/${Uri.encodeComponent(projectName)}')
-        as Map<String, dynamic>;
+    final raw = await _api.get(ref.path()) as Map<String, dynamic>;
     final rawItems = (raw['items'] as List?) ?? const [];
 
     final key = await generateShareKey();
@@ -81,7 +81,7 @@ class ShareContentGenerator {
     if (uploads.isEmpty) return null;
 
     await _api.put(
-      '/api/projects/${Uri.encodeComponent(projectName)}/share/content',
+      ref.path('/share/content'),
       {'items': uploads},
     );
     return shareKeyToBase64(key);

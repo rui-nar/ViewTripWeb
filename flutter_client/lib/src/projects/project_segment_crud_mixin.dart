@@ -11,11 +11,12 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import 'project_service.dart';
 
 mixin ProjectSegmentCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ──────────
-  String? get projectName;
+  ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
   set items(List<Map<String, dynamic>> v);
   Map<String, dynamic>? get geo;
@@ -28,7 +29,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   ProjectService get service;
 
   /// Details-only reload — thin delegate to _silentReloadDetailsOnly.
-  Future<void> reloadDetailsOnly(String name);
+  Future<void> reloadDetailsOnly(ProjectRef ref);
 
   /// Format an Exception into a user-readable string — delegates to _msg.
   String errorMessage(Exception e);
@@ -36,11 +37,11 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   /// If [e] is a 409 optimistic-lock conflict, resync items + geo from the
   /// server (discarding the optimistic change) and surface a soft retry
   /// message. Returns true when the conflict was handled.
-  Future<bool> _resyncOnConflict(Object e, String name) async {
+  Future<bool> _resyncOnConflict(Object e, ProjectRef ref) async {
     if (e is! ApiException || e.statusCode != 409) return false;
     try {
-      await reloadDetailsOnly(name);
-      geo = await service.getGeo(name);
+      await reloadDetailsOnly(ref);
+      geo = await service.getGeo(ref);
     } catch (_) {
       // Best-effort resync; the next load will reconcile regardless.
     }
@@ -63,8 +64,8 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     String? trainNumber,
     String? hafasProvider,
   }) async {
-    final name = projectName;
-    if (name == null) return '';
+    final ref = projectRef;
+    if (ref == null) return '';
     final placeholder = {
       'item_type': 'segment',
       'segment': {
@@ -86,7 +87,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(name)}/segments',
+        ref.path('/segments'),
         {
           'segment_type': segmentType,
           'label': label,
@@ -133,7 +134,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           .toList();
       removeSegmentFromGeo('__optimistic__');
       _segmentTombstones.remove('__optimistic__'); // not a real server segment
-      if (await _resyncOnConflict(e, name)) return '';
+      if (await _resyncOnConflict(e, ref)) return '';
       error = errorMessage(e);
       notifyListeners();
       return '';
@@ -153,8 +154,8 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     String? hafasProvider,
     String? routeMode,
   }) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     String? prevRouteMode;
     double? prevStartLat, prevStartLon, prevEndLat, prevEndLon;
     Map<String, dynamic>? prevSegment;  // full snapshot for rollback on error
@@ -190,7 +191,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}',
+        ref.path('/segments/${Uri.encodeComponent(segId)}'),
         {
           'segment_type': segmentType,
           'label': label,
@@ -226,7 +227,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
               item,
         ];
       }
-      if (await _resyncOnConflict(e, name)) return;
+      if (await _resyncOnConflict(e, ref)) return;
       error = errorMessage(e);
       notifyListeners();
     }
@@ -249,10 +250,10 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     String? trainNumber,
     String? date,
   }) async {
-    final name = projectName;
-    if (name == null) throw Exception('No project open');
+    final ref = projectRef;
+    if (ref == null) throw Exception('No project open');
     await service.resolveTrainRoute(
-      name, segId,
+      ref, segId,
       hafasProvider: hafasProvider,
       trainNumber: trainNumber,
       date: date,
@@ -277,19 +278,19 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     Duration interval = const Duration(seconds: 3),
     Duration timeout = const Duration(minutes: 2),
   }) async {
-    final name = projectName;
-    if (name == null) return {'route_status': 'cancelled'};
+    final ref = projectRef;
+    if (ref == null) return {'route_status': 'cancelled'};
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(interval);
-      if (projectName != name) return {'route_status': 'cancelled'};
+      if (projectRef != ref) return {'route_status': 'cancelled'};
       Map<String, dynamic> meta;
       try {
-        meta = await service.getDetailsMeta(name);
+        meta = await service.getDetailsMeta(ref);
       } on Exception {
         continue; // transient network error — retry on the next tick
       }
-      if (projectName != name) return {'route_status': 'cancelled'};
+      if (projectRef != ref) return {'route_status': 'cancelled'};
       final seg = _segmentFromMeta(meta, segId);
       if (seg == null) return {'route_status': 'cancelled'}; // deleted mid-resolve
       final stat = (seg['route_status'] as String?) ?? 'idle';
@@ -343,7 +344,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   /// Re-trigger resolution for any segment stuck in `pending` past
   /// [_pendingStaleAfter]. Called once per load so a job lost to a server
   /// restart is recovered when the user reopens the project. Fire-and-forget.
-  void recoverStalePendingSegments(String name) {
+  void recoverStalePendingSegments(ProjectRef ref) {
     final now = DateTime.now().toUtc();
     for (final item in List<Map<String, dynamic>>.from(items)) {
       if (item['item_type'] != 'segment') continue;
@@ -362,7 +363,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       final trainNumber = seg['train_number'] as String?;
       final date = seg['date'] as String?;
       () async {
-        if (projectName != name) return; // navigated away before we started
+        if (projectRef != ref) return; // navigated away before we started
         try {
           await resolveTrainRoute(
             segId,
@@ -469,14 +470,13 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   }
 
   Future<void> deleteSegment(String segId) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     // removeSegmentLocally already called via onOptimistic before the undo window.
     // No reload needed — reloading would bring back other pending-delete segments
     // (still in the DB) and cause ghost reappearances while their toasts are active.
     try {
-      await api.delete(
-          '/api/projects/${Uri.encodeComponent(name)}/segments/${Uri.encodeComponent(segId)}');
+      await api.delete(ref.path('/segments/${Uri.encodeComponent(segId)}'));
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();

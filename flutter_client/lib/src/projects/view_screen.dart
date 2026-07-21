@@ -18,6 +18,7 @@ import '../api/client.dart' show api;
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/last_opened_project.dart';
+import '../core/project_ref.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'elevation_chart.dart';
@@ -33,23 +34,19 @@ import 'viewport_sync.dart';
 // ── Service — calls /api/projects/{name}/meta first, full details in background
 
 class _ViewProjectService extends ProjectService {
-  final String projectName;
-
-  _ViewProjectService(this.projectName);
-
   /// Returns the lightweight /meta response so load() can render the UI quickly.
   /// Full details are fetched separately via fetchFullDetails() after load()
   /// returns, giving meta exclusive NAS uplink bandwidth.
   @override
-  Future<Map<String, dynamic>> getDetails(String name) async {
-    final meta = await api.get('/api/projects/$name/meta') as Map<String, dynamic>;
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
+    final meta = await api.get(ref.path('/meta')) as Map<String, dynamic>;
     return meta;
   }
 
   /// Fetches the full ~3 MB response (elevation_profile included).
   /// Called by ViewProjectNotifier.loadView() after load() has returned.
-  Future<Map<String, dynamic>> fetchFullDetails(String name) async {
-    final data = await api.get('/api/projects/$name');
+  Future<Map<String, dynamic>> fetchFullDetails(ProjectRef ref) async {
+    final data = await api.get(ref.path());
     return data as Map<String, dynamic>;
   }
 }
@@ -63,8 +60,8 @@ class ViewProjectNotifier extends ProjectNotifier {
   ViewProjectNotifier._internal(_ViewProjectService super.svc)
       : _viewSvc = svc;
 
-  factory ViewProjectNotifier(String projectName) {
-    final svc = _ViewProjectService(projectName);
+  factory ViewProjectNotifier() {
+    final svc = _ViewProjectService();
     return ViewProjectNotifier._internal(svc);
   }
 
@@ -74,14 +71,14 @@ class ViewProjectNotifier extends ProjectNotifier {
     super.dispose();
   }
 
-  Future<void> loadView(String projectName) async {
+  Future<void> loadView(ProjectRef ref) async {
     isMetaLoaded = false;
     isElevationLoaded = false;
     isGeoLoaded = false;
 
     // Phase 1: load() calls _viewSvc.getDetails() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
-    await load(projectName);
+    await load(ref);
     if (_disposed) return;
     isMetaLoaded = true;
     // The /meta response now carries a downsampled (low-res) elevation profile,
@@ -93,8 +90,8 @@ class ViewProjectNotifier extends ProjectNotifier {
     // Phase 2 (background): fetch full ~3 MB response for elevation data.
     // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
-      final fullDetails = await _viewSvc.fetchFullDetails(projectName);
-      if (_disposed || currentLoadKey != projectName) return;
+      final fullDetails = await _viewSvc.fetchFullDetails(ref);
+      if (_disposed || currentLoadKey != ref) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
         applyFullActivities(rawActs.cast<Map<String, dynamic>>());
@@ -112,6 +109,10 @@ class ViewProjectNotifier extends ProjectNotifier {
 class ViewScreen extends StatelessWidget {
   final String projectName;
 
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects.
+  final int? ownerId;
+
   /// Camera position carried over from edit mode via the mode toggle, so
   /// switching modes doesn't reset the map viewport to fit-all-bounds.
   final double? initialLat;
@@ -121,6 +122,7 @@ class ViewScreen extends StatelessWidget {
   const ViewScreen({
     super.key,
     required this.projectName,
+    this.ownerId,
     this.initialLat,
     this.initialLng,
     this.initialZoom,
@@ -129,9 +131,10 @@ class ViewScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) => ViewProjectNotifier(projectName),
+      create: (_) => ViewProjectNotifier(),
       child: _ViewBody(
         projectName: projectName,
+        ownerId: ownerId,
         initialLat: initialLat,
         initialLng: initialLng,
         initialZoom: initialZoom,
@@ -144,15 +147,20 @@ class ViewScreen extends StatelessWidget {
 
 class _ViewBody extends StatefulWidget {
   final String projectName;
+  final int? ownerId;
   final double? initialLat;
   final double? initialLng;
   final double? initialZoom;
   const _ViewBody({
     required this.projectName,
+    this.ownerId,
     this.initialLat,
     this.initialLng,
     this.initialZoom,
   });
+
+  /// Addressing for [projectName]/[ownerId] — issue #106.
+  ProjectRef get projectRef => ProjectRef(name: projectName, ownerId: ownerId);
 
   @override
   State<_ViewBody> createState() => _ViewBodyState();
@@ -196,6 +204,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
       context.replace(viewportSyncPath(
         basePath: '/view',
         projectName: widget.projectName,
+        ownerId: widget.ownerId,
         lat: cam.center.latitude,
         lng: cam.center.longitude,
         zoom: cam.zoom,
@@ -237,12 +246,12 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
           stravaActivities: pending.strava,
           psSteps: pending.polarsteps,
         ),
-        child: SyncImportDialog(projectName: widget.projectName),
+        child: SyncImportDialog(projectRef: widget.projectRef),
       ),
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
-      notifier.loadView(widget.projectName);
+      notifier.loadView(widget.projectRef);
     });
   }
 
@@ -251,10 +260,10 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ViewProjectNotifier>();
-      notifier.loadView(widget.projectName).then((_) {
+      notifier.loadView(widget.projectRef).then((_) {
         if (!mounted || notifier.error != null) return;
         saveLastOpenedProject(
-            context.read<AuthNotifier>().user?.id, widget.projectName);
+            context.read<AuthNotifier>().user?.id, notifier.ref ?? widget.projectRef);
       });
     });
     _mapEventSub =
@@ -308,9 +317,9 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
               selected: const {true},
               onSelectionChanged: (s) {
                 final cam = _mapController.mapController.camera;
-                context.go(
+                context.go(widget.projectRef.withOwner(
                     '/app?project=${Uri.encodeComponent(widget.projectName)}'
-                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}');
+                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}'));
               },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,
@@ -380,7 +389,8 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
             // here since view mode's ViewProjectNotifier is a separate
             // instance the singleton doesn't share.
             onPressed: isLoading ? null : () => context.push(
-              '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+              widget.projectRef.withOwner(
+                  '/stats?project=${Uri.encodeComponent(widget.projectName)}'),
             ),
           ),
           IconButton(

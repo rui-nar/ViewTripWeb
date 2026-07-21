@@ -7,14 +7,17 @@ library;
 
 /// Builds the `/app` or `/view` route location for [projectName] with the
 /// given camera position encoded as query params. No live `MapController`
-/// required, so this is independently unit-testable.
+/// required, so this is independently unit-testable. [ownerId] (issue #106)
+/// is included so a reload of a shared project's URL still resolves it.
 String viewportSyncPath({
   required String basePath,
   required String projectName,
+  int? ownerId,
   required double lat,
   required double lng,
   required double zoom,
 }) {
   return '$basePath?project=${Uri.encodeComponent(projectName)}'
+      '${ownerId != null ? '&owner=$ownerId' : ''}'
       '&lat=$lat&lng=$lng&zoom=$zoom';
 }

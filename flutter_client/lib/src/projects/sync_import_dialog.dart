@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/project_ref.dart';
 import 'sync_import_notifier.dart';
 
 class SyncImportDialog extends StatefulWidget {
-  final String projectName;
+  final ProjectRef projectRef;
 
-  const SyncImportDialog({super.key, required this.projectName});
+  const SyncImportDialog({super.key, required this.projectRef});
 
   @override
   State<SyncImportDialog> createState() => _SyncImportDialogState();
@@ -15,7 +16,7 @@ class SyncImportDialog extends StatefulWidget {
 class _SyncImportDialogState extends State<SyncImportDialog> {
   Future<void> _import() async {
     final notifier = context.read<SyncImportNotifier>();
-    final added = await notifier.importSelected(widget.projectName);
+    final added = await notifier.importSelected(widget.projectRef);
     if (!mounted) return;
     if (notifier.error == null || added > 0) {
       Navigator.of(context).pop();

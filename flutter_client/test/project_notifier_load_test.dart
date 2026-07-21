@@ -7,18 +7,19 @@
 // instead of being contained by load()'s try/catch.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 class _OrphanRiskService extends ProjectService {
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String name) async {
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async {
     await Future<void>.delayed(const Duration(milliseconds: 1));
     throw Exception('lowRes rejects first');
   }
 
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async {
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
     await Future<void>.delayed(const Duration(milliseconds: 20));
     throw Exception('details rejects later, after load() already returned');
   }
@@ -27,11 +28,11 @@ class _OrphanRiskService extends ProjectService {
   // stub them out so this test only exercises the getLowResGeo/getDetailsMeta
   // race, not real (host-less, in-test) HTTP calls.
   @override
-  Future<Map<String, dynamic>> getGeo(String name) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getDetails(String name) async => {};
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async => {};
 }
 
 void main() {
@@ -40,7 +41,7 @@ void main() {
       'first-awaited request fails before the second one settles', () async {
     final notifier = ProjectNotifier(_OrphanRiskService());
 
-    await notifier.load('Trip');
+    await notifier.load(const ProjectRef(name: 'Trip'));
     expect(notifier.error, isNotNull);
 
     // Give the still-in-flight getDetailsMeta() future time to reject. Before

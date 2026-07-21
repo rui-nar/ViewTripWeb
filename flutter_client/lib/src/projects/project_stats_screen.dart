@@ -5,6 +5,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/project_ref.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
 
@@ -167,6 +168,10 @@ class _CountRow extends StatelessWidget {
 
 class ProjectStatsScreen extends StatefulWidget {
   final String projectName;
+
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects.
+  final int? ownerId;
   final ProjectService? service;
 
   /// Explicit override, used only by the public/anonymous shared-project view
@@ -181,10 +186,14 @@ class ProjectStatsScreen extends StatefulWidget {
   const ProjectStatsScreen({
     super.key,
     required this.projectName,
+    this.ownerId,
     this.availableTags,
     this.sleepingOptionGroups,
     this.service,
   });
+
+  /// Addressing for [projectName]/[ownerId] — issue #106.
+  ProjectRef get projectRef => ProjectRef(name: projectName, ownerId: ownerId);
 
   @override
   State<ProjectStatsScreen> createState() => _ProjectStatsScreenState();
@@ -209,9 +218,9 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
       // (like AppScreen) since load() calls notifyListeners() synchronously
       // before its first await, which would otherwise fire mid-build here.
       final notifier = context.read<ProjectNotifier>();
-      if (notifier.projectName != widget.projectName) {
+      if (notifier.ref != widget.projectRef) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) context.read<ProjectNotifier>().load(widget.projectName);
+          if (mounted) context.read<ProjectNotifier>().load(widget.projectRef);
         });
       }
       _tagOptions = List.of(notifier.availableTags);
@@ -221,7 +230,7 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
 
   void _load() {
     final future = (widget.service ?? ProjectService())
-        .getStats(widget.projectName, tags: _selectedTags.toList());
+        .getStats(widget.projectRef, tags: _selectedTags.toList());
     future.then((data) {
       if (!mounted) return;
       final opts = data['tag_options'];

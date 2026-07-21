@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/activity_panel.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -68,7 +69,7 @@ void main() {
       (tester) async {
     final service = _RecordingService();
     final notifier = ProjectNotifier(service);
-    notifier.projectName = 'trip';
+    notifier.ref = const ProjectRef(name: 'trip');
     notifier.activities = [
       {
         'id': -7,
@@ -104,19 +105,19 @@ class _RecordingService extends ProjectService {
   final List<(String, int)> deletedLocal = [];
 
   @override
-  Future<void> deleteLocalActivity(String name, int activityId) async {
-    deletedLocal.add((name, activityId));
+  Future<void> deleteLocalActivity(ProjectRef ref, int activityId) async {
+    deletedLocal.add((ref.name, activityId));
   }
 
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async => {
-        'name': name,
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async => {
+        'name': ref.name,
         'activities': const [],
         'items': const [],
       };
 
   @override
-  Future<Map<String, dynamic>> getGeo(String name) async => {
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async => {
         'type': 'FeatureCollection',
         'features': const [],
       };

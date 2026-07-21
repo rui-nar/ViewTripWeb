@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 
 class SyncImportNotifier extends ChangeNotifier {
   final List<Map<String, dynamic>> stravaActivities;
@@ -82,7 +83,7 @@ class SyncImportNotifier extends ChangeNotifier {
 
   // ── Import ─────────────────────────────────────────────────────────────────
 
-  Future<int> importSelected(String projectName) async {
+  Future<int> importSelected(ProjectRef ref) async {
     final stravaToImport = stravaActivities
         .where((a) => selectedStravaIds.contains(a['id']))
         .toList();
@@ -104,7 +105,7 @@ class SyncImportNotifier extends ChangeNotifier {
       if (stravaToImport.isNotEmpty) {
         try {
           final result = await api.post(
-            '/api/projects/${Uri.encodeComponent(projectName)}/activities',
+            ref.path('/activities'),
             {'activities': stravaToImport},
           ) as Map<String, dynamic>;
           created += (result['added'] as int?) ?? 0;
@@ -132,8 +133,8 @@ class SyncImportNotifier extends ChangeNotifier {
         final lon = (step['lon'] as num?)?.toDouble();
 
         try {
-          final result = await api.post('/api/memories/', {
-            'project_name': projectName,
+          final result = await api.post(ref.withOwner('/api/memories/'), {
+            'project_name': ref.name,
             'date': date,
             'geo_mode': (lat != null && lon != null) ? 'custom' : 'start_of_day',
             if (name != null) 'name': name,

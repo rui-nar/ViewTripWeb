@@ -34,6 +34,11 @@ String _initialLocation() {
   return (path.isEmpty || path == '/') ? '/' : path;
 }
 
+/// Reads the `owner` query param (issue #106 — shared-project addressing)
+/// as an int, or null when absent/malformed (own project).
+int? _ownerParam(GoRouterState state) =>
+    int.tryParse(state.uri.queryParameters['owner'] ?? '');
+
 GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
 
@@ -114,6 +119,7 @@ GoRouter buildRouter(BuildContext context) {
               state.uri.queryParameters['project'] ?? '';
           return AppScreen(
             projectName: projectName,
+            ownerId: _ownerParam(state),
             initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
             initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
             initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
@@ -127,6 +133,7 @@ GoRouter buildRouter(BuildContext context) {
               state.uri.queryParameters['project'] ?? '';
           return ViewScreen(
             projectName: projectName,
+            ownerId: _ownerParam(state),
             initialLat: double.tryParse(state.uri.queryParameters['lat'] ?? ''),
             initialLng: double.tryParse(state.uri.queryParameters['lng'] ?? ''),
             initialZoom: double.tryParse(state.uri.queryParameters['zoom'] ?? ''),
@@ -140,7 +147,8 @@ GoRouter buildRouter(BuildContext context) {
               state.uri.queryParameters['project'] ?? '';
           return ChangeNotifierProvider(
             create: (_) => StravaImportNotifier(),
-            child: StravaImportScreen(projectName: projectName),
+            child: StravaImportScreen(
+                projectName: projectName, ownerId: _ownerParam(state)),
           );
         },
       ),
@@ -151,7 +159,8 @@ GoRouter buildRouter(BuildContext context) {
               state.uri.queryParameters['project'] ?? '';
           return ChangeNotifierProvider(
             create: (_) => PolarstepsImportNotifier(),
-            child: PolarstepsImportScreen(projectName: projectName),
+            child: PolarstepsImportScreen(
+                projectName: projectName, ownerId: _ownerParam(state)),
           );
         },
       ),
@@ -163,14 +172,16 @@ GoRouter buildRouter(BuildContext context) {
           // Tags/groups come from the ambient ProjectNotifier, not
           // GoRouterState.extra — extra isn't URL-encoded, so it's lost on a
           // forced reload (issue #76 follow-up). See ProjectStatsScreen.
-          return ProjectStatsScreen(projectName: projectName);
+          return ProjectStatsScreen(
+              projectName: projectName, ownerId: _ownerParam(state));
         },
       ),
       GoRoute(
         path: '/project-settings',
         builder: (context, state) {
           final projectName = state.uri.queryParameters['project'] ?? '';
-          return ProjectSettingsScreen(projectName: projectName);
+          return ProjectSettingsScreen(
+              projectName: projectName, ownerId: _ownerParam(state));
         },
       ),
       GoRoute(

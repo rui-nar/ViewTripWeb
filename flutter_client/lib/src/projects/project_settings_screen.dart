@@ -26,7 +26,15 @@ const _kRed       = Color(0xFFEF4444);
 
 class ProjectSettingsScreen extends StatefulWidget {
   final String projectName;
-  const ProjectSettingsScreen({super.key, required this.projectName});
+
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects. The screen itself reads/writes
+  /// through the ambient ProjectNotifier (already addressing the right
+  /// project — see [ProjectNotifier.ref]), so this is accepted only for
+  /// router-signature symmetry with the other project routes.
+  final int? ownerId;
+
+  const ProjectSettingsScreen({super.key, required this.projectName, this.ownerId});
 
   @override
   State<ProjectSettingsScreen> createState() => _ProjectSettingsScreenState();
@@ -76,15 +84,25 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   // passed to saveDayMeta on Save without touching the notifier until then.
   late Map<String, Map<String, dynamic>> _dayMeta;
 
-  static const _sectionLabels = [
-    (icon: Icons.tune,          label: 'General'),
-    (icon: Icons.hub,           label: 'Integrations'),
-    (icon: Icons.share,         label: 'Sharing'),
-    (icon: Icons.polyline,      label: 'Track style'),
-    (icon: Icons.hotel,         label: 'Sleeping'),
-    (icon: Icons.tag,           label: 'Counters'),
-    (icon: Icons.label_outlined, label: 'Tags'),
+  static const _allSectionLabels = [
+    (icon: Icons.tune,          label: 'General',      key: 0),
+    (icon: Icons.hub,           label: 'Integrations', key: 1),
+    (icon: Icons.share,         label: 'Sharing',       key: 2),
+    (icon: Icons.polyline,      label: 'Track style',  key: 3),
+    (icon: Icons.hotel,         label: 'Sleeping',     key: 4),
+    (icon: Icons.tag,           label: 'Counters',     key: 5),
+    (icon: Icons.label_outlined, label: 'Tags',        key: 6),
   ];
+
+  /// Section tabs, keyed so [_sectionContent] can switch on a stable id
+  /// rather than a position that shifts when a tab is hidden. The Sharing
+  /// tab (create/revoke links, per-share content) is owner-only — issue #106
+  /// editors get 403s from those endpoints, so it's hidden rather than shown
+  /// disabled.
+  List<({IconData icon, String label, int key})> get _sectionLabels =>
+      _notifier.isEditor
+          ? [for (final s in _allSectionLabels) if (s.key != 2) s]
+          : _allSectionLabels;
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -245,7 +263,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
 
     final n = _notifier;
     final newName = _nameCtrl.text.trim();
-    if (newName.isNotEmpty && newName != n.projectName) {
+    if (!n.isEditor && newName.isNotEmpty && newName != n.projectName) {
       await n.renameProject(newName);
     }
 
@@ -425,6 +443,9 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
                 const SizedBox(height: 8),
                 TextField(
                   controller: _nameCtrl,
+                  // Rename is owner-only (issue #106) — editors get a 403
+                  // from the server, so the field is read-only for them.
+                  readOnly: _notifier.isEditor,
                   style: const TextStyle(
                     color: _kText1, fontSize: 15, fontWeight: FontWeight.w600),
                   decoration: InputDecoration(
@@ -1306,7 +1327,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 
 class _Sidebar extends StatelessWidget {
-  final List<({IconData icon, String label})> sections;
+  final List<({IconData icon, String label, int key})> sections;
   final int active;
   final bool wide;
   final String projectName;
@@ -1377,12 +1398,12 @@ class _Sidebar extends StatelessWidget {
               itemCount: sections.length,
               itemBuilder: (_, i) {
                 final s = sections[i];
-                final isActive = active == i;
+                final isActive = active == s.key;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 2),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(8),
-                    onTap: () => onSelect(i),
+                    onTap: () => onSelect(s.key),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 150),
                       padding: EdgeInsets.symmetric(

@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/map_panel.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 ProjectNotifier _notifierWithEncounter() {
-  final n = ProjectNotifier(ProjectService())..projectName = 'Trip';
+  final n = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
   n.people = [
     {'id': 1, 'name': 'Alice'},
   ];

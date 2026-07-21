@@ -690,8 +690,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         label: 'Undo',
         onPressed: () {
           undone = true;
-          final name = notifier.projectName;
-          if (name != null) notifier.load(name);
+          final ref = notifier.ref;
+          if (ref != null) notifier.load(ref);
         },
       ),
     ));

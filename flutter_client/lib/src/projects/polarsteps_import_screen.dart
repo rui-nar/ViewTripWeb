@@ -2,13 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../core/project_ref.dart';
 import 'polarsteps_import_notifier.dart';
 import 'project_notifier.dart';
 
 class PolarstepsImportScreen extends StatefulWidget {
   final String projectName;
 
-  const PolarstepsImportScreen({super.key, required this.projectName});
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects.
+  final int? ownerId;
+
+  const PolarstepsImportScreen({super.key, required this.projectName, this.ownerId});
+
+  /// Addressing for [projectName]/[ownerId] — issue #106.
+  ProjectRef get projectRef => ProjectRef(name: projectName, ownerId: ownerId);
 
   @override
   State<PolarstepsImportScreen> createState() =>
@@ -22,21 +30,21 @@ class _PolarstepsImportScreenState
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final n = context.read<PolarstepsImportNotifier>();
-      n.projectName = widget.projectName;
+      n.projectRef = widget.projectRef;
       n.loadTrips();
     });
   }
 
   Future<void> _import() async {
     final notifier = context.read<PolarstepsImportNotifier>();
-    final added = await notifier.importSelected(widget.projectName);
+    final added = await notifier.importSelected(widget.projectRef);
     if (!mounted) return;
     if (added > 0) {
       // Reload the project so the newly-added memories appear immediately
       // in the activity panel and on the map when we pop back to AppScreen.
       final projectNotifier = context.read<ProjectNotifier>();
-      projectNotifier.load(widget.projectName);
-      projectNotifier.startPhotoPolling(widget.projectName);
+      projectNotifier.load(widget.projectRef);
+      projectNotifier.startPhotoPolling(widget.projectRef);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$added ${added == 1 ? 'memory' : 'memories'} added')),
       );

@@ -10,6 +10,7 @@ import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
@@ -75,7 +76,17 @@ class ProjectNotifier extends ChangeNotifier
 
   ProjectNotifier(this._service);
 
-  @override String? projectName;
+  /// The addressing for the currently open project (name + owner + role —
+  /// issue #106). Null until [load] has been called at least once.
+  ProjectRef? ref;
+
+  String? get projectName => ref?.name;
+
+  /// True when the caller only has editor (not owner) access to the open
+  /// project — screens use this to hide owner-only actions (rename, delete,
+  /// share, members-manage).
+  bool get isEditor => ref?.isEditor ?? false;
+
   @override List<Map<String, dynamic>> activities = [];
   @override List<Map<String, dynamic>> items = [];   // ordered project items (activities + segments + memories)
   @override List<Map<String, dynamic>> people = [];  // trip people directory (#40)
@@ -196,11 +207,11 @@ class ProjectNotifier extends ChangeNotifier
     if (colorByTypeEnabled != null) colorByType = colorByTypeEnabled;
     if (typeStyleOverrides != null) typeStyles = typeStyleOverrides;
     notifyListeners();
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
       await _service.saveTrackStyle(
-        name,
+        ref,
         trackColor: color != null ? _colorToHex(color) : null,
         trackSecondaryColor: secondaryColor != _kUnset
             ? (secondaryColor != null ? _colorToHex(secondaryColor as Color) : null)
@@ -225,10 +236,10 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> saveLanguages(List<String> langs) async {
     languages = List<String>.from(langs);
     notifyListeners();
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
-      await _service.saveLanguages(name, langs);
+      await _service.saveLanguages(ref, langs);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -361,11 +372,12 @@ class ProjectNotifier extends ChangeNotifier
   /// longer in [dayMeta]) so a stale selection can't resurrect as a dangling
   /// reference. Silently no-ops on missing/malformed prefs.
   Future<void> _restoreUiState() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
+    final name = ref.name;
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (_loadKey != name) return; // navigated away while awaiting prefs
+      if (_loadKey != ref) return; // navigated away while awaiting prefs
       final raw = prefs.getString(_uiStateKey(name));
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -444,18 +456,19 @@ class ProjectNotifier extends ChangeNotifier
   /// decrypted content via the CMK).
   SecretKey? get shareContentKey => null;
 
-  // Tracks the name/token passed to the current load() call so Phase 2 can
-  // detect navigation-away without comparing against the mutable projectName
-  // field (which is overwritten with the real project name during Phase 1).
-  String? _loadKey;
+  // Tracks the ref passed to the current load() call so Phase 2 can detect
+  // navigation-away without comparing against the mutable `ref` field (whose
+  // name is overwritten with the server's returned name during Phase 1).
+  ProjectRef? _loadKey;
 
   Timer? _photoPollingTimer;
 
-  Future<void> load(String name) async {
-    if (name.isEmpty) return;
+  Future<void> load(ProjectRef ref) async {
+    if (ref.name.isEmpty) return;
+    final name = ref.name;
     _stopPhotoPolling();
-    _loadKey = name;
-    projectName = name;
+    _loadKey = ref;
+    this.ref = ref;
     isLoading = true;
     error = null;
     activities = [];
@@ -479,9 +492,9 @@ class ProjectNotifier extends ChangeNotifier
       // activity's geometry (issue #29) — skip the parallel low-res fetch
       // (it would be discarded) and build low-res geo client-side below,
       // once decrypted activities/items are available.
-      final detailsFuture = _service.getDetailsMeta(name);
+      final detailsFuture = _service.getDetailsMeta(ref);
       final lowResFuture =
-          encryption.isUnlocked ? null : _service.getLowResGeo(name);
+          encryption.isUnlocked ? null : _service.getLowResGeo(ref);
       // Both futures need a listener from the moment they're created: if
       // lowResFuture rejects first, the catch below returns before
       // detailsFuture is ever awaited, leaving it truly unobserved — a later
@@ -493,13 +506,13 @@ class ProjectNotifier extends ChangeNotifier
 
       if (lowResFuture != null) {
         geo = await lowResFuture;
-        if (_loadKey == name) notifyListeners(); // map visible at ~2.2s
+        if (_loadKey == ref) notifyListeners(); // map visible at ~2.2s
       }
 
       final details = await detailsFuture;
-      if (_loadKey != name) return;
+      if (_loadKey != ref) return;
 
-      projectName = details['name'] as String? ?? name;
+      this.ref = ref.copyWith(name: details['name'] as String? ?? name);
       tripStart = details['trip_start'] as String?;
       tripEnd = details['trip_end'] as String?;
       final rawActivities = details['activities'];
@@ -572,7 +585,7 @@ class ProjectNotifier extends ChangeNotifier
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
       await _restoreUiState();  // issue #76 follow-up: reapply persisted selection/filters
       if (loadOwnerExtras) {
-        await Future.wait([_loadSyncMeta(name), _loadShareInfo(name)]);
+        await Future.wait([_loadSyncMeta(ref), _loadShareInfo(ref)]);
       }
     } on Exception catch (e) {
       error = _msg(e);
@@ -582,25 +595,25 @@ class ProjectNotifier extends ChangeNotifier
     }
 
     // Phase 2: full-res GeoJSON + elevation data in background.
-    _loadFullGeoProgressively(name);
-    _loadElevationData(name);
+    _loadFullGeoProgressively(ref);
+    _loadElevationData(ref);
     // Recover any segment left "pending" by a resolve job that never finished
     // (e.g. the server restarted mid-resolve). Owner-editable loads only.
-    if (loadOwnerExtras) recoverStalePendingSegments(name);
+    if (loadOwnerExtras) recoverStalePendingSegments(ref);
     // Background sync check — fires only for active trips with auto-sync on.
     // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
       Future.delayed(const Duration(seconds: 5), () {
-        if (_loadKey == name) _backgroundSyncCheck(name);
+        if (_loadKey == ref) _backgroundSyncCheck(ref);
       });
     }
   }
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
   /// straight-line approximation with its real GPS trace (last activity first).
-  Future<void> _loadFullGeoProgressively(String name) async {
+  Future<void> _loadFullGeoProgressively(ProjectRef ref) async {
     // Guard: abort if the user navigated away before we finish
-    if (_loadKey != name) return;
+    if (_loadKey != ref) return;
 
     if (encryption.isUnlocked) {
       // Full-res geo is already fully knowable from the decrypted activities
@@ -626,13 +639,13 @@ class ProjectNotifier extends ChangeNotifier
     Map<String, dynamic>? fullGeo;
     for (int attempt = 0; attempt < 2; attempt++) {
       try {
-        fullGeo = await _service.getGeo(name);
+        fullGeo = await _service.getGeo(ref);
         break;
       } on Object catch (e) {
         // Catch Object (not just Exception): a decode failure can throw an
         // Error (RangeError/TypeError), which would otherwise escape as an
         // unhandled async exception and never surface here.
-        if (_loadKey != name) return;
+        if (_loadKey != ref) return;
         if (attempt == 1) {
           error = 'Could not load full-resolution tracks: $e';
           isGeoLoaded = false;
@@ -640,10 +653,10 @@ class ProjectNotifier extends ChangeNotifier
           return;
         }
         await Future.delayed(const Duration(seconds: 2));
-        if (_loadKey != name) return;
+        if (_loadKey != ref) return;
       }
     }
-    if (fullGeo == null || _loadKey != name) return;
+    if (fullGeo == null || _loadKey != ref) return;
 
     try {
       // Drop overlay entries the server geo already reflects, so the durable
@@ -677,7 +690,7 @@ class ProjectNotifier extends ChangeNotifier
       int batchCount = 0;
       List<dynamic>? batchFeatures;
       for (final actId in actIds) {
-        if (_loadKey != name) return;
+        if (_loadKey != ref) return;
         final full = fullFeatures[actId];
         if (full == null) continue;
         if (batchFeatures == null) {
@@ -697,7 +710,7 @@ class ProjectNotifier extends ChangeNotifier
         }
       }
 
-      if (_loadKey != name) return;
+      if (_loadKey != ref) return;
       // Final pass: rebuild authoritatively from the server geo (activities at
       // full resolution + the server's segment features), then re-apply the
       // durable segment overlay so any local add/update/delete that happened
@@ -721,10 +734,10 @@ class ProjectNotifier extends ChangeNotifier
   /// background and merges them into the already-rendered activity list so the
   /// elevation chart and cursor-to-map sync become available without blocking
   /// the initial panel render.
-  Future<void> _loadElevationData(String name) async {
+  Future<void> _loadElevationData(ProjectRef ref) async {
     try {
-      final details = await _service.getDetails(name);
-      if (_loadKey != name) return;
+      final details = await _service.getDetails(ref);
+      if (_loadKey != ref) return;
       final rawActivities = details['activities'];
       if (rawActivities is List) {
         final freshActivities = rawActivities.cast<Map<String, dynamic>>();
@@ -833,7 +846,7 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Guard used by staged-loading subclasses to detect navigation away.
   @protected
-  String? get currentLoadKey => _loadKey;
+  ProjectRef? get currentLoadKey => _loadKey;
 
   /// Live arc preview while a SegmentDialog or LocationPickerDialog is open.
   /// Callers write directly to `.value` — updates don't trigger notifyListeners().
@@ -922,7 +935,7 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   void clear() {
-    projectName = null;
+    ref = null;
     activities = [];
     items = [];
     geo = null;
@@ -949,14 +962,14 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<String?> renameProject(String newName) async {
-    final name = projectName;
-    if (name == null) return null;
+    final ref = this.ref;
+    if (ref == null) return null;
     try {
       final result = await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}',
+        ref.path(),
         {'new_name': newName},
       ) as Map<String, dynamic>;
-      projectName = result['name'] as String;
+      this.ref = ref.copyWith(name: result['name'] as String);
       notifyListeners();
       return projectName;
     } on Exception catch (e) {
@@ -984,11 +997,9 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Auto-sync ─────────────────────────────────────────────────────────────
 
-  Future<void> _loadSyncMeta(String name) async {
+  Future<void> _loadSyncMeta(ProjectRef ref) async {
     try {
-      final data = await api.get(
-        '/api/projects/${Uri.encodeComponent(name)}/sync-meta',
-      ) as Map<String, dynamic>;
+      final data = await api.get(ref.path('/sync-meta')) as Map<String, dynamic>;
       autoSyncEnabled = data['auto_sync_enabled'] as bool? ?? true;
       linkedPsTripId = data['linked_ps_trip_id'] as int?;
       lastStravaSyncAt = (data['last_strava_sync_at'] as num?)?.toDouble();
@@ -998,11 +1009,9 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> _loadShareInfo(String name) async {
+  Future<void> _loadShareInfo(ProjectRef ref) async {
     try {
-      final data = await api.get(
-        '/api/projects/${Uri.encodeComponent(name)}/share-info',
-      ) as Map<String, dynamic>;
+      final data = await api.get(ref.path('/share-info')) as Map<String, dynamic>;
       shareToken = data['share_token'] as String?;
       shareTokenNoMemories = data['share_token_no_memories'] as String?;
     } catch (_) {
@@ -1010,14 +1019,12 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> _backgroundSyncCheck(String name) async {
+  Future<void> _backgroundSyncCheck(ProjectRef ref) async {
     try {
-      final data = await api.get(
-        '/api/projects/${Uri.encodeComponent(name)}/sync/check',
-      ) as Map<String, dynamic>;
+      final data = await api.get(ref.path('/sync/check')) as Map<String, dynamic>;
       final strava = (data['strava'] as List?)?.cast<Map<String, dynamic>>() ?? [];
       final ps = (data['polarsteps'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      if ((strava.isNotEmpty || ps.isNotEmpty) && projectName == name) {
+      if ((strava.isNotEmpty || ps.isNotEmpty) && this.ref == ref) {
         pendingSync = (strava: strava, polarsteps: ps);
         notifyListeners();
       }
@@ -1027,8 +1034,8 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> saveSyncMeta({bool? autoSyncEnabled, int? linkedPsTripId, bool clearLinkedTrip = false}) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     if (autoSyncEnabled != null) this.autoSyncEnabled = autoSyncEnabled;
     if (clearLinkedTrip) {
       this.linkedPsTripId = null;
@@ -1045,7 +1052,7 @@ class ProjectNotifier extends ChangeNotifier
       } else if (linkedPsTripId != null) {
         body['linked_ps_trip_id'] = linkedPsTripId;
       }
-      await api.put('/api/projects/${Uri.encodeComponent(name)}/sync-meta', body);
+      await api.put(ref.path('/sync-meta'), body);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -1053,8 +1060,8 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> markSynced() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
     lastStravaSyncAt = now;
     lastPsSyncAt = now;
@@ -1062,7 +1069,7 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
     try {
       await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}/sync-meta',
+        ref.path('/sync-meta'),
         {'last_strava_sync_at': now, 'last_ps_sync_at': now},
       );
     } on Exception catch (e) {
@@ -1074,13 +1081,10 @@ class ProjectNotifier extends ChangeNotifier
   // ── Share ──────────────────────────────────────────────────────────────────
 
   Future<void> createShareToken() async {
-    final name = projectName;
-    if (name == null) throw Exception('No project open');
+    final ref = this.ref;
+    if (ref == null) throw Exception('No project open');
     try {
-      final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(name)}/share',
-        {},
-      ) as Map<String, dynamic>;
+      final result = await api.post(ref.path('/share'), {}) as Map<String, dynamic>;
       shareToken = result['share_token'] as String?;
       notifyListeners();
     } on ApiException catch (e) {
@@ -1089,10 +1093,10 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> revokeShareToken() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
-      await api.delete('/api/projects/${Uri.encodeComponent(name)}/share');
+      await api.delete(ref.path('/share'));
       shareToken = null;
       notifyListeners();
     } on ApiException catch (e) {
@@ -1101,13 +1105,11 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> createShareTokenNoMemories() async {
-    final name = projectName;
-    if (name == null) throw Exception('No project open');
+    final ref = this.ref;
+    if (ref == null) throw Exception('No project open');
     try {
-      final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(name)}/share/no-memories',
-        {},
-      ) as Map<String, dynamic>;
+      final result = await api.post(ref.path('/share/no-memories'), {})
+          as Map<String, dynamic>;
       shareTokenNoMemories = result['share_token_no_memories'] as String?;
       notifyListeners();
     } on ApiException catch (e) {
@@ -1116,11 +1118,10 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> revokeShareTokenNoMemories() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
-      await api.delete(
-          '/api/projects/${Uri.encodeComponent(name)}/share/no-memories');
+      await api.delete(ref.path('/share/no-memories'));
       shareTokenNoMemories = null;
       notifyListeners();
     } on ApiException catch (e) {
@@ -1129,12 +1130,10 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<Map<String, dynamic>> getShareVisitors() async {
-    final name = projectName;
-    if (name == null) return {};
+    final ref = this.ref;
+    if (ref == null) return {};
     try {
-      return await api.get(
-        '/api/projects/${Uri.encodeComponent(name)}/share/visitors',
-      ) as Map<String, dynamic>;
+      return await api.get(ref.path('/share/visitors')) as Map<String, dynamic>;
     } on ApiException catch (e) {
       throw Exception(e.body);
     }
@@ -1154,9 +1153,9 @@ class ProjectNotifier extends ChangeNotifier
   /// attached to the "full" share token. See [ShareContentGenerator] for the
   /// actual (independently-testable) logic.
   Future<String?> generateShareContent() async {
-    final name = projectName;
-    if (name == null) throw Exception('No project open');
-    return ShareContentGenerator(api).generate(name, items);
+    final ref = this.ref;
+    if (ref == null) throw Exception('No project open');
+    return ShareContentGenerator(api).generate(ref, items);
   }
 
   /// Fetches raw bytes for an export API path.
@@ -1173,15 +1172,15 @@ class ProjectNotifier extends ChangeNotifier
   /// Optimistic update is applied immediately; no reload needed since the
   /// server only writes these two fields and returns them unchanged.
   Future<void> setTripDates(String? startStr, String? endStr) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     if (tripStart == startStr && tripEnd == endStr) return;
     tripStart = startStr;
     tripEnd = endStr;
     notifyListeners();
     try {
       await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}',
+        ref.path(),
         {'trip_start': startStr, 'trip_end': endStr},
       );
     } on Exception catch (e) {
@@ -1195,16 +1194,16 @@ class ProjectNotifier extends ChangeNotifier
   /// Polls memory photos every 3 s for up to 60 s after a Polarsteps import.
   /// Updates only the `photos` list inside each memory item so map markers
   /// refresh without a full reload.
-  void startPhotoPolling(String projectName) {
+  void startPhotoPolling(ProjectRef ref) {
     _stopPhotoPolling();
     var remainingTicks = 20; // 3 s × 20 = 60 s
     _photoPollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      if (remainingTicks <= 0 || this.projectName != projectName) {
+      if (remainingTicks <= 0 || this.ref != ref) {
         _stopPhotoPolling();
         return;
       }
       remainingTicks--;
-      await _refreshMemoryPhotos(projectName);
+      await _refreshMemoryPhotos(ref);
     });
   }
 
@@ -1213,10 +1212,10 @@ class ProjectNotifier extends ChangeNotifier
     _photoPollingTimer = null;
   }
 
-  Future<void> _refreshMemoryPhotos(String projectName) async {
+  Future<void> _refreshMemoryPhotos(ProjectRef ref) async {
     try {
-      final details = await _service.getDetails(projectName);
-      if (this.projectName != projectName) return;
+      final details = await _service.getDetails(ref);
+      if (this.ref != ref) return;
       final rawItems = details['items'];
       if (rawItems is! List) return;
       final freshItems = rawItems.cast<Map<String, dynamic>>();
@@ -1276,11 +1275,11 @@ class ProjectNotifier extends ChangeNotifier
   // ── Item management ────────────────────────────────────────────────────────
 
   Future<void> refreshActivity(int activityId) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
       final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(name)}/activities/$activityId/refresh',
+        ref.path('/activities/$activityId/refresh'),
         {},
       ) as Map<String, dynamic>;
       final rawActivities = result['activities'];
@@ -1296,7 +1295,7 @@ class ProjectNotifier extends ChangeNotifier
       // Refresh GeoJSON so the map polylines reflect the updated track.
       geo = encryption.isUnlocked
           ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
-          : await _service.getGeo(name);
+          : await _service.getGeo(ref);
       notifyListeners();
     } on Exception catch (e) {
       error = _msg(e);
@@ -1316,13 +1315,12 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> removeItem(int index) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     removeItemLocally(index);
     try {
-      await api.delete(
-          '/api/projects/${Uri.encodeComponent(name)}/items/$index');
-      await _silentReload(name);
+      await api.delete(ref.path('/items/$index'));
+      await _silentReload(ref);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -1332,12 +1330,11 @@ class ProjectNotifier extends ChangeNotifier
   /// API-only delete used by the undo-aware dismiss flow: the local removal
   /// has already happened via [removeItemLocally].
   Future<void> confirmRemoveItem(int index) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
-      await api.delete(
-          '/api/projects/${Uri.encodeComponent(name)}/items/$index');
-      await _silentReload(name);
+      await api.delete(ref.path('/items/$index'));
+      await _silentReload(ref);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -1345,11 +1342,11 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> sortItemsByDate() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
-      await _service.sortItems(name);
-      await _silentReloadDetailsOnly(name);
+      await _service.sortItems(ref);
+      await _silentReloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -1357,18 +1354,18 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> reorderItems(int fromIndex, int toIndex) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     // Immediate local update so the list responds without a blank flash.
     final moved = items.removeAt(fromIndex);
     items.insert(toIndex, moved);
     notifyListeners();
     try {
       await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}/items/reorder',
+        ref.path('/items/reorder'),
         {'from_index': fromIndex, 'to_index': toIndex},
       );
-      await _silentReloadDetailsOnly(name);
+      await _silentReloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
@@ -1382,9 +1379,9 @@ class ProjectNotifier extends ChangeNotifier
   /// the lightweight meta/list load omits. Uses the per-activity endpoint so the
   /// editor doesn't download the whole project. Returns null if not found.
   Future<Map<String, dynamic>?> fetchActivityForEdit(int activityId) async {
-    final name = projectName;
-    if (name == null) return null;
-    return _service.getActivityTrack(name, activityId);
+    final ref = this.ref;
+    if (ref == null) return null;
+    return _service.getActivityTrack(ref, activityId);
   }
 
   /// Save an edited track (trim/add/remove) for [activityId]. [payload] is
@@ -1392,18 +1389,18 @@ class ProjectNotifier extends ChangeNotifier
   /// the editor page can surface the failure and keep the user's edits.
   Future<void> saveActivityTrack(
     int activityId, Map<String, dynamic> payload) async {
-    final name = projectName;
-    if (name == null) return;
-    await _service.saveActivityTrack(name, activityId, payload);
-    await _silentReload(name);
+    final ref = this.ref;
+    if (ref == null) return;
+    await _service.saveActivityTrack(ref, activityId, payload);
+    await _silentReload(ref);
   }
 
   /// Reset [activityId]'s track to the original Strava geometry.
   Future<void> resetActivityTrack(int activityId) async {
-    final name = projectName;
-    if (name == null) return;
-    await _service.resetActivityTrack(name, activityId);
-    await _silentReload(name);
+    final ref = this.ref;
+    if (ref == null) return;
+    await _service.resetActivityTrack(ref, activityId);
+    await _silentReload(ref);
   }
 
   /// Split [activityId] at [splitIndex]; the tail becomes a new local activity.
@@ -1414,19 +1411,19 @@ class ProjectNotifier extends ChangeNotifier
     int splitIndex, {
     bool dropBoundary = false,
   }) async {
-    final name = projectName;
-    if (name == null) return;
-    await _service.splitActivity(name, activityId, splitIndex,
+    final ref = this.ref;
+    if (ref == null) return;
+    await _service.splitActivity(ref, activityId, splitIndex,
         dropBoundary: dropBoundary);
-    await _silentReload(name);
+    await _silentReload(ref);
   }
 
   /// Delete a local (split-tail, negative-id) [activityId].
   Future<void> deleteLocalActivity(int activityId) async {
-    final name = projectName;
-    if (name == null) return;
-    await _service.deleteLocalActivity(name, activityId);
-    await _silentReload(name);
+    final ref = this.ref;
+    if (ref == null) return;
+    await _service.deleteLocalActivity(ref, activityId);
+    await _silentReload(ref);
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────────
@@ -1438,8 +1435,8 @@ class ProjectNotifier extends ChangeNotifier
     Map<String, String>? newSleepingOptionGroups,
     List<Map<String, dynamic>>? newCounters,
   }) async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     dayMeta = newDayMeta;
     if (newSleepingOptions != null) sleepingOptions = newSleepingOptions;
     if (newSleepingOptionGroups != null) sleepingOptionGroups = newSleepingOptionGroups;
@@ -1447,7 +1444,7 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
     try {
       await api.put(
-        '/api/projects/${Uri.encodeComponent(name)}/day-meta',
+        ref.path('/day-meta'),
         {
           'day_meta': newDayMeta,
           if (newSleepingOptions != null) 'sleeping_options': newSleepingOptions,
@@ -1512,22 +1509,22 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
-  Future<void> _silentReload(String name) async {
+  Future<void> _silentReload(ProjectRef ref) async {
     try {
       if (encryption.isUnlocked) {
         // The server can't build geo for encrypted activities (issue #29) —
         // build it client-side from the just-reloaded, decrypted activities.
-        final details = await _service.getDetailsMeta(name);
-        await _applyDetails(details, name);
+        final details = await _service.getDetailsMeta(ref);
+        await _applyDetails(details, ref);
         _autoFillDaysToToday();
         geo = client_geo.buildFullGeo(items, client_geo.activitiesById(activities));
       } else {
         final results = await Future.wait([
-          _service.getDetailsMeta(name),
-          _service.getGeo(name),
+          _service.getDetailsMeta(ref),
+          _service.getGeo(ref),
         ]);
         final details = results[0];
-        await _applyDetails(details, name);
+        await _applyDetails(details, ref);
         _autoFillDaysToToday();
         geo = results[1];
       }
@@ -1542,10 +1539,10 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Details-only reload: skips the heavy GeoJSON fetch. Use when a mutation
   /// cannot change map geometry (reorder, trip-start, memory CRUD).
-  Future<void> _silentReloadDetailsOnly(String name) async {
+  Future<void> _silentReloadDetailsOnly(ProjectRef ref) async {
     try {
-      final details = await _service.getDetailsMeta(name);
-      await _applyDetails(details, name);
+      final details = await _service.getDetailsMeta(ref);
+      await _applyDetails(details, ref);
       _autoFillDaysToToday();
       _updateStats();
     } on Exception catch (e) {
@@ -1639,8 +1636,8 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  Future<void> _applyDetails(dynamic details, String name) async {
-    projectName = details['name'] as String? ?? name;
+  Future<void> _applyDetails(dynamic details, ProjectRef ref) async {
+    this.ref = ref.copyWith(name: details['name'] as String? ?? ref.name);
     tripStart   = details['trip_start'] as String?;
     final rawColor = details['track_color'] as String?;
     if (rawColor != null && rawColor.length == 7 && rawColor.startsWith('#')) {
@@ -1700,7 +1697,10 @@ class ProjectNotifier extends ChangeNotifier
   ProjectService get service => _service;
 
   @override
-  Future<void> reloadDetailsOnly(String name) => _silentReloadDetailsOnly(name);
+  ProjectRef? get projectRef => ref;
+
+  @override
+  Future<void> reloadDetailsOnly(ProjectRef ref) => _silentReloadDetailsOnly(ref);
 
   @override
   String errorMessage(Exception e) => _msg(e);

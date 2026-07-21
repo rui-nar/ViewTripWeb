@@ -10,6 +10,7 @@ library;
 import 'package:flutter/foundation.dart';
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 
 /// Converts a memory item (as found in `ProjectNotifier.items`) to the
 /// `PosterMemoryIn` shape the poster API expects.
@@ -28,7 +29,7 @@ Map<String, dynamic> posterMemoryJson(Map<String, dynamic> memory) => {
 /// (no job created, no polling): the server skips the Mapbox basemap fetch
 /// entirely for this endpoint, so it returns in well under a second.
 Future<Uint8List> fetchPosterPreview({
-  required String projectName,
+  required ProjectRef ref,
   required Map<String, double> bounds,
   required String orientation,
   required Map<String, bool> config,
@@ -36,7 +37,7 @@ Future<Uint8List> fetchPosterPreview({
   ApiClient? client,
 }) async {
   final res = await (client ?? api).postRaw(
-    '/api/projects/${Uri.encodeComponent(projectName)}/poster/preview',
+    ref.path('/poster/preview'),
     {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
   );
   return res.bodyBytes;
@@ -49,16 +50,19 @@ Future<Uint8List> fetchPosterPreview({
 /// [downloadPath] once [status] is 'done'.
 class PosterJobNotifier extends ChangeNotifier {
   final ApiClient _api;
-  final String projectName;
+  final ProjectRef ref;
   final Duration pollInterval;
   final int maxPollAttempts;
 
   PosterJobNotifier({
-    required this.projectName,
+    required this.ref,
     ApiClient? client,
     this.pollInterval = const Duration(seconds: 2),
     this.maxPollAttempts = 60,
   }) : _api = client ?? api;
+
+  /// Display-only convenience — filenames etc still key off the plain name.
+  String get projectName => ref.name;
 
   int? jobId;
 
@@ -70,8 +74,6 @@ class PosterJobNotifier extends ChangeNotifier {
   bool get isBusy => status == 'pending' || status == 'running';
   bool get isDone => status == 'done';
   bool get isFailed => status == 'failed';
-
-  String get _encName => Uri.encodeComponent(projectName);
 
   /// Starts a poster job for the given request body and polls it to
   /// completion. [bounds] is `{north, south, east, west}`; [config] matches
@@ -86,7 +88,7 @@ class PosterJobNotifier extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
-      final result = await _api.post('/api/projects/$_encName/poster', {
+      final result = await _api.post(ref.path('/poster'), {
         'bounds': bounds,
         'orientation': orientation,
         'config': config,
@@ -112,8 +114,8 @@ class PosterJobNotifier extends ChangeNotifier {
     if (id == null) return;
     for (var i = 0; i < maxPollAttempts; i++) {
       try {
-        final result = await _api.get('/api/projects/$_encName/poster/$id')
-            as Map<String, dynamic>;
+        final result =
+            await _api.get(ref.path('/poster/$id')) as Map<String, dynamic>;
         status = result['status'] as String? ?? status;
         stage = result['stage'] as String?;
         if (status == 'done') {
@@ -146,5 +148,5 @@ class PosterJobNotifier extends ChangeNotifier {
 
   /// API path for downloading the rendered poster once [status] is 'done'.
   String downloadPath(String format) =>
-      '/api/projects/$_encName/poster/$jobId/download?format=$format';
+      ref.path('/poster/$jobId/download?format=$format');
 }

@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
+import '../core/project_ref.dart';
 import 'projects_notifier.dart';
 
 class ProjectsScreen extends StatefulWidget {
@@ -238,9 +239,9 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
 
                 const SizedBox(height: 16),
 
-                // ── Open saved ────────────────────────────────────────────
+                // ── My trips ─────────────────────────────────────────────
                 _SectionCard(
-                  title: 'Open Saved',
+                  title: 'My Trips',
                   icon: Icons.folder_open_outlined,
                   child: Consumer<ProjectsNotifier>(
                     builder: (_, notifier, __) {
@@ -251,7 +252,10 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                               Center(child: CircularProgressIndicator()),
                         );
                       }
-                      if (notifier.projects.isEmpty) {
+                      final mine = notifier.projects
+                          .where((p) => !p.isSharedWithMe)
+                          .toList();
+                      if (mine.isEmpty) {
                         return Padding(
                           padding:
                               const EdgeInsets.symmetric(vertical: 24),
@@ -263,59 +267,44 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                       }
                       return Column(
                         children: [
-                          for (int i = 0;
-                              i < notifier.projects.length;
-                              i++) ...[
+                          for (int i = 0; i < mine.length; i++) ...[
                             if (i > 0) const Divider(height: 1),
-                            Builder(builder: (context) {
-                              final project = notifier.projects[i];
-                              final name =
-                                  project['name'] as String? ?? 'Untitled';
-                              return ListTile(
-                                contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 0, vertical: 4),
-                                leading: Icon(Icons.map_outlined,
-                                    color: theme.colorScheme.primary),
-                                title: Text(name,
-                                    style: theme.textTheme.bodyMedium),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(
-                                          Icons.delete_outline,
-                                          size: 20),
-                                      tooltip: 'Delete project',
-                                      color: theme.colorScheme.error,
-                                      onPressed: () =>
-                                          _confirmDelete(name),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    ElevatedButton(
-                                      onPressed: () {
-                                        final encoded =
-                                            Uri.encodeComponent(name);
-                                        context.go(
-                                            '/view?project=$encoded');
-                                      },
-                                      style: ElevatedButton.styleFrom(
-                                        minimumSize:
-                                            const Size(72, 36),
-                                        padding:
-                                            const EdgeInsets.symmetric(
-                                                horizontal: 16),
-                                      ),
-                                      child: const Text('Open'),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            }),
+                            _ProjectTile(
+                              project: mine[i],
+                              onDelete: _confirmDelete,
+                            ),
                           ],
                         ],
                       );
                     },
                   ),
+                ),
+
+                // ── Shared with me (issue #106) ─────────────────────────────
+                Consumer<ProjectsNotifier>(
+                  builder: (_, notifier, __) {
+                    final shared = notifier.projects
+                        .where((p) => p.isSharedWithMe)
+                        .toList();
+                    if (shared.isEmpty) return const SizedBox.shrink();
+                    return Column(
+                      children: [
+                        const SizedBox(height: 16),
+                        _SectionCard(
+                          title: 'Shared With Me',
+                          icon: Icons.group_outlined,
+                          child: Column(
+                            children: [
+                              for (int i = 0; i < shared.length; i++) ...[
+                                if (i > 0) const Divider(height: 1),
+                                _ProjectTile(project: shared[i]),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
 
                 const SizedBox(height: 16),
@@ -420,6 +409,68 @@ class _BgPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BgPainter old) => old.dark != dark;
+}
+
+// ── Project tile (own or shared — issue #106) ─────────────────────────────────
+
+/// One row in "My Trips" / "Shared With Me": name (+ owner chip when shared),
+/// an Open button, and — only for [onDelete] != null, i.e. owned projects —
+/// a delete button. Shared tiles have no delete/rename here; leaving a shared
+/// trip is member-management UI, out of scope for this unit (see #106 U5).
+class _ProjectTile extends StatelessWidget {
+  final Map<String, dynamic> project;
+  final void Function(String name)? onDelete;
+
+  const _ProjectTile({required this.project, this.onDelete});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final name = project['name'] as String? ?? 'Untitled';
+    final ref = project.ref;
+    final ownerName = project.ownerName;
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
+      leading: Icon(Icons.map_outlined, color: theme.colorScheme.primary),
+      title: Text(name, style: theme.textTheme.bodyMedium),
+      subtitle: ownerName != null && ownerName.isNotEmpty
+          ? Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Chip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                avatar: const Icon(Icons.person_outline, size: 14),
+                label: Text('Shared by $ownerName',
+                    style: theme.textTheme.bodySmall),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+              ),
+            )
+          : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (onDelete != null) ...[
+            IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              tooltip: 'Delete project',
+              color: theme.colorScheme.error,
+              onPressed: () => onDelete!(name),
+            ),
+            const SizedBox(width: 4),
+          ],
+          ElevatedButton(
+            onPressed: () => context.go(
+                ref.withOwner('/view?project=${Uri.encodeComponent(name)}')),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(72, 36),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+            ),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ── Reusable section card ─────────────────────────────────────────────────────

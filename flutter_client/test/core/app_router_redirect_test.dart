@@ -17,6 +17,7 @@ import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
 import 'package:viewtrip_client/src/core/app_router.dart';
 import 'package:viewtrip_client/src/core/last_opened_project.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/app_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -41,8 +42,8 @@ AuthNotifier _loggedInAuth(String userId) {
 // unmocked api.get() call.
 class _FakeProjectService extends ProjectService {
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async => {
-        'name': name,
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async => {
+        'name': ref.name,
         'activities': <dynamic>[],
         'items': <dynamic>[],
         'people': <dynamic>[],
@@ -50,11 +51,11 @@ class _FakeProjectService extends ProjectService {
       };
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String name) async =>
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getGeo(String name) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   // load() unconditionally kicks off a background elevation-data fetch via
@@ -62,8 +63,8 @@ class _FakeProjectService extends ProjectService {
   // falls through to a real, unmocked api.get() call (see
   // project_stats_screen_test.dart for the same precedent).
   @override
-  Future<Map<String, dynamic>> getDetails(String name) async =>
-      getDetailsMeta(name);
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async =>
+      getDetailsMeta(ref);
 }
 
 /// Skips owner-only network calls (sync meta / share info) that
@@ -81,7 +82,7 @@ void main() {
       'resolves to /view?project=<name> when a last-opened project pref is set',
       () async {
     final auth = _loggedInAuth('user-1');
-    await saveLastOpenedProject(auth.user!.id, 'Trip A');
+    await saveLastOpenedProject(auth.user!.id, const ProjectRef(name: 'Trip A'));
 
     final target = await rootRedirectTarget(auth.user?.id);
 
@@ -100,7 +101,7 @@ void main() {
   test('resolves to /projects for a different user than the one who saved',
       () async {
     final saver = _loggedInAuth('user-1');
-    await saveLastOpenedProject(saver.user!.id, 'Trip A');
+    await saveLastOpenedProject(saver.user!.id, const ProjectRef(name: 'Trip A'));
     final otherUser = _loggedInAuth('user-2');
 
     final target = await rootRedirectTarget(otherUser.user?.id);
