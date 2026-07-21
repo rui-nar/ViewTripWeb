@@ -110,6 +110,7 @@ These are read by the backend at **runtime** (`os.getenv`) — a value passed to
 | `DATABASE_URL` | SQLAlchemy URL for the DB (defaults to local `viewtripweb.db`) |
 | `GOOGLE_TRANSLATE_API_KEY` | Enables memory translation endpoints (optional) |
 | `GOOGLE_CLIENT_ID` | Google OAuth client id; takes priority over `config.json` (optional) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `MAIL_FROM` | Transactional email via any provider's SMTP relay (optional — without `SMTP_HOST`, emails are logged to the console instead of sent) |
 | `APP_VERSION` | Running version; set automatically from the git tag at image build |
 
 **Local dev:** export the vars before launching (`export $(grep -v '^#' .env | xargs)`),

@@ -19,7 +19,7 @@ from api.deps import get_current_user
 from api.members import router as members_router, invites_router
 from api.people import router as people_router
 from api.projects import router as projects_router
-from models.project_db import DBProject, DBProjectMember
+from models.project_db import DBProject, DBProjectInvite, DBProjectMember
 from models.user import UserInfo
 
 
@@ -256,3 +256,91 @@ def test_meta_and_full_payload_carry_caller_role(env):
     act_as("viewer")
     assert client.get(f"/api/projects/Trip/meta{q}").json()["caller_role"] == "viewer"
     assert client.get(f"/api/projects/Trip{q}").json()["caller_role"] == "viewer"
+
+
+# ── Invite emails (issue #113) ──────────────────────────────────────────────
+#
+# create_invite queues a background email when the request carries one.
+# FastAPI's TestClient runs BackgroundTasks inline before the response
+# returns, so these assert on the fake synchronously — no real network, no
+# mocking of aiosmtplib (per the email-service test guidance).
+
+class _FakeEmailService:
+    def __init__(self):
+        self.sent: list = []
+
+    async def send(self, message) -> None:
+        self.sent.append(message)
+
+
+@pytest.fixture
+def fake_email(monkeypatch):
+    fake = _FakeEmailService()
+    monkeypatch.setattr("api.members.get_email_service", lambda: fake)
+    return fake
+
+
+def test_invite_with_email_queues_a_send(env, fake_email):
+    client, _, _, act_as = env
+    act_as("owner")
+
+    r = client.post("/api/projects/Trip/members/invite",
+                     json={"role": "editor", "email": "friend@example.com"})
+
+    assert r.status_code == 200, r.text
+    assert len(fake_email.sent) == 1
+    msg = fake_email.sent[0]
+    assert msg.to == "friend@example.com"
+    assert "Trip" in msg.subject
+    assert f"/join/{r.json()['token']}" in msg.text_body
+    assert f"/join/{r.json()['token']}" in msg.html_body
+
+
+def test_invite_without_email_sends_nothing(env, fake_email):
+    client, _, _, act_as = env
+    act_as("owner")
+
+    r = client.post("/api/projects/Trip/members/invite", json={"role": "editor"})
+
+    assert r.status_code == 200, r.text
+    assert fake_email.sent == []
+
+
+def test_invite_email_rejects_a_malformed_address(env, fake_email):
+    client, _, _, act_as = env
+    act_as("owner")
+
+    r = client.post("/api/projects/Trip/members/invite",
+                     json={"role": "editor", "email": "not-an-email"})
+
+    assert r.status_code == 422
+    assert fake_email.sent == []
+
+
+def test_invite_email_still_enforces_the_coowner_gate(env, fake_email):
+    client, _, ids, act_as = env
+    _join(client, act_as, "editor", role="editor")
+    act_as("editor")
+
+    r = client.post(f"/api/projects/Trip/members/invite?owner={ids['owner']}",
+                     json={"role": "editor", "email": "friend@example.com"})
+
+    assert r.status_code == 403
+    assert fake_email.sent == []
+
+
+def test_invite_email_reuses_the_existing_token_and_can_be_resent(env, fake_email):
+    """Emailing an already-existing invite to a second address doesn't
+    create a second DBProjectInvite row, and both sends are queued."""
+    client, engine, _, act_as = env
+    act_as("owner")
+
+    r1 = client.post("/api/projects/Trip/members/invite",
+                      json={"email": "one@example.com"})
+    r2 = client.post("/api/projects/Trip/members/invite",
+                      json={"email": "two@example.com"})
+
+    assert r1.json()["token"] == r2.json()["token"]
+    assert [m.to for m in fake_email.sent] == ["one@example.com", "two@example.com"]
+    with Session(engine) as sess:
+        assert len(sess.exec(select(DBProjectInvite)).all()) == 1

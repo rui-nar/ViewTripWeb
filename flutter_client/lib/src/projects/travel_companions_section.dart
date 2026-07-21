@@ -1,13 +1,15 @@
-/// "Travel companions" settings section (issue #106; roles: issue #109).
+/// "Travel companions" settings section (issue #106; roles: issue #109;
+/// invite emails: issue #113).
 ///
 /// Rendered inside ProjectSettingsScreen's section card. Co-owner+ view:
 /// member list with per-member remove (a co-owner can't remove another
 /// co-owner — owner-only, to avoid co-owners locking each other out), plus
 /// an invite-link block with a role picker (viewer/editor, and co-owner for
-/// the strict owner only) — create → copy URL → revoke; a 409 from an
-/// E2EE-enabled account surfaces the server's message inline. Editor/viewer
-/// view: read-only member list plus a "Leave trip" action that removes the
-/// caller's own membership and returns to the projects list.
+/// the strict owner only) — create → copy URL → revoke, with an optional
+/// email field to have the server send the join link directly; a 409 from
+/// an E2EE-enabled account surfaces the server's message inline. Editor/
+/// viewer view: read-only member list plus a "Leave trip" action that
+/// removes the caller's own membership and returns to the projects list.
 library;
 
 import 'package:flutter/material.dart';
@@ -80,12 +82,21 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
   // of an already-created link, which is memberInviteRole on the notifier.
   String _inviteRoleChoice = 'editor';
 
+  // Recipient for the optional "email this link" action (issue #113).
+  final _inviteEmailCtrl = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     // Deferred: loadMembers() calls notifyListeners(), which must not fire
     // during the first build (see feedback_patterns — ValueNotifier timing).
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _inviteEmailCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -120,17 +131,24 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
   }
 
   Future<void> _createInvite() async {
+    final email = _inviteEmailCtrl.text.trim();
     setState(() {
       _inviteBusy = true;
       _inviteError = null;
     });
     try {
-      await context
-          .read<ProjectNotifier>()
-          .createMemberInvite(role: _inviteRoleChoice);
+      await context.read<ProjectNotifier>().createMemberInvite(
+          role: _inviteRoleChoice, email: email.isEmpty ? null : email);
+      // The send itself is fire-and-forget background work on the server
+      // (issue #113) — this confirms it was queued, not that it arrived.
+      if (email.isNotEmpty && mounted) {
+        _inviteEmailCtrl.clear();
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Invite sent to $email')));
+      }
     } on Exception catch (e) {
-      // 409 (E2EE-enabled account) and any other failure surface inline —
-      // no dialog.
+      // 409 (E2EE-enabled account), 422 (malformed email), and any other
+      // failure surface inline — no dialog.
       if (mounted) setState(() => _inviteError = companionErrorMessage(e));
     } finally {
       if (mounted) setState(() => _inviteBusy = false);
@@ -314,9 +332,34 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
     );
   }
 
+  Widget _emailField() => TextField(
+        controller: _inviteEmailCtrl,
+        onChanged: (_) => setState(() {}), // live-update the button below
+        keyboardType: TextInputType.emailAddress,
+        style: const TextStyle(color: _kText2, fontSize: 13),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Email address (optional) — we\'ll send them the link',
+          hintStyle: const TextStyle(color: _kDim, fontSize: 12),
+          filled: true,
+          fillColor: _kBgCard,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: _kBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: _kBorder),
+          ),
+        ),
+      );
+
   Widget _inviteBlock(ProjectNotifier notifier) {
     final token = notifier.memberInviteToken;
     final grantedRole = notifier.memberInviteRole ?? _inviteRoleChoice;
+    final hasEmail = _inviteEmailCtrl.text.trim().isNotEmpty;
     return Container(
       decoration: BoxDecoration(
         color: _kBg,
@@ -383,6 +426,8 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
               ],
             ),
             const SizedBox(height: 10),
+            _emailField(),
+            const SizedBox(height: 10),
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kBlueActive,
@@ -394,11 +439,12 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
                       width: 14,
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.person_add_alt, size: 15),
-              label: const Text('Create invite link'),
+                  : Icon(hasEmail ? Icons.mail_outline : Icons.person_add_alt,
+                      size: 15),
+              label: Text(hasEmail ? 'Send invite' : 'Create invite link'),
               onPressed: _inviteBusy ? null : _createInvite,
             ),
-          ] else
+          ] else ...[
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
@@ -439,6 +485,27 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
                 ],
               ),
             ),
+            // Email the already-existing link to someone new — same POST,
+            // idempotent for the token itself (issue #113).
+            const SizedBox(height: 10),
+            _emailField(),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: _kBlueActive,
+                side: const BorderSide(color: Color(0x473B82F6)),
+                backgroundColor: const Color(0x1A3B82F6),
+              ),
+              icon: _inviteBusy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.mail_outline, size: 15),
+              label: const Text('Send invite'),
+              onPressed: (_inviteBusy || !hasEmail) ? null : _createInvite,
+            ),
+          ],
           if (_inviteError != null) ...[
             const SizedBox(height: 8),
             Text(

@@ -38,6 +38,7 @@ class _FakeMembersService extends MembersService {
   final removedIds = <int>[];
   int createCalls = 0;
   String? lastRequestedRole;
+  String? lastRequestedEmail;
   int revokeCalls = 0;
 
   _FakeMembersService(this.members);
@@ -46,9 +47,11 @@ class _FakeMembersService extends MembersService {
   Future<List<ProjectMember>> listMembers(ProjectRef ref) async => members;
 
   @override
-  Future<CreatedInvite> createInvite(ProjectRef ref, {String role = 'editor'}) async {
+  Future<CreatedInvite> createInvite(ProjectRef ref,
+      {String role = 'editor', String? email}) async {
     createCalls++;
     lastRequestedRole = role;
+    lastRequestedEmail = email;
     return (token: 'tok123', role: role);
   }
 
