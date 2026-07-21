@@ -21,6 +21,15 @@ Future<void> saveLastOpenedProject(String? userId, ProjectRef ref) async {
   await prefs.setString(_prefKey(userId), jsonEncode(ref.toJson()));
 }
 
+/// Forgets [userId]'s last-opened project — e.g. after leaving a shared trip
+/// (issue #106), so the bare-root redirect doesn't drop the user back into a
+/// project they no longer have access to. No-op if [userId] is null.
+Future<void> clearLastOpenedProject(String? userId) async {
+  if (userId == null) return;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove(_prefKey(userId));
+}
+
 /// Reads [userId]'s last-opened project ref, or null if none is recorded.
 /// No-op (returns null) if [userId] is null. Backward compatible with the
 /// pre-#106 format, which stored the bare project name as a plain string.

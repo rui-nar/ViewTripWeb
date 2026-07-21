@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 
 import 'package:viewtrip_client/src/api/client.dart' show ApiException;
+import 'package:viewtrip_client/src/auth/auth_notifier.dart';
+import 'package:viewtrip_client/src/auth/auth_service.dart';
 import 'package:viewtrip_client/src/projects/people_screen.dart';
 import 'package:viewtrip_client/src/projects/view_screen.dart';
 
@@ -20,8 +23,20 @@ void main() {
       if (details.exception is! ApiException) previousReporter(details, description);
     };
 
-    await tester.pumpWidget(const MaterialApp(
-      home: ViewScreen(projectName: 'Trip'),
+    // ViewScreen resolves the project ref's role against the signed-in user
+    // on load (issue #106), so an AuthNotifier must be in the tree.
+    final auth = AuthNotifier(AuthService());
+    auth.updateUser({
+      'id': 'user-1',
+      'email': 'a@x.com',
+      'display_name': 'A',
+      'auth_provider': 'local',
+    });
+    await tester.pumpWidget(MaterialApp(
+      home: ChangeNotifierProvider<AuthNotifier>.value(
+        value: auth,
+        child: const ViewScreen(projectName: 'Trip'),
+      ),
     ));
     await tester.pump();
     reportTestException = previousReporter;

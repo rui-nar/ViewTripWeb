@@ -46,6 +46,19 @@ class ProjectRef {
         role: role ?? this.role,
       );
 
+  /// Resolves [role] against the signed-in user's id ([selfId], the string id
+  /// exposed by AuthNotifier). URL-derived refs (`?owner=`) don't carry a
+  /// role, so a shared project deep link would otherwise default to "owner"
+  /// and break owner-only UI gating ([isEditor]). Addressing another user's
+  /// project can only ever be editor access (the server 404s otherwise);
+  /// [ownerId] absent — or equal to [selfId], as own entries in the projects
+  /// list carry their owner_id — means the caller owns the project.
+  ProjectRef resolveRoleFor(String? selfId) {
+    final id = ownerId;
+    final resolved = (id != null && id.toString() != selfId) ? 'editor' : 'owner';
+    return resolved == role ? this : copyWith(role: resolved);
+  }
+
   /// Query params for a GoRouter location carrying this ref: `project`
   /// always, `owner` only when this is a shared project.
   Map<String, String> get routeParams => {

@@ -5,6 +5,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../auth/auth_notifier.dart';
 import '../core/project_ref.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
@@ -218,9 +219,20 @@ class _ProjectStatsScreenState extends State<ProjectStatsScreen> {
       // (like AppScreen) since load() calls notifyListeners() synchronously
       // before its first await, which would otherwise fire mid-build here.
       final notifier = context.read<ProjectNotifier>();
-      if (notifier.ref != widget.projectRef) {
+      // Compare/load with the role resolved against the signed-in user —
+      // the notifier's ref carries the resolved role (issue #106), while the
+      // URL-derived widget.projectRef defaults to "owner".
+      String? selfId;
+      try {
+        selfId = context.read<AuthNotifier>().user?.id;
+      } on ProviderNotFoundException {
+        // No AuthNotifier in the tree (tests) — own-project refs resolve the
+        // same either way.
+      }
+      final target = widget.projectRef.resolveRoleFor(selfId);
+      if (notifier.ref != target) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) context.read<ProjectNotifier>().load(widget.projectRef);
+          if (mounted) context.read<ProjectNotifier>().load(target);
         });
       }
       _tagOptions = List.of(notifier.availableTags);

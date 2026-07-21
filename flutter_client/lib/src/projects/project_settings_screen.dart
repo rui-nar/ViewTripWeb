@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import '../api/client.dart';
 import '../core/design_tokens.dart' show LineStyleKind, resolveTypeStyle, lineStyleName;
 import 'project_notifier.dart';
+import 'travel_companions_section.dart';
 
 const _kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
@@ -92,6 +93,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     (icon: Icons.hotel,         label: 'Sleeping',     key: 4),
     (icon: Icons.tag,           label: 'Counters',     key: 5),
     (icon: Icons.label_outlined, label: 'Tags',        key: 6),
+    (icon: Icons.group_outlined, label: 'Companions',  key: 7),
   ];
 
   /// Section tabs, keyed so [_sectionContent] can switch on a stable id
@@ -420,8 +422,20 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       4 => _sleepingSection(),
       5 => _countersSection(),
       6 => _tagsSection(),
+      7 => _companionsSection(),
       _ => const SizedBox.shrink(),
     };
+  }
+
+  Widget _companionsSection() {
+    return _SectionCard(
+      eyebrow: '08',
+      title: 'Travel companions',
+      subtitle: _notifier.isEditor
+          ? 'People with access to this trip.'
+          : 'Invite people to add and edit trip content with you.',
+      child: const TravelCompanionsSection(),
+    );
   }
 
   Widget _generalSection() {

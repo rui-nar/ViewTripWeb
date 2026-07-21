@@ -16,6 +16,7 @@ import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
 import 'client_geo_builder.dart' as client_geo;
+import 'members_service.dart';
 import 'project_filter_mixin.dart';
 import 'project_filters.dart';
 import 'project_journal_crud_mixin.dart';
@@ -73,8 +74,10 @@ int progressiveGeoBatchSize(int activityCount) =>
 class ProjectNotifier extends ChangeNotifier
     with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
+  final MembersService _membersService;
 
-  ProjectNotifier(this._service);
+  ProjectNotifier(this._service, {MembersService? membersService})
+      : _membersService = membersService ?? MembersService();
 
   /// The addressing for the currently open project (name + owner + role —
   /// issue #106). Null until [load] has been called at least once.
@@ -481,6 +484,8 @@ class ProjectNotifier extends ChangeNotifier
     selectedDay = null;
     selectedDays = {};
     pendingSync = null;
+    members = [];
+    memberInviteToken = null;
     notifyListeners();
 
     try {
@@ -948,6 +953,8 @@ class ProjectNotifier extends ChangeNotifier
     tripEnd = null;
     dayMeta = {};
     sleepingOptions = [];
+    members = [];
+    memberInviteToken = null;
     previewArcNotifier.value = null;
     elevationCursorNotifier.value = null;
     mapCursorDistNotifier.value = null;
@@ -1136,6 +1143,64 @@ class ProjectNotifier extends ChangeNotifier
       return await api.get(ref.path('/share/visitors')) as Map<String, dynamic>;
     } on ApiException catch (e) {
       throw Exception(e.body);
+    }
+  }
+
+  // ── Travel companions (issue #106) ─────────────────────────────────────────
+
+  /// Members of the open project (owner first — server ordering). Loaded on
+  /// demand by the settings screen's Travel companions section.
+  List<ProjectMember> members = [];
+
+  /// The project's invite token, once the owner has created (or re-fetched)
+  /// it this session. There is no GET endpoint for it — POST is idempotent
+  /// and returns the existing token — so this stays null until
+  /// [createMemberInvite] is called.
+  String? memberInviteToken;
+
+  /// GET members into [members]. Throws ([ApiException] passes through) so
+  /// the caller can show an inline error.
+  Future<void> loadMembers() async {
+    final ref = this.ref;
+    if (ref == null) return;
+    members = await _membersService.listMembers(ref);
+    notifyListeners();
+  }
+
+  /// Create (or re-fetch — idempotent) the invite token. Owner-only.
+  /// Rethrows [ApiException] unchanged — a 409 means the account has E2EE
+  /// enabled and carries the server's explanation in its detail.
+  Future<void> createMemberInvite() async {
+    final ref = this.ref;
+    if (ref == null) throw Exception('No project open');
+    memberInviteToken = await _membersService.createInvite(ref);
+    notifyListeners();
+  }
+
+  /// Revoke the invite link. Owner-only. Existing members are unaffected.
+  Future<void> revokeMemberInvite() async {
+    final ref = this.ref;
+    if (ref == null) return;
+    await _membersService.revokeInvite(ref);
+    memberInviteToken = null;
+    notifyListeners();
+  }
+
+  /// Remove [userId] from the project — owner removes anyone; an editor may
+  /// remove only themself (leave). Optimistic: the row disappears
+  /// immediately and is restored if the request fails (rethrown).
+  Future<void> removeMember(int userId) async {
+    final ref = this.ref;
+    if (ref == null) return;
+    final prev = members;
+    members = [for (final m in members) if (m.userId != userId) m];
+    notifyListeners();
+    try {
+      await _membersService.removeMember(ref, userId);
+    } on Exception {
+      members = prev;
+      notifyListeners();
+      rethrow;
     }
   }
 

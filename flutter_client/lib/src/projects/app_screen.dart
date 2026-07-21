@@ -176,10 +176,15 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ProjectNotifier>();
-      notifier.load(widget.projectRef).then((_) {
+      // The URL-derived ref carries no role — resolve it against the signed-in
+      // user so owner-only UI gating (ProjectNotifier.isEditor) is correct for
+      // shared projects (issue #106).
+      final projectRef = widget.projectRef
+          .resolveRoleFor(context.read<AuthNotifier>().user?.id);
+      notifier.load(projectRef).then((_) {
         if (!mounted || notifier.error != null) return;
         saveLastOpenedProject(
-            context.read<AuthNotifier>().user?.id, notifier.ref ?? widget.projectRef);
+            context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
       });
     });
     SharedPreferences.getInstance().then((prefs) {
@@ -438,6 +443,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     final notifier = context.read<ProjectNotifier>();
     final pending = notifier.pendingSync;
     if (pending == null) return;
+    // Captured before the dialog's async gap; see initState for why the
+    // URL-derived ref's role is resolved against the signed-in user.
+    final projectRef = widget.projectRef
+        .resolveRoleFor(context.read<AuthNotifier>().user?.id);
     showDialog<void>(
       context: context,
       useRootNavigator: true,
@@ -451,7 +460,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
-      notifier.load(widget.projectRef);
+      notifier.load(projectRef);
     });
   }
 

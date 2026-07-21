@@ -238,6 +238,10 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     final notifier = context.read<ViewProjectNotifier>();
     final pending = notifier.pendingSync;
     if (pending == null) return;
+    // Captured before the dialog's async gap; see initState for why the
+    // URL-derived ref's role is resolved against the signed-in user.
+    final projectRef = widget.projectRef
+        .resolveRoleFor(context.read<AuthNotifier>().user?.id);
     showDialog<void>(
       context: context,
       useRootNavigator: true,
@@ -251,7 +255,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
-      notifier.loadView(widget.projectRef);
+      notifier.loadView(projectRef);
     });
   }
 
@@ -260,10 +264,14 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ViewProjectNotifier>();
-      notifier.loadView(widget.projectRef).then((_) {
+      // Resolve the URL-derived ref's role against the signed-in user so
+      // editor gating is correct for shared projects (issue #106).
+      final projectRef = widget.projectRef
+          .resolveRoleFor(context.read<AuthNotifier>().user?.id);
+      notifier.loadView(projectRef).then((_) {
         if (!mounted || notifier.error != null) return;
         saveLastOpenedProject(
-            context.read<AuthNotifier>().user?.id, notifier.ref ?? widget.projectRef);
+            context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
       });
     });
     _mapEventSub =

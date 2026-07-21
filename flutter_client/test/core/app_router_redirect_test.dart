@@ -78,6 +78,68 @@ class _TestProjectNotifier extends ProjectNotifier {
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
+  // The full auth-guard decision — authRedirectTarget() — is what
+  // app_router.dart's redirect callback delegates to; tested directly here
+  // (same approach as rootRedirectTarget below). Issue #106: a /join/{token}
+  // invite deep link must survive the login round-trip via return_to.
+  group('authRedirectTarget — /join invite deep links (issue #106)', () {
+    test('unauthenticated /join/{token} redirects to /login with the invite '
+        'URL as return_to', () async {
+      final auth = AuthNotifier(AuthService()); // no user, not loading
+
+      final target =
+          await authRedirectTarget(auth, Uri.parse('/join/tok123'));
+
+      expect(target, '/login?return_to=%2Fjoin%2Ftok123');
+    });
+
+    test('after login, /login?return_to=/join/{token} resolves back to the '
+        'invite URL', () async {
+      final auth = _loggedInAuth('user-1');
+
+      final target = await authRedirectTarget(
+          auth, Uri.parse('/login?return_to=%2Fjoin%2Ftok123'));
+
+      expect(target, '/join/tok123');
+    });
+
+    test('logged-in /join/{token} passes through (no redirect)', () async {
+      final auth = _loggedInAuth('user-1');
+
+      final target =
+          await authRedirectTarget(auth, Uri.parse('/join/tok123'));
+
+      expect(target, isNull);
+    });
+
+    test('return_to is ignored unless it is a relative path', () async {
+      final auth = _loggedInAuth('user-1');
+
+      final target = await authRedirectTarget(
+          auth, Uri.parse('/login?return_to=https%3A%2F%2Fevil.example'));
+
+      expect(target, '/projects');
+    });
+
+    test('scheme-relative return_to (//host) is ignored too', () async {
+      final auth = _loggedInAuth('user-1');
+
+      final target = await authRedirectTarget(
+          auth, Uri.parse('/login?return_to=%2F%2Fevil.example'));
+
+      expect(target, '/projects');
+    });
+
+    test('other protected routes still redirect unauthenticated users to /',
+        () async {
+      final auth = AuthNotifier(AuthService());
+
+      expect(await authRedirectTarget(auth, Uri.parse('/projects')), '/');
+      // Share links stay public.
+      expect(await authRedirectTarget(auth, Uri.parse('/share/tok')), isNull);
+    });
+  });
+
   test(
       'resolves to /view?project=<name> when a last-opened project pref is set',
       () async {
