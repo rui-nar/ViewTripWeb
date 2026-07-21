@@ -1219,6 +1219,11 @@ class _MapPanelState extends State<MapPanel> {
                   userAgentPackageName: 'com.viewtrip.client',
                   tileProvider: _tileProvider!,
                   maxNativeZoom: 22,
+                  // Below city scale the overlay is one raster image bundling
+                  // country/state/city labels together — no way to keep just
+                  // country names, so hide it entirely until zoomed in close
+                  // enough that region-name clutter (#75) isn't the tradeoff.
+                  minZoom: 10,
                 ),
             ],
             if (widget.trackTileUrlTemplate != null)
