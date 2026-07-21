@@ -37,7 +37,7 @@ from api.polarsteps import (
     _persist_rotated_token,
     _require_client,
 )
-from api.project_access import resolve_project
+from api.project_access import OwnerParam, assert_project_access, resolve_project
 from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
 from src.api.polarsteps_client import format_step, format_trip
 from src.models.person import polarsteps_from_socials
@@ -66,14 +66,13 @@ def _get_owned_person(sess, person_id: int, user_info_id: int) -> DBPerson:
     row = sess.get(DBPerson, person_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
-    project_row = sess.get(DBProject, row.project_id)
-    if project_row is None or project_row.user_info_id != user_info_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    assert_project_access(sess, user_info_id, row.project_id)
     return row
 
 
-def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    return resolve_project(sess, user_info_id, project_name).id
+def _get_project_id(sess, user_info_id: int, project_name: str,
+                    owner_id: int | None = None) -> int:
+    return resolve_project(sess, user_info_id, project_name, owner_id).id
 
 
 def _loads_list(raw: str | None) -> list:
@@ -173,11 +172,12 @@ def _apply_person_fields(row: DBPerson, body: "PersonBody | PersonUpdateBody") -
 def create_person(
     body: PersonBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create a new person in the project's people directory."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        project_id = _get_project_id(sess, user_info_id, body.project_name, owner)
         row = DBPerson(project_id=project_id)
         _apply_person_fields(row, body)
         sess.add(row)

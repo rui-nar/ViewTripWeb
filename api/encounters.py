@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from api.project_access import resolve_project
+from api.project_access import OwnerParam, assert_project_access, resolve_project
 from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/encounters", tags=["encounters"])
@@ -35,17 +35,16 @@ class IDOut(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    return resolve_project(sess, user_info_id, project_name).id
+def _get_project_id(sess, user_info_id: int, project_name: str,
+                    owner_id: int | None = None) -> int:
+    return resolve_project(sess, user_info_id, project_name, owner_id).id
 
 
 def _get_owned_encounter(sess, encounter_id: int, user_info_id: int) -> DBEncounter:
     row = sess.get(DBEncounter, encounter_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Encounter not found")
-    project_row = sess.get(DBProject, row.project_id)
-    if project_row is None or project_row.user_info_id != user_info_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    assert_project_access(sess, user_info_id, row.project_id)
     return row
 
 
@@ -131,11 +130,12 @@ class EncounterUpdateBody(BaseModel):
 def create_encounter(
     body: EncounterBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create an encounter with a person or group on a day and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        project_id = _get_project_id(sess, user_info_id, body.project_name, owner)
         _require_exactly_one_of_person_or_group(body.person_id, body.group_id)
         if body.person_id is not None:
             _require_person_in_project(sess, body.person_id, project_id)

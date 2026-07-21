@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from api.project_shared import _legacy_path, _refresh_stats_background, _repo
-from models.project_db import DBProjectItem, DBProjectSyncMeta
+from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.models.activity import Activity
@@ -68,10 +68,36 @@ class SyncMetaOut(BaseModel):
 
 @router.get("/", summary="List projects")
 def list_projects(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Return all projects belonging to the current user."""
+    """Return the current user's own projects plus those shared with them.
+
+    Each entry carries ``owner_id``/``owner_name``/``role`` ("owner" |
+    "editor"); shared entries are addressed by passing ``?owner=owner_id`` on
+    the project routes (issue #106).
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        return _repo.list_projects(sess, user_info_id)
+        own = _repo.list_projects(sess, user_info_id)
+        for entry in own:
+            entry.update(owner_id=user_info_id, owner_name="", role="owner")
+
+        shared = []
+        memberships = sess.exec(
+            select(DBProjectMember).where(DBProjectMember.user_info_id == user_info_id)
+        ).all()
+        for m in memberships:
+            proj = sess.get(DBProject, m.project_id)
+            if proj is None:
+                continue
+            owner_user = sess.get(UserInfo, proj.user_info_id)
+            shared.append({
+                "name": proj.name,
+                "filename": proj.name + ProjectIO.EXTENSION,
+                "owner_id": proj.user_info_id,
+                "owner_name": (owner_user.display_name or owner_user.email) if owner_user else "",
+                "role": m.role,
+            })
+        shared.sort(key=lambda e: e["name"])
+        return own + shared
 
 
 class CreateProjectRequest(BaseModel):
@@ -191,8 +217,13 @@ def update_project(
         row = resolve_project(sess, user_info_id, name, owner)
         owner_id = row.user_info_id
 
-        # Rename if requested
+        # Rename if requested — owner-only; editors may still update trip dates
         if body.new_name is not None:
+            if owner_id != user_info_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only the trip owner can rename a trip",
+                )
             new_name = body.new_name.strip()
             if not new_name:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Name cannot be empty")

@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from api.project_access import resolve_project
+from api.project_access import OwnerParam, assert_project_access, resolve_project
 from models.project_db import DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -58,17 +58,16 @@ class MembersBody(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    return resolve_project(sess, user_info_id, project_name).id
+def _get_project_id(sess, user_info_id: int, project_name: str,
+                    owner_id: int | None = None) -> int:
+    return resolve_project(sess, user_info_id, project_name, owner_id).id
 
 
 def _get_owned_group(sess, group_id: int, user_info_id: int) -> DBPersonGroup:
     row = sess.get(DBPersonGroup, group_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    project_row = sess.get(DBProject, row.project_id)
-    if project_row is None or project_row.user_info_id != user_info_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    assert_project_access(sess, user_info_id, row.project_id)
     return row
 
 
@@ -99,11 +98,12 @@ def _apply_group_fields(row: DBPersonGroup, body) -> None:
 def create_group(
     body: GroupBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create a new (empty) group in the project."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        project_id = _get_project_id(sess, user_info_id, body.project_name, owner)
         row = DBPersonGroup(project_id=project_id)
         _apply_group_fields(row, body)
         sess.add(row)

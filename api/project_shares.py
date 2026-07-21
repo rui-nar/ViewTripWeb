@@ -141,7 +141,7 @@ def upload_share_memory_content(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
 
         updated = 0
         now = _utc_now()
