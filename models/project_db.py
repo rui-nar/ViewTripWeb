@@ -142,12 +142,12 @@ def _check_schema_contract() -> None:
 
 
 class DBProjectMember(sqlmodel.SQLModel, table=True):
-    """A non-owner user with write access to a project (issue #106).
+    """A non-owner user with access to a project (issue #106; roles: #109).
 
-    Membership grants "editor" access: content mutations (activities, segments,
-    memories, people, counters, imports) but none of the owner-only operations
-    (rename, delete, share links, transfer, member management). ``role`` is
-    always "editor" today; the column exists so future roles need no migration.
+    ``role`` is one of "viewer" (read-only), "editor" (content mutations —
+    activities, segments, memories, people, counters, imports), or "co-owner"
+    (editor + rename, share links, member management). Delete and transfer
+    stay owner-only regardless of role — see api/project_access.py.
     """
 
     __tablename__ = "projectmember"
@@ -162,12 +162,13 @@ class DBProjectMember(sqlmodel.SQLModel, table=True):
 
 
 class DBProjectInvite(sqlmodel.SQLModel, table=True):
-    """An invite-link token that grants editor membership on accept (issue #106).
+    """An invite-link token that grants membership on accept (issue #106).
 
-    Multi-use: any logged-in user who opens the link joins as editor until the
-    owner revokes it (revoke deletes the row, mirroring share-token revocation).
-    At most one active invite per project — creation is idempotent like share
-    links.
+    Multi-use: any logged-in user who opens the link joins with ``role`` until
+    the owner (or a co-owner) revokes it (revoke deletes the row, mirroring
+    share-token revocation). At most one active invite per project — creation
+    is idempotent like share links. ``role`` defaults to "editor" (issue #109);
+    only the trip owner may create a "co-owner" invite.
     """
 
     __tablename__ = "projectinvite"
@@ -176,6 +177,7 @@ class DBProjectInvite(sqlmodel.SQLModel, table=True):
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     token: str = sqlmodel.Field(
         default_factory=lambda: uuid.uuid4().hex, index=True, unique=True)
+    role: str = sqlmodel.Field(default="editor")
     created_by: int = sqlmodel.Field(foreign_key="userinfo.id")
     created_at: float = sqlmodel.Field(default_factory=time.time)
 

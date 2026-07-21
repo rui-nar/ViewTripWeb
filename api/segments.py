@@ -261,7 +261,7 @@ def create_segment(
     item = ProjectItem(item_type="segment", segment=seg)
 
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -293,7 +293,7 @@ def update_segment(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -339,7 +339,7 @@ def delete_segment(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -390,7 +390,7 @@ def resolve_segment_route(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,

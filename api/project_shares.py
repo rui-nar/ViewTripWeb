@@ -65,7 +65,7 @@ def create_share_link(
     """Generate (or return existing) share token for public read-only access."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
         if not row.share_token:
             row.share_token = str(uuid.uuid4())
             sess.add(row)
@@ -89,7 +89,7 @@ def revoke_share_link(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
         if row.share_token:
             from src.tile_renderer import invalidate_tile_cache
             from api.share import invalidate_share_cache
@@ -141,7 +141,7 @@ def upload_share_memory_content(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
 
         updated = 0
         now = _utc_now()
@@ -205,7 +205,7 @@ def create_share_link_no_memories(
     """Create (idempotent) a share token that strips memory items."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
         if not row.share_token_no_memories:
             row.share_token_no_memories = str(uuid.uuid4())
             sess.add(row)
@@ -223,7 +223,7 @@ def revoke_share_link_no_memories(
     """Revoke the no-memories share token."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
         if row.share_token_no_memories:
             from src.tile_renderer import invalidate_tile_cache
             from api.share import invalidate_share_cache

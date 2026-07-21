@@ -62,17 +62,17 @@ def _avatar_dir(user_id: str, person_id: int) -> Path:
     return p
 
 
-def _get_owned_person(sess, person_id: int, user_info_id: int) -> DBPerson:
+def _get_owned_person(sess, person_id: int, user_info_id: int, min_role: str = "editor") -> DBPerson:
     row = sess.get(DBPerson, person_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Person not found")
-    assert_project_access(sess, user_info_id, row.project_id)
+    assert_project_access(sess, user_info_id, row.project_id, min_role=min_role)
     return row
 
 
 def _get_project_id(sess, user_info_id: int, project_name: str,
-                    owner_id: int | None = None) -> int:
-    return resolve_project(sess, user_info_id, project_name, owner_id).id
+                    owner_id: int | None = None, min_role: str = "editor") -> int:
+    return resolve_project(sess, user_info_id, project_name, owner_id, min_role=min_role).id
 
 
 def _loads_list(raw: str | None) -> list:
@@ -194,7 +194,7 @@ def get_person(
     """Return a person plus every encounter (date, place, note) with them."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_person(sess, person_id, user_info_id)
+        row = _get_owned_person(sess, person_id, user_info_id, min_role="viewer")
         encounters = sess.exec(
             select(DBEncounter)
             .where(DBEncounter.person_id == person_id)
@@ -317,7 +317,7 @@ def serve_avatar(
     """Return the full-resolution avatar JPEG."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_person(sess, person_id, user_info_id)
+        row = _get_owned_person(sess, person_id, user_info_id, min_role="viewer")
         uuid_str = row.avatar_photo
     if not uuid_str:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
@@ -335,7 +335,7 @@ def serve_avatar_thumb(
     """Return the 400×400 avatar thumbnail; falls back to full-res if missing."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_person(sess, person_id, user_info_id)
+        row = _get_owned_person(sess, person_id, user_info_id, min_role="viewer")
         uuid_str = row.avatar_photo
     if not uuid_str:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No avatar")
@@ -355,7 +355,7 @@ def serve_avatar_thumb(
 # content is never persisted or shared onward.
 
 def _person_ps_username(sess, person_id: int, user_info_id: int) -> str:
-    person = _get_owned_person(sess, person_id, user_info_id)
+    person = _get_owned_person(sess, person_id, user_info_id, min_role="viewer")
     username = _parse_ps_username(person.polarsteps)
     if username is None:
         raise HTTPException(

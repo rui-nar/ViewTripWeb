@@ -69,18 +69,23 @@ def _photo_dir(user_id: str, journal_id: int) -> Path:
     return p
 
 
-def _get_owned_journal(sess, journal_id: int, user_info_id: int) -> DBJournalEntry:
+def _get_owned_journal(
+    sess, journal_id: int, user_info_id: int, min_role: str = "editor"
+) -> DBJournalEntry:
     """Return the entry iff the caller is its author (issue #106).
 
-    Order matters: 404 for an unknown entry, 403 when the caller has no access
-    to the parent project, and 403 again when the entry belongs to another
-    editor — only the author may read/update/delete an entry or manage its
-    photos. A NULL author is a legacy row owned by the project owner.
+    Order matters: 404 for an unknown entry, 403 when the caller's tier on
+    the parent project doesn't satisfy *min_role* (default "editor" — a
+    viewer could never be an author anyway, since authoring requires editor+;
+    read routes pass "viewer" for consistency), and 403 again when the entry
+    belongs to another author — only the author may read/update/delete an
+    entry or manage its photos. A NULL author is a legacy row owned by the
+    project owner.
     """
     row = sess.get(DBJournalEntry, journal_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Journal entry not found")
-    project_row = assert_project_access(sess, user_info_id, row.project_id)
+    project_row = assert_project_access(sess, user_info_id, row.project_id, min_role=min_role)
     author = row.user_info_id if row.user_info_id is not None else project_row.user_info_id
     if author != user_info_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -190,7 +195,7 @@ def create_journal(
     """Create a new private journal entry and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner, min_role="editor")
         project_id = project_row.id
         owner_id = project_row.user_info_id
 
@@ -407,7 +412,7 @@ def serve_photo(
     """Return the full-resolution JPEG for a journal photo."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_journal(sess, journal_id, user_info_id)
+        row = _get_owned_journal(sess, journal_id, user_info_id, min_role="viewer")
         photos: List[str] = json.loads(row.photos_json or "[]")
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
@@ -428,7 +433,7 @@ def serve_photo_thumb(
     """Return the 400×400 thumbnail JPEG; falls back to full-res if thumb is missing."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_journal(sess, journal_id, user_info_id)
+        row = _get_owned_journal(sess, journal_id, user_info_id, min_role="viewer")
         photos: List[str] = json.loads(row.photos_json or "[]")
         if photo_uuid not in photos:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")

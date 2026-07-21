@@ -36,7 +36,7 @@ def delete_item(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -87,7 +87,7 @@ def reorder_items(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -132,7 +132,7 @@ def sort_items(
 
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,

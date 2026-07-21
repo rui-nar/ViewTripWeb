@@ -59,15 +59,15 @@ class MembersBody(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_project_id(sess, user_info_id: int, project_name: str,
-                    owner_id: int | None = None) -> int:
-    return resolve_project(sess, user_info_id, project_name, owner_id).id
+                    owner_id: int | None = None, min_role: str = "editor") -> int:
+    return resolve_project(sess, user_info_id, project_name, owner_id, min_role=min_role).id
 
 
-def _get_owned_group(sess, group_id: int, user_info_id: int) -> DBPersonGroup:
+def _get_owned_group(sess, group_id: int, user_info_id: int, min_role: str = "editor") -> DBPersonGroup:
     row = sess.get(DBPersonGroup, group_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    assert_project_access(sess, user_info_id, row.project_id)
+    assert_project_access(sess, user_info_id, row.project_id, min_role=min_role)
     return row
 
 
@@ -120,7 +120,7 @@ def get_group(
     """Return a group plus its member people (id, name, avatar)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_owned_group(sess, group_id, user_info_id)
+        row = _get_owned_group(sess, group_id, user_info_id, min_role="viewer")
         members = sess.exec(
             select(DBPerson).where(DBPerson.group_id == group_id).order_by(DBPerson.id)
         ).all()

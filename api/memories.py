@@ -182,12 +182,14 @@ def _row_to_memory(row: DBMemory) -> Memory:
     )
 
 
-def _get_owned_memory(sess, memory_id: int, user_info_id: int) -> DBMemory:
-    """Return the DBMemory row, verifying the caller may edit the parent project."""
+def _get_owned_memory(sess, memory_id: int, user_info_id: int, min_role: str = "editor") -> DBMemory:
+    """Return the DBMemory row, verifying the caller's tier on the parent
+    project satisfies *min_role* (default "editor" — most callers mutate;
+    read routes pass "viewer")."""
     mem_row = sess.get(DBMemory, memory_id)
     if mem_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
-    assert_project_access(sess, user_info_id, mem_row.project_id)
+    assert_project_access(sess, user_info_id, mem_row.project_id, min_role=min_role)
     return mem_row
 
 
@@ -272,7 +274,7 @@ def create_memory(
     """Create a new memory in a project and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner, min_role="editor")
         project_id = project_row.id
         owner_id = project_row.user_info_id
 
@@ -577,7 +579,7 @@ def serve_photo(
     """Return the full-resolution JPEG for a memory photo."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
         owner_dir = _owner_dir_id(sess, mem_row)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if photo_uuid not in photos:
@@ -599,7 +601,7 @@ def serve_photo_thumb(
     """Return the 400×400 thumbnail JPEG; falls back to full-res if thumb is missing."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
         owner_dir = _owner_dir_id(sess, mem_row)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if photo_uuid not in photos:
@@ -657,7 +659,7 @@ def list_comments(
     """Return all comments on a memory as a recursive tree (replies nested under parents)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
         rows = sess.exec(
             select(DBMemoryComment)
             .where(DBMemoryComment.memory_id == memory_id)
@@ -749,7 +751,7 @@ def get_likes(
     """Return the like count, whether the caller has liked this memory, and the list of likers."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
         like_rows = sess.exec(
             select(DBMemoryLike).where(DBMemoryLike.memory_id == memory_id)
         ).all()
@@ -831,7 +833,7 @@ async def get_translation(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
         if _is_encrypted_envelope(mem_row.name) or _is_encrypted_envelope(mem_row.description):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
