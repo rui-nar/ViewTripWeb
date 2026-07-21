@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
+from api.project_access import resolve_project
 from models.project_db import DBJournalEntry, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
@@ -71,15 +72,7 @@ def _get_owned_journal(sess, journal_id: int, user_info_id: int) -> DBJournalEnt
 
 
 def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    row = sess.exec(
-        select(DBProject).where(
-            DBProject.user_info_id == user_info_id,
-            DBProject.name == project_name,
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return row.id
+    return resolve_project(sess, user_info_id, project_name).id
 
 
 def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):

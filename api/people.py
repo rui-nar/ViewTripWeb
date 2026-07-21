@@ -37,6 +37,7 @@ from api.polarsteps import (
     _persist_rotated_token,
     _require_client,
 )
+from api.project_access import resolve_project
 from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
 from src.api.polarsteps_client import format_step, format_trip
 from src.models.person import polarsteps_from_socials
@@ -72,15 +73,7 @@ def _get_owned_person(sess, person_id: int, user_info_id: int) -> DBPerson:
 
 
 def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    row = sess.exec(
-        select(DBProject).where(
-            DBProject.user_info_id == user_info_id,
-            DBProject.name == project_name,
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return row.id
+    return resolve_project(sess, user_info_id, project_name).id
 
 
 def _loads_list(raw: str | None) -> list:

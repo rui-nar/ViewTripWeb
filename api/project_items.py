@@ -16,7 +16,8 @@ from pydantic import BaseModel
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache
-from api.project_shared import _get_project_row, _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from api.project_access import OwnerParam, resolve_project
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
 from src.project.project_io import ProjectIO
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -31,12 +32,15 @@ def delete_item(
     index: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -44,7 +48,7 @@ def delete_item(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Index out of range")
         removed = project.items[index]
         project.remove_item(index)
-        _repo.save_project(sess, user_info_id, project)
+        _repo.save_project(sess, owner_id, project)
         # A split tail is a LOCAL (negative-id) activity owned solely by its
         # timeline item. remove_item only unlinks the item, so without this the
         # row is orphaned in the activity table and its negative id gets reused
@@ -58,11 +62,10 @@ def delete_item(
                 for it in project.items
             )
         ):
-            row = _get_project_row(sess, user_info_id, name)
             _repo.delete_local_activity(sess, row.id, removed.activity_id)
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
 
 
 class ReorderRequest(BaseModel):
@@ -76,19 +79,22 @@ def reorder_items(
     body: ReorderRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         project.move_item(body.from_index, body.to_index)
-        _repo.save_project(sess, user_info_id, project)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+        _repo.save_project(sess, owner_id, project)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     return [ProjectIO._serialise_item(i) for i in project.items]
 
 
@@ -98,6 +104,7 @@ def sort_items(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ) -> None:
     """Re-order all project items by date/time.
 
@@ -115,9 +122,11 @@ def sort_items(
 
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -184,7 +193,7 @@ def sort_items(
                 zip(keys, project.items), key=lambda t: t[0]
             )
         ]
-        _repo.save_project(sess, user_info_id, project)
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+        _repo.save_project(sess, owner_id, project)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)

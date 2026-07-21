@@ -34,8 +34,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from api.project_shared import _get_project_row, _legacy_path, _refresh_stats_background, _repo
-from models.project_db import DBProject, DBProjectItem, DBProjectSyncMeta
+from api.project_access import OwnerParam, resolve_project
+from api.project_shared import _legacy_path, _refresh_stats_background, _repo
+from models.project_db import DBProjectItem, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.models.activity import Activity
@@ -99,12 +100,14 @@ def create_project(
 def get_project(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -115,6 +118,7 @@ def get_project(
 def get_project_meta(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Same shape as GET /{name} but with elevation_profile and map.summary_polyline
     absent from each activity.  Uses lightweight loading (deferred heavy columns) so
@@ -122,9 +126,10 @@ def get_project_meta(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
             include_heavy=False,
         )
     if project is None:
@@ -137,35 +142,25 @@ def get_project_stats(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
     tags: Optional[List[str]] = Query(default=None),
+    owner: OwnerParam = None,
 ):
     """Return project statistics, optionally filtered to days with matching tags."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
 
         if tags:
             # Tag-filtered request: compute on-demand (bypass cache)
-            project = _repo.get_project(sess, user_info_id, name)
+            project = _repo.get_project(sess, owner_id, name)
             if project is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
             return _compute_stats(project, tag_filter=tags)
 
         # Unfiltered: use cached stats
         if row.stats_json is None:
-            _repo.compute_and_cache_stats(sess, user_info_id, name)
-            row = sess.exec(
-                select(DBProject).where(
-                    DBProject.user_info_id == user_info_id,
-                    DBProject.name == name,
-                )
-            ).first()
+            _repo.compute_and_cache_stats(sess, owner_id, name)
+            row = resolve_project(sess, user_info_id, name, owner)
         stats = json.loads(row.stats_json or "{}")
 
         # Always derive tag_options live from day_meta_json so they are never
@@ -189,24 +184,19 @@ def update_project(
     name: str,
     body: ProjectUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
 
         # Rename if requested
         if body.new_name is not None:
             new_name = body.new_name.strip()
             if not new_name:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Name cannot be empty")
-            if new_name != name and _repo.project_exists(sess, user_info_id, new_name):
+            if new_name != name and _repo.project_exists(sess, owner_id, new_name):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
             row.name = new_name
 
@@ -260,18 +250,13 @@ def update_day_meta(
     body: DayMetaUpdateRequest,
     background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Replace day metadata (and optionally sleeping options) for a project."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         row.day_meta_json = json.dumps(
             _merge_day_meta_preserve_counters(body.day_meta, row.day_meta_json)
         )
@@ -289,7 +274,7 @@ def update_day_meta(
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
 
 
 # ── Sync-meta (auto-sync config per project) ─────────────────────────────────
@@ -306,10 +291,11 @@ def _get_sync_meta(sess, project_id: int) -> DBProjectSyncMeta:
 def get_sync_meta(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ) -> dict:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        proj = _get_project_row(sess, user_info_id, name)
+        proj = resolve_project(sess, user_info_id, name, owner)
         meta = _get_sync_meta(sess, proj.id)
     return {
         "auto_sync_enabled": meta.auto_sync_enabled,
@@ -339,10 +325,11 @@ def update_track_style(
     name: str,
     body: TrackStyleUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ) -> None:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_project_row(sess, user_info_id, name)
+        row = resolve_project(sess, user_info_id, name, owner)
         if body.track_color is not None:
             row.track_color = body.track_color
         if 'track_secondary_color' in body.model_fields_set:
@@ -374,10 +361,11 @@ def update_languages(
     name: str,
     body: LanguagesUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ) -> None:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_project_row(sess, user_info_id, name)
+        row = resolve_project(sess, user_info_id, name, owner)
         row.languages_json = json.dumps(body.languages)
         row.updated_at = time.time()
         sess.add(row)
@@ -396,10 +384,11 @@ def update_sync_meta(
     name: str,
     body: SyncMetaUpdateRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ) -> dict:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        proj = _get_project_row(sess, user_info_id, name)
+        proj = resolve_project(sess, user_info_id, name, owner)
         meta = _get_sync_meta(sess, proj.id)
         if meta.project_id != proj.id:
             meta.project_id = proj.id
@@ -429,12 +418,13 @@ def update_sync_meta(
 def sync_check(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ) -> dict:
     """Return new Strava activities and Polarsteps steps not yet in this project."""
     user_info_id = int(current_user["sub"])
 
     with get_session() as sess:
-        proj = _get_project_row(sess, user_info_id, name)
+        proj = resolve_project(sess, user_info_id, name, owner)
         meta = _get_sync_meta(sess, proj.id)
 
         if not meta.auto_sync_enabled:
@@ -534,9 +524,11 @@ def sync_check(
 def delete_project(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        found = _repo.delete_project(sess, user_info_id, name)
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        found = _repo.delete_project(sess, row.user_info_id, name)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

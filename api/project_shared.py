@@ -10,10 +10,10 @@ import os
 import threading
 from typing import Dict
 
-from fastapi import HTTPException, status
 from models.db import get_session
 from sqlmodel import select
 
+from api.project_access import resolve_project
 from models.project_db import DBProject
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo
@@ -34,15 +34,7 @@ def _legacy_path(user_id: str, name: str) -> str:
 
 
 def _get_project_row(sess, user_info_id: int, name: str) -> DBProject:
-    row = sess.exec(
-        select(DBProject).where(
-            DBProject.user_info_id == user_info_id,
-            DBProject.name == name,
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return row
+    return resolve_project(sess, user_info_id, name)
 
 
 def _refresh_share_tiles(user_info_id: int, project_name: str) -> None:

@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
+from api.project_access import OwnerParam, resolve_project
 from models.db import get_session
-from models.project_db import DBMemory, DBProject
+from models.project_db import DBMemory
 from models.user import PolarstepsToken
 from src.api.polarsteps_client import PolarstepsClient, format_step, format_trip
 from src.project.memory_match import step_key
@@ -198,6 +199,7 @@ def polarsteps_trip_steps(
     trip_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     project_name: Optional[str] = None,
+    owner: OwnerParam = None,
 ) -> list[dict]:
     """Return all published steps for a trip.
 
@@ -219,12 +221,10 @@ def polarsteps_trip_steps(
     existing_name_dates: set[tuple[str | None, str | None]] = set()
     if project_name:
         with get_session() as sess:
-            proj = sess.exec(
-                select(DBProject).where(
-                    DBProject.user_info_id == user_info_id,
-                    DBProject.name == project_name,
-                )
-            ).first()
+            try:
+                proj = resolve_project(sess, user_info_id, project_name, owner)
+            except HTTPException:
+                proj = None
             if proj:
                 rows = sess.exec(
                     select(DBMemory.polarsteps_step_id).where(

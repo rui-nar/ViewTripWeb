@@ -26,7 +26,8 @@ from models.db import get_session
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache
-from models.project_db import DBProject, DBProjectItem, DBStravaCache
+from api.project_access import OwnerParam, resolve_project
+from models.project_db import DBProjectItem, DBStravaCache
 from models.user import StravaToken, UserInfo
 from src.api.strava_client import StravaAPI
 from src.auth.oauth import OAuth2Session
@@ -288,6 +289,7 @@ def strava_activities(
     refresh: bool = False,              # bypass cache and re-fetch from Strava
     page: int = 1,                      # 1-based page number
     per_page: int = 50,                 # items per page (max 200)
+    owner: OwnerParam = None,           # project's owner, if not the caller
 ):
     """Browse the current user's Strava activities with optional filters.
 
@@ -362,12 +364,10 @@ def strava_activities(
     in_project_ids: set = set()
     if project:
         with get_session() as sess:
-            proj_row = sess.exec(
-                select(DBProject).where(
-                    DBProject.user_info_id == user_info_id,
-                    DBProject.name == project,
-                )
-            ).first()
+            try:
+                proj_row = resolve_project(sess, user_info_id, project, owner)
+            except HTTPException:
+                proj_row = None
             if proj_row:
                 item_rows = sess.exec(
                     select(DBProjectItem).where(
@@ -422,6 +422,7 @@ def strava_cache_status(current_user: Annotated[dict, Depends(get_current_user)]
 def strava_sync(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Fetch all Strava activities and add new ones to the project.
 
@@ -433,6 +434,9 @@ def strava_sync(
     user_id = current_user["sub"]
 
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+
         token_row = sess.exec(
             select(StravaToken).where(StravaToken.user_info_id == user_info_id)
         ).first()
@@ -453,13 +457,13 @@ def strava_sync(
             except Exception:
                 pass
 
-        project = _project_repo.get_project(sess, user_info_id, name)
+        project = _project_repo.get_project(sess, owner_id, name)
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         added = project.add_activities(activities)
-        _project_repo.save_project(sess, user_info_id, project)
+        _project_repo.save_project(sess, owner_id, project)
         _save_refreshed_token(sess, token_row, client)
 
     if added > 0:
-        bust_geo_cache(user_info_id, name)
+        bust_geo_cache(owner_id, name)
     return {"added": added, "total": len(project.activities)}
