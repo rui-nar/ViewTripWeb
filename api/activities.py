@@ -212,7 +212,7 @@ def add_activities(
             pass
 
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -270,7 +270,7 @@ def refresh_activity(
     # and another editor's account can't see this activity — worse, the
     # overwrite would re-attribute the row to the wrong user.
     with get_session() as sess:
-        resolve_project(sess, user_info_id, name, owner)
+        resolve_project(sess, user_info_id, name, owner, min_role="editor")
         act_row = sess.get(DBActivity, activity_id)
     if act_row is not None and act_row.user_info_id != user_info_id:
         raise HTTPException(
@@ -332,7 +332,7 @@ def refresh_activity(
 
     # 3. Overwrite the DB row (all columns, including enrichment)
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         _repo.force_update_activity(sess, user_info_id, act)
         bust_geo_cache(owner_id, name)
@@ -426,7 +426,7 @@ def edit_activity_track(
     points = [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
 
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -461,7 +461,7 @@ def reset_activity_track(
     """Restore an edited activity's geometry from its snapshot and clear is_edited."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -514,7 +514,7 @@ def split_activity(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         project = _repo.get_project(
             sess, owner_id, name,
@@ -559,7 +559,7 @@ def delete_local_activity(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         if not _repo.delete_local_activity(sess, row.id, activity_id):
             raise HTTPException(

@@ -34,7 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from api.project_access import OwnerParam, resolve_project
+from api.project_access import OwnerParam, require_role, resolve_project
 from api.project_shared import _legacy_path, _refresh_stats_background, _repo
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
@@ -216,16 +216,12 @@ def update_project(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
 
-        # Rename if requested — owner-only; editors may still update trip dates
+        # Rename if requested — co-owner+; editors may still update trip dates
         if body.new_name is not None:
-            if owner_id != user_info_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Only the trip owner can rename a trip",
-                )
+            require_role(sess, row, user_info_id, "co-owner")
             new_name = body.new_name.strip()
             if not new_name:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Name cannot be empty")
@@ -288,7 +284,7 @@ def update_day_meta(
     """Replace day metadata (and optionally sleeping options) for a project."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         row.day_meta_json = json.dumps(
             _merge_day_meta_preserve_counters(body.day_meta, row.day_meta_json)
@@ -362,7 +358,7 @@ def update_track_style(
 ) -> None:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         if body.track_color is not None:
             row.track_color = body.track_color
         if 'track_secondary_color' in body.model_fields_set:
@@ -398,7 +394,7 @@ def update_languages(
 ) -> None:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         row.languages_json = json.dumps(body.languages)
         row.updated_at = time.time()
         sess.add(row)
@@ -421,7 +417,7 @@ def update_sync_meta(
 ) -> dict:
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        proj = resolve_project(sess, user_info_id, name, owner)
+        proj = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         meta = _get_sync_meta(sess, proj.id)
         if meta.project_id != proj.id:
             meta.project_id = proj.id
@@ -561,7 +557,7 @@ def delete_project(
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="owner")
         found = _repo.delete_project(sess, row.user_info_id, name)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

@@ -41,11 +41,11 @@ class IDOut(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_owned_encounter(sess, encounter_id: int, user_info_id: int) -> DBEncounter:
+def _get_owned_encounter(sess, encounter_id: int, user_info_id: int, min_role: str = "editor") -> DBEncounter:
     row = sess.get(DBEncounter, encounter_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Encounter not found")
-    assert_project_access(sess, user_info_id, row.project_id)
+    assert_project_access(sess, user_info_id, row.project_id, min_role=min_role)
     return row
 
 
@@ -136,7 +136,7 @@ def create_encounter(
     """Create an encounter with a person or group on a day and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner, min_role="editor")
         project_id = project_row.id
         proj_owner_id = project_row.user_info_id
         _require_exactly_one_of_person_or_group(body.person_id, body.group_id)

@@ -434,7 +434,7 @@ def strava_sync(
     user_id = current_user["sub"]
 
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
 
         token_row = sess.exec(

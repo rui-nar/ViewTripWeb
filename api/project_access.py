@@ -1,4 +1,5 @@
-"""Central project-access resolver (issue #106 — travel companion).
+"""Central project-access resolver (issue #106 — travel companion; issue #109
+— companion roles).
 
 Single place that turns ``(caller, name, ?owner)`` into a ``DBProject`` row.
 Every router that used to inline a ``(user_info_id, name)`` ownership lookup
@@ -6,9 +7,19 @@ now calls :func:`resolve_project` instead, then threads ``row.user_info_id``
 (the project *owner*) into the repo / cache / background-task calls that
 follow.
 
-Access model: the owner has full access; a ``projectmember`` row grants
-"editor" access — content mutations, but none of the owner-only operations
-(``require_owner=True``: rename, delete, share links, member management).
+Access model — four tiers, ranked low to high:
+
+- **viewer**   — read-only. Sees the trip but can't mutate anything.
+- **editor**   — viewer + content mutations (day-meta, activities, segments,
+  memories, people/groups/encounters, imports). No owner-tier operations.
+- **co-owner** — editor + rename, share links, member management (invite
+  create/revoke, removing editors/viewers). Cannot remove/demote another
+  co-owner, delete the trip, or transfer ownership — those stay owner-only.
+- **owner**    — full access. Not a ``projectmember`` row; implicit from
+  ``DBProject.user_info_id``.
+
+Every access-checking function takes ``min_role``: the caller passes iff
+their tier is >= ``min_role`` in the ranking above.
 """
 from __future__ import annotations
 
@@ -30,16 +41,58 @@ OwnerParam = Annotated[
     ),
 ]
 
-_OWNER_ONLY_DETAIL = "Only the trip owner can do this"
+# Rank order for the four access tiers — higher satisfies a lower min_role.
+_ROLE_RANK = {"viewer": 0, "editor": 1, "co-owner": 2, "owner": 3}
+
+_MIN_ROLE_DETAIL = {
+    "editor": "You need editor access to do this",
+    "co-owner": "Only the trip owner or a co-owner can do this",
+    "owner": "Only the trip owner can do this",
+}
 
 
-def _is_member(sess, project_id: int, user_info_id: int) -> bool:
-    return sess.exec(
+def _caller_role(sess, project_id: int, user_info_id: int) -> Optional[str]:
+    """The caller's ``projectmember.role`` on *project_id*, or None if they
+    hold no membership row (not a member — the owner is checked separately)."""
+    m = sess.exec(
         select(DBProjectMember).where(
             DBProjectMember.project_id == project_id,
             DBProjectMember.user_info_id == user_info_id,
         )
-    ).first() is not None
+    ).first()
+    return m.role if m else None
+
+
+def _is_member(sess, project_id: int, user_info_id: int) -> bool:
+    return _caller_role(sess, project_id, user_info_id) is not None
+
+
+def _role_satisfies(role: Optional[str], min_role: str) -> bool:
+    return _ROLE_RANK.get(role, -1) >= _ROLE_RANK[min_role]
+
+
+def effective_role(sess, row: DBProject, caller_id: int) -> Optional[str]:
+    """The caller's tier on *row*: "owner", a ``projectmember.role`` string,
+    or None if they have no access at all."""
+    if row.user_info_id == caller_id:
+        return "owner"
+    return _caller_role(sess, row.id, caller_id)
+
+
+def require_role(sess, row: DBProject, caller_id: int, min_role: str) -> None:
+    """Raise 403 unless the caller's tier on *row* is >= *min_role*.
+
+    For in-route branching where a single endpoint mixes tiers (e.g.
+    ``PUT /{name}`` allows editor+ for trip dates but co-owner+ for rename) —
+    call after :func:`resolve_project` has already granted at least the
+    endpoint's baseline tier.
+    """
+    role = effective_role(sess, row, caller_id)
+    if not _role_satisfies(role, min_role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_MIN_ROLE_DETAIL.get(min_role, "Forbidden"),
+        )
 
 
 def resolve_project(
@@ -48,20 +101,22 @@ def resolve_project(
     name: str,
     owner_id: Optional[int] = None,
     *,
-    require_owner: bool = False,
+    min_role: str = "viewer",
 ) -> DBProject:
     """Resolve a project by name for *caller_id*, honoring an optional *owner_id*.
 
     ``owner_id`` absent (``None``) or equal to ``caller_id`` resolves the
     caller's own project by ``(caller_id, name)``; 404s with "Project not
-    found" if absent.
+    found" if absent. The caller is the owner, which always satisfies any
+    ``min_role``.
 
     ``owner_id`` set to someone other than the caller is the shared-access
     path: the project is looked up by ``(owner_id, name)`` and the caller must
-    hold a ``projectmember`` row. Both a missing project and a missing
-    membership 404 (not 403) so a stranger can't probe whether a project
-    exists. ``require_owner=True`` additionally 403s members — reserved for
-    owner-only operations.
+    hold a ``projectmember`` row. A missing project or no membership at all
+    404s ("Project not found") so a stranger can't probe whether a project
+    exists; holding a membership whose role doesn't satisfy ``min_role``
+    (default "viewer" — any member) 403s instead, since existence is already
+    established at that point.
     """
     if owner_id is not None and owner_id != caller_id:
         row = sess.exec(
@@ -70,10 +125,14 @@ def resolve_project(
                 DBProject.name == name,
             )
         ).first()
-        if row is None or not _is_member(sess, row.id, caller_id):
+        role = _caller_role(sess, row.id, caller_id) if row is not None else None
+        if row is None or role is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        if require_owner:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWNER_ONLY_DETAIL)
+        if not _role_satisfies(role, min_role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=_MIN_ROLE_DETAIL.get(min_role, "Forbidden"),
+            )
         return row
 
     row = sess.exec(
@@ -92,22 +151,24 @@ def assert_project_access(
     caller_id: int,
     project_id: int,
     *,
-    require_owner: bool = False,
+    min_role: str = "editor",
 ) -> DBProject:
     """Access check for routes keyed on a sub-resource's ``project_id``.
 
     Counterpart of :func:`resolve_project` for the ``_get_owned_*`` helpers
     (memories, journal, people, groups, encounters) that already know the
     project id from the row being edited. Preserves their historical contract:
-    403 "Forbidden" when the project is missing or the caller has no access —
-    never 404, since the sub-resource id was already validated by the caller.
+    403 "Forbidden" when the project is missing or the caller's tier doesn't
+    satisfy ``min_role`` — never 404, since the sub-resource id was already
+    validated by the caller. Defaults to "editor" since most of these helpers
+    back mutation routes; read routes (serving a photo, listing comments)
+    pass ``min_role="viewer"`` explicitly.
     """
     row = sess.get(DBProject, project_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-    if row.user_info_id == caller_id:
-        return row
-    if require_owner or not _is_member(sess, project_id, caller_id):
+    role = effective_role(sess, row, caller_id)
+    if not _role_satisfies(role, min_role):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return row
 

@@ -88,7 +88,7 @@ def test_invite_preview_shows_project_and_owner(env):
     act_as("stranger")
     r = client.get(f"/api/invites/{token}")
     assert r.status_code == 200
-    assert r.json() == {"project_name": "Trip", "owner_name": "Owner"}
+    assert r.json() == {"project_name": "Trip", "owner_name": "Owner", "role": "editor"}
 
 
 def test_accept_creates_membership_and_is_idempotent(env):

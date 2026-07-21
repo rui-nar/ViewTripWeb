@@ -1,21 +1,24 @@
-"""REST travel-companion endpoints — project members and invite links (issue #106).
+"""REST travel-companion endpoints — project members and invite links
+(issue #106; roles: issue #109).
 
 Routes:
     POST   /api/projects/{name}/members/invite     — create (or return) the invite link token
     DELETE /api/projects/{name}/members/invite     — revoke the invite link
     GET    /api/projects/{name}/members            — list members (owner first)
-    DELETE /api/projects/{name}/members/{user_id}  — owner removes a member; a member removes themself
-    GET    /api/invites/{token}                    — preview an invite (project + owner name)
-    POST   /api/invites/{token}/accept             — join the project as editor
+    DELETE /api/projects/{name}/members/{user_id}  — remove a member; a member removes themself
+    GET    /api/invites/{token}                    — preview an invite (project + owner name + role)
+    POST   /api/invites/{token}/accept             — join the project with the invite's role
 
-Owner-only: invite create/revoke and removing *other* users. Any member may
-leave. Invites are blocked while the owner has E2EE enabled — companions could
+Member management (invite create/revoke, removing editors/viewers) is
+co-owner+. Only the strict owner may create a "co-owner" invite or remove a
+co-owner (so co-owners can't lock each other out). Any member may leave.
+Invites are blocked while the owner has E2EE enabled — companions could
 neither read nor write content encrypted under the owner's CMK (see plan for
 issue #106; key sharing is a follow-up).
 """
 from __future__ import annotations
 
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from models.db import get_session
@@ -23,24 +26,34 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from api.project_access import resolve_project
+from api.project_access import require_role, resolve_project
 from models.project_db import DBProject, DBProjectInvite, DBProjectMember
 from models.user import UserInfo
 
 router = APIRouter(prefix="/api/projects", tags=["members"])
 invites_router = APIRouter(prefix="/api/invites", tags=["members"])
 
+InviteRole = Literal["viewer", "editor", "co-owner"]
 
-# ── Response schemas ──────────────────────────────────────────────────────────
+
+# ── Request / response schemas ──────────────────────────────────────────────
+
+class InviteCreateBody(BaseModel):
+    role: InviteRole = Field(
+        default="editor",
+        description='Role granted on accept. Only the trip owner (not a '
+                    'co-owner) may create a "co-owner" invite.',
+    )
 
 class InviteTokenOut(BaseModel):
     token: str = Field(description="Invite token; append to /join/{token} to build the link")
+    role: str = Field(description="Role this invite grants on accept")
 
 class MemberOut(BaseModel):
     user_id: int = Field(description="Member's user id")
     display_name: str = Field(description="Member's display name")
     avatar_url: str = Field(description="Member's avatar URL, may be empty")
-    role: str = Field(description='"owner" or "editor"')
+    role: str = Field(description='"owner", "co-owner", "editor", or "viewer"')
 
 class MembersOut(BaseModel):
     members: List[MemberOut] = Field(description="Project members, owner first")
@@ -48,6 +61,7 @@ class MembersOut(BaseModel):
 class InvitePreviewOut(BaseModel):
     project_name: str = Field(description="Name of the project the invite joins")
     owner_name: str = Field(description="Display name of the project owner")
+    role: str = Field(description="Role this invite grants on accept")
 
 class InviteAcceptedOut(BaseModel):
     name: str = Field(description="Name of the joined project")
@@ -81,14 +95,20 @@ def _get_invite(sess, token: str) -> tuple[DBProjectInvite, DBProject]:
 def create_invite(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    body: Optional[InviteCreateBody] = None,
     owner: Optional[int] = None,
 ):
-    """Create the project's invite token (idempotent — returns the existing one)."""
+    """Create the project's invite token (idempotent — returns the existing
+    one, unchanged, if one already exists; the requested role is ignored on
+    that path)."""
     user_info_id = int(current_user["sub"])
+    role = (body or InviteCreateBody()).role
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
-        owner = sess.get(UserInfo, row.user_info_id)
-        if owner is not None and owner.encryption_enabled:
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
+        if role == "co-owner":
+            require_role(sess, row, user_info_id, "owner")
+        owner_user = sess.get(UserInfo, row.user_info_id)
+        if owner_user is not None and owner_user.encryption_enabled:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Travel companions are not available on encrypted accounts — "
@@ -98,11 +118,11 @@ def create_invite(
             select(DBProjectInvite).where(DBProjectInvite.project_id == row.id)
         ).first()
         if invite is None:
-            invite = DBProjectInvite(project_id=row.id, created_by=user_info_id)
+            invite = DBProjectInvite(project_id=row.id, created_by=user_info_id, role=role)
             sess.add(invite)
             sess.commit()
             sess.refresh(invite)
-        return {"token": invite.token}
+        return {"token": invite.token, "role": invite.role}
 
 
 @router.delete("/{name}/members/invite", status_code=status.HTTP_204_NO_CONTENT,
@@ -115,7 +135,7 @@ def revoke_invite(
     """Delete the project's invite token. Existing members are unaffected."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
         for invite in sess.exec(
             select(DBProjectInvite).where(DBProjectInvite.project_id == row.id)
         ).all():
@@ -129,7 +149,8 @@ def list_members(
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: Optional[int] = None,
 ):
-    """Return the owner plus all editors. Visible to the owner and any member."""
+    """Return the owner plus all members (any role). Visible to any member,
+    including viewers."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
@@ -163,11 +184,14 @@ def remove_member(
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: Optional[int] = None,
 ):
-    """Owner removes any member; a member may remove only themself (leave)."""
+    """Co-owner+ removes an editor/viewer; a member may remove only themself
+    (leave), at any role. Removing a co-owner is strict-owner-only, so
+    co-owners can't lock each other out."""
     user_info_id = int(current_user["sub"])
+    is_self = user_id == user_info_id
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner,
-                              require_owner=user_id != user_info_id)
+                              min_role="viewer" if is_self else "co-owner")
         member = sess.exec(
             select(DBProjectMember).where(
                 DBProjectMember.project_id == row.id,
@@ -176,6 +200,8 @@ def remove_member(
         ).first()
         if member is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+        if not is_self and member.role == "co-owner":
+            require_role(sess, row, user_info_id, "owner")
         sess.delete(member)
         sess.commit()
 
@@ -188,10 +214,11 @@ def preview_invite(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     with get_session() as sess:
-        _invite, project = _get_invite(sess, token)
+        invite, project = _get_invite(sess, token)
         return {
             "project_name": project.name,
             "owner_name": _display_name(sess.get(UserInfo, project.user_info_id)),
+            "role": invite.role,
         }
 
 
@@ -201,7 +228,8 @@ def accept_invite(
     token: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Join the invite's project as editor. Idempotent for existing members."""
+    """Join the invite's project with its role. Idempotent for existing
+    members (role is not changed by re-accepting)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         invite, project = _get_invite(sess, token)
@@ -220,6 +248,7 @@ def accept_invite(
             sess.add(DBProjectMember(
                 project_id=project.id,
                 user_info_id=user_info_id,
+                role=invite.role,
                 invited_by=invite.created_by,
             ))
             sess.commit()
