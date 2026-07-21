@@ -9,13 +9,27 @@ ViewTripWeb/
 │   ├── router.py                 # FastAPI app: mounts routers, lifespan, SPA fallback
 │   ├── deps.py                   # JWT dependency (get_current_user, create_access_token)
 │   ├── auth.py                   # Auth endpoints (local + Google → JWT)
-│   ├── projects.py               # Projects, items, segments, import/export, stats, sharing
+│   ├── admin.py                  # Admin dashboard endpoints (is_admin-gated)
+│   ├── projects.py               # Project CRUD, day-meta, track style, sync-meta
+│   ├── project_access.py         # Shared (caller, name, ?owner) → DBProject resolver + role gating
+│   ├── project_shared.py         # Shared infra (no routes): ProjectRepo instance, legacy paths, background tasks
+│   ├── project_items.py          # Item delete/reorder/sort
+│   ├── project_shares.py         # Share-token create/revoke, per-share content key, visitor stats
+│   ├── project_transfer.py       # Import/export (.viewtrip, GPX, ZIP)
+│   ├── activities.py             # Add/refresh/track-edit/split/delete Strava activities
+│   ├── segments.py               # Connecting transport segments (flight/train/bus/boat)
 │   ├── geo.py                    # GeoJSON builders (full + low-res)
 │   ├── memories.py               # Memory CRUD, photos, comments, likes, translations
-│   ├── journal.py                # Journal entry CRUD + photos
+│   ├── journal.py                # Journal entry CRUD + photos (per-author, private)
+│   ├── members.py                # Travel-companion invites (viewer/editor/co-owner), member list/removal
+│   ├── people.py                 # Per-project people directory CRUD, avatars
+│   ├── groups.py                 # Groups of people CRUD + membership
+│   ├── encounters.py             # People-you-met CRUD, tied to a day/place
+│   ├── encryption.py             # Zero-knowledge E2EE enable/status, device register/approve, recovery
 │   ├── share.py                  # Public read-only share endpoints + tiles
 │   ├── strava.py                 # Strava OAuth + activity browsing/sync
 │   ├── polarsteps.py             # Polarsteps connect + trip/step listing
+│   ├── poster.py                 # A0 trip poster generation (async job + status/download)
 │   ├── backup.py                 # List/restore database backups
 │   └── translations.py           # Google Translate helper (used by memory endpoints)
 │
@@ -25,6 +39,7 @@ ViewTripWeb/
 │   └── user.py                   # LocalUser, UserInfo, StravaToken, PolarstepsToken
 │
 ├── src/                          # Core business logic (shared by API and tests)
+│   ├── admin/                    # Admin dashboard queries
 │   ├── api/
 │   │   ├── strava_client.py      # StravaAPI — HTTP client with retry + rate limiting
 │   │   └── polarsteps_client.py  # Polarsteps trip/step fetch client
@@ -34,17 +49,21 @@ ViewTripWeb/
 │   ├── cache/
 │   │   └── activity_cache.py     # Per-user Strava activity cache
 │   ├── config/settings.py        # Config — dot-notation access to config/config.json
+│   ├── email/                    # Transactional email — EmailService (SMTP/console backends)
+│   │   └── templates/            #   + Jinja text/html templates, rendered by pure functions
 │   ├── exceptions/errors.py      # Custom exception hierarchy
 │   ├── filters/filter_engine.py  # FilterCriteria + FilterEngine.apply()
 │   ├── gpx/processor.py          # GPX export
 │   ├── models/                   # Domain models: activity, project, memory, journal,
 │   │                             #   track, great_circle (SLERP arc for segments)
+│   ├── poster/                   # A0 poster layout, map stitching, job runner
 │   ├── project/
 │   │   ├── project_io.py         # ProjectIO — (de)serialise .viewtrip JSON
 │   │   └── project_repo.py       # ProjectRepo — DB-backed CRUD (optimistic locking)
 │   ├── services/
 │   │   ├── hafas_service.py      # Train schedules (DB/ÖBB/DSB/VR digitraffic)
 │   │   └── overpass_service.py   # OSM rail/ferry/bus route geometry
+│   ├── tile_renderer.py          # Raster tile cache for share links / posters
 │   └── utils/logging.py          # Logger setup
 │
 ├── flutter_client/               # Flutter frontend (web / Android / iOS)
@@ -124,6 +143,17 @@ Read-only public links come in two flavours (`share_token`, with memories, and
 `/share/<token>?memory=<public_id>`, where `public_id` is a stable per-memory
 UUID independent of the primary key, so links survive re-import.
 
+### Travel Companions
+
+A trip owner invites other accounts via a multi-use link (`projectinvite`,
+consumed into a `projectmember` row on accept) carrying one of four tiers —
+viewer (read-only), editor (content mutations), co-owner (editor + rename/
+share-links/member-management), and the implicit owner. `api/project_access.py`
+centralises the `(caller, name, ?owner) → DBProject` resolution and role check
+every route uses. Each companion's journal entries stay private to them
+(`journalentry.user_info_id`); invite links are copyable or, once SMTP is
+configured (`src/email/`), emailed directly to the invitee.
+
 ### Database Schema (SQLModel + Alembic)
 
 | Table | Purpose |
@@ -140,6 +170,12 @@ UUID independent of the primary key, so links survive re-import.
 | `memory_comment` | Threaded comments on a memory |
 | `memory_like` | Likes on a memory |
 | `memory_translation` | Cached translations of a memory's text |
-| `journalentry` | Private day note with photos |
+| `journalentry` | Private day note with photos (`user_info_id` — per-author, private) |
+| `projectmember` | Travel-companion membership: user, role (viewer/editor/co-owner), invited_by |
+| `projectinvite` | Invite-link token → role granted on accept |
 | `sharevisit` | Visitor analytics for share links |
 | `stravacache` | Per-user Strava activity-list cache |
+
+> This table covers the core trip/sharing schema; people/groups/encounters,
+> E2EE key material, and poster-job tables also exist — see `models/project_db.py`
+> and `models/user.py` for the full set.
