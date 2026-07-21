@@ -81,7 +81,7 @@ _LEADER_COLOR = (120, 120, 120)
 _ROUTE_COLOR = (30, 60, 200)
 _ROUTE_WIDTH = 4
 
-_FALLBACK_BASEMAP_COLOR = (230, 230, 230)  # same neutral grey as the old stub
+_PREVIEW_BASEMAP_COLOR = (230, 230, 230)  # flat stand-in used only when skip_basemap
 
 _LEGEND_MARGIN = 40
 
@@ -274,25 +274,6 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: float, draw: 
     return lines
 
 
-def _render_basemap_safe(
-    bounds: Dict[str, float], target_w: int, target_h: int, tile_fetcher: Optional[TileFetcher] = None
-) -> Image.Image:
-    """``render_basemap``, falling back to a solid-colour canvas on failure.
-
-    Self-hosted deployments may not have ``MAPBOX_TOKEN`` configured, or
-    Mapbox may be briefly unreachable; either raises before any tile is
-    fetched (missing token) or via a network exception. Rather than failing
-    the whole poster job in that case, fall back to the same neutral grey the
-    original stub used — pins, the route, and cards are still useful without
-    a photographic basemap underneath.
-    """
-    try:
-        return render_basemap(bounds, target_w, target_h, tile_fetcher=tile_fetcher)
-    except Exception:
-        _log.warning("Poster basemap render failed; falling back to a solid background", exc_info=True)
-        return Image.new("RGB", (target_w, target_h), _FALLBACK_BASEMAP_COLOR)
-
-
 def _draw_route(draw: ImageDraw.ImageDraw, project: Any, projector: _Projector, scale: float = 1.0) -> bool:
     """Draw the project's track geometry onto the basemap.
 
@@ -461,8 +442,8 @@ def _compose_poster_image(
     skip_basemap: bool = False,
     progress: Optional[ProgressFn] = None,
 ) -> Image.Image:
-    """Build the composited poster image: basemap (or a flat fallback), route,
-    pins, non-overlapping cards, and an overflow legend.
+    """Build the composited poster image: basemap, route, pins,
+    non-overlapping cards, and an overflow legend.
 
     ``scale`` is the ratio of this render's pixel size to the real A0 output
     (1.0 for the real render; < 1 for ``render_poster_preview``'s small, fast
@@ -470,7 +451,11 @@ def _compose_poster_image(
     so a preview keeps the same visual proportions rather than drawing
     full-size elements onto a tiny canvas. ``skip_basemap`` bypasses the
     Mapbox tile fetch entirely (used by the preview so it never depends on
-    network/``MAPBOX_TOKEN`` and stays fast).
+    network/``MAPBOX_TOKEN`` and stays fast); without it, a basemap failure
+    (missing/invalid ``MAPBOX_TOKEN``, Mapbox unreachable) propagates — a
+    poster without its map is not a useful output, so the job must fail with
+    the underlying error rather than silently rendering on a grey background
+    (issue #14 feedback, point 1).
     """
     bounds = request["bounds"]
     config = request.get("config", {})
@@ -479,9 +464,9 @@ def _compose_poster_image(
 
     _notify(progress, "fetching basemap")
     if skip_basemap:
-        canvas = Image.new("RGB", (target_w, target_h), _FALLBACK_BASEMAP_COLOR)
+        canvas = Image.new("RGB", (target_w, target_h), _PREVIEW_BASEMAP_COLOR)
     else:
-        canvas = _render_basemap_safe(bounds, target_w, target_h, tile_fetcher=tile_fetcher)
+        canvas = render_basemap(bounds, target_w, target_h, tile_fetcher=tile_fetcher)
     draw = ImageDraw.Draw(canvas)
     projector = _Projector(bounds, target_w, target_h)
 

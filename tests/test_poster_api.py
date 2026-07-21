@@ -13,6 +13,9 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import api.poster as poster_module
 import models.db as db_module
+import src.poster.poster_renderer as renderer_module
+import src.poster.tile_stitcher as tile_stitcher
+from PIL import Image
 from api.deps import get_current_user
 from api.poster import router as poster_router
 from models.project_db import DBPosterJob, DBProject
@@ -86,10 +89,16 @@ def test_create_job_returns_id_and_stays_pending_until_run(env, monkeypatch):
         assert job.status == "pending"
 
 
-def test_full_stub_run_produces_downloadable_png_and_pdf(env):
-    """The stub runner (executed synchronously by TestClient's BackgroundTasks)
-    takes the job from pending to done and writes real files."""
+def test_full_run_produces_downloadable_png_and_pdf(env, monkeypatch):
+    """The runner (executed synchronously by TestClient's BackgroundTasks)
+    takes the job from pending to done and writes real files. The Mapbox
+    basemap is faked out — a real fetch would need a token and network, and a
+    failed fetch now fails the job instead of falling back to grey."""
     client, engine, uid, _ = env
+    monkeypatch.setattr(
+        renderer_module, "render_basemap",
+        lambda bounds, w, h, tile_fetcher=None: Image.new("RGB", (w, h), (120, 140, 160)),
+    )
 
     r = client.post("/api/projects/My Trip/poster", json=_BODY)
     assert r.status_code == 201, r.text
@@ -115,6 +124,23 @@ def test_full_stub_run_produces_downloadable_png_and_pdf(env):
         assert job.result_png_path and Path(job.result_png_path).exists()
         assert job.result_pdf_path and Path(job.result_pdf_path).exists()
         assert job.completed_at is not None
+
+
+def test_job_fails_with_actionable_error_when_basemap_unavailable(env, monkeypatch):
+    """With no MAPBOX_TOKEN configured, the job must end 'failed' with an
+    error message that names the missing token — not 'done' with a silent
+    grey background (issue #14 feedback, point 1)."""
+    client, _, _, _ = env
+    monkeypatch.setattr(tile_stitcher, "_mapbox_token", lambda: "")
+
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+    body = client.get(f"/api/projects/My Trip/poster/{job_id}").json()
+    assert body["status"] == "failed"
+    assert "MAPBOX_TOKEN" in (body["error_message"] or "")
+
+    # And the unfinished job's file is not downloadable.
+    r = client.get(f"/api/projects/My Trip/poster/{job_id}/download", params={"format": "png"})
+    assert r.status_code == 404
 
 
 def test_download_404_when_job_not_done(env, monkeypatch):
@@ -171,6 +197,21 @@ def test_preview_returns_png_without_creating_a_job(env):
     with Session(engine) as sess:
         jobs_after = len(sess.exec(select(DBPosterJob)).all())
     assert jobs_after == jobs_before, "preview must not create a DBPosterJob row"
+
+
+def test_preview_render_failure_returns_500_with_detail(env, monkeypatch):
+    """A preview render failure must return a 500 whose detail carries the
+    underlying error (issue #14 feedback, point 9 — a bare 500 left the
+    'preview not available' report undiagnosable)."""
+    client, _, _, _ = env
+
+    def _boom(project_id, user_info_id, request):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(poster_module, "render_poster_preview", _boom)
+    r = client.post("/api/projects/My Trip/poster/preview", json=_BODY)
+    assert r.status_code == 500
+    assert "kaboom" in r.json()["detail"]
 
 
 def test_preview_404_for_unknown_project(env):
