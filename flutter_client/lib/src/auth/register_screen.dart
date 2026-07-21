@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../core/return_to.dart';
 import 'auth_notifier.dart';
 
 class RegisterScreen extends StatefulWidget {
@@ -40,8 +41,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
       GoRouterState.of(context).uri.queryParameters['return_to'];
 
   void _navigateAfterRegister() {
-    final ret = _returnTo;
-    context.go(ret != null && ret.isNotEmpty ? ret : '/projects');
+    // Same relative-path-only guard as the router redirect (issue #111).
+    context.go(safeReturnTo(_returnTo) ?? '/projects');
   }
 
   Future<void> _submit() async {

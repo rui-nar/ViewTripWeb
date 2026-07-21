@@ -14,6 +14,7 @@ import 'package:provider/provider.dart';
 import 'google_button_stub.dart'
     if (dart.library.html) 'google_button_web.dart';
 
+import '../core/return_to.dart';
 import 'auth_notifier.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -69,8 +70,8 @@ class _LoginScreenState extends State<LoginScreen> {
       GoRouterState.of(context).uri.queryParameters['return_to'];
 
   void _navigateAfterLogin() {
-    final ret = _returnTo;
-    context.go(ret != null && ret.isNotEmpty ? ret : '/projects');
+    // Same relative-path-only guard as the router redirect (issue #111).
+    context.go(safeReturnTo(_returnTo) ?? '/projects');
   }
 
   Future<void> _submit() async {
