@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:viewtrip_client/src/api/client.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/poster_job_notifier.dart';
 
 http.Response _json(int status, Object body) => http.Response(
@@ -26,7 +27,7 @@ PosterJobNotifier _notifier(
   final mock = MockClient((req) => handler(req));
   final client = ApiClient(httpClient: mock)..setToken('jwt');
   return PosterJobNotifier(
-    projectName: 'Trip',
+    ref: const ProjectRef(name: 'Trip'),
     client: client,
     pollInterval: Duration.zero,
     maxPollAttempts: maxPollAttempts,
@@ -163,7 +164,7 @@ void main() {
       final client = ApiClient(httpClient: mock)..setToken('jwt');
 
       final bytes = await fetchPosterPreview(
-        projectName: 'Trip',
+        ref: const ProjectRef(name: 'Trip'),
         bounds: {'north': 1, 'south': 0, 'east': 1, 'west': 0},
         orientation: 'landscape',
         config: {'distance': true},
@@ -191,7 +192,7 @@ void main() {
 
       expect(
         () => fetchPosterPreview(
-          projectName: 'Trip',
+          ref: const ProjectRef(name: 'Trip'),
           bounds: const {},
           orientation: 'landscape',
           config: const {},

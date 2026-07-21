@@ -5,10 +5,11 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 
 mixin ProjectPeopleCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
-  String? get projectName;
+  ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
   set items(List<Map<String, dynamic>> v);
   List<Map<String, dynamic>> get people;
@@ -18,7 +19,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   String? get error;
   set error(String? v);
 
-  Future<void> reloadDetailsOnly(String name);
+  Future<void> reloadDetailsOnly(ProjectRef ref);
   String errorMessage(Exception e);
 
   // ── People CRUD ───────────────────────────────────────────────────────────
@@ -33,11 +34,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     List<String>? nationalities,
     String? residence,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return null;
+    final ref = projectRef;
+    if (ref == null) return null;
     try {
-      final res = await api.post('/api/people/', {
-        'project_name': projectName,
+      final res = await api.post(ref.withOwner('/api/people/'), {
+        'project_name': ref.name,
         if (name != null) 'name': name,
         if (email != null) 'email': email,
         if (phone != null) 'phone': phone,
@@ -46,7 +47,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         if (nationalities != null) 'nationalities': nationalities,
         if (residence != null) 'residence': residence,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
       return (res as Map)['id'] as int?;
     } on Exception catch (e) {
       error = errorMessage(e);
@@ -65,8 +66,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     List<String>? nationalities,
     String? residence,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     try {
       await api.put('/api/people/$personId', {
         'name': name,
@@ -77,7 +78,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         'nationalities': nationalities,
         'residence': residence,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -98,8 +99,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   }
 
   Future<void> deletePerson(int personId) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     // Optimistic: drop the person and any of their encounter items.
     people = people.where((p) => p['id'] != personId).toList();
     items = items
@@ -109,7 +110,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       await api.delete('/api/people/$personId');
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -135,8 +136,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     String filename,
   ) async {
     final token = api.tokenForUpload;
-    final projectName = this.projectName;
-    if (token == null || projectName == null) return false;
+    final ref = projectRef;
+    if (token == null || ref == null) return false;
     final uri = Uri.parse('${api.baseUrl}/api/people/$personId/avatar');
     final request = http.MultipartRequest('POST', uri)
       ..headers['Authorization'] = 'Bearer $token'
@@ -145,7 +146,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
       final streamed = await request.send();
       final res = await http.Response.fromStream(streamed);
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        await reloadDetailsOnly(projectName);
+        await reloadDetailsOnly(ref);
         return true;
       }
       return false;
@@ -169,8 +170,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     double? lon,
     int? insertAfterIndex,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     final placeholder = {
       'item_type': 'encounter',
       'encounter': {
@@ -191,8 +192,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     items.insert(insertAt, placeholder);
     notifyListeners();
     try {
-      await api.post('/api/encounters/', {
-        'project_name': projectName,
+      await api.post(ref.withOwner('/api/encounters/'), {
+        'project_name': ref.name,
         'person_id': personId,
         'group_id': groupId,
         'date': date,
@@ -203,7 +204,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -223,8 +224,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     double? lat,
     double? lon,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     try {
       await api.put('/api/encounters/$encounterId', {
         'person_id': personId,
@@ -236,7 +237,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -244,15 +245,15 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   }
 
   Future<void> deleteEncounter(String encounterId) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     items.removeWhere((item) =>
         item['item_type'] == 'encounter' &&
         item['encounter']?['id']?.toString() == encounterId);
     notifyListeners();
     try {
       await api.delete('/api/encounters/$encounterId');
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -319,16 +320,16 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     List<String>? nationalities,
     List<Map<String, String>>? socials,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return null;
+    final ref = projectRef;
+    if (ref == null) return null;
     try {
-      final res = await api.post('/api/groups/', {
-        'project_name': projectName,
+      final res = await api.post(ref.withOwner('/api/groups/'), {
+        'project_name': ref.name,
         if (name != null) 'name': name,
         if (nationalities != null) 'nationalities': nationalities,
         if (socials != null) 'socials': socials,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
       return (res as Map)['id'] as int?;
     } on Exception catch (e) {
       error = errorMessage(e);
@@ -343,15 +344,15 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     List<String>? nationalities,
     List<Map<String, String>>? socials,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     try {
       await api.put('/api/groups/$groupId', {
         'name': name,
         'nationalities': nationalities,
         'socials': socials,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -359,8 +360,8 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
   }
 
   Future<void> deleteGroup(int groupId) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     // Optimistic: drop the group, its direct group-encounters (issue #56 —
     // unlike a member, they have no fallback), and ungroup remaining members.
     groups = groups.where((g) => g['id'] != groupId).toList();
@@ -374,7 +375,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     notifyListeners();
     try {
       await api.delete('/api/groups/$groupId');
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -383,11 +384,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
 
   /// Set the group's member list to exactly [personIds] (assigns them, clears others).
   Future<void> setGroupMembers(int groupId, List<int> personIds) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     try {
       await api.put('/api/groups/$groupId/members', {'person_ids': personIds});
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();

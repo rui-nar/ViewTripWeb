@@ -5,6 +5,7 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_segment_crud_mixin.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
@@ -12,7 +13,7 @@ import 'package:viewtrip_client/src/projects/project_service.dart';
 /// geo-overlay methods are tested; `service` is never called.
 class _Host extends ChangeNotifier with ProjectSegmentCrudMixin {
   @override
-  String? projectName = 'p';
+  ProjectRef? projectRef = const ProjectRef(name: 'p');
   @override
   List<Map<String, dynamic>> items = [];
   @override
@@ -22,7 +23,7 @@ class _Host extends ChangeNotifier with ProjectSegmentCrudMixin {
   @override
   final ProjectService service = ProjectService();
   @override
-  Future<void> reloadDetailsOnly(String name) async {}
+  Future<void> reloadDetailsOnly(ProjectRef ref) async {}
   @override
   String errorMessage(Exception e) => e.toString();
 }

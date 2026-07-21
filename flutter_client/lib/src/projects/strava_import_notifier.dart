@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 
 class StravaImportNotifier extends ChangeNotifier {
   List<Map<String, dynamic>> activities = [];
@@ -33,16 +34,16 @@ class StravaImportNotifier extends ChangeNotifier {
   bool get hasMore => _hasMore;
 
   int _currentPage = 1;
-  String? _lastProjectName;
+  ProjectRef? _lastProjectRef;
 
   // ── Load (first page / reset) ───────────────────────────────────────────────
 
   /// Fetch page 1 from the backend, resetting the list.
   ///
   /// Pass [refresh] = true to bypass the server-side cache.
-  Future<void> load({String? projectName, bool refresh = false}) async {
+  Future<void> load({ProjectRef? ref, bool refresh = false}) async {
     _currentPage = 1;
-    _lastProjectName = projectName;
+    _lastProjectRef = ref;
     isLoading = true;
     error = null;
     stravaNotConnected = false;
@@ -51,7 +52,7 @@ class StravaImportNotifier extends ChangeNotifier {
     try {
       final envelope = await _fetchPage(
         page: 1,
-        projectName: projectName,
+        ref: ref,
         refresh: refresh,
       );
 
@@ -97,7 +98,7 @@ class StravaImportNotifier extends ChangeNotifier {
     try {
       final envelope = await _fetchPage(
         page: _currentPage + 1,
-        projectName: _lastProjectName,
+        ref: _lastProjectRef,
         refresh: false,
       );
 
@@ -127,7 +128,7 @@ class StravaImportNotifier extends ChangeNotifier {
 
   Future<Map<String, dynamic>> _fetchPage({
     required int page,
-    String? projectName,
+    ProjectRef? ref,
     bool refresh = false,
   }) async {
     final params = <String, String>{'page': '$page', 'per_page': '50'};
@@ -146,7 +147,10 @@ class StravaImportNotifier extends ChangeNotifier {
     if (selectedTypes.isNotEmpty) {
       params['types'] = selectedTypes.join(',');
     }
-    if (projectName != null) params['project'] = projectName;
+    if (ref != null) {
+      params['project'] = ref.name;
+      if (ref.ownerId != null) params['owner'] = ref.ownerId.toString();
+    }
     if (refresh) params['refresh'] = 'true';
 
     final query = params.entries
@@ -235,7 +239,7 @@ class StravaImportNotifier extends ChangeNotifier {
   // ── Add to project ──────────────────────────────────────────────────────────
 
   /// POST selected activities to the project. Returns count added.
-  Future<int> addSelected(String projectName) async {
+  Future<int> addSelected(ProjectRef ref) async {
     final toAdd = activities
         .where((a) => selectedIds.contains(a['id'] as int))
         .toList();
@@ -247,7 +251,7 @@ class StravaImportNotifier extends ChangeNotifier {
 
     try {
       final result = await api.post(
-        '/api/projects/${Uri.encodeComponent(projectName)}/activities',
+        ref.path('/activities'),
         {'activities': toAdd},
       ) as Map<String, dynamic>;
       pendingEnrichment = (result['pending_enrichment'] as int?) ?? 0;

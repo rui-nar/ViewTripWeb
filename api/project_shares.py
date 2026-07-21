@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.memories import _utc_now
-from models.project_db import DBMemory, DBProject, DBShareMemoryContent, DBShareVisit
+from api.project_access import OwnerParam, resolve_project
+from models.project_db import DBMemory, DBShareMemoryContent, DBShareVisit
 from models.user import UserInfo
 from src.utils.encryption_check import is_encrypted_envelope
 
@@ -59,18 +60,12 @@ class ShareMemoryContentOut(BaseModel):
 def create_share_link(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Generate (or return existing) share token for public read-only access."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
         if not row.share_token:
             row.share_token = str(uuid.uuid4())
             sess.add(row)
@@ -83,6 +78,7 @@ def create_share_link(
 def revoke_share_link(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Revoke the share token — the project becomes private again.
 
@@ -93,14 +89,7 @@ def revoke_share_link(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
         if row.share_token:
             from src.tile_renderer import invalidate_tile_cache
             from api.share import invalidate_share_cache
@@ -135,6 +124,7 @@ def upload_share_memory_content(
     name: str,
     body: ShareMemoryContentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Bulk-upsert re-encrypted memory content for the project's "full" share
     token (issue #28). This is a client-driven bulk upsert, not per-memory
@@ -151,14 +141,7 @@ def upload_share_memory_content(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
 
         updated = 0
         now = _utc_now()
@@ -200,18 +183,12 @@ def upload_share_memory_content(
 def get_share_info(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Return both share tokens for the project (null when not yet created)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner)
         return {
             "share_token": row.share_token,
             "share_token_no_memories": row.share_token_no_memories,
@@ -223,18 +200,12 @@ def get_share_info(
 def create_share_link_no_memories(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create (idempotent) a share token that strips memory items."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
         if not row.share_token_no_memories:
             row.share_token_no_memories = str(uuid.uuid4())
             sess.add(row)
@@ -247,18 +218,12 @@ def create_share_link_no_memories(
 def revoke_share_link_no_memories(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Revoke the no-memories share token."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner, require_owner=True)
         if row.share_token_no_memories:
             from src.tile_renderer import invalidate_tile_cache
             from api.share import invalidate_share_cache
@@ -273,6 +238,7 @@ def revoke_share_link_no_memories(
 def get_share_visitors(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Return visitor stats for both share link types.
 
@@ -284,14 +250,7 @@ def get_share_visitors(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = sess.exec(
-            select(DBProject).where(
-                DBProject.user_info_id == user_info_id,
-                DBProject.name == name,
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        row = resolve_project(sess, user_info_id, name, owner)
         project_id = row.id
 
         visits = sess.exec(

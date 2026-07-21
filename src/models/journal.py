@@ -1,4 +1,4 @@
-"""Journal Entry data model — a private owner-only note attached to a trip date."""
+"""Journal Entry data model — a private per-user note attached to a trip date."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,6 +9,10 @@ from typing import List, Optional
 class JournalEntry:
     id: Optional[int] = None
     project_id: Optional[int] = None
+    # Author of the entry (issue #106). None = legacy row owned by the project
+    # owner. Deliberately not serialised in to_dict(): it is server-side
+    # visibility state, not trip content.
+    user_info_id: Optional[int] = None
     date: str = ""                          # "YYYY-MM-DD" — mandatory
     time: Optional[str] = None              # "HH:MM" local time
     description: Optional[str] = None

@@ -7,6 +7,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
@@ -17,18 +18,18 @@ class _FakeProjectService extends ProjectService {
   _FakeProjectService(this.details);
 
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async => details;
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async => details;
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String name) async =>
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getGeo(String name) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getDetails(String name) async => details;
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async => details;
 }
 
 /// Skips owner-only network calls (sync-meta/share-info/background-sync
@@ -67,14 +68,14 @@ void main() {
     final details = _details(dayMeta: {'2026-05-10': <String, dynamic>{}});
 
     final n1 = _TestProjectNotifier(_FakeProjectService(details));
-    await n1.load('Trip');
+    await n1.load(const ProjectRef(name: 'Trip'));
     n1.selectDay('2026-05-10');
     // The persistence write is fire-and-forget (saveUiState() is void, per
     // the mixin's abstract hook signature) — give it a tick to land.
     await Future<void>.delayed(const Duration(milliseconds: 20));
 
     final n2 = _TestProjectNotifier(_FakeProjectService(details));
-    await n2.load('Trip');
+    await n2.load(const ProjectRef(name: 'Trip'));
 
     expect(n2.selectedDay, '2026-05-10');
   });
@@ -87,14 +88,14 @@ void main() {
     final details = _details(activities: activities);
 
     final n1 = _TestProjectNotifier(_FakeProjectService(details));
-    await n1.load('Trip');
+    await n1.load(const ProjectRef(name: 'Trip'));
     n1.selectActivity(1);
     await Future<void>.delayed(const Duration(milliseconds: 20));
 
     // Second load: the activity no longer exists in the fresh data.
     final detailsAfterDelete = _details(activities: const []);
     final n2 = _TestProjectNotifier(_FakeProjectService(detailsAfterDelete));
-    await n2.load('Trip');
+    await n2.load(const ProjectRef(name: 'Trip'));
 
     expect(n2.selectedActivityId, isNull);
   });
@@ -104,13 +105,13 @@ void main() {
     final details = _details(dayMeta: {'2026-05-10': <String, dynamic>{}});
 
     final n1 = _TestProjectNotifier(_FakeProjectService(details));
-    await n1.load('Trip');
+    await n1.load(const ProjectRef(name: 'Trip'));
     n1.selectDay('2026-05-10');
     await Future<void>.delayed(const Duration(milliseconds: 20));
 
     final detailsNoDay = _details(dayMeta: const {});
     final n2 = _TestProjectNotifier(_FakeProjectService(detailsNoDay));
-    await n2.load('Trip');
+    await n2.load(const ProjectRef(name: 'Trip'));
 
     expect(n2.selectedDay, isNull);
   });
@@ -121,12 +122,12 @@ void main() {
     });
 
     final n1 = _TestProjectNotifier(_FakeProjectService(details));
-    await n1.load('Trip');
+    await n1.load(const ProjectRef(name: 'Trip'));
     n1.setFilters(tags: {'norway'});
     await Future<void>.delayed(const Duration(milliseconds: 20));
 
     final n2 = _TestProjectNotifier(_FakeProjectService(details));
-    await n2.load('Trip');
+    await n2.load(const ProjectRef(name: 'Trip'));
 
     expect(n2.tagFilter, {'norway'});
   });

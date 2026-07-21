@@ -21,6 +21,13 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
+from api.project_access import (
+    OwnerParam,
+    assert_project_access,
+    journal_visible_row_positions,
+    resolve_project,
+    translate_insert_after,
+)
 from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/encounters", tags=["encounters"])
@@ -34,25 +41,11 @@ class IDOut(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    row = sess.exec(
-        select(DBProject).where(
-            DBProject.user_info_id == user_info_id,
-            DBProject.name == project_name,
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return row.id
-
-
 def _get_owned_encounter(sess, encounter_id: int, user_info_id: int) -> DBEncounter:
     row = sess.get(DBEncounter, encounter_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Encounter not found")
-    project_row = sess.get(DBProject, row.project_id)
-    if project_row is None or project_row.user_info_id != user_info_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    assert_project_access(sess, user_info_id, row.project_id)
     return row
 
 
@@ -138,11 +131,14 @@ class EncounterUpdateBody(BaseModel):
 def create_encounter(
     body: EncounterBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create an encounter with a person or group on a day and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_id = project_row.id
+        proj_owner_id = project_row.user_info_id
         _require_exactly_one_of_person_or_group(body.person_id, body.group_id)
         if body.person_id is not None:
             _require_person_in_project(sess, body.person_id, project_id)
@@ -172,9 +168,10 @@ def create_encounter(
             .where(DBProjectItem.project_id == project_id)
             .order_by(DBProjectItem.position)
         ).all()
-        insert_at = len(existing_items)
-        if body.insert_after_index is not None:
-            insert_at = max(0, min(len(existing_items), body.insert_after_index + 1))
+        # insert_after_index is an index into the caller's *visible* item list
+        # (other users' journal items are hidden) — translate it (issue #106).
+        visible = journal_visible_row_positions(sess, existing_items, user_info_id, proj_owner_id)
+        insert_at = translate_insert_after(visible, body.insert_after_index, len(existing_items))
 
         for item in existing_items:
             if item.position >= insert_at:

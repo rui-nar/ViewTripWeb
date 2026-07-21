@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 
 from api.deps import get_current_user
+from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
 from src.models.project import Project
 from src.project.project_io import ProjectIO
@@ -127,6 +128,7 @@ def places(
 def project_geo_low_res(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Return low-res GeoJSON — straight lines per activity, arcs per segment.
 
@@ -138,9 +140,10 @@ def project_geo_low_res(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -277,6 +280,7 @@ def project_geo(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
     encoded: bool = False,
+    owner: OwnerParam = None,
 ):
     """Return a GeoJSON FeatureCollection for *name*.
 
@@ -289,20 +293,23 @@ def project_geo(
     [longitude, latitude] as per the spec.
     """
     user_info_id = int(current_user["sub"])
-    cache_key = (user_info_id, name, encoded)
-    with _geo_cache_lock:
-        cached_bytes = _geo_cache.get(cache_key)
-    if cached_bytes is not None:
-        return Response(
-            content=cached_bytes,
-            media_type="application/json",
-            headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
-        )
-
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+
+        cache_key = (owner_id, name, encoded)
+        with _geo_cache_lock:
+            cached_bytes = _geo_cache.get(cache_key)
+        if cached_bytes is not None:
+            return Response(
+                content=cached_bytes,
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+            )
+
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
             include_elevation=False,
         )
     if project is None:

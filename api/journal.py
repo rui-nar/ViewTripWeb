@@ -1,6 +1,8 @@
 """REST journal endpoints — CRUD and photo management for project journal entries.
 
-Journal entries are private and owner-only — they are never exposed in shared views.
+Journal entries are private and per-user (issue #106): every project editor —
+owner or travel companion — keeps their own entries, visible and editable only
+by their author. They are never exposed in shared views.
 
 Routes:
     POST   /api/journal                            — create a journal entry
@@ -30,7 +32,14 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
-from models.project_db import DBJournalEntry, DBProject, DBProjectItem
+from api.project_access import (
+    OwnerParam,
+    assert_project_access,
+    journal_visible_row_positions,
+    resolve_project,
+    translate_insert_after,
+)
+from models.project_db import DBJournalEntry, DBProjectItem
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
 
@@ -61,25 +70,21 @@ def _photo_dir(user_id: str, journal_id: int) -> Path:
 
 
 def _get_owned_journal(sess, journal_id: int, user_info_id: int) -> DBJournalEntry:
+    """Return the entry iff the caller is its author (issue #106).
+
+    Order matters: 404 for an unknown entry, 403 when the caller has no access
+    to the parent project, and 403 again when the entry belongs to another
+    editor — only the author may read/update/delete an entry or manage its
+    photos. A NULL author is a legacy row owned by the project owner.
+    """
     row = sess.get(DBJournalEntry, journal_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Journal entry not found")
-    project_row = sess.get(DBProject, row.project_id)
-    if project_row is None or project_row.user_info_id != user_info_id:
+    project_row = assert_project_access(sess, user_info_id, row.project_id)
+    author = row.user_info_id if row.user_info_id is not None else project_row.user_info_id
+    if author != user_info_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return row
-
-
-def _get_project_id(sess, user_info_id: int, project_name: str) -> int:
-    row = sess.exec(
-        select(DBProject).where(
-            DBProject.user_info_id == user_info_id,
-            DBProject.name == project_name,
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return row.id
 
 
 def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
@@ -180,11 +185,14 @@ class PhotoFromUrlIn(BaseModel):
 def create_journal(
     body: JournalBody,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Create a new private journal entry and insert it at the requested position."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project_id = _get_project_id(sess, user_info_id, body.project_name)
+        project_row = resolve_project(sess, user_info_id, body.project_name, owner)
+        project_id = project_row.id
+        owner_id = project_row.user_info_id
 
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
@@ -192,6 +200,7 @@ def create_journal(
 
         row = DBJournalEntry(
             project_id=project_id,
+            user_info_id=user_info_id,
             date=body.date,
             time=body.time,
             description=body.description,
@@ -208,9 +217,10 @@ def create_journal(
             .where(DBProjectItem.project_id == project_id)
             .order_by(DBProjectItem.position)
         ).all()
-        insert_at = len(existing_items)
-        if body.insert_after_index is not None:
-            insert_at = max(0, min(len(existing_items), body.insert_after_index + 1))
+        # insert_after_index is an index into the caller's *visible* item list
+        # (other users' journal items are hidden) — translate it (issue #106).
+        visible = journal_visible_row_positions(sess, existing_items, user_info_id, owner_id)
+        insert_at = translate_insert_after(visible, body.insert_after_index, len(existing_items))
 
         for item in existing_items:
             if item.position >= insert_at:

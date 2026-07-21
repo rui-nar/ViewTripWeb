@@ -141,6 +141,45 @@ def _check_schema_contract() -> None:
         )
 
 
+class DBProjectMember(sqlmodel.SQLModel, table=True):
+    """A non-owner user with write access to a project (issue #106).
+
+    Membership grants "editor" access: content mutations (activities, segments,
+    memories, people, counters, imports) but none of the owner-only operations
+    (rename, delete, share links, transfer, member management). ``role`` is
+    always "editor" today; the column exists so future roles need no migration.
+    """
+
+    __tablename__ = "projectmember"
+    __table_args__ = (UniqueConstraint("project_id", "user_info_id"),)
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    role: str = sqlmodel.Field(default="editor")
+    invited_by: int = sqlmodel.Field(foreign_key="userinfo.id")
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
+class DBProjectInvite(sqlmodel.SQLModel, table=True):
+    """An invite-link token that grants editor membership on accept (issue #106).
+
+    Multi-use: any logged-in user who opens the link joins as editor until the
+    owner revokes it (revoke deletes the row, mirroring share-token revocation).
+    At most one active invite per project — creation is idempotent like share
+    links.
+    """
+
+    __tablename__ = "projectinvite"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    token: str = sqlmodel.Field(
+        default_factory=lambda: uuid.uuid4().hex, index=True, unique=True)
+    created_by: int = sqlmodel.Field(foreign_key="userinfo.id")
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+
+
 class DBProjectSyncMeta(sqlmodel.SQLModel, table=True):
     """Per-project auto-sync configuration and last-synced timestamps."""
 
@@ -274,12 +313,19 @@ class DBMemory(sqlmodel.SQLModel, table=True):
 
 
 class DBJournalEntry(sqlmodel.SQLModel, table=True):
-    """A private, owner-only journal entry attached to a project and a specific date."""
+    """A private, per-user journal entry attached to a project and a specific date.
+
+    ``user_info_id`` is the entry's author (issue #106): with travel companions
+    a shared project can hold journal entries from several users, and each user
+    only ever sees their own. NULL = legacy row created before the column
+    existed, owned by the project owner.
+    """
 
     __tablename__ = "journalentry"
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: Optional[int] = sqlmodel.Field(default=None, foreign_key="userinfo.id", index=True)
     date: str = sqlmodel.Field(index=True)      # "YYYY-MM-DD"
     time: Optional[str] = sqlmodel.Field(default=None)
     description: Optional[str] = sqlmodel.Field(default=None)

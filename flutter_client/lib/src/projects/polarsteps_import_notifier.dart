@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 
 class PolarstepsImportNotifier extends ChangeNotifier {
   // Injectable so tests can supply an ApiClient backed by a MockClient.
@@ -9,8 +10,8 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   PolarstepsImportNotifier({ApiClient? client}) : _api = client ?? api;
 
   // ── Project context ────────────────────────────────────────────────────────
-  String? _projectName;
-  set projectName(String value) => _projectName = value;
+  ProjectRef? _projectRef;
+  set projectRef(ProjectRef value) => _projectRef = value;
 
   // ── Trips ──────────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> trips = [];
@@ -90,8 +91,9 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     notifyListeners();
     try {
       final tripId = trip['id'] as int;
-      final projectParam = _projectName != null
-          ? '?project_name=${Uri.encodeComponent(_projectName!)}'
+      final ref = _projectRef;
+      final projectParam = ref != null
+          ? ref.withOwner('?project_name=${Uri.encodeComponent(ref.name)}')
           : '';
       final raw = await _api.get(
               '/api/polarsteps/trips/$tripId/steps$projectParam')
@@ -204,11 +206,11 @@ class PolarstepsImportNotifier extends ChangeNotifier {
 
   // ── Import ─────────────────────────────────────────────────────────────────
 
-  /// Import selected steps as memories into [projectName].
+  /// Import selected steps as memories into [ref]'s project.
   ///
   /// For each step: POST /api/memories/ then upload each photo.
   /// Returns the count of successfully created memories.
-  Future<int> importSelected(String projectName) async {
+  Future<int> importSelected(ProjectRef ref) async {
     final toImport = steps
         .where((s) => selectedStepIds.contains(s['id'] as int?))
         .toList();
@@ -231,7 +233,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
         );
 
         final results = await Future.wait(
-          batch.map((step) => _importStep(step, projectName)),
+          batch.map((step) => _importStep(step, ref)),
         );
 
         for (final ok in results) {
@@ -249,7 +251,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
 
   Future<bool> _importStep(
     Map<String, dynamic> step,
-    String projectName,
+    ProjectRef ref,
   ) async {
     final date = step['date'] as String?;
     if (date == null) return false;
@@ -263,7 +265,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     final stepId = step['id'] as int?;
 
     final body = <String, dynamic>{
-      'project_name': projectName,
+      'project_name': ref.name,
       'date': date,
       'geo_mode': (lat != null && lon != null) ? 'custom' : 'start_of_day',
       if (name != null) 'name': name,
@@ -274,7 +276,7 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     };
 
     try {
-      final result = await _postWithRetry('/api/memories/', body);
+      final result = await _postWithRetry(ref.withOwner('/api/memories/'), body);
       final memId = result['id']?.toString();
       if (memId != null) {
         // Photo uploads return 202 immediately (background download on server).

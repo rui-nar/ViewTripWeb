@@ -19,7 +19,7 @@ from sqlmodel import select
 
 from api.deps import get_current_user
 from models.db import get_session
-from models.project_db import DBDeviceKey, DBRecoveryWrap
+from models.project_db import DBDeviceKey, DBProject, DBProjectMember, DBRecoveryWrap
 from models.user import UserInfo
 
 router = APIRouter(prefix="/api/encryption", tags=["encryption"])
@@ -104,6 +104,20 @@ def enable(body: EnableIn, user: dict = Depends(get_current_user)) -> StatusOut:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Encryption already enabled for this account",
+            )
+        # Travel companions (issue #106) and E2EE are mutually exclusive:
+        # companions could neither read nor write content encrypted under this
+        # account's CMK, so block enabling while any owned trip has members.
+        has_members = sess.exec(
+            select(DBProjectMember)
+            .join(DBProject, DBProject.id == DBProjectMember.project_id)
+            .where(DBProject.user_info_id == uid)
+        ).first() is not None
+        if has_members:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Encryption cannot be enabled while your trips have travel "
+                       "companions — remove them first.",
             )
 
         sess.add(DBDeviceKey(

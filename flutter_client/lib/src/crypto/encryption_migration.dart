@@ -11,6 +11,7 @@ library;
 import 'dart:convert';
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import 'e2ee_crypto.dart';
 import 'encryption_service.dart';
 
@@ -28,9 +29,15 @@ class EncryptionMigration {
     var migrated = 0;
     final projects = await _api.get('/api/projects/') as List;
     for (final p in projects) {
-      final name = (p as Map)['name'] as String;
-      final details = await _api.get(
-          '/api/projects/${Uri.encodeComponent(name)}') as Map<String, dynamic>;
+      final entry = (p as Map).cast<String, dynamic>();
+      // Issue #106: the list can now include projects shared *with* this
+      // user (role "editor") alongside their own. Migration re-encrypts the
+      // caller's own content under the caller's own key — key-sharing with
+      // companions on someone else's project is explicitly out of scope
+      // (see the #106 plan), so only the caller's own projects are migrated.
+      if (entry.isSharedWithMe) continue;
+      final ref = entry.ref;
+      final details = await _api.get(ref.path()) as Map<String, dynamic>;
       final items = (details['items'] as List?) ?? const [];
       for (final raw in items) {
         final item = raw as Map;

@@ -2,13 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../core/project_ref.dart';
 import 'project_notifier.dart';
 import 'strava_import_notifier.dart';
 
 class StravaImportScreen extends StatefulWidget {
   final String projectName;
 
-  const StravaImportScreen({super.key, required this.projectName});
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects.
+  final int? ownerId;
+
+  const StravaImportScreen({super.key, required this.projectName, this.ownerId});
+
+  /// Addressing for [projectName]/[ownerId] — issue #106.
+  ProjectRef get projectRef => ProjectRef(name: projectName, ownerId: ownerId);
 
   @override
   State<StravaImportScreen> createState() => _StravaImportScreenState();
@@ -66,7 +74,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
 
   Future<void> _search(StravaImportNotifier notifier) async {
     setState(() => _hasSearched = true);
-    await notifier.load(projectName: widget.projectName);
+    await notifier.load(ref: widget.projectRef);
   }
 
   Future<void> _pickDateRange(StravaImportNotifier notifier) async {
@@ -88,12 +96,12 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
 
   Future<void> _addSelected(BuildContext ctx) async {
     final notifier = ctx.read<StravaImportNotifier>();
-    final added = await notifier.addSelected(widget.projectName);
+    final added = await notifier.addSelected(widget.projectRef);
     if (!mounted) return;
     if (notifier.error == null) {
       // Reload the project so the newly-added activities appear immediately
       // in the activity list when we pop back to AppScreen.
-      context.read<ProjectNotifier>().load(widget.projectName);
+      context.read<ProjectNotifier>().load(widget.projectRef);
       final msg = 'Added $added ${added == 1 ? "activity" : "activities"} to project. '
           'GPS tracks loading in the background.';
       ScaffoldMessenger.of(context).showSnackBar(
@@ -202,7 +210,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                               : () {
                                   setState(() => _hasSearched = true);
                                   notifier.load(
-                                    projectName: widget.projectName,
+                                    ref: widget.projectRef,
                                     refresh: true,
                                   );
                                 },
@@ -221,7 +229,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
                           selected: selected,
                           onSelected: (_) {
                             notifier.toggleType(type);
-                            notifier.load(projectName: widget.projectName);
+                            notifier.load(ref: widget.projectRef);
                           },
                         );
                       }).toList(),

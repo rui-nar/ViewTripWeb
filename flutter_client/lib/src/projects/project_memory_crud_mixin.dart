@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 
 /// Thrown by [ProjectMemoryCrudMixin.fetchTranslation] when a memory is
@@ -18,14 +19,14 @@ class TranslationUnavailableException implements Exception {}
 
 mixin ProjectMemoryCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
-  String? get projectName;
+  ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
   set items(List<Map<String, dynamic>> v);
   String? get error;
   set error(String? v);
 
   /// Details-only reload — thin delegate to the private helper in the notifier.
-  Future<void> reloadDetailsOnly(String name);
+  Future<void> reloadDetailsOnly(ProjectRef ref);
 
   /// Formats an Exception into a user-readable string — delegates to _msg.
   String errorMessage(Exception e);
@@ -42,8 +43,8 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     double? lon,
     int? insertAfterIndex,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    final ref = projectRef;
+    if (ref == null) return;
     final placeholder = {
       'item_type': 'memory',
       'memory': {
@@ -66,8 +67,8 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     try {
       final encName = await encryption.protect(name);
       final encDescription = await encryption.protect(description);
-      await api.post('/api/memories/', {
-        'project_name': projectName,
+      await api.post(ref.withOwner('/api/memories/'), {
+        'project_name': ref.name,
         'date': date,
         'geo_mode': geoMode,
         if (encName != null) 'name': encName,
@@ -77,7 +78,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
-      await reloadDetailsOnly(projectName);
+      await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
@@ -94,8 +95,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     double? lat,
     double? lon,
   }) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    if (projectRef == null) return;
     for (final item in items) {
       if (item['item_type'] == 'memory' &&
           item['memory']?['id']?.toString() == memoryId) {
@@ -141,8 +141,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
   }
 
   Future<void> deleteMemory(String memoryId) async {
-    final projectName = this.projectName;
-    if (projectName == null) return;
+    if (projectRef == null) return;
     items.removeWhere((item) =>
         item['item_type'] == 'memory' &&
         item['memory']?['id']?.toString() == memoryId);
@@ -186,10 +185,10 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     String photoUuid, {
     bool reload = true,
   }) async {
-    final projectName = this.projectName;
+    final ref = projectRef;
     try {
       await api.delete('/api/memories/$memoryId/photos/$photoUuid');
-      if (reload && projectName != null) await reloadDetailsOnly(projectName);
+      if (reload && ref != null) await reloadDetailsOnly(ref);
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();

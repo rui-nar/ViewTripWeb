@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
-from api.project_shared import _get_project_row, _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from api.project_access import OwnerParam, resolve_project
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
@@ -114,6 +115,7 @@ def _enrich_activities(
 def _enrich_activities_background(
     activity_ids: List[int],
     user_info_id: int,
+    owner_id: int,
     project_name: str,
 ) -> None:
     """Enrich GPS streams for newly imported activities in the background.
@@ -122,6 +124,10 @@ def _enrich_activities_background(
     activity is written to the DB as it completes so partial progress is
     preserved on interruption.  Strava 429 responses are handled by the
     StravaAPI client (sleeps Retry-After then continues).
+
+    ``user_info_id`` is the IMPORTER whose Strava token fetches the streams;
+    ``owner_id`` is the PROJECT OWNER whose geo cache is keyed — the two differ
+    when a companion imports into a shared trip (issue #106).
     """
     client = _strava_client_for_user(user_info_id)
     if client is None:
@@ -159,20 +165,21 @@ def _enrich_activities_background(
             pass
 
     if any_enriched:
-        bust_geo_cache(user_info_id, project_name)
+        bust_geo_cache(owner_id, project_name)
         # Recompute now (still in the background task) so the user's next geo
         # load is a fast cache HIT rather than a cold recompute.
-        warm_geo_cache(user_info_id, project_name)
+        warm_geo_cache(owner_id, project_name)
 
 
 def _enrich_pending_background(
     pending_ids: List[int],
     user_info_id: int,
+    owner_id: int,
     project_name: str,
 ) -> None:
     """Sleep until the Strava rate-limit window resets, then enrich remaining activities."""
     time.sleep(RateLimiter.WINDOW_SECONDS + 5)
-    _enrich_activities_background(pending_ids, user_info_id, project_name)
+    _enrich_activities_background(pending_ids, user_info_id, owner_id, project_name)
 
 
 # ── Activity management ────────────────────────────────────────────────────────
@@ -188,6 +195,7 @@ def add_activities(
     body: AddActivitiesRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Add activities to a project, enriching GPS streams from Strava.
 
@@ -204,26 +212,31 @@ def add_activities(
             pass
 
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         added = project.add_activities(activities)
-        _repo.save_project(sess, user_info_id, project)
+        # New activity rows record the IMPORTER (the caller), not the project
+        # owner — a companion's imports must stay tied to their Strava account.
+        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
 
-    bust_geo_cache(user_info_id, name)
+    bust_geo_cache(owner_id, name)
 
     # Enrich GPS streams in the background immediately — never blocks this response.
+    # Uses the importer's (caller's) Strava token, not the project owner's.
     activity_ids = [a.id for a in activities if a.id is not None]
     if activity_ids:
         background_tasks.add_task(
-            _enrich_activities_background, activity_ids, user_info_id, name
+            _enrich_activities_background, activity_ids, user_info_id, owner_id, name
         )
 
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
 
     return {
         "added": added,
@@ -239,6 +252,7 @@ def refresh_activity(
     name: str,
     activity_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Re-fetch a single activity from Strava and update the stored data.
 
@@ -250,6 +264,19 @@ def refresh_activity(
     GET /api/projects/{name}).
     """
     user_info_id = int(current_user["sub"])
+
+    # Check project access first, then restrict the refresh to the activity's
+    # IMPORTER (issue #106): a re-fetch talks to Strava with the caller's token,
+    # and another editor's account can't see this activity — worse, the
+    # overwrite would re-attribute the row to the wrong user.
+    with get_session() as sess:
+        resolve_project(sess, user_info_id, name, owner)
+        act_row = sess.get(DBActivity, activity_id)
+    if act_row is not None and act_row.user_info_id != user_info_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the user who imported this activity can refresh it from Strava",
+        )
 
     # Locally edited tracks must never be overwritten by a Strava re-fetch.
     # Surface a clear message so the client can prompt the user to reset first.
@@ -305,12 +332,14 @@ def refresh_activity(
 
     # 3. Overwrite the DB row (all columns, including enrichment)
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         _repo.force_update_activity(sess, user_info_id, act)
-        bust_geo_cache(user_info_id, name)
+        bust_geo_cache(owner_id, name)
         # Return the updated project so the client can refresh its state
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
 
     if project is None:
@@ -345,6 +374,7 @@ def get_activity_track(
     name: str,
     activity_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Return one activity's editor payload (map.summary_polyline + elevation_profile
     pairs), so the track editor doesn't download the whole project just to edit a
@@ -353,9 +383,10 @@ def get_activity_track(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -376,6 +407,7 @@ def edit_activity_track(
     body: TrackEditRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Overwrite an activity's track with an edited point list (trim/add/remove).
 
@@ -394,9 +426,11 @@ def edit_activity_track(
     points = [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
 
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -405,13 +439,13 @@ def edit_activity_track(
         if not _repo.edit_activity_track(sess, activity_id, points):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
 
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     return _repo.to_dict(project)
 
 
@@ -422,13 +456,16 @@ def reset_activity_track(
     activity_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Restore an edited activity's geometry from its snapshot and clear is_edited."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -440,13 +477,13 @@ def reset_activity_track(
                 detail="Activity has no edit to reset",
             )
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
 
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     return _repo.to_dict(project)
 
 
@@ -469,6 +506,7 @@ def split_activity(
     body: SplitRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Split an activity at *split_index*: the head keeps its Strava id, the tail
     becomes a new LOCAL activity (negative id, manual, "<name> (2)") inserted
@@ -476,16 +514,17 @@ def split_activity(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_project_row(sess, user_info_id, name)
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None or not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
         try:
             tail_id = _repo.split_activity(
-                sess, user_info_id, row.id, activity_id, body.split_index,
+                sess, owner_id, row.id, activity_id, body.split_index,
                 drop_boundary=body.drop_boundary)
         except ValueError as exc:
             raise HTTPException(
@@ -493,13 +532,13 @@ def split_activity(
         if tail_id is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
 
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     return _repo.to_dict(project)
 
 
@@ -511,6 +550,7 @@ def delete_local_activity(
     activity_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Delete a local (negative-id) activity row and unlink it from the project.
 
@@ -519,15 +559,16 @@ def delete_local_activity(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        row = _get_project_row(sess, user_info_id, name)
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         if not _repo.delete_local_activity(sess, row.id, activity_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Local activity not found",
             )
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
 
 
 # ── Activity field update (issue #29 — client-side E2EE migration) ────────────

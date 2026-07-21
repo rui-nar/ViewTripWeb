@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/people_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -11,7 +12,7 @@ import 'package:viewtrip_client/src/projects/project_service.dart';
 void main() {
   testWidgets('tapping the phone number copies it to the clipboard',
       (tester) async {
-    final notifier = ProjectNotifier(ProjectService())..projectName = 'Trip';
+    final notifier = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
     final person = {'id': 1, 'name': 'Alice', 'phone': '+1 555-0100'};
 
     String? copied;

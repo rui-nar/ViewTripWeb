@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
 import '../auth/auth_notifier.dart';
+import '../core/project_ref.dart';
 import '../projects/basemaps.dart';
 import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingPlaceholder;
 import '../projects/map_panel.dart';
@@ -35,7 +36,7 @@ class _SharedProjectService extends ProjectService {
   /// the UI quickly.  Full details are fetched separately via fetchFullDetails()
   /// after load() returns, giving meta exclusive NAS uplink bandwidth.
   @override
-  Future<Map<String, dynamic>> getDetails(String _) async {
+  Future<Map<String, dynamic>> getDetails(ProjectRef _) async {
     final meta =
         await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
     ownerName = (meta['owner_name'] as String?) ?? '';
@@ -53,19 +54,19 @@ class _SharedProjectService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getGeo(String _) async {
+  Future<Map<String, dynamic>> getGeo(ProjectRef _) async {
     final data = await api.get('/api/share/$token/geo$_aidParam');
     return data as Map<String, dynamic>;
   }
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String _) async {
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) async {
     final data = await api.get('/api/share/$token/geo/low-res');
     return data as Map<String, dynamic>;
   }
 
   @override
-  Future<Map<String, dynamic>> getStats(String _, {List<String> tags = const []}) async {
+  Future<Map<String, dynamic>> getStats(ProjectRef _, {List<String> tags = const []}) async {
     final query = tags.isEmpty
         ? ''
         : '?${tags.map((t) => 'tags=${Uri.encodeComponent(t)}').join('&')}';
@@ -125,7 +126,8 @@ class SharedProjectNotifier extends ProjectNotifier {
 
     // Phase 1: load() calls _sharedSvc.getDetails() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
-    await load(token);
+    final tokenRef = ProjectRef(name: token);
+    await load(tokenRef);
     if (_disposed) return;
     isMetaLoaded = true;
     // The /meta response now carries a downsampled (low-res) elevation profile,
@@ -137,7 +139,7 @@ class SharedProjectNotifier extends ProjectNotifier {
     // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
       final fullDetails = await _sharedSvc.fetchFullDetails();
-      if (_disposed || currentLoadKey != token) return;
+      if (_disposed || currentLoadKey != tokenRef) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
         applyFullActivities(rawActs.cast<Map<String, dynamic>>());

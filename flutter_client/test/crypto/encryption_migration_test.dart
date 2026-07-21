@@ -139,4 +139,38 @@ void main() {
     expect(await EncryptionMigration(api, enc).run(), 0);
     expect(putCount, 0);
   });
+
+  test('skips a project shared with the caller (role: editor — issue #106)',
+      () async {
+    // A companion's own encryption migration must only touch their own
+    // projects — key-sharing with the owner of a shared project is out of
+    // scope, and GETting a shared project's name without ?owner= would 404
+    // (or worse, hit an unrelated same-named project of the caller's own).
+    final getPaths = <String>[];
+    final mock = MockClient((req) async {
+      if (req.method == 'GET' && req.url.path == '/api/projects/') {
+        return http.Response(jsonEncode([
+          {'name': 'OwnTrip'},
+          {
+            'name': 'FriendTrip',
+            'owner_id': 7,
+            'owner_name': 'Bob',
+            'role': 'editor',
+          },
+        ]), 200);
+      }
+      getPaths.add(req.url.path);
+      if (req.method == 'GET') {
+        return http.Response(jsonEncode({'items': <dynamic>[]}), 200);
+      }
+      return http.Response('', 204);
+    });
+
+    final api = ApiClient(baseUrl: '', httpClient: mock);
+    final enc = EncryptionService(_FakeStore(), _FakeApi());
+    await enc.enable(const RecoveryKeyChoice());
+
+    expect(await EncryptionMigration(api, enc).run(), 0);
+    expect(getPaths, ['/api/projects/OwnTrip']);
+  });
 }

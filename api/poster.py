@@ -25,7 +25,7 @@ from models.db import get_session
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from api.project_shared import _get_project_row
+from api.project_access import OwnerParam, resolve_project
 from models.project_db import DBPosterJob
 from src.poster.poster_job_runner import run_poster_job
 from src.poster.poster_renderer import render_poster_preview
@@ -109,11 +109,12 @@ def create_poster_job(
     body: PosterRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     """Create a pending poster job for a project and render it in the background."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project = _get_project_row(sess, user_info_id, name)
+        project = resolve_project(sess, user_info_id, name, owner)
         job = DBPosterJob(
             project_id=project.id,
             user_info_id=user_info_id,
@@ -134,11 +135,12 @@ def get_poster_job_status(
     name: str,
     job_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Poll the status of a poster job."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_project_row(sess, user_info_id, name)
+        resolve_project(sess, user_info_id, name, owner)
         job = _get_owned_job(sess, job_id, user_info_id)
         return {
             "status": job.status,
@@ -153,6 +155,7 @@ def download_poster(
     job_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
     format: str = Query("png", pattern="^(png|pdf)$"),
+    owner: OwnerParam = None,
 ):
     """Return the rendered poster file once the job is done.
 
@@ -162,7 +165,7 @@ def download_poster(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_project_row(sess, user_info_id, name)
+        resolve_project(sess, user_info_id, name, owner)
         job = _get_owned_job(sess, job_id, user_info_id)
         if job.status != "done":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not ready")
@@ -180,6 +183,7 @@ def preview_poster(
     name: str,
     body: PosterRequest,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Return a small PNG preview of the poster layout (pins/cards/legend)
     for the given request, synchronously — no job row, no background task,
@@ -190,11 +194,12 @@ def preview_poster(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        project = _get_project_row(sess, user_info_id, name)
-        project_id = project.id
+        row = resolve_project(sess, user_info_id, name, owner)
+        project_id = row.id
+        owner_id = row.user_info_id
 
     try:
-        png_bytes = render_poster_preview(project_id, user_info_id, body.model_dump())
+        png_bytes = render_poster_preview(project_id, owner_id, body.model_dump())
     except Exception as exc:
         # Unlike the async job (whose failure lands in job.error_message), a
         # preview failure would otherwise surface as a bare 500 with no

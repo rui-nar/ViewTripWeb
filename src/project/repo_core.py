@@ -81,12 +81,20 @@ class ProjectCoreMixin:
         legacy_path: Optional[str] = None,
         include_heavy: bool = True,
         include_elevation: bool = True,
+        journal_user_id: Optional[int] = None,
     ) -> Optional[Project]:
         """Load a project from DB.
 
         If no DB row exists and *legacy_path* points to a ``.viewtrip`` or ``.gettracks`` file,
         the file is ingested into the DB first (lazy migration).
         Returns ``None`` if neither DB row nor legacy file exists.
+
+        journal_user_id (issue #106) filters journal entries — and their timeline
+        items — to those authored by that user (a NULL author = the project
+        owner). None (the default) loads everything: required by every
+        load-mutate-save flow, since save_project does a full item-list replace
+        and must never drop another user's journal items. Pass the *caller's* id
+        on read-only paths that serialise the project to a client.
 
         include_heavy=False defers summary_polyline and elevation_profile_json (see
         _row_to_project for details).  The legacy-ingest path always uses full loading.
@@ -108,7 +116,8 @@ class ProjectCoreMixin:
                 return None
 
         return self._row_to_project(
-            sess, row, include_heavy=include_heavy, include_elevation=include_elevation)
+            sess, row, include_heavy=include_heavy, include_elevation=include_elevation,
+            journal_user_id=journal_user_id)
 
     def get_project_by_id(self, sess: Session, project_id: int) -> Optional[Project]:
         """Load a project directly by its primary key (used for shared-link access)."""
@@ -154,10 +163,16 @@ class ProjectCoreMixin:
         project: Project,
         *,
         check_version: bool = False,
+        activity_user_id: Optional[int] = None,
     ) -> None:
         """Persist all changes to an in-memory Project back to the DB.
 
         This is a full replace of the project's item list and activity upserts.
+
+        ``activity_user_id`` is recorded on any NEWLY inserted activity rows —
+        the importer, which for a shared project (issue #106) may be a
+        companion rather than the project owner passed as ``user_info_id``.
+        Defaults to ``user_info_id``. Existing rows keep their importer.
 
         Pass ``check_version=True`` for load-then-mutate-then-save flows that
         must not clobber a concurrent write (e.g. the segment endpoints and the
@@ -236,8 +251,9 @@ class ProjectCoreMixin:
         row.updated_at = time.time()
 
         # Upsert all activities in the project's activity pool
+        importer_id = activity_user_id if activity_user_id is not None else user_info_id
         for act in project.activities:
-            self._upsert_activity(sess, user_info_id, act)
+            self._upsert_activity(sess, importer_id, act)
 
         # Replace the full item list
         sess.flush()  # ensure row.id is available
@@ -323,7 +339,8 @@ class ProjectCoreMixin:
     # ------------------------------------------------------------------
 
     def _row_to_project(self, sess: Session, row: DBProject, include_heavy: bool = True,
-                        include_elevation: bool = True) -> Project:
+                        include_elevation: bool = True,
+                        journal_user_id: Optional[int] = None) -> Project:
         """Reconstruct an in-memory Project from DB rows.
 
         include_heavy=False defers summary_polyline and elevation_profile_json from
@@ -332,6 +349,10 @@ class ProjectCoreMixin:
 
         include_elevation=False (with include_heavy=True) defers only
         elevation_profile_json: summary_polyline is loaded, elevation_profile is None.
+
+        journal_user_id, when set, keeps only journal entries authored by that
+        user (NULL author = project owner); their timeline items drop out with
+        them. See get_project for the None-vs-caller contract (issue #106).
         """
         fs_raw = json.loads(row.filter_state_json or "{}")
         filter_state = ProjectFilterState(
@@ -398,10 +419,18 @@ class ProjectCoreMixin:
             mem.like_count = like_counts.get(mr.id, 0)
             memory_by_id[mr.id] = mem
 
-        # Load journal entry rows for this project
+        # Load journal entry rows for this project. Journal is per-user (issue
+        # #106): when a requesting user is given, keep only their own entries —
+        # the item loop below then skips the hidden entries' timeline items too.
         journal_rows = sess.exec(
             select(DBJournalEntry).where(DBJournalEntry.project_id == row.id)
         ).all()
+        if journal_user_id is not None:
+            journal_rows = [
+                jr for jr in journal_rows
+                if (jr.user_info_id if jr.user_info_id is not None
+                    else row.user_info_id) == journal_user_id
+            ]
         journal_by_id = {jr.id: self._row_to_journal(jr) for jr in journal_rows}
 
         # Load people + encounter rows for this project (issue #40)

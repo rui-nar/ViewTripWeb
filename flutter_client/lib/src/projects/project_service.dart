@@ -4,13 +4,14 @@ library;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../api/client.dart';
+import '../core/project_ref.dart';
 import '../map/polyline_decoder.dart';
 
 class ProjectService {
-  /// Fetches the full project dict for [name] including elevation_profile data.
+  /// Fetches the full project dict for [ref] including elevation_profile data.
   /// GET /api/projects/{name}
-  Future<Map<String, dynamic>> getDetails(String name) async {
-    final data = await api.get('/api/projects/$name');
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
+    final data = await api.get(ref.path());
     return data as Map<String, dynamic>;
   }
 
@@ -18,12 +19,12 @@ class ProjectService {
   /// Typically 10-15× smaller than getDetails(); use for initial load and
   /// reloads that don't need the elevation chart to update.
   /// GET /api/projects/{name}/meta
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async {
-    final data = await api.get('/api/projects/$name/meta');
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
+    final data = await api.get(ref.path('/meta'));
     return data as Map<String, dynamic>;
   }
 
-  /// Fetches the GeoJSON FeatureCollection for [name].
+  /// Fetches the GeoJSON FeatureCollection for [ref].
   /// GET /api/geo/project?name={name}
   ///
   /// The full-res endpoint sends activity tracks as Google-encoded polylines
@@ -31,15 +32,16 @@ class ProjectService {
   /// small; [_expandEncodedActivities] decodes them back to `coordinates` so
   /// the rest of the app sees standard GeoJSON. The timeout is generous because
   /// a cold-cache build of a large trip can take a while on NAS storage.
-  Future<Map<String, dynamic>> getGeo(String name) async {
-    final encoded = Uri.encodeComponent(name);
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async {
+    final encoded = Uri.encodeComponent(ref.name);
     // Compact payload: activity tracks as Google-encoded polylines, decoded by
     // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
     // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
     // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
     // (see polyline_decoder.dart). The generous timeout covers a cold-cache
     // build of a large trip.
-    final data = await api.get('/api/geo/project?name=$encoded&encoded=1',
+    final data = await api.get(
+        ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
         timeout: const Duration(seconds: 90));
     return expandEncodedActivities(data as Map<String, dynamic>);
   }
@@ -79,30 +81,30 @@ class ProjectService {
     return geo;
   }
 
-  /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [name].
+  /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [ref].
   /// GET /api/geo/project/low-res?name={name}
-  Future<Map<String, dynamic>> getLowResGeo(String name) async {
-    final encoded = Uri.encodeComponent(name);
-    final data = await api.get('/api/geo/project/low-res?name=$encoded');
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async {
+    final encoded = Uri.encodeComponent(ref.name);
+    final data =
+        await api.get(ref.withOwner('/api/geo/project/low-res?name=$encoded'));
     return data as Map<String, dynamic>;
   }
 
-  /// Fetches pre-computed project statistics for [name].
+  /// Fetches pre-computed project statistics for [ref].
   /// Pass [tags] to filter stats to only days with matching tags.
   /// GET /api/projects/{name}/stats[?tags=x&tags=y]
-  Future<Map<String, dynamic>> getStats(String name,
+  Future<Map<String, dynamic>> getStats(ProjectRef ref,
       {List<String> tags = const []}) async {
-    final encoded = Uri.encodeComponent(name);
     final query = tags.isEmpty
         ? ''
         : '?${tags.map((t) => 'tags=${Uri.encodeComponent(t)}').join('&')}';
-    final data = await api.get('/api/projects/$encoded/stats$query');
+    final data = await api.get(ref.path('/stats$query'));
     return data as Map<String, dynamic>;
   }
 
   /// PUT /api/projects/{name}/track-style
   Future<void> saveTrackStyle(
-    String name, {
+    ProjectRef ref, {
     String? trackColor,
     Object? trackSecondaryColor = _kUnset, // null = clear, _kUnset = don't send
     double? trackWidth,
@@ -112,8 +114,7 @@ class ProjectService {
     bool? colorByType,
     Map<String, Map<String, dynamic>>? typeStyles,
   }) async {
-    final enc = Uri.encodeComponent(name);
-    await api.put('/api/projects/$enc/track-style', {
+    await api.put(ref.path('/track-style'), {
       if (trackColor != null) 'track_color': trackColor,
       if (trackSecondaryColor != _kUnset) 'track_secondary_color': trackSecondaryColor,
       if (trackWidth != null) 'track_width': trackWidth,
@@ -128,15 +129,13 @@ class ProjectService {
   static const Object _kUnset = Object();
 
   /// PUT /api/projects/{name}/items/sort
-  Future<void> sortItems(String name) async {
-    final enc = Uri.encodeComponent(name);
-    await api.put('/api/projects/$enc/items/sort', {});
+  Future<void> sortItems(ProjectRef ref) async {
+    await api.put(ref.path('/items/sort'), {});
   }
 
   /// PUT /api/projects/{name}/languages
-  Future<void> saveLanguages(String name, List<String> languages) async {
-    final enc = Uri.encodeComponent(name);
-    await api.put('/api/projects/$enc/languages', {'languages': languages});
+  Future<void> saveLanguages(ProjectRef ref, List<String> languages) async {
+    await api.put(ref.path('/languages'), {'languages': languages});
   }
 
   /// Fetch a single activity's editable geometry (polyline + elevation pairs).
@@ -144,11 +143,10 @@ class ProjectService {
   /// Far smaller than getDetails() — used to open the track editor without
   /// downloading the whole project.
   Future<Map<String, dynamic>> getActivityTrack(
-    String name,
+    ProjectRef ref,
     int activityId,
   ) async {
-    final enc = Uri.encodeComponent(name);
-    final data = await api.get('/api/projects/$enc/activities/$activityId/track');
+    final data = await api.get(ref.path('/activities/$activityId/track'));
     return data as Map<String, dynamic>;
   }
 
@@ -156,13 +154,12 @@ class ProjectService {
   /// PUT /api/projects/{name}/activities/{id}/track
   /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated project.
   Future<Map<String, dynamic>> saveActivityTrack(
-    String name,
+    ProjectRef ref,
     int activityId,
     Map<String, dynamic> payload,
   ) async {
-    final enc = Uri.encodeComponent(name);
     final data = await api.put(
-      '/api/projects/$enc/activities/$activityId/track',
+      ref.path('/activities/$activityId/track'),
       payload,
     );
     return data as Map<String, dynamic>;
@@ -171,12 +168,11 @@ class ProjectService {
   /// Reset an edited activity's track to the original Strava geometry.
   /// POST /api/projects/{name}/activities/{id}/reset
   Future<Map<String, dynamic>> resetActivityTrack(
-    String name,
+    ProjectRef ref,
     int activityId,
   ) async {
-    final enc = Uri.encodeComponent(name);
     final data = await api.post(
-      '/api/projects/$enc/activities/$activityId/reset',
+      ref.path('/activities/$activityId/reset'),
       const {},
     );
     return data as Map<String, dynamic>;
@@ -187,14 +183,13 @@ class ProjectService {
   /// (#104 — used when a transportation segment will bridge the cut).
   /// POST /api/projects/{name}/activities/{id}/split
   Future<Map<String, dynamic>> splitActivity(
-    String name,
+    ProjectRef ref,
     int activityId,
     int splitIndex, {
     bool dropBoundary = false,
   }) async {
-    final enc = Uri.encodeComponent(name);
     final data = await api.post(
-      '/api/projects/$enc/activities/$activityId/split',
+      ref.path('/activities/$activityId/split'),
       {'split_index': splitIndex, 'drop_boundary': dropBoundary},
     );
     return data as Map<String, dynamic>;
@@ -202,20 +197,18 @@ class ProjectService {
 
   /// Delete a local (split-tail, negative-id) activity.
   /// DELETE /api/projects/{name}/activities/{id}/local
-  Future<void> deleteLocalActivity(String name, int activityId) async {
-    final enc = Uri.encodeComponent(name);
-    await api.delete('/api/projects/$enc/activities/$activityId/local');
+  Future<void> deleteLocalActivity(ProjectRef ref, int activityId) async {
+    await api.delete(ref.path('/activities/$activityId/local'));
   }
 
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
   Future<Map<String, dynamic>> resolveTrainRoute(
-    String projectName,
+    ProjectRef ref,
     String segId, {
     String? hafasProvider,
     String? trainNumber,
     String? date,
   }) async {
-    final enc = Uri.encodeComponent(projectName);
     final sid = Uri.encodeComponent(segId);
     final body = <String, dynamic>{
       if (hafasProvider != null && hafasProvider.isNotEmpty)
@@ -225,7 +218,7 @@ class ProjectService {
       if (date != null && date.isNotEmpty) 'date': date,
     };
     final data = await api.post(
-      '/api/projects/$enc/segments/$sid/resolve-route',
+      ref.path('/segments/$sid/resolve-route'),
       body,
       timeout: const Duration(minutes: 3),
     );

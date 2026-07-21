@@ -21,6 +21,7 @@ from api.encryption import router as encryption_router
 from api.geo import router as geo_router
 from api.groups import router as groups_router
 from api.journal import router as journal_router
+from api.members import router as members_router, invites_router
 from api.memories import router as memories_router
 from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
@@ -100,6 +101,8 @@ app.include_router(encryption_router)
 app.include_router(geo_router)
 app.include_router(groups_router)
 app.include_router(journal_router)
+app.include_router(members_router)
+app.include_router(invites_router)
 app.include_router(memories_router)
 app.include_router(people_router)
 app.include_router(polarsteps_router)

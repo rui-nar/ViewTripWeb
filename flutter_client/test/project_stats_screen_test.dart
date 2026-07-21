@@ -9,14 +9,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 import 'package:viewtrip_client/src/projects/project_stats_screen.dart';
 
 class _FakeProjectService extends ProjectService {
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(String name) async => {
-        'name': name,
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async => {
+        'name': ref.name,
         'activities': <dynamic>[],
         'items': <dynamic>[],
         'day_meta': {
@@ -30,19 +31,19 @@ class _FakeProjectService extends ProjectService {
       };
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(String name) async =>
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getGeo(String name) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   // load() unconditionally kicks off a background elevation-data fetch via
   // getDetails() (not gated by loadOwnerExtras) — override it too so nothing
   // falls through to a real, unmocked api.get() call.
   @override
-  Future<Map<String, dynamic>> getDetails(String name) async =>
-      getDetailsMeta(name);
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async =>
+      getDetailsMeta(ref);
 }
 
 /// Skips owner-only network calls and the 5 s background-sync-check Timer
@@ -55,7 +56,7 @@ class _TestProjectNotifier extends ProjectNotifier {
 
 class _FakeStatsService extends ProjectService {
   @override
-  Future<Map<String, dynamic>> getStats(String name,
+  Future<Map<String, dynamic>> getStats(ProjectRef ref,
           {List<String> tags = const []}) async =>
       <String, dynamic>{};
 }
@@ -70,7 +71,7 @@ void main() {
       'reads tags from the ambient ProjectNotifier, not a constructor param',
       (tester) async {
     final notifier = _TestProjectNotifier(_FakeProjectService());
-    await notifier.load('Trip');
+    await notifier.load(const ProjectRef(name: 'Trip'));
 
     await tester.pumpWidget(MaterialApp(
       home: ChangeNotifierProvider<ProjectNotifier>.value(

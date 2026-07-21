@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
+from api.project_access import OwnerParam, resolve_project
 from api.project_shared import _DATA_DIR, _legacy_path, _projects_dir, _repo
 from src.models.great_circle import great_circle_points
 from src.project.project_io import ProjectIO
@@ -83,13 +84,15 @@ _SAFE_NAME = re.compile(r"[^\w\-. ]")
 def export_project_gpx(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Build and stream the project as a GPX file."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -227,13 +230,16 @@ def export_project_gpx(
 def export_project_viewtrip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Download the project as a .viewtrip JSON file (no embedded photos)."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -256,14 +262,19 @@ def export_project_viewtrip(
 def export_project_zip(
     name: str,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """Download a ZIP containing the .viewtrip file and all memory photos."""
     user_info_id = int(current_user["sub"])
-    user_id = current_user["sub"]
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        # Memory photos live under the project OWNER's data dir (issue #106) —
+        # not the caller's, who may be a companion.
+        owner_dir_id = str(row.user_info_id)
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(user_id, name),
+            sess, row.user_info_id, name,
+            legacy_path=_legacy_path(str(row.user_info_id), name),
+            journal_user_id=user_info_id,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -295,7 +306,7 @@ def export_project_zip(
 
     zip_buffer = io.BytesIO()
     safe = _SAFE_NAME.sub("_", project.name)
-    memories_base = Path(_DATA_DIR) / "users" / user_id / "memories"
+    memories_base = Path(_DATA_DIR) / "users" / owner_dir_id / "memories"
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{safe}.viewtrip", viewtrip_bytes)
         for item in project.items:

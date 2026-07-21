@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:viewtrip_client/src/api/client.dart';
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/crypto/share_crypto.dart';
 import 'package:viewtrip_client/src/share/share_content_generator.dart';
 
@@ -63,7 +64,8 @@ void main() {
       ];
 
       final key = await generateShareKey();
-      final base64Key = await ShareContentGenerator(api).generate('Trip1', decryptedItems);
+      final base64Key = await ShareContentGenerator(api)
+          .generate(const ProjectRef(name: 'Trip1'), decryptedItems);
 
       expect(base64Key, isNotNull);
       expect(putPath, '/api/projects/Trip1/share/content');
@@ -109,7 +111,8 @@ void main() {
       });
 
       final api = ApiClient(baseUrl: '', httpClient: mock);
-      final result = await ShareContentGenerator(api).generate('Trip1', const [
+      final result = await ShareContentGenerator(api)
+          .generate(const ProjectRef(name: 'Trip1'), const [
         {
           'item_type': 'memory',
           'memory': {'id': 1, 'name': 'Plain', 'description': 'Notes'},
@@ -143,7 +146,8 @@ void main() {
 
       final api = ApiClient(baseUrl: '', httpClient: mock);
       // decryptedItems does not contain memory 9 at all.
-      final result = await ShareContentGenerator(api).generate('Trip1', const []);
+      final result = await ShareContentGenerator(api)
+          .generate(const ProjectRef(name: 'Trip1'), const []);
 
       expect(result, isNull);
       expect(putBody, isNull);

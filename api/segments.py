@@ -20,6 +20,12 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
+from api.project_access import (
+    OwnerParam,
+    journal_visible_positions,
+    resolve_project,
+    translate_insert_after,
+)
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_repo import StaleWriteError
@@ -239,6 +245,7 @@ def create_segment(
     body: SegmentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     seg = ConnectingSegment(
@@ -254,20 +261,23 @@ def create_segment(
     item = ProjectItem(item_type="segment", segment=seg)
 
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        insert_at = len(project.items)
-        if body.insert_after_index is not None:
-            insert_at = max(0, min(len(project.items), body.insert_after_index + 1))
+        # insert_after_index is an index into the caller's *visible* item list
+        # (other users' journal items are hidden) — translate it (issue #106).
+        visible = journal_visible_positions(project.items, user_info_id, owner_id)
+        insert_at = translate_insert_after(visible, body.insert_after_index, len(project.items))
         project.items.insert(insert_at, item)
-        _repo.save_project(sess, user_info_id, project, check_version=True)
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+        _repo.save_project(sess, owner_id, project, check_version=True)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     return {"id": seg.id}
 
 
@@ -279,12 +289,15 @@ def update_segment(
     body: SegmentBody,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -307,10 +320,10 @@ def update_segment(
                     seg.route_polyline = None
                 elif body.route_mode == "rail":
                     seg.route_mode = "rail"
-                _repo.save_project(sess, user_info_id, project, check_version=True)
-                bust_geo_cache(user_info_id, name)
-                background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-                background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+                _repo.save_project(sess, owner_id, project, check_version=True)
+                bust_geo_cache(owner_id, name)
+                background_tasks.add_task(_refresh_stats_background, owner_id, name)
+                background_tasks.add_task(_refresh_share_tiles, owner_id, name)
                 return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
@@ -322,12 +335,15 @@ def delete_segment(
     seg_id: str,
     current_user: Annotated[dict, Depends(get_current_user)],
     background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
 ):
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -338,10 +354,10 @@ def delete_segment(
         ]
         if len(project.items) == original_len:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
-        _repo.save_project(sess, user_info_id, project, check_version=True)
-    bust_geo_cache(user_info_id, name)
-    background_tasks.add_task(_refresh_stats_background, user_info_id, name)
-    background_tasks.add_task(_refresh_share_tiles, user_info_id, name)
+        _repo.save_project(sess, owner_id, project, check_version=True)
+    bust_geo_cache(owner_id, name)
+    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
 
 
 class ResolveRouteRequest(BaseModel):
@@ -359,6 +375,7 @@ def resolve_segment_route(
     body: ResolveRouteRequest,
     background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
 ):
     """
     Schedule OSM-based route resolution for a train, boat, or bus segment.
@@ -373,9 +390,11 @@ def resolve_segment_route(
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
         project = _repo.get_project(
-            sess, user_info_id, name,
-            legacy_path=_legacy_path(current_user["sub"], name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -401,10 +420,10 @@ def resolve_segment_route(
             seg.train_number = body.train_number
         if body.hafas_provider:
             seg.hafas_provider = body.hafas_provider
-        _repo.save_project(sess, user_info_id, project, check_version=True)
-    bust_geo_cache(user_info_id, name)
+        _repo.save_project(sess, owner_id, project, check_version=True)
+    bust_geo_cache(owner_id, name)
 
     background_tasks.add_task(
-        _resolve_route_job, user_info_id, name, seg_id, body.model_dump()
+        _resolve_route_job, owner_id, name, seg_id, body.model_dump()
     )
     return {"status": "pending", "route_status": "pending"}

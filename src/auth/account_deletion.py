@@ -25,7 +25,9 @@ from models.project_db import (
     DBPerson,
     DBPersonGroup,
     DBProject,
+    DBProjectInvite,
     DBProjectItem,
+    DBProjectMember,
     DBProjectSyncMeta,
     DBActivity,
     DBShareMemoryContent,
@@ -65,6 +67,29 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
     _delete_all(DBMemoryComment, DBMemoryComment.user_info_id == user_info_id)
     _delete_all(DBMemoryLike, DBMemoryLike.user_info_id == user_info_id)
     _delete_all(DBShareVisit, DBShareVisit.user_info_id == user_info_id)
+
+    # Travel-companion footprint (issue #106): rows this user left in OTHER
+    # users' projects, and membership/invite rows in both directions. Items
+    # first (they reference the journal entries / activities being removed);
+    # own-project rows are covered again by the project block below, which is
+    # harmless. The user's journal photo files live under
+    # ``data/users/{id}/journal/`` and are removed by purge_user_files.
+    authored_journal_ids = sess.exec(
+        select(DBJournalEntry.id).where(DBJournalEntry.user_info_id == user_info_id)
+    ).all()
+    if authored_journal_ids:
+        _delete_all(DBProjectItem, DBProjectItem.journal_id.in_(authored_journal_ids))
+        _delete_all(DBJournalEntry, DBJournalEntry.id.in_(authored_journal_ids))
+    activity_ids = sess.exec(
+        select(DBActivity.id).where(DBActivity.user_info_id == user_info_id)
+    ).all()
+    if activity_ids:
+        _delete_all(DBProjectItem, DBProjectItem.activity_id.in_(activity_ids))
+    _delete_all(DBProjectMember, DBProjectMember.user_info_id == user_info_id)
+    _delete_all(DBProjectInvite, DBProjectInvite.created_by == user_info_id)
+    if project_ids:
+        _delete_all(DBProjectMember, DBProjectMember.project_id.in_(project_ids))
+        _delete_all(DBProjectInvite, DBProjectInvite.project_id.in_(project_ids))
 
     if project_ids:
         _delete_all(DBMemory, DBMemory.project_id.in_(project_ids))

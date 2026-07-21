@@ -19,6 +19,7 @@ import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/last_opened_project.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
+import '../core/project_ref.dart';
 import 'project_notifier.dart';
 import 'activity_panel.dart';
 import 'panel_resize.dart';
@@ -39,6 +40,10 @@ import 'viewport_sync.dart';
 class AppScreen extends StatefulWidget {
   final String projectName;
 
+  /// Owning user's id for a project shared with the caller (issue #106);
+  /// null for one of the caller's own projects.
+  final int? ownerId;
+
   /// Camera position carried over from view mode via the mode toggle, so
   /// switching modes doesn't reset the map viewport to fit-all-bounds.
   final double? initialLat;
@@ -48,10 +53,15 @@ class AppScreen extends StatefulWidget {
   const AppScreen({
     super.key,
     required this.projectName,
+    this.ownerId,
     this.initialLat,
     this.initialLng,
     this.initialZoom,
   });
+
+  /// Addressing for [projectName]/[ownerId], threaded down to the notifier
+  /// and used to build any project-scoped URL this screen needs directly.
+  ProjectRef get projectRef => ProjectRef(name: projectName, ownerId: ownerId);
 
   @override
   State<AppScreen> createState() => _AppScreenState();
@@ -99,6 +109,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       context.replace(viewportSyncPath(
         basePath: '/app',
         projectName: widget.projectName,
+        ownerId: widget.ownerId,
         lat: cam.center.latitude,
         lng: cam.center.longitude,
         zoom: cam.zoom,
@@ -165,10 +176,15 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ProjectNotifier>();
-      notifier.load(widget.projectName).then((_) {
+      // The URL-derived ref carries no role — resolve it against the signed-in
+      // user so owner-only UI gating (ProjectNotifier.isEditor) is correct for
+      // shared projects (issue #106).
+      final projectRef = widget.projectRef
+          .resolveRoleFor(context.read<AuthNotifier>().user?.id);
+      notifier.load(projectRef).then((_) {
         if (!mounted || notifier.error != null) return;
         saveLastOpenedProject(
-            context.read<AuthNotifier>().user?.id, widget.projectName);
+            context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
       });
     });
     SharedPreferences.getInstance().then((prefs) {
@@ -193,6 +209,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
+
+  /// Builds a sub-route location for [path] carrying `project` (and `owner`
+  /// when this is a shared project — issue #106) so a reload/deep-link into
+  /// e.g. `/stats` or `/project-settings` still resolves the right project.
+  String _route(String path) => widget.projectRef
+      .withOwner('$path?project=${Uri.encodeComponent(widget.projectName)}');
 
   Future<void> _downloadFile(String apiPath, String fallbackFilename) async {
     setState(() => _isExporting = true);
@@ -225,7 +247,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   Future<void> _exportOptions() async {
     final name = widget.projectName;
-    final enc = Uri.encodeComponent(name);
+    final ref = widget.projectRef;
 
     final notifier = context.read<ProjectNotifier>();
     final hasMemoryPhotos = notifier.items.any(
@@ -294,12 +316,11 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
     if (choice == null || !mounted) return;
     if (choice == 'gpx') {
-      await _downloadFile('/api/projects/$enc/export', '$name.gpx');
+      await _downloadFile(ref.path('/export'), '$name.gpx');
     } else if (choice == 'viewtrip') {
-      await _downloadFile(
-          '/api/projects/$enc/export-viewtrip', '$name.viewtrip');
+      await _downloadFile(ref.path('/export-viewtrip'), '$name.viewtrip');
     } else if (choice == 'zip') {
-      await _downloadFile('/api/projects/$enc/export-zip', '$name.zip');
+      await _downloadFile(ref.path('/export-zip'), '$name.zip');
     } else if (choice == 'image') {
       await _exportImage();
     } else if (choice == 'poster') {
@@ -384,7 +405,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       context: context,
       barrierDismissible: false,
       builder: (_) => _PosterPreviewDialog(
-        projectName: widget.projectName,
+        projectRef: widget.projectRef,
         bounds: bounds,
         orientation: orientation,
         opts: opts,
@@ -398,7 +419,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       PosterConfigOptions opts, List<Map<String, dynamic>> memories) async {
     if (!mounted) return;
 
-    final job = PosterJobNotifier(projectName: widget.projectName);
+    final job = PosterJobNotifier(ref: widget.projectRef);
     unawaited(showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -422,6 +443,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     final notifier = context.read<ProjectNotifier>();
     final pending = notifier.pendingSync;
     if (pending == null) return;
+    // Captured before the dialog's async gap; see initState for why the
+    // URL-derived ref's role is resolved against the signed-in user.
+    final projectRef = widget.projectRef
+        .resolveRoleFor(context.read<AuthNotifier>().user?.id);
     showDialog<void>(
       context: context,
       useRootNavigator: true,
@@ -430,12 +455,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           stravaActivities: pending.strava,
           psSteps: pending.polarsteps,
         ),
-        child: SyncImportDialog(projectName: widget.projectName),
+        child: SyncImportDialog(projectRef: widget.projectRef),
       ),
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
-      notifier.load(widget.projectName);
+      notifier.load(projectRef);
     });
   }
 
@@ -510,9 +535,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               selected: const {false},
               onSelectionChanged: (s) {
                 final cam = _mapController.mapController.camera;
-                context.go(
+                context.go(widget.projectRef.withOwner(
                     '/view?project=${Uri.encodeComponent(widget.projectName)}'
-                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}');
+                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}'));
               },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,
@@ -577,14 +602,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
               onPressed: isLoading ? null : () => context.push(
-                '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+                _route('/stats'),
               ),
             ),
             IconButton(
               icon: const Icon(Icons.playlist_add),
               tooltip: 'Import activities from Strava',
               onPressed: () => context.push(
-                  '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+                  _route('/strava-import')),
             ),
             PopupMenuButton<int>(
               icon: const Icon(Icons.more_vert),
@@ -593,10 +618,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 switch (v) {
                   case 0: if (!_isExporting) _exportOptions();
                   case 1: context.push(
-                      '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}');
+                      _route('/polarsteps-import'));
                   case 2: _showShareDialog();
                   case 3: context.push(
-                    '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
+                    _route('/project-settings'),
                   );
                   case 4: context.push('/settings');
                   case 5: context.go('/projects');
@@ -668,13 +693,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               icon: const Icon(Icons.playlist_add),
               tooltip: 'Import activities from Strava',
               onPressed: () => context.push(
-                  '/strava-import?project=${Uri.encodeComponent(widget.projectName)}'),
+                  _route('/strava-import')),
             ),
             IconButton(
               icon: const Icon(Icons.explore_outlined),
               tooltip: 'Import steps from Polarsteps',
               onPressed: () => context.push(
-                  '/polarsteps-import?project=${Uri.encodeComponent(widget.projectName)}'),
+                  _route('/polarsteps-import')),
             ),
             IconButton(
               icon: const Icon(Icons.share_outlined),
@@ -685,14 +710,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               icon: const Icon(Icons.bar_chart_outlined),
               tooltip: 'Statistics',
               onPressed: isLoading ? null : () => context.push(
-                '/stats?project=${Uri.encodeComponent(widget.projectName)}',
+                _route('/stats'),
               ),
             ),
             IconButton(
               icon: const Icon(Icons.tune),
               tooltip: 'Project settings',
               onPressed: isLoading ? null : () => context.push(
-                '/project-settings?project=${Uri.encodeComponent(widget.projectName)}',
+                _route('/project-settings'),
               ),
             ),
             IconButton(
@@ -1043,7 +1068,7 @@ class _PosterJobDialog extends StatelessWidget {
 /// a small size) so the user can sanity-check card placement/overlap before
 /// committing to the slower full-resolution job.
 class _PosterPreviewDialog extends StatefulWidget {
-  final String projectName;
+  final ProjectRef projectRef;
   final LatLngBounds bounds;
   final String orientation;
   final PosterConfigOptions opts;
@@ -1051,7 +1076,7 @@ class _PosterPreviewDialog extends StatefulWidget {
   final VoidCallback onGenerate;
 
   const _PosterPreviewDialog({
-    required this.projectName,
+    required this.projectRef,
     required this.bounds,
     required this.orientation,
     required this.opts,
@@ -1076,7 +1101,7 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
   Future<void> _load() async {
     try {
       final bytes = await fetchPosterPreview(
-        projectName: widget.projectName,
+        ref: widget.projectRef,
         bounds: posterBoundsFromLatLngBounds(widget.bounds),
         orientation: widget.orientation,
         config: widget.opts.toJson(),

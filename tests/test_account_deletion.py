@@ -28,7 +28,9 @@ from models.project_db import (
     DBPerson,
     DBPersonGroup,
     DBProject,
+    DBProjectInvite,
     DBProjectItem,
+    DBProjectMember,
     DBProjectSyncMeta,
     DBShareMemoryContent,
     DBShareVisit,
@@ -160,6 +162,94 @@ class TestDeleteUserAndData:
 
     def test_purge_user_files_is_noop_if_absent(self, engine):
         purge_user_files(999999)  # must not raise
+
+
+def _seed_companionship(sess, owner_id: int, companion_id: int) -> dict:
+    """Owner project with the companion as editor, plus the companion's
+    footprint inside it: a journal entry, an imported activity, and the
+    timeline items referencing both (issue #106)."""
+    proj = DBProject(user_info_id=owner_id, name="Shared Trip")
+    sess.add(proj)
+    sess.commit()
+    sess.refresh(proj)
+
+    sess.add(DBProjectMember(project_id=proj.id, user_info_id=companion_id,
+                             role="editor", invited_by=owner_id, created_at=0.0))
+    sess.add(DBProjectInvite(project_id=proj.id, token="tok123",
+                             created_by=owner_id, created_at=0.0))
+    entry = DBJournalEntry(project_id=proj.id, user_info_id=companion_id,
+                           date="2026-01-01")
+    owner_entry = DBJournalEntry(project_id=proj.id, user_info_id=None,
+                                 date="2026-01-02")  # legacy row = owner's
+    act = DBActivity(id=companion_id * 1000 + 7, user_info_id=companion_id, name="ride")
+    sess.add(entry); sess.add(owner_entry); sess.add(act)
+    sess.commit()
+    sess.refresh(entry); sess.refresh(owner_entry)
+
+    sess.add(DBProjectItem(project_id=proj.id, position=0, item_type="journal",
+                           journal_id=entry.id))
+    sess.add(DBProjectItem(project_id=proj.id, position=1, item_type="journal",
+                           journal_id=owner_entry.id))
+    sess.add(DBProjectItem(project_id=proj.id, position=2, item_type="activity",
+                           activity_id=act.id))
+    sess.commit()
+
+    return {"project_id": proj.id, "entry_id": entry.id,
+            "owner_entry_id": owner_entry.id, "activity_id": act.id}
+
+
+class TestCompanionCleanup:
+    """Issue #106: deleting a user also removes their footprint in OTHER
+    users' projects — membership, journal entries + items, activity items."""
+
+    def test_deleting_companion_cleans_their_rows_in_owner_project(self, engine):
+        with Session(engine) as sess:
+            owner = _mk_user(sess, display_name="Owner", email="own@x.io")
+            companion = _mk_user(sess, display_name="Comp", email="comp@x.io")
+            oid, cid = owner.id, companion.id
+            ids = _seed_companionship(sess, oid, cid)
+
+        with Session(engine) as sess:
+            delete_user_and_data(sess, cid)
+
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, cid) is None
+            assert sess.exec(select(DBProjectMember)).first() is None
+            # The companion's journal entry, its item, and their activity item
+            # are gone from the owner's project…
+            assert sess.get(DBJournalEntry, ids["entry_id"]) is None
+            assert sess.exec(select(DBProjectItem).where(
+                DBProjectItem.journal_id == ids["entry_id"])).first() is None
+            assert sess.exec(select(DBActivity).where(
+                DBActivity.id == ids["activity_id"])).first() is None
+            assert sess.exec(select(DBProjectItem).where(
+                DBProjectItem.activity_id == ids["activity_id"])).first() is None
+            # …while the owner's project, invite, and own (legacy) entry survive.
+            assert sess.get(DBProject, ids["project_id"]) is not None
+            assert sess.exec(select(DBProjectInvite)).first() is not None
+            assert sess.get(DBJournalEntry, ids["owner_entry_id"]) is not None
+            assert sess.exec(select(DBProjectItem).where(
+                DBProjectItem.journal_id == ids["owner_entry_id"])).first() is not None
+
+    def test_deleting_owner_removes_membership_and_invites(self, engine):
+        with Session(engine) as sess:
+            owner = _mk_user(sess, display_name="Owner", email="own@x.io")
+            companion = _mk_user(sess, display_name="Comp", email="comp@x.io")
+            oid, cid = owner.id, companion.id
+            _seed_companionship(sess, oid, cid)
+
+        with Session(engine) as sess:
+            delete_user_and_data(sess, oid)
+
+        with Session(engine) as sess:
+            assert sess.get(UserInfo, oid) is None
+            assert sess.exec(select(DBProject)).first() is None
+            assert sess.exec(select(DBProjectMember)).first() is None
+            assert sess.exec(select(DBProjectInvite)).first() is None
+            assert sess.exec(select(DBJournalEntry)).first() is None
+            assert sess.exec(select(DBProjectItem)).first() is None
+            # The companion account itself is untouched.
+            assert sess.get(UserInfo, cid) is not None
 
 
 class TestSelfDeleteEndpoint:

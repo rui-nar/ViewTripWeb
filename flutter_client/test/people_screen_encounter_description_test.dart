@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/people_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -12,7 +13,7 @@ const _longNote =
     'of the journey through the mountains.';
 
 ProjectNotifier _notifierWithGroupEncounter(String description) {
-  final n = ProjectNotifier(ProjectService())..projectName = 'Trip';
+  final n = ProjectNotifier(ProjectService())..ref = const ProjectRef(name: 'Trip');
   n.groups = [
     {'id': 5, 'name': 'Crew', 'nationalities': [], 'socials': []},
   ];
