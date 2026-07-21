@@ -38,7 +38,7 @@ TrackEditModel modelForActivity(Map<String, dynamic> activity) {
 }
 
 /// Actions offered by the per-point context menu (long-press / right-click).
-enum _PointAction { trimFrom, trimTo, split, delete }
+enum _PointAction { trimFrom, trimTo, split, cutForTransport, delete }
 
 class ActivityEditorPage extends StatefulWidget {
   final ProjectNotifier notifier;
@@ -211,6 +211,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
             'Trim: keep up to here', index < last),
         _menuItem(_PointAction.split, Icons.call_split, 'Split here',
             _c.canSplitAt(index)),
+        _menuItem(_PointAction.cutForTransport, Icons.alt_route,
+            'Cut & add transport', _c.canCutForTransport(index)),
         const PopupMenuDivider(),
         _menuItem(_PointAction.delete, Icons.delete_outline, 'Delete point',
             _c.points.length > 2,
@@ -227,6 +229,9 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         break;
       case _PointAction.split:
         await _confirmSplit(index);
+        break;
+      case _PointAction.cutForTransport:
+        await _confirmCutForTransport(index);
         break;
       case _PointAction.delete:
         _c.removeSelected(index);
@@ -325,6 +330,48 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
       if (!mounted) return;
       setState(() => _saving = false);
       messenger.showSnackBar(SnackBar(content: Text('Split failed: $e')));
+    }
+  }
+
+  /// Cut the track at [index] and drop the shared boundary point from the new
+  /// tail activity, leaving a gap for a transportation segment to bridge (#104).
+  /// Pops with a request for the caller to open the Add Transportation dialog,
+  /// pre-filled from this activity's (now-shorter) end point.
+  Future<void> _confirmCutForTransport(int index) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cut for transportation'),
+        content: Text(
+          'Cut the track at point ${index + 1}? The portion after this point '
+          'becomes a new local activity, and you\'ll be prompted to add a '
+          'transportation segment to bridge the gap.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Cut'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _saving = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    try {
+      await widget.notifier
+          .splitActivity(_activityId, index, dropBoundary: true);
+      if (!mounted) return;
+      navigator.pop({'openSegmentFor': _activityId});
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      messenger.showSnackBar(SnackBar(content: Text('Cut failed: $e')));
     }
   }
 

@@ -119,6 +119,33 @@ void main() {
     });
   });
 
+  group('cut-for-transport preview (#104)', () {
+    test('canCutForTransport needs one more tail point than canSplitAt', () {
+      // 4-point track: canSplitAt allows index 1 and 2, but dropping the
+      // boundary point needs an extra tail point, so only index 1 qualifies.
+      final c = _controller();
+      expect(c.canCutForTransport(0), isFalse);
+      expect(c.canCutForTransport(1), isTrue);
+      expect(c.canCutForTransport(2), isFalse);
+      expect(c.canCutForTransport(3), isFalse);
+    });
+
+    test('canCutForTransport accepts interior indices on a longer track', () {
+      final c = TrackEditorController(TrackEditModel.fromPoints(const [
+        EditPoint(48.0, 2.0),
+        EditPoint(48.0, 2.1),
+        EditPoint(48.0, 2.2),
+        EditPoint(48.0, 2.3),
+        EditPoint(48.0, 2.4),
+      ]));
+      expect(c.canCutForTransport(0), isFalse);
+      expect(c.canCutForTransport(1), isTrue);
+      expect(c.canCutForTransport(2), isTrue);
+      expect(c.canCutForTransport(3), isFalse); // only 1 point left after boundary
+      expect(c.canCutForTransport(4), isFalse);
+    });
+  });
+
   group('save gating', () {
     test('canSave is false when pristine', () {
       expect(_controller().canSave, isFalse);

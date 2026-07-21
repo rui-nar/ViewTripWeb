@@ -183,16 +183,19 @@ class ProjectService {
   }
 
   /// Split an activity at [splitIndex]; the tail becomes a new local activity.
+  /// When [dropBoundary] is true, the tail excludes the shared boundary point
+  /// (#104 — used when a transportation segment will bridge the cut).
   /// POST /api/projects/{name}/activities/{id}/split
   Future<Map<String, dynamic>> splitActivity(
     String name,
     int activityId,
-    int splitIndex,
-  ) async {
+    int splitIndex, {
+    bool dropBoundary = false,
+  }) async {
     final enc = Uri.encodeComponent(name);
     final data = await api.post(
       '/api/projects/$enc/activities/$activityId/split',
-      {'split_index': splitIndex},
+      {'split_index': splitIndex, 'drop_boundary': dropBoundary},
     );
     return data as Map<String, dynamic>;
   }

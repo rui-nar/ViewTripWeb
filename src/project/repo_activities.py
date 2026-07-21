@@ -223,15 +223,19 @@ class ActivityMixin:
         project_id: int,
         activity_id: int,
         split_index: int,
+        drop_boundary: bool = False,
     ) -> Optional[int]:
         """Split an activity into a head (keeps id) and a local tail (negative id).
 
-        The boundary point at *split_index* is shared: the head keeps
+        The boundary point at *split_index* is shared by default: the head keeps
         ``points[:split_index+1]`` and the tail gets ``points[split_index:]`` so
-        the two pieces stay contiguous. The tail is a new LOCAL activity
-        (``manual=True``, synthetic negative id, name ``"<name> (2)"``) inserted
-        into the project items directly after the head. Both pieces are marked
-        is_edited with their own geometry snapshot.
+        the two pieces stay contiguous. When *drop_boundary* is True the tail
+        instead starts at ``split_index + 1``, excluding the boundary point —
+        used when a transportation segment will bridge the gap left at the cut
+        (issue #104), so the tail's track doesn't also sit on the departure point.
+        The tail is a new LOCAL activity (``manual=True``, synthetic negative id,
+        name ``"<name> (2)"``) inserted into the project items directly after the
+        head. Both pieces are marked is_edited with their own geometry snapshot.
 
         Returns the new tail activity id, or None if the activity is missing.
         Raises ValueError if *split_index* does not yield two non-trivial pieces.
@@ -243,13 +247,15 @@ class ActivityMixin:
             return None
 
         points = align_points(head.summary_polyline, _parse_ep(head.elevation_profile_json))
-        # Need at least 2 points on each side of the boundary.
-        if split_index < 1 or split_index > len(points) - 2:
+        # Need at least 2 points on each side of the boundary (3 on the tail side
+        # when dropping the boundary, so 2 remain once it's excluded).
+        min_tail_start = split_index + 1 if drop_boundary else split_index
+        if split_index < 1 or len(points) - min_tail_start < 2:
             raise ValueError(
                 f"split_index {split_index} out of range for a {len(points)}-point track")
 
         head_points = points[: split_index + 1]
-        tail_points = points[split_index:]
+        tail_points = points[min_tail_start:]
 
         # Allocate the next free negative id. activity.id is a GLOBAL primary key,
         # and split tails are LOCAL rows keyed by negative id. Scanning only this

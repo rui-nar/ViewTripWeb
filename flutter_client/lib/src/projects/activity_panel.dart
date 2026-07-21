@@ -763,9 +763,19 @@ class _ActivityPanelState extends State<ActivityPanel> {
       );
       return;
     }
-    await navigator.push(MaterialPageRoute(
+    final result = await navigator.push(MaterialPageRoute(
       builder: (_) => ActivityEditorPage(notifier: notifier, activity: loaded),
     ));
+    // #104: "Cut & add transport" pops with a request to immediately open the
+    // Add Transportation dialog, pre-filled from the freshly cut activity.
+    if (result is Map && result['openSegmentFor'] != null) {
+      if (!context.mounted) return;
+      _showSegmentDialog(
+        context,
+        notifier,
+        preselectedStartActivityId: result['openSegmentFor'],
+      );
+    }
   }
 
   void _flyToActivity(Map<String, dynamic> activity) {

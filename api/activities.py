@@ -454,6 +454,11 @@ class SplitRequest(BaseModel):
     split_index: int = Field(
         description="0-based point index at which to split; the point is shared "
                     "as the last point of the head and the first of the tail")
+    drop_boundary: bool = Field(
+        default=False,
+        description="If true, exclude the boundary point from the tail instead "
+                    "of sharing it — used when a transportation segment will "
+                    "bridge the gap at the cut (issue #104)")
 
 
 @router.post("/{name}/activities/{activity_id}/split",
@@ -480,7 +485,8 @@ def split_activity(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
         try:
             tail_id = _repo.split_activity(
-                sess, user_info_id, row.id, activity_id, body.split_index)
+                sess, user_info_id, row.id, activity_id, body.split_index,
+                drop_boundary=body.drop_boundary)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))

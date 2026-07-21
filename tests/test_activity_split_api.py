@@ -132,6 +132,42 @@ def test_split_index_out_of_range(env):
     assert resp.status_code == 422
 
 
+def test_split_drop_boundary_excludes_point_from_tail(env):
+    """#104: dropping the boundary point leaves the tail starting one point later,
+    so the gap can be bridged by a transportation segment instead of overlapping.
+    """
+    client, _ = env
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 2, "drop_boundary": True},
+    )
+    assert resp.status_code == 200, resp.text
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    tail = next(a for i, a in acts.items() if i < 0)
+    # Head still ends at the boundary point (index 2 == (48.0, 2.02)).
+    assert acts[111]["end_latlng"] == [48.0, 2.02]
+    # Tail starts at index 3, not the shared boundary at index 2.
+    assert tail["start_latlng"] == [48.0, 2.03]
+
+
+def test_split_drop_boundary_requires_two_points_after_boundary(env):
+    """The tail must retain >=2 points once the boundary point is excluded."""
+    client, _ = env
+    # _TRACK has 5 points (0..4); split_index=3 leaves only point 4 for the tail
+    # once the boundary is dropped — too small.
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 3, "drop_boundary": True},
+    )
+    assert resp.status_code == 422
+    # split_index=2 still leaves 2 points (3, 4) for the tail — valid.
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 2, "drop_boundary": True},
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def test_delete_local_removes_row_and_item(env):
     client, engine = env
     resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})

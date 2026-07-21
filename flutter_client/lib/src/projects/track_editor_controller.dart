@@ -116,6 +116,11 @@ class TrackEditorController extends ChangeNotifier {
   /// Whether [index] is a valid split boundary (two non-trivial pieces).
   bool canSplitAt(int index) => index >= 1 && index <= model.length - 2;
 
+  /// Whether [index] is a valid boundary for "cut & insert transport" (#104):
+  /// like [canSplitAt], but the tail also loses its shared boundary point, so
+  /// it needs one extra point to stay non-trivial.
+  bool canCutForTransport(int index) => index >= 1 && index <= model.length - 3;
+
   /// Preview head/tail lists for a split at [index]; throws if not valid.
   ({List<EditPoint> head, List<EditPoint> tail}) previewSplit(int index) =>
       model.previewSplit(index);

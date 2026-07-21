@@ -1407,10 +1407,17 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   /// Split [activityId] at [splitIndex]; the tail becomes a new local activity.
-  Future<void> splitActivity(int activityId, int splitIndex) async {
+  /// When [dropBoundary] is true, the tail excludes the shared boundary point
+  /// (#104 — used when a transportation segment will bridge the cut).
+  Future<void> splitActivity(
+    int activityId,
+    int splitIndex, {
+    bool dropBoundary = false,
+  }) async {
     final name = projectName;
     if (name == null) return;
-    await _service.splitActivity(name, activityId, splitIndex);
+    await _service.splitActivity(name, activityId, splitIndex,
+        dropBoundary: dropBoundary);
     await _silentReload(name);
   }
 
