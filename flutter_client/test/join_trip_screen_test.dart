@@ -1,6 +1,7 @@
-// Widget tests for the /join/{token} invite-accept screen (issue #106):
-// preview rendering, invalid/revoked token handling, join → navigate into the
-// trip as editor, and the 409 you-own-this-trip fallback. The service is
+// Widget tests for the /join/{token} invite-accept screen (issue #106; roles:
+// issue #109): preview rendering (including the role-specific description),
+// invalid/revoked token handling, join → navigate into the trip with the
+// invite's role, and the 409 you-own-this-trip fallback. The service is
 // mocked by subclassing; navigation is exercised through a real GoRouter.
 
 import 'package:flutter/material.dart';
@@ -25,7 +26,7 @@ class _FakeMembersService extends MembersService {
   }
 
   @override
-  Future<ProjectRef> acceptInvite(String token) async {
+  Future<ProjectRef> acceptInvite(String token, {String role = 'editor'}) async {
     final err = acceptError;
     if (err != null) throw err;
     return accepted!;
@@ -59,7 +60,8 @@ void main() {
   testWidgets('shows "«Owner» invites you to join «Trip»" and a Join button',
       (tester) async {
     final svc = _FakeMembersService()
-      ..preview = const InvitePreview(projectName: 'Alps', ownerName: 'Alice');
+      ..preview = const InvitePreview(
+          projectName: 'Alps', ownerName: 'Alice', role: 'editor');
 
     await tester.pumpWidget(
         MaterialApp.router(routerConfig: _router(svc, (_) {})));
@@ -68,6 +70,19 @@ void main() {
     expect(
         find.textContaining('Alice invites you to join Alps'), findsOneWidget);
     expect(find.widgetWithText(ElevatedButton, 'Join trip'), findsOneWidget);
+  });
+
+  testWidgets('shows what a viewer invite grants (issue #109)',
+      (tester) async {
+    final svc = _FakeMembersService()
+      ..preview = const InvitePreview(
+          projectName: 'Alps', ownerName: 'Alice', role: 'viewer');
+
+    await tester.pumpWidget(
+        MaterialApp.router(routerConfig: _router(svc, (_) {})));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('read-only'), findsOneWidget);
   });
 
   testWidgets('invalid/revoked token shows a friendly message with a way home',
@@ -92,7 +107,8 @@ void main() {
       '(?owner= carried in the URL)', (tester) async {
     Uri? viewUri;
     final svc = _FakeMembersService()
-      ..preview = const InvitePreview(projectName: 'Alps', ownerName: 'Alice')
+      ..preview = const InvitePreview(
+          projectName: 'Alps', ownerName: 'Alice', role: 'editor')
       ..accepted = const ProjectRef(name: 'Alps', ownerId: 3, role: 'editor');
 
     await tester.pumpWidget(
@@ -112,7 +128,8 @@ void main() {
       (tester) async {
     Uri? viewUri;
     final svc = _FakeMembersService()
-      ..preview = const InvitePreview(projectName: 'Alps', ownerName: 'Alice')
+      ..preview = const InvitePreview(
+          projectName: 'Alps', ownerName: 'Alice', role: 'editor')
       ..acceptError = ApiException(409, '{"detail": "You already own this trip"}');
 
     await tester.pumpWidget(

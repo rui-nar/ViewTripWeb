@@ -240,3 +240,19 @@ def test_coowner_can_still_leave_without_owner_permission(env):
     assert r.status_code == 204
     with Session(engine) as sess:
         assert sess.exec(select(DBProjectMember)).first() is None
+
+
+# ── caller_role on project payloads (client capability model, issue #109) ─────
+
+def test_meta_and_full_payload_carry_caller_role(env):
+    client, _, ids, act_as = env
+    _join(client, act_as, "viewer", role="viewer")
+    q = f"?owner={ids['owner']}"
+
+    act_as("owner")
+    assert client.get("/api/projects/Trip/meta").json()["caller_role"] == "owner"
+    assert client.get("/api/projects/Trip").json()["caller_role"] == "owner"
+
+    act_as("viewer")
+    assert client.get(f"/api/projects/Trip/meta{q}").json()["caller_role"] == "viewer"
+    assert client.get(f"/api/projects/Trip{q}").json()["caller_role"] == "viewer"

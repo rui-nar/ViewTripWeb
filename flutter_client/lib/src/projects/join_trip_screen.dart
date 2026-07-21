@@ -1,8 +1,9 @@
 /// Invite-accept screen for `/join/{token}` (issue #106 — travel companion).
 ///
 /// On load it previews the invite (GET /api/invites/{token}) and shows
-/// "«Owner» invites you to join «Trip»" with a Join button. Accepting joins
-/// the caller as editor and navigates into the trip. A 404 (unknown/revoked
+/// "«Owner» invites you to join «Trip»" with a Join button, plus what the
+/// invite's role (issue #109) will let the caller do. Accepting joins the
+/// caller with that role and navigates into the trip. A 404 (unknown/revoked
 /// token) shows a friendly message with a way home; a 409 means the caller
 /// already owns the trip — it simply opens as owner. Unauthenticated visits
 /// never reach this screen: app_router.dart redirects them to
@@ -17,6 +18,16 @@ import '../api/client.dart';
 import 'members_service.dart';
 import 'projects_notifier.dart';
 import 'travel_companions_section.dart' show companionErrorMessage;
+
+/// User-facing summary of what [role] grants, shown on the invite preview.
+String _roleDescription(String role) => switch (role) {
+      'viewer' => 'You will be able to view this trip (read-only).',
+      'co-owner' =>
+        'You will be able to add and edit trip content, and manage sharing '
+            'and companions.',
+      _ /* editor */ =>
+        'You will be able to add and edit trip content as an editor.',
+    };
 
 class JoinTripScreen extends StatefulWidget {
   final String token;
@@ -84,7 +95,10 @@ class _JoinTripScreenState extends State<JoinTripScreen> {
       _error = null;
     });
     try {
-      final joined = await widget.service.acceptInvite(widget.token);
+      final joined = await widget.service.acceptInvite(
+        widget.token,
+        role: _preview?.role ?? 'editor',
+      );
       if (!mounted) return;
       _refreshProjectsList();
       context.go(
@@ -198,7 +212,7 @@ class _JoinTripScreenState extends State<JoinTripScreen> {
         if (preview != null) ...[
           const SizedBox(height: 8),
           Text(
-            'You will be able to add and edit trip content as an editor.',
+            _roleDescription(preview.role),
             style: theme.textTheme.bodySmall,
             textAlign: TextAlign.center,
           ),

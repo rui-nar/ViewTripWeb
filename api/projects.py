@@ -34,7 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
-from api.project_access import OwnerParam, require_role, resolve_project
+from api.project_access import OwnerParam, effective_role, require_role, resolve_project
 from api.project_shared import _legacy_path, _refresh_stats_background, _repo
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
@@ -131,6 +131,7 @@ def get_project(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
+        role = effective_role(sess, row, user_info_id)
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
@@ -138,7 +139,9 @@ def get_project(
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    return _repo.to_dict(project)
+    data = _repo.to_dict(project)
+    data["caller_role"] = role
+    return data
 
 
 @router.get("/{name}/meta", summary="Get project metadata (lightweight)")
@@ -154,6 +157,7 @@ def get_project_meta(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
+        role = effective_role(sess, row, user_info_id)
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
@@ -162,7 +166,9 @@ def get_project_meta(
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    return _repo.to_dict(project)
+    data = _repo.to_dict(project)
+    data["caller_role"] = role
+    return data
 
 
 @router.get("/{name}/stats", summary="Get project statistics")

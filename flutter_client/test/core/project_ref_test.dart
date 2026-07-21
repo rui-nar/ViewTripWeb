@@ -8,17 +8,46 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 
 void main() {
-  group('ProjectRef.isOwn / isEditor', () {
+  group('ProjectRef.isOwn / capability getters', () {
     test('an ownerId-null ref is own, regardless of role', () {
       const ref = ProjectRef(name: 'Trip');
       expect(ref.isOwn, isTrue);
-      expect(ref.isEditor, isFalse); // role defaults to "owner"
+      expect(ref.isOwner, isTrue); // role defaults to "owner"
+      expect(ref.canManageTrip, isTrue);
+      expect(ref.canEditContent, isTrue);
+      expect(ref.isViewer, isFalse);
     });
 
     test('a ref with ownerId set is not own', () {
       const ref = ProjectRef(name: 'Trip', ownerId: 7, role: 'editor');
       expect(ref.isOwn, isFalse);
-      expect(ref.isEditor, isTrue);
+      expect(ref.isOwner, isFalse);
+      expect(ref.canEditContent, isTrue);
+      expect(ref.canManageTrip, isFalse);
+    });
+
+    test('viewer: read-only — no edit or manage capability', () {
+      const ref = ProjectRef(name: 'Trip', ownerId: 7, role: 'viewer');
+      expect(ref.isViewer, isTrue);
+      expect(ref.canEditContent, isFalse);
+      expect(ref.canManageTrip, isFalse);
+      expect(ref.isOwner, isFalse);
+    });
+
+    test('co-owner: can edit content and manage the trip, but is not owner',
+        () {
+      const ref = ProjectRef(name: 'Trip', ownerId: 7, role: 'co-owner');
+      expect(ref.isViewer, isFalse);
+      expect(ref.canEditContent, isTrue);
+      expect(ref.canManageTrip, isTrue);
+      expect(ref.isOwner, isFalse);
+    });
+
+    test('an unrecognized role string is treated as the lowest tier', () {
+      const ref = ProjectRef(name: 'Trip', ownerId: 7, role: 'bogus');
+      expect(ref.canEditContent, isFalse);
+      expect(ref.canManageTrip, isFalse);
+      expect(ref.isOwner, isFalse);
     });
   });
 
@@ -127,6 +156,19 @@ void main() {
       expect(entry.ref, const ProjectRef(name: 'Trip'));
       expect(entry.ownerName, isNull);
       expect(entry.isSharedWithMe, isFalse);
+    });
+
+    // Regression (issue #109): isSharedWithMe used to check `role == 'editor'`,
+    // which miscategorized viewer/co-owner entries as "My Trips" instead of
+    // "Shared With Me" once those roles existed.
+    test('a viewer entry is "shared with me"', () {
+      final entry = {'name': 'Trip', 'owner_id': 7, 'role': 'viewer'};
+      expect(entry.isSharedWithMe, isTrue);
+    });
+
+    test('a co-owner entry is "shared with me"', () {
+      final entry = {'name': 'Trip', 'owner_id': 7, 'role': 'co-owner'};
+      expect(entry.isSharedWithMe, isTrue);
     });
   });
 }

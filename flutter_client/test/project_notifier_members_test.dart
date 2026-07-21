@@ -37,6 +37,7 @@ class _FakeMembersService extends MembersService {
   bool failRemove = false;
   final removedIds = <int>[];
   int createCalls = 0;
+  String? lastRequestedRole;
   int revokeCalls = 0;
 
   _FakeMembersService(this.members);
@@ -45,9 +46,10 @@ class _FakeMembersService extends MembersService {
   Future<List<ProjectMember>> listMembers(ProjectRef ref) async => members;
 
   @override
-  Future<String> createInvite(ProjectRef ref) async {
+  Future<CreatedInvite> createInvite(ProjectRef ref, {String role = 'editor'}) async {
     createCalls++;
-    return 'tok123';
+    lastRequestedRole = role;
+    return (token: 'tok123', role: role);
   }
 
   @override
@@ -97,19 +99,34 @@ void main() {
     expect(n.members, isEmpty);
   });
 
-  test('createMemberInvite stores the token; revokeMemberInvite clears it',
-      () async {
+  test('createMemberInvite stores the token+role; revokeMemberInvite clears '
+      'both', () async {
     final svc = _FakeMembersService([_owner]);
     final n = _TestProjectNotifier(_FakeProjectService(), membersService: svc);
     n.ref = const ProjectRef(name: 'Trip');
 
     await n.createMemberInvite();
     expect(n.memberInviteToken, 'tok123');
+    expect(n.memberInviteRole, 'editor');
     expect(svc.createCalls, 1);
+    expect(svc.lastRequestedRole, 'editor');
 
     await n.revokeMemberInvite();
     expect(n.memberInviteToken, isNull);
+    expect(n.memberInviteRole, isNull);
     expect(svc.revokeCalls, 1);
+  });
+
+  test('createMemberInvite forwards a non-default role (issue #109)',
+      () async {
+    final svc = _FakeMembersService([_owner]);
+    final n = _TestProjectNotifier(_FakeProjectService(), membersService: svc);
+    n.ref = const ProjectRef(name: 'Trip');
+
+    await n.createMemberInvite(role: 'viewer');
+
+    expect(svc.lastRequestedRole, 'viewer');
+    expect(n.memberInviteRole, 'viewer');
   });
 
   test('removeMember removes optimistically and calls the service', () async {
