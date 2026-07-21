@@ -163,10 +163,16 @@ class ProjectCoreMixin:
         project: Project,
         *,
         check_version: bool = False,
+        activity_user_id: Optional[int] = None,
     ) -> None:
         """Persist all changes to an in-memory Project back to the DB.
 
         This is a full replace of the project's item list and activity upserts.
+
+        ``activity_user_id`` is recorded on any NEWLY inserted activity rows —
+        the importer, which for a shared project (issue #106) may be a
+        companion rather than the project owner passed as ``user_info_id``.
+        Defaults to ``user_info_id``. Existing rows keep their importer.
 
         Pass ``check_version=True`` for load-then-mutate-then-save flows that
         must not clobber a concurrent write (e.g. the segment endpoints and the
@@ -245,8 +251,9 @@ class ProjectCoreMixin:
         row.updated_at = time.time()
 
         # Upsert all activities in the project's activity pool
+        importer_id = activity_user_id if activity_user_id is not None else user_info_id
         for act in project.activities:
-            self._upsert_activity(sess, user_info_id, act)
+            self._upsert_activity(sess, importer_id, act)
 
         # Replace the full item list
         sess.flush()  # ensure row.id is available

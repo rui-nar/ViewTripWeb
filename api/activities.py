@@ -115,6 +115,7 @@ def _enrich_activities(
 def _enrich_activities_background(
     activity_ids: List[int],
     user_info_id: int,
+    owner_id: int,
     project_name: str,
 ) -> None:
     """Enrich GPS streams for newly imported activities in the background.
@@ -123,6 +124,10 @@ def _enrich_activities_background(
     activity is written to the DB as it completes so partial progress is
     preserved on interruption.  Strava 429 responses are handled by the
     StravaAPI client (sleeps Retry-After then continues).
+
+    ``user_info_id`` is the IMPORTER whose Strava token fetches the streams;
+    ``owner_id`` is the PROJECT OWNER whose geo cache is keyed — the two differ
+    when a companion imports into a shared trip (issue #106).
     """
     client = _strava_client_for_user(user_info_id)
     if client is None:
@@ -160,20 +165,21 @@ def _enrich_activities_background(
             pass
 
     if any_enriched:
-        bust_geo_cache(user_info_id, project_name)
+        bust_geo_cache(owner_id, project_name)
         # Recompute now (still in the background task) so the user's next geo
         # load is a fast cache HIT rather than a cold recompute.
-        warm_geo_cache(user_info_id, project_name)
+        warm_geo_cache(owner_id, project_name)
 
 
 def _enrich_pending_background(
     pending_ids: List[int],
     user_info_id: int,
+    owner_id: int,
     project_name: str,
 ) -> None:
     """Sleep until the Strava rate-limit window resets, then enrich remaining activities."""
     time.sleep(RateLimiter.WINDOW_SECONDS + 5)
-    _enrich_activities_background(pending_ids, user_info_id, project_name)
+    _enrich_activities_background(pending_ids, user_info_id, owner_id, project_name)
 
 
 # ── Activity management ────────────────────────────────────────────────────────
@@ -215,7 +221,9 @@ def add_activities(
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         added = project.add_activities(activities)
-        _repo.save_project(sess, owner_id, project)
+        # New activity rows record the IMPORTER (the caller), not the project
+        # owner — a companion's imports must stay tied to their Strava account.
+        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
 
     bust_geo_cache(owner_id, name)
 
@@ -224,7 +232,7 @@ def add_activities(
     activity_ids = [a.id for a in activities if a.id is not None]
     if activity_ids:
         background_tasks.add_task(
-            _enrich_activities_background, activity_ids, user_info_id, name
+            _enrich_activities_background, activity_ids, user_info_id, owner_id, name
         )
 
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
@@ -256,6 +264,19 @@ def refresh_activity(
     GET /api/projects/{name}).
     """
     user_info_id = int(current_user["sub"])
+
+    # Check project access first, then restrict the refresh to the activity's
+    # IMPORTER (issue #106): a re-fetch talks to Strava with the caller's token,
+    # and another editor's account can't see this activity — worse, the
+    # overwrite would re-attribute the row to the wrong user.
+    with get_session() as sess:
+        resolve_project(sess, user_info_id, name, owner)
+        act_row = sess.get(DBActivity, activity_id)
+    if act_row is not None and act_row.user_info_id != user_info_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the user who imported this activity can refresh it from Strava",
+        )
 
     # Locally edited tracks must never be overwritten by a Strava re-fetch.
     # Surface a clear message so the client can prompt the user to reset first.

@@ -461,7 +461,9 @@ def strava_sync(
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         added = project.add_activities(activities)
-        _project_repo.save_project(sess, owner_id, project)
+        # New activity rows record the IMPORTER (the caller), not the project
+        # owner — a companion's imports must stay tied to their Strava account.
+        _project_repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
         _save_refreshed_token(sess, token_row, client)
 
     if added > 0:
