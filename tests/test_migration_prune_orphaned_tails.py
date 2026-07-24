@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, MetaData, Table, text
 from sqlmodel import Session
 
 from models.project_db import DBActivity, DBProjectItem
@@ -38,19 +38,39 @@ def _activity_ids(engine) -> set[int]:
         return {r[0] for r in conn.execute(text("SELECT id FROM activity"))}
 
 
+def _seed_activity_row(engine, **kwargs) -> None:
+    """Insert an activity row using only the columns that actually exist in the
+    table AT _PREV_REV, filtered from the ORM class's defaults.
+
+    Building the values via DBActivity(**kwargs) is what gets every NOT NULL
+    column (there are ~20, e.g. distance/moving_time/trainer/...) its correct
+    model default for free. But DBActivity always reflects the CURRENT model —
+    inserting all of its columns directly would include any added since
+    _PREV_REV (e.g. #45's split_root_id/split_base_name) that don't exist yet
+    in this deliberately-frozen historical schema. Reflecting the real table
+    and filtering to its actual columns keeps this test immune to that drift.
+    """
+    obj = DBActivity(**kwargs)
+    data = {k: v for k, v in obj.__dict__.items() if not k.startswith("_sa_")}
+    md = MetaData()
+    tbl = Table("activity", md, autoload_with=engine)
+    data = {k: v for k, v in data.items() if k in tbl.columns}
+    with engine.begin() as conn:
+        conn.execute(insert(tbl), data)
+
+
 def test_prune_removes_only_orphaned_local_rows(db):
     cfg = _cfg(db)
     command.upgrade(cfg, _PREV_REV)
 
     engine = create_engine(f"sqlite:///{db.as_posix()}")
-    # Seed via the ORM so all NOT NULL activity columns get their model defaults.
     # SQLite leaves FK enforcement off, so activity/projectitem rows stand alone
     # without userinfo/project parents — keeps the fixture focused on the two
     # tables the prune actually reads.
+    # Four activities: only the orphaned LOCAL one (-1) must be pruned.
+    for aid in (-1, -2, 100, 200):
+        _seed_activity_row(engine, id=aid, user_info_id=1, name="x", type="Ride")
     with Session(engine) as s:
-        # Four activities: only the orphaned LOCAL one (-1) must be pruned.
-        for aid in (-1, -2, 100, 200):
-            s.add(DBActivity(id=aid, user_info_id=1, name="x", type="Ride"))
         # -2 (local) and 100 (Strava) are referenced by a timeline item; -1 and
         # 200 are orphaned. The prune is scoped to id < 0, so 200 survives too.
         s.add(DBProjectItem(project_id=1, position=0, item_type="activity", activity_id=-2))

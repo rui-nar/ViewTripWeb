@@ -84,7 +84,8 @@ def test_split_yields_two_activities(env):
     tail_ids = [i for i in acts if i < 0]
     assert len(tail_ids) == 1                 # exactly one local tail
     tail = acts[tail_ids[0]]
-    assert tail["name"] == "Ride (2)"
+    assert acts[111]["name"] == "Ride (1/2)"
+    assert tail["name"] == "Ride (2/2)"
     assert tail["manual"] is True
     assert acts[111]["is_edited"] is True
     assert tail["is_edited"] is True
@@ -236,6 +237,75 @@ def test_split_across_projects_allocates_distinct_ids(env):
     tail2 = next(i for i in (a["id"] for a in r2.json()["activities"]) if i < 0)
     assert tail2 == -2                       # distinct global id, no collision
     assert tail2 != tail1
+
+
+def test_resplit_renumbers_whole_family(env):
+    """Splitting an already-split piece must renumber ALL surviving family
+    members to reflect the new size (issue #45 follow-up) - not append another
+    "(2)" suffix onto whatever name the piece already carries."""
+    client, _ = env
+    r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    tail1_id = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
+
+    # Split the tail again (it has points[2:5] = 3 points, so index 1 is valid).
+    r2 = client.post(f"/api/projects/My Trip/activities/{tail1_id}/split", json={"split_index": 1})
+    assert r2.status_code == 200, r2.text
+    acts = {a["id"]: a for a in r2.json()["activities"]}
+    assert len(acts) == 3
+    names = sorted(a["name"] for a in acts.values())
+    assert names == ["Ride (1/3)", "Ride (2/3)", "Ride (3/3)"]
+    # Chronological order matches the physical split order.
+    by_start = sorted(acts.values(), key=lambda a: a["start_date"])
+    assert [a["name"] for a in by_start] == ["Ride (1/3)", "Ride (2/3)", "Ride (3/3)"]
+
+
+def test_delete_local_renumbers_survivors(env):
+    """Deleting one piece of a 3-way split family must renumber the remaining
+    two back down to (1/2)/(2/2), not leave stale (i/3) numbering."""
+    client, _ = env
+    r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    tail1_id = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
+    r2 = client.post(f"/api/projects/My Trip/activities/{tail1_id}/split", json={"split_index": 1})
+    acts = {a["id"]: a for a in r2.json()["activities"]}
+    tail_ids = sorted(i for i in acts if i < 0)
+    assert len(tail_ids) == 2
+
+    resp = client.delete(f"/api/projects/My Trip/activities/{tail_ids[0]}/local")
+    assert resp.status_code == 204
+
+    body = client.get("/api/projects/My Trip").json()
+    names = sorted(a["name"] for a in body["activities"])
+    assert names == ["Ride (1/2)", "Ride (2/2)"]
+
+
+def test_delete_local_restores_plain_name_when_family_reduced_to_one(env):
+    """Deleting the only split tail leaves a single piece - it should get its
+    plain base name back, not a stale "(1/1)"."""
+    client, _ = env
+    r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    tail_id = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
+
+    resp = client.delete(f"/api/projects/My Trip/activities/{tail_id}/local")
+    assert resp.status_code == 204
+
+    body = client.get("/api/projects/My Trip").json()
+    assert [a["name"] for a in body["activities"]] == ["Ride"]
+
+
+def test_split_skips_renumbering_for_encrypted_name(env, monkeypatch):
+    """An E2EE-encrypted activity name (issue #29) can't be used to derive a
+    base name - split must leave names alone rather than corrupt ciphertext."""
+    client, engine = env
+    with Session(engine) as sess:
+        act = sess.get(DBActivity, 111)
+        act.name = "v1.abc.def"  # looks like a ciphertext envelope
+        sess.add(act)
+        sess.commit()
+
+    resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    assert resp.status_code == 200, resp.text
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    assert acts[111]["name"] == "v1.abc.def"  # untouched
 
 
 def test_delete_split_item_removes_local_row_and_allows_resplit(env):

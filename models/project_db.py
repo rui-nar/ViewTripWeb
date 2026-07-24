@@ -271,6 +271,20 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     original_polyline: Optional[str] = sqlmodel.Field(default=None)
     original_elevation_profile_json: Optional[str] = sqlmodel.Field(default=None)
 
+    # Split-family tracking (issue #45 follow-up). NULL on a row that has never
+    # been split (or is the root of a family — the very first piece, which by
+    # definition has no parent of its own). A tail row created by split_activity
+    # always has this set to the id of the ORIGINAL first piece, so the whole
+    # family can be found in one query regardless of how deep the split chain
+    # goes (splitting an already-split tail sets its own tail's split_root_id to
+    # the SAME root, not to the immediate parent). split_base_name is the clean
+    # pre-split name, captured once on the root the first time it's split, so
+    # renumbering ("<name> (i/N)") never accumulates on top of a previous
+    # renumbering. DB-only — not surfaced in the domain model, same as the
+    # original_* snapshot columns above.
+    split_root_id: Optional[int] = sqlmodel.Field(default=None, index=True)
+    split_base_name: Optional[str] = sqlmodel.Field(default=None)
+
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")
 

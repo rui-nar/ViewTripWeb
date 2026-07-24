@@ -216,6 +216,44 @@ class ActivityMixin:
         sess.commit()
         return True
 
+    @staticmethod
+    def _renumber_split_family(sess: Session, root_id: int) -> None:
+        """Rename every surviving member of a split family as ``"<base> (i/N)"``,
+        1-indexed in chronological (start_date) order. Called after a split
+        creates a new piece and after a local tail is deleted, so the numbering
+        always reflects the CURRENT family size instead of accumulating suffixes
+        (issue #45 follow-up — this replaced the old ``"<name> (2)"`` scheme,
+        which produced "<name> (2) (2)" when a piece was split again).
+
+        No-op if the root's name is an E2EE ciphertext envelope (issue #29) — a
+        base name can't be meaningfully derived from ciphertext, so this leaves
+        whatever name each piece already has untouched. Also no-op if the
+        family has been reduced to (or never grew past) a single surviving
+        piece, other than restoring its plain base name if one was recorded.
+        """
+        root = sess.get(DBActivity, root_id)
+        if root is None or is_encrypted_envelope(root.name):
+            return
+
+        members = sess.exec(
+            select(DBActivity).where(
+                (DBActivity.id == root_id) | (DBActivity.split_root_id == root_id)
+            )
+        ).all()
+        if len(members) < 2:
+            if members and root.split_base_name:
+                members[0].name = root.split_base_name
+            return
+
+        base_name = root.split_base_name or root.name
+        if root.split_base_name is None:
+            root.split_base_name = base_name
+
+        members.sort(key=lambda a: a.start_date or "")
+        n = len(members)
+        for i, act in enumerate(members, start=1):
+            act.name = f"{base_name} ({i}/{n})"
+
     def split_activity(
         self,
         sess: Session,
@@ -233,9 +271,12 @@ class ActivityMixin:
         instead starts at ``split_index + 1``, excluding the boundary point —
         used when a transportation segment will bridge the gap left at the cut
         (issue #104), so the tail's track doesn't also sit on the departure point.
-        The tail is a new LOCAL activity (``manual=True``, synthetic negative id,
-        name ``"<name> (2)"``) inserted into the project items directly after the
-        head. Both pieces are marked is_edited with their own geometry snapshot.
+        The tail is a new LOCAL activity (``manual=True``, synthetic negative id)
+        inserted into the project items directly after the head. Both pieces are
+        marked is_edited with their own geometry snapshot, and every surviving
+        member of the split family (head, tail, and any earlier siblings) is
+        renamed ``"<base name> (i/N)"`` in chronological order — see
+        ``_renumber_split_family``.
 
         Returns the new tail activity id, or None if the activity is missing.
         Raises ValueError if *split_index* does not yield two non-trivial pieces.
@@ -268,11 +309,19 @@ class ActivityMixin:
         global_min = sess.exec(select(func.min(DBActivity.id))).one()
         tail_id = min(0, global_min or 0) - 1
 
-        # Create the tail row copying the head's metadata.
+        # Resolve the family root: the very first piece ever split, regardless
+        # of how deep this split is in the chain (splitting an already-split
+        # tail still points its own new tail at the SAME root as its parent).
+        root_id = head.split_root_id if head.split_root_id is not None else head.id
+
+        # Create the tail row copying the head's metadata. name is a
+        # placeholder — _renumber_split_family overwrites it below (kept here
+        # only as the fallback when that's skipped, e.g. an E2EE-encrypted name).
         tail = DBActivity(
             id=tail_id,
             user_info_id=user_info_id,
             name=f"{head.name} (2)",
+            split_root_id=root_id,
             type=head.type,
             moving_time=head.moving_time,
             elapsed_time=head.elapsed_time,
@@ -331,6 +380,7 @@ class ActivityMixin:
             it.position = pos
             sess.add(it)
 
+        self._renumber_split_family(sess, root_id)
         sess.commit()
         return tail_id
 
@@ -341,6 +391,8 @@ class ActivityMixin:
 
         Only local activities (split tails, id < 0) may be deleted — Strava
         activities are shared across projects and must never be row-deleted here.
+        Also renumbers any surviving split-family siblings (see
+        ``_renumber_split_family``) so "(i/N)" reflects the new, smaller N.
         Returns False if the id is not local or the row is absent.
         """
         if activity_id >= 0:
@@ -348,6 +400,7 @@ class ActivityMixin:
         row = sess.get(DBActivity, activity_id)
         if row is None:
             return False
+        root_id = row.split_root_id
         sess.execute(
             delete(DBProjectItem).where(
                 DBProjectItem.project_id == project_id,
@@ -365,6 +418,8 @@ class ActivityMixin:
         for pos, it in enumerate(remaining):
             it.position = pos
             sess.add(it)
+        if root_id is not None:
+            self._renumber_split_family(sess, root_id)
         sess.commit()
         return True
 
