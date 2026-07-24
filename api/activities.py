@@ -436,9 +436,15 @@ def edit_activity_track(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
+        # include_heavy=False: this load is only used for the existence/
+        # containment check below, never the track geometry — no reason to pull
+        # every activity's summary_polyline/elevation_profile_json off disk just
+        # to check membership (issue #45 follow-up: this alone measured 2.2s on
+        # a project with a large activity).
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_heavy=False,
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -478,9 +484,12 @@ def reset_activity_track(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
+        # include_heavy=False: only used for the containment check below — see
+        # edit_activity_track for why.
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_heavy=False,
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -533,9 +542,12 @@ def split_activity(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
+        # include_heavy=False: only used for the containment check below — see
+        # edit_activity_track for why.
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_heavy=False,
         )
         if project is None or not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")

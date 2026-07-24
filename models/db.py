@@ -64,6 +64,17 @@ def _configure_sqlite(target_engine) -> None:
         behind it burns its busy_timeout waiting on an unlucky commit instead of
         real contention. ``checkpoint_wal()`` below replaces it with a periodic
         PASSIVE checkpoint that never blocks a writer.
+      * cache_size=-64000    — ~64 MB of page cache per connection (SQLite's
+        default is ~2 MB). Rows with large TEXT columns (an activity's full
+        summary_polyline/elevation_profile_json can run several hundred KB)
+        spill into SQLite overflow pages; a cache too small to hold a
+        project's working set forces repeated random-read disk I/O for pages
+        that were just written in the SAME transaction, not only across
+        requests (issue #45 follow-up: a project reload right after writing a
+        large activity row measured 6.5s on this alone). cache_size is a
+        per-connection PRAGMA (unlike journal_mode, not persisted in the DB
+        header), so — like busy_timeout/synchronous — it must be reapplied on
+        every new connection here.
 
     No-op for non-SQLite backends.
     """
@@ -78,6 +89,7 @@ def _configure_sqlite(target_engine) -> None:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA wal_autocheckpoint=0")
+            cursor.execute("PRAGMA cache_size=-64000")
         finally:
             cursor.close()
 

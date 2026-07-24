@@ -19,6 +19,9 @@ def test_pragmas_applied_on_every_connection(tmp_path):
         assert conn.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
         # synchronous: 1 == NORMAL
         assert conn.exec_driver_sql("PRAGMA synchronous").scalar() == 1
+        # cache_size: negative == KB of cache (SQLite's default ~2000 KB is too
+        # small for projects with large activity TEXT columns — issue #45 follow-up).
+        assert conn.exec_driver_sql("PRAGMA cache_size").scalar() == -64000
     eng.dispose()
 
 
