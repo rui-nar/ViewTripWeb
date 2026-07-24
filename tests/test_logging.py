@@ -54,6 +54,24 @@ class TestConfigureLogging:
         uvicorn_logger = logging.getLogger("uvicorn.access")
         assert _app_handlers(uvicorn_logger) == []
 
+    def test_restyles_existing_uvicorn_handler_with_timestamp(self):
+        """Issue #45 investigation needed exact request timing to tell a slow
+        request apart from a stuck one, but uvicorn's access/error loggers
+        print no timestamp by default. configure_logging() must restyle
+        whatever handler uvicorn already attached (not add a second one, which
+        would duplicate every access/error line) so its output carries the
+        same %(asctime)s (millisecond-resolution) prefix as app logs."""
+        uvicorn_logger = logging.getLogger("uvicorn.access")
+        stub_handler = logging.StreamHandler()
+        stub_handler.setFormatter(logging.Formatter("%(message)s"))  # mimics uvicorn's own, no timestamp
+        uvicorn_logger.handlers = [stub_handler]
+        try:
+            configure_logging()
+            assert len(uvicorn_logger.handlers) == 1
+            assert "%(asctime)s" in uvicorn_logger.handlers[0].formatter._fmt
+        finally:
+            uvicorn_logger.handlers = []
+
     def test_alembic_fileconfig_keeps_app_loggers_enabled(self):
         """Regression for the "no logs in production" bug. `alembic upgrade head`
         runs inside the live API process (lifespan) and loads alembic/env.py,

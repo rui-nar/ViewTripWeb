@@ -69,24 +69,45 @@ def get_logger(name: str) -> logging.Logger:
 
 # Top-level logger namespaces used by app modules via get_logger(__name__):
 # everything under `api.*` (routers) and `src.*` (business logic / services).
-_APP_LOGGER_NAMES = ("api", "src")
+# ``apscheduler`` (background jobs — WAL checkpoint, daily backup) has no
+# handler of its own either, so it gets the same treatment.
+_APP_LOGGER_NAMES = ("api", "src", "apscheduler")
 _APP_HANDLER_MARK = "_viewtrip_app_handler"
+
+# uvicorn wires its own handlers onto these before the app module is imported
+# (Config.__init__ calls configure_logging() ahead of Config.load()), but its
+# default formatters omit the timestamp entirely — restyled in place below
+# rather than replaced, so the record's %(message)s (built by uvicorn's
+# ColourizedFormatter subclasses from client_addr/request_line/status_code)
+# still renders correctly.
+_UVICORN_LOGGER_NAMES = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    """Attach a console handler to the app's top-level loggers (idempotent).
+    """Attach a millisecond-timestamped console handler across every logger
+    this process emits through (idempotent).
 
     App modules obtain loggers via ``get_logger(__name__)`` under the ``api.*``
-    and ``src.*`` namespaces. Those loggers have no handlers of their own, so
-    without this their records propagate to an unconfigured root and are dropped
-    (only WARNING+ survives, via logging's last-resort handler) — which is why
-    early auth diagnostics were invisible when running under uvicorn.
+    and ``src.*`` namespaces, and APScheduler logs under ``apscheduler``. Those
+    loggers have no handlers of their own, so without this their records
+    propagate to an unconfigured root and are dropped (only WARNING+ survives,
+    via logging's last-resort handler) — which is why early auth diagnostics
+    were invisible when running under uvicorn, and why APScheduler's "job
+    missed" warnings showed up with no timestamp at all (issue #45 investigation
+    needed exact timing to distinguish a slow request from a stuck one).
 
-    Wiring a handler onto the two app namespaces makes INFO+ app logs appear on
-    the console alongside uvicorn's own output. Uvicorn configures its own
-    ``uvicorn``/``uvicorn.access`` loggers with ``propagate=False``, so they are
-    untouched and access logs are never duplicated. Safe to call more than once
-    (e.g. on module reload): a handler is added only if one isn't already there.
+    uvicorn's own ``uvicorn``/``uvicorn.error``/``uvicorn.access`` loggers do
+    have handlers (uvicorn wires those up before this app module is even
+    imported), but uvicorn's default formatters print no timestamp either —
+    those get their existing handler's formatter swapped in place instead of a
+    second handler added, so access/error lines aren't duplicated.
+
+    ``%(asctime)s`` includes milliseconds by default (``,mmm``) with no
+    ``datefmt`` override, which is what every one of these needed to correlate
+    a request's actual server-side duration against the client's own timeout.
+
+    Safe to call more than once (e.g. on module reload): a handler is added
+    only if one isn't already there.
     """
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -104,3 +125,7 @@ def configure_logging(level: int = logging.INFO) -> None:
         )
         if not already:
             logger.addHandler(handler)
+
+    for name in _UVICORN_LOGGER_NAMES:
+        for h in logging.getLogger(name).handlers:
+            h.setFormatter(formatter)
