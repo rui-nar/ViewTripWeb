@@ -529,7 +529,11 @@ class SelectionStatsData {
 @visibleForTesting
 SelectionStatsData? computeSelectionStats(ProjectNotifier notifier) {
   final selActId = notifier.selectedActivityId;
-  final selDays = notifier.selectedDays;
+  // Multi-select takes priority over single-day selection, same as the
+  // polyline-highlighting "effectiveDays" logic below.
+  final selDays = notifier.selectedDays.isNotEmpty
+      ? notifier.selectedDays
+      : (notifier.selectedDay != null ? {notifier.selectedDay!} : <String>{});
   if (selActId == null && selDays.isEmpty) return null;
 
   final orderedDays = notifier.orderedDayKeys();
@@ -2217,7 +2221,10 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             ),
           ),
         Positioned(
-          top: 12,
+          // Drop below the Polarsteps trip banner (also top:12, full-width)
+          // so the two never overlap — the banner's close button otherwise
+          // sits under this badge's top-right corner.
+          top: notifier.polarstepsOverlaySteps.isNotEmpty ? 64 : 12,
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),

@@ -59,6 +59,18 @@ void main() {
       expect(s.dayLabel, 'Day 2');
     });
 
+    test('single day selected via plain click (selectedDay, not selectedDays)',
+        () {
+      // A plain click on a day header sets the singular `selectedDay` field
+      // (see activity_panel.dart), distinct from the multi-select `selectedDays`
+      // set. The overlay must honour both (issue #74 reopened).
+      final n = _tripNotifier()..selectedDay = '2024-06-02';
+      final s = computeSelectionStats(n)!;
+      expect(s.distanceKm, 20);
+      expect(s.elevationM, 200);
+      expect(s.dayLabel, 'Day 2');
+    });
+
     test('contiguous multi-day selection sums stats and shows a range', () {
       final n = _tripNotifier()..selectedDays = {'2024-06-01', '2024-06-02'};
       final s = computeSelectionStats(n)!;
@@ -96,6 +108,14 @@ void main() {
     testWidgets('shows distance, climb and day for a selected day',
         (tester) async {
       await _pump(tester, _tripNotifier()..selectedDays = {'2024-06-02'});
+      expect(find.text('20'), findsOneWidget);
+      expect(find.text('200'), findsOneWidget);
+      expect(find.text('Day 2'), findsOneWidget);
+    });
+
+    testWidgets('shows distance, climb and day for a plain single-day click',
+        (tester) async {
+      await _pump(tester, _tripNotifier()..selectedDay = '2024-06-02');
       expect(find.text('20'), findsOneWidget);
       expect(find.text('200'), findsOneWidget);
       expect(find.text('Day 2'), findsOneWidget);
