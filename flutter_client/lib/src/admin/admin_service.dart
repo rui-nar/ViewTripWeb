@@ -40,4 +40,22 @@ class AdminService {
   Future<void> deleteUser(int userInfoId) async {
     await api.delete('/api/admin/users/$userInfoId');
   }
+
+  /// Send a plain-text email to the given users, or to every user when
+  /// [sendToAll] is true (in which case [userIds] is ignored). Returns the
+  /// number of recipients the email was queued for.
+  Future<int> broadcastEmail({
+    required String subject,
+    required String body,
+    List<int> userIds = const [],
+    bool sendToAll = false,
+  }) async {
+    final data = await api.post('/api/admin/broadcast-email', {
+      'subject': subject,
+      'body': body,
+      'user_ids': userIds,
+      'send_to_all': sendToAll,
+    }) as Map<String, dynamic>;
+    return data['sent_count'] as int;
+  }
 }

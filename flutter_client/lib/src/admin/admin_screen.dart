@@ -75,6 +75,12 @@ class _AdminScreenState extends State<AdminScreen> {
   final Set<int> _togglingAdmin = {};
   final Set<int> _deleting = {};
 
+  // ── Broadcast email state ────────────────────────────────────────────────
+  final Set<int> _selectedUserIds = {};
+  final _emailSubjectCtrl = TextEditingController();
+  final _emailBodyCtrl = TextEditingController();
+  bool _sendingEmail = false;
+
   @override
   void initState() {
     super.initState();
@@ -84,6 +90,8 @@ class _AdminScreenState extends State<AdminScreen> {
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _emailSubjectCtrl.dispose();
+    _emailBodyCtrl.dispose();
     super.dispose();
   }
 
@@ -215,6 +223,88 @@ class _AdminScreenState extends State<AdminScreen> {
     }
   }
 
+  void _toggleUserSelected(int id, bool selected) {
+    setState(() {
+      if (selected) {
+        _selectedUserIds.add(id);
+      } else {
+        _selectedUserIds.remove(id);
+      }
+    });
+  }
+
+  void _toggleSelectAll(bool selectAll, List<int> allIds) {
+    setState(() {
+      if (selectAll) {
+        _selectedUserIds.addAll(allIds);
+      } else {
+        _selectedUserIds.clear();
+      }
+    });
+  }
+
+  Future<void> _sendBroadcastEmail({required bool sendToAll, required int totalUsers}) async {
+    final subject = _emailSubjectCtrl.text.trim();
+    final body = _emailBodyCtrl.text.trim();
+    if (subject.isEmpty || body.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Subject and body are required.')),
+      );
+      return;
+    }
+    final recipientCount = sendToAll ? totalUsers : _selectedUserIds.length;
+    if (recipientCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No recipients selected.')),
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Send email?'),
+            content: Text(
+                'This will send "$subject" to $recipientCount user${recipientCount == 1 ? '' : 's'}.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Send'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+
+    setState(() => _sendingEmail = true);
+    try {
+      final sent = await widget.service.broadcastEmail(
+        subject: subject,
+        body: body,
+        userIds: _selectedUserIds.toList(),
+        sendToAll: sendToAll,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Queued for $sent recipient${sent == 1 ? '' : 's'}.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sendingEmail = false);
+    }
+  }
+
   void _showTempPasswordDialog(Map<String, dynamic> user, String temp) {
     showDialog<void>(
       context: context,
@@ -329,7 +419,19 @@ class _AdminScreenState extends State<AdminScreen> {
                 icon: Icons.people_outline,
                 child: users.isEmpty
                     ? const Text('No users.')
-                    : _UserTable(users: users),
+                    : _UserTable(
+                        users: users,
+                        selected: _selectedUserIds,
+                        onToggle: _toggleUserSelected,
+                        onToggleAll: (v) => _toggleSelectAll(
+                            v, users.map((u) => u['id'] as int).toList()),
+                      ),
+              ),
+              const SizedBox(height: 16),
+              _SectionCard(
+                title: 'Send email',
+                icon: Icons.email_outlined,
+                child: _buildBroadcastEmail(context, users.length),
               ),
               const SizedBox(height: 16),
               _SectionCard(
@@ -345,12 +447,70 @@ class _AdminScreenState extends State<AdminScreen> {
     );
   }
 
+  Widget _buildBroadcastEmail(BuildContext context, int totalUsers) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          '${_selectedUserIds.length} of $totalUsers user${totalUsers == 1 ? '' : 's'} selected '
+          '(check rows in the Users table above).',
+          style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _emailSubjectCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Subject',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _emailBodyCtrl,
+          maxLines: 6,
+          decoration: const InputDecoration(
+            labelText: 'Message',
+            border: OutlineInputBorder(),
+            alignLabelWithHint: true,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          alignment: WrapAlignment.end,
+          children: [
+            OutlinedButton(
+              onPressed: _sendingEmail || totalUsers == 0
+                  ? null
+                  : () => _sendBroadcastEmail(sendToAll: true, totalUsers: totalUsers),
+              child: Text('Send to all $totalUsers'),
+            ),
+            FilledButton(
+              onPressed: _sendingEmail || _selectedUserIds.isEmpty
+                  ? null
+                  : () => _sendBroadcastEmail(sendToAll: false, totalUsers: totalUsers),
+              child: _sendingEmail
+                  ? const SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : Text('Send to selected (${_selectedUserIds.length})'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildSearch(BuildContext context) {
     final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextField(
+          key: const Key('admin-search-field'),
           controller: _searchCtrl,
           onSubmitted: (_) => _search(),
           decoration: InputDecoration(
@@ -416,47 +576,72 @@ class _MetricTile extends StatelessWidget {
 
 class _UserTable extends StatelessWidget {
   final List<Map<String, dynamic>> users;
-  const _UserTable({required this.users});
+  final Set<int> selected;
+  final void Function(int id, bool selected) onToggle;
+  final void Function(bool selectAll) onToggleAll;
+
+  const _UserTable({
+    required this.users,
+    required this.selected,
+    required this.onToggle,
+    required this.onToggleAll,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final allSelected = users.isNotEmpty &&
+        users.every((u) => selected.contains(u['id'] as int));
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: DataTable(
-        columns: const [
-          DataColumn(label: Text('User')),
-          DataColumn(label: Text('Provider')),
-          DataColumn(label: Text('Signup')),
-          DataColumn(label: Text('Projects'), numeric: true),
-          DataColumn(label: Text('Activities'), numeric: true),
-          DataColumn(label: Text('Memories'), numeric: true),
-          DataColumn(label: Text('Storage')),
-          DataColumn(label: Text('Encryption')),
+        columns: [
+          DataColumn(
+            label: Checkbox(
+              value: allSelected,
+              onChanged: (v) => onToggleAll(v ?? false),
+            ),
+          ),
+          const DataColumn(label: Text('User')),
+          const DataColumn(label: Text('Provider')),
+          const DataColumn(label: Text('Signup')),
+          const DataColumn(label: Text('Projects'), numeric: true),
+          const DataColumn(label: Text('Activities'), numeric: true),
+          const DataColumn(label: Text('Memories'), numeric: true),
+          const DataColumn(label: Text('Storage')),
+          const DataColumn(label: Text('Encryption')),
         ],
         rows: users.map((u) {
+          final id = u['id'] as int;
           final tier = u['encryption_tier'] as String? ?? 'none';
           final name = (u['display_name'] as String?)?.isNotEmpty == true
               ? u['display_name'] as String
               : (u['email'] as String? ?? '#${u['id']}');
-          return DataRow(cells: [
-            DataCell(Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (u['is_admin'] == true) ...[
-                  const _AdminShieldIcon(),
-                  const SizedBox(width: 6),
+          return DataRow(
+            selected: selected.contains(id),
+            cells: [
+              DataCell(Checkbox(
+                value: selected.contains(id),
+                onChanged: (v) => onToggle(id, v ?? false),
+              )),
+              DataCell(Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (u['is_admin'] == true) ...[
+                    const _AdminShieldIcon(),
+                    const SizedBox(width: 6),
+                  ],
+                  Text(name),
                 ],
-                Text(name),
-              ],
-            )),
-            DataCell(Text(u['auth_provider'] as String? ?? 'local')),
-            DataCell(Text(formatSignup((u['created_at'] as num?) ?? 0))),
-            DataCell(Text('${u['project_count'] ?? 0}')),
-            DataCell(Text('${u['activity_count'] ?? 0}')),
-            DataCell(Text('${u['memory_count'] ?? 0}')),
-            DataCell(Text(humanizeBytes((u['storage_bytes'] as num?)?.toInt() ?? 0))),
-            DataCell(_TierChip(tier: tier)),
-          ]);
+              )),
+              DataCell(Text(u['auth_provider'] as String? ?? 'local')),
+              DataCell(Text(formatSignup((u['created_at'] as num?) ?? 0))),
+              DataCell(Text('${u['project_count'] ?? 0}')),
+              DataCell(Text('${u['activity_count'] ?? 0}')),
+              DataCell(Text('${u['memory_count'] ?? 0}')),
+              DataCell(Text(humanizeBytes((u['storage_bytes'] as num?)?.toInt() ?? 0))),
+              DataCell(_TierChip(tier: tier)),
+            ],
+          );
         }).toList(),
       ),
     );

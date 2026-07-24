@@ -10,11 +10,12 @@ session so a slow walk never pins a pooled connection.
 """
 from __future__ import annotations
 
+import html
 import secrets
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlmodel import select
@@ -25,6 +26,7 @@ from models.project_db import DBActivity, DBMemory, DBProject
 from models.user import LocalUser, UserInfo
 from src.admin.storage import cached_user_storage, refresh_storage_cache
 from src.admin.tiers import user_encryption_tier
+from src.email.service import EmailMessage, get_email_service
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -93,6 +95,20 @@ class SetAdminRequest(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool = True
+
+
+class BroadcastEmailRequest(BaseModel):
+    subject: str = Field(min_length=1)
+    body: str = Field(min_length=1, description="Plain text; sent as-is, also wrapped as simple HTML")
+    user_ids: list[int] = Field(
+        default_factory=list,
+        description="Recipient UserInfo ids; ignored when send_to_all is true",
+    )
+    send_to_all: bool = False
+
+
+class BroadcastEmailResponse(BaseModel):
+    sent_count: int
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -326,3 +342,53 @@ def delete_user(
 
     _log.info("Admin deleted user_info_id=%s", user_info_id)
     return {"ok": True}
+
+
+async def _send_broadcast_email(to_email: str, subject: str, text_body: str) -> None:
+    """Background task: send one broadcast email. Logged, not raised, on
+    failure — same rationale as ``send_invite_email`` in ``api/members.py``:
+    there's no request left to report to once this runs."""
+    html_body = f"<p>{html.escape(text_body).replace(chr(10), '<br>')}</p>"
+    try:
+        await get_email_service().send(EmailMessage(
+            to=to_email, subject=subject, text_body=text_body, html_body=html_body,
+        ))
+    except Exception:
+        _log.exception("Failed to send broadcast email to %s", to_email)
+
+
+@router.post("/broadcast-email", response_model=BroadcastEmailResponse,
+             summary="Send a plain-text email to selected users, or all users")
+def broadcast_email(
+    body: BroadcastEmailRequest,
+    background_tasks: BackgroundTasks,
+    _admin: Annotated[dict, Depends(require_admin)],
+):
+    """Queues one email per recipient via BackgroundTasks so a slow/broken
+    relay never delays the response (mirrors the invite-email path)."""
+    with get_session() as sess:
+        if body.send_to_all:
+            recipients = [u.email for u in sess.exec(select(UserInfo)).all() if u.email]
+        else:
+            if not body.user_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="No recipients selected",
+                )
+            recipients = [
+                u.email for u in sess.exec(
+                    select(UserInfo).where(UserInfo.id.in_(body.user_ids))
+                ).all() if u.email
+            ]
+
+    if not recipients:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="No recipients with an email address",
+        )
+
+    for to_email in recipients:
+        background_tasks.add_task(_send_broadcast_email, to_email, body.subject, body.body)
+
+    _log.info("Admin queued broadcast email to %d recipient(s)", len(recipients))
+    return BroadcastEmailResponse(sent_count=len(recipients))

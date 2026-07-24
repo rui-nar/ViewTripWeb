@@ -12,6 +12,11 @@ class _FakeAdminService extends AdminService {
   Object? setAdminError;
   int? deleteCalledFor;
   Object? deleteError;
+  String? emailSentSubject;
+  String? emailSentBody;
+  List<int>? emailSentUserIds;
+  bool? emailSentToAll;
+  Object? broadcastEmailError;
 
   @override
   Future<Map<String, dynamic>> getStats() async => {
@@ -63,6 +68,21 @@ class _FakeAdminService extends AdminService {
   Future<void> deleteUser(int userInfoId) async {
     if (deleteError != null) throw deleteError!;
     deleteCalledFor = userInfoId;
+  }
+
+  @override
+  Future<int> broadcastEmail({
+    required String subject,
+    required String body,
+    List<int> userIds = const [],
+    bool sendToAll = false,
+  }) async {
+    if (broadcastEmailError != null) throw broadcastEmailError!;
+    emailSentSubject = subject;
+    emailSentBody = body;
+    emailSentUserIds = userIds;
+    emailSentToAll = sendToAll;
+    return sendToAll ? 2 : userIds.length;
   }
 }
 
@@ -120,7 +140,7 @@ void main() {
       ];
     await _pump(tester, AdminScreen(service: svc));
 
-    await tester.enterText(find.byType(TextField), 'x');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'x');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -145,7 +165,7 @@ void main() {
       ];
     await _pump(tester, AdminScreen(service: svc));
 
-    await tester.enterText(find.byType(TextField), 'plain');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'plain');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -167,7 +187,7 @@ void main() {
       ];
     await _pump(tester, AdminScreen(service: svc));
 
-    await tester.enterText(find.byType(TextField), 'me');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'me');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -186,7 +206,7 @@ void main() {
          'encryption_tier': 'none', 'is_admin': true},
       ];
     await _pump(tester, AdminScreen(service: svc));
-    await tester.enterText(find.byType(TextField), 'admin2');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'admin2');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
     // One shield for Bob (admin, in the Users table from getStats) + one for
@@ -202,7 +222,7 @@ void main() {
          'encryption_tier': 'none', 'is_admin': false},
       ];
     await _pump(tester, AdminScreen(service: svc));
-    await tester.enterText(find.byType(TextField), 'del');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'del');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -225,7 +245,7 @@ void main() {
          'encryption_tier': 'none', 'is_admin': false},
       ];
     await _pump(tester, AdminScreen(service: svc));
-    await tester.enterText(find.byType(TextField), 'del2');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'del2');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -247,7 +267,7 @@ void main() {
          'encryption_tier': 'none', 'is_admin': false},
       ];
     await _pump(tester, AdminScreen(service: svc));
-    await tester.enterText(find.byType(TextField), 'me2');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'me2');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
@@ -278,12 +298,100 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: AdminScreen(service: svc)));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField), 'narrow');
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'narrow');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull); // no RenderFlex overflow
     // The full name renders as one Text widget, not split per character.
     expect(find.text('Narrow Name'), findsOneWidget);
+  });
+
+  // ── Broadcast email ─────────────────────────────────────────────────────────
+
+  testWidgets('selecting a user row then sending to selected calls the '
+      'service with that id, subject and body', (tester) async {
+    final svc = _FakeAdminService();
+    await _pump(tester, AdminScreen(service: svc));
+
+    // Checkbox order in the Users table: header (select-all), Alice, Bob.
+    await tester.tap(find.byType(Checkbox).at(1));
+    await tester.pumpAndSettle();
+
+    // TextField order: subject, body (Send email section), then search.
+    await tester.enterText(find.byType(TextField).at(0), 'Test subject');
+    await tester.enterText(find.byType(TextField).at(1), 'Test body');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Send to selected (1)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Send email?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Send'));
+    await tester.pumpAndSettle();
+
+    expect(svc.emailSentSubject, 'Test subject');
+    expect(svc.emailSentBody, 'Test body');
+    expect(svc.emailSentUserIds, [1]); // Alice's id
+    expect(svc.emailSentToAll, false);
+    expect(find.text('Queued for 1 recipient.'), findsOneWidget);
+  });
+
+  testWidgets('send to all works without any row selected', (tester) async {
+    final svc = _FakeAdminService();
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.enterText(find.byType(TextField).at(0), 'Subj');
+    await tester.enterText(find.byType(TextField).at(1), 'Body');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Send to all 2'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Send'));
+    await tester.pumpAndSettle();
+
+    expect(svc.emailSentToAll, true);
+    expect(find.text('Queued for 2 recipients.'), findsOneWidget);
+  });
+
+  testWidgets('the header checkbox selects every user row', (tester) async {
+    final svc = _FakeAdminService();
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.tap(find.byType(Checkbox).first); // select-all
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(FilledButton, 'Send to selected (2)'), findsOneWidget);
+  });
+
+  testWidgets('sending with an empty subject/body is blocked with a snackbar',
+      (tester) async {
+    final svc = _FakeAdminService();
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.tap(find.byType(Checkbox).at(1));
+    await tester.pumpAndSettle();
+    // Subject/body left empty.
+    await tester.tap(find.widgetWithText(FilledButton, 'Send to selected (1)'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Subject and body are required.'), findsOneWidget);
+    expect(svc.emailSentSubject, isNull);
+  });
+
+  testWidgets('canceling the confirmation dialog sends nothing', (tester) async {
+    final svc = _FakeAdminService();
+    await _pump(tester, AdminScreen(service: svc));
+
+    await tester.tap(find.byType(Checkbox).at(1));
+    await tester.enterText(find.byType(TextField).at(0), 'Subj');
+    await tester.enterText(find.byType(TextField).at(1), 'Body');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Send to selected (1)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(svc.emailSentSubject, isNull);
   });
 }

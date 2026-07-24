@@ -90,6 +90,7 @@ _ADMIN_ROUTES = [
     ("post", "/api/admin/users/1/reset-password"),
     ("post", "/api/admin/users/1/set-admin"),
     ("delete", "/api/admin/users/999999"),
+    ("post", "/api/admin/broadcast-email"),
 ]
 
 
@@ -99,7 +100,12 @@ class TestGating:
             return client.get(path)
         if method == "delete":
             return client.delete(path)
-        body = {"is_admin": True} if "set-admin" in path else {}
+        if "set-admin" in path:
+            body = {"is_admin": True}
+        elif "broadcast-email" in path:
+            body = {"subject": "s", "body": "b", "send_to_all": True}
+        else:
+            body = {}
         return client.post(path, json=body)
 
     @pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
@@ -453,3 +459,88 @@ class TestDeleteUser:
         client, *_ = ctx
         resp = client.delete("/api/admin/users/999999")
         assert resp.status_code == 404
+
+
+# ── 18. Broadcast email ────────────────────────────────────────────────────────
+#
+# FastAPI's TestClient runs BackgroundTasks inline before the response
+# returns, so these assert on the fake synchronously — no real network (same
+# approach as the invite-email tests in tests/test_companion_roles.py).
+
+class _FakeEmailService:
+    def __init__(self):
+        self.sent: list = []
+
+    async def send(self, message) -> None:
+        self.sent.append(message)
+
+
+@pytest.fixture
+def fake_email(monkeypatch):
+    fake = _FakeEmailService()
+    monkeypatch.setattr(admin_mod, "get_email_service", lambda: fake)
+    return fake
+
+
+class TestBroadcastEmail:
+    @pytest.fixture
+    def ctx(self, engine):
+        with Session(engine) as sess:
+            admin, _ = _mk_user(sess, display_name="admin", email="admin@x.io",
+                                is_admin=True)
+            a, _ = _mk_user(sess, display_name="Alice", email="a@x.io")
+            b, _ = _mk_user(sess, display_name="Bob", email="b@x.io")
+            aid, alice_id, bob_id = admin.id, a.id, b.id
+        payload = {"sub": str(aid), "email": "admin@x.io", "auth_provider": "local"}
+        return TestClient(_admin_app(engine, payload)), alice_id, bob_id
+
+    def test_send_to_selected_users(self, ctx, fake_email):
+        client, alice_id, _bob_id = ctx
+        resp = client.post("/api/admin/broadcast-email", json={
+            "subject": "Hello",
+            "body": "Test message",
+            "user_ids": [alice_id],
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["sent_count"] == 1
+        assert len(fake_email.sent) == 1
+        msg = fake_email.sent[0]
+        assert msg.to == "a@x.io"
+        assert msg.subject == "Hello"
+        assert msg.text_body == "Test message"
+        assert "Test message" in msg.html_body
+
+    def test_send_to_all_ignores_user_ids(self, ctx, fake_email):
+        client, alice_id, _bob_id = ctx
+        resp = client.post("/api/admin/broadcast-email", json={
+            "subject": "Hello",
+            "body": "Test message",
+            "user_ids": [],
+            "send_to_all": True,
+        })
+        assert resp.status_code == 200, resp.text
+        # admin + alice + bob, all seeded with emails.
+        assert resp.json()["sent_count"] == 3
+        assert {m.to for m in fake_email.sent} == {"admin@x.io", "a@x.io", "b@x.io"}
+
+    def test_no_recipients_selected_422(self, ctx, fake_email):
+        client, *_ = ctx
+        resp = client.post("/api/admin/broadcast-email", json={
+            "subject": "Hello",
+            "body": "Test message",
+            "user_ids": [],
+        })
+        assert resp.status_code == 422
+        assert fake_email.sent == []
+
+    def test_html_body_escapes_and_preserves_newlines(self, ctx, fake_email):
+        client, alice_id, _bob_id = ctx
+        client.post("/api/admin/broadcast-email", json={
+            "subject": "Hi",
+            "body": "line1 <b>\nline2",
+            "user_ids": [alice_id],
+        })
+        html_body = fake_email.sent[0].html_body
+        assert "&lt;b&gt;" in html_body
+        assert "<b>" not in html_body
+        assert "<br>" in html_body
