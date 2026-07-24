@@ -33,7 +33,9 @@ from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
 from src.models.activity import Activity
+from src.utils.logging import get_logger
 
+_log = get_logger(__name__)
 _cfg = Config("config/config.json")
 if os.environ.get("STRAVA_CLIENT_ID"):
     _cfg.set("strava.client_id", os.environ["STRAVA_CLIENT_ID"])
@@ -425,6 +427,12 @@ def edit_activity_track(
         )
     points = [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
 
+    # Phase-timed (issue #45 follow-up): the align_points O(N*M) fix cut most
+    # of the hang, but split/edit-track were still blowing past the client's
+    # timeout on some real-world tracks — this pins down which phase (DB
+    # load+commit vs. response serialisation) the remaining time is in, on the
+    # next repro, instead of inferring it from scheduler-jitter side effects.
+    t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
@@ -442,11 +450,18 @@ def edit_activity_track(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
         )
+    t1 = time.time()
 
     bust_geo_cache(owner_id, name)
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
     background_tasks.add_task(_refresh_share_tiles, owner_id, name)
-    return _repo.to_dict(project)
+    result = _repo.to_dict(project)
+    t2 = time.time()
+    _log.info(
+        "edit_activity_track name=%s activity_id=%s db=%.3fs serialize=%.3fs total=%.3fs",
+        name, activity_id, t1 - t0, t2 - t1, t2 - t0,
+    )
+    return result
 
 
 @router.post("/{name}/activities/{activity_id}/reset",
@@ -513,6 +528,8 @@ def split_activity(
     right after the head. Both pieces are marked edited. Returns the updated project.
     """
     user_info_id = int(current_user["sub"])
+    # Phase-timed (issue #45 follow-up) — see edit_activity_track for why.
+    t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
@@ -522,6 +539,7 @@ def split_activity(
         )
         if project is None or not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
+        t1 = time.time()
         try:
             tail_id = _repo.split_activity(
                 sess, owner_id, row.id, activity_id, body.split_index,
@@ -531,15 +549,24 @@ def split_activity(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
         if tail_id is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        t2 = time.time()
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
         )
+    t3 = time.time()
 
     bust_geo_cache(owner_id, name)
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
     background_tasks.add_task(_refresh_share_tiles, owner_id, name)
-    return _repo.to_dict(project)
+    result = _repo.to_dict(project)
+    t4 = time.time()
+    _log.info(
+        "split_activity name=%s activity_id=%s load=%.3fs split_commit=%.3fs "
+        "reload=%.3fs serialize=%.3fs total=%.3fs",
+        name, activity_id, t1 - t0, t2 - t1, t3 - t2, t4 - t3, t4 - t0,
+    )
+    return result
 
 
 @router.delete("/{name}/activities/{activity_id}/local",
