@@ -113,3 +113,40 @@ class TestAlignRoundTrip:
 
     def test_points_to_polyline_empty(self):
         assert points_to_polyline([]) is None
+
+
+class TestAlignPointsPerformance:
+    """Regression test for issue #45 — save/split on a long, dense activity
+    (tens of thousands of GPS points, e.g. a multi-hour ride) used to hang past
+    the client's request timeout. Root cause: align_points' elevation
+    interpolation rescanned the elevation array from the start for every
+    polyline point, making one alignment O(N*M) — 20+ seconds at ~40k points —
+    even though the write itself succeeded a moment later (visible on reload),
+    which is what made this look like a DB-lock hang rather than a slow
+    computation. Fixed via binary search (bisect) instead of a linear rescan.
+    """
+
+    def test_large_track_aligns_quickly(self):
+        import random
+        import time
+
+        random.seed(7)
+        n = 30_000
+        lat, lng = 48.0, 2.0
+        pts = []
+        for _ in range(n):
+            lat += random.uniform(-0.0005, 0.0005)
+            lng += random.uniform(-0.0005, 0.0005)
+            pts.append(TrackPoint(lat, lng))
+        poly = points_to_polyline(pts)
+        dist_km = [i * 0.01 for i in range(n)]
+        elev_m = [100.0 + (i % 50) for i in range(n)]
+
+        start = time.time()
+        aligned = align_points(poly, (dist_km, elev_m))
+        elapsed = time.time() - start
+
+        assert len(aligned) == n
+        # The old O(N*M) scan took 20+ seconds at this size; a healthy
+        # implementation finishes in well under a second.
+        assert elapsed < 3.0, f"align_points took {elapsed:.2f}s for {n} points"

@@ -18,6 +18,7 @@ Two responsibilities, both side-effect-free and standalone-testable:
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -70,22 +71,26 @@ def align_points(
 
 
 def _interp_elev(d: float, dist_km: List[float], elev_m: List[float]) -> float:
-    """Linearly interpolate elevation at cumulative distance *d* (km)."""
+    """Linearly interpolate elevation at cumulative distance *d* (km).
+
+    Uses a binary search rather than a linear scan: called once per polyline
+    point from align_points, a linear rescan-from-start made a full alignment
+    O(N*M) (N polyline points, M elevation samples) — quadratic overall since
+    N and M scale together, which measured at 20+ seconds for a ~40k-point
+    activity (a few hours of dense GPS recording) and blew past the client's
+    request timeout on save/split (issue #45).
+    """
     if d <= dist_km[0]:
         return elev_m[0]
     if d >= dist_km[-1]:
         return elev_m[-1]
-    # Binary search would be faster, but linear is fine for the point counts
-    # involved and keeps the code obvious.
-    for i in range(1, len(dist_km)):
-        if d <= dist_km[i]:
-            d0, d1 = dist_km[i - 1], dist_km[i]
-            e0, e1 = elev_m[i - 1], elev_m[i]
-            if d1 == d0:
-                return e0
-            frac = (d - d0) / (d1 - d0)
-            return e0 + frac * (e1 - e0)
-    return elev_m[-1]
+    i = bisect_left(dist_km, d)
+    d0, d1 = dist_km[i - 1], dist_km[i]
+    e0, e1 = elev_m[i - 1], elev_m[i]
+    if d1 == d0:
+        return e0
+    frac = (d - d0) / (d1 - d0)
+    return e0 + frac * (e1 - e0)
 
 
 def points_to_polyline(points: List[TrackPoint]) -> Optional[str]:
