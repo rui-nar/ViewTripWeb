@@ -1626,22 +1626,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                         : () => _openTrackEditor(context, notifier, a),
                                   ),
                                   const SizedBox(width: 4),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete_outline, size: 15),
-                                    visualDensity: VisualDensity.compact,
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                    color: theme.colorScheme.error.withValues(alpha: 0.6),
-                                    onPressed: () => _dismissWithUndo(
-                                      context: context,
-                                      notifier: notifier,
-                                      label: 'Removed "$name"',
-                                      onOptimistic: () => notifier.removeItemLocally(i),
-                                      onConfirm: () => notifier.confirmRemoveItem(i),
-                                    ),
-                                  ),
-                                  if (isLocal) ...[
-                                    const SizedBox(width: 4),
+                                  if (isLocal)
                                     IconButton(
                                       key: ValueKey('del_local_$activityId'),
                                       icon: const Icon(Icons.delete_forever, size: 15),
@@ -1661,8 +1646,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                                 onConfirm: () => notifier
                                                     .deleteLocalActivity(localActId),
                                               ),
+                                    )
+                                  else
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline, size: 15),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      color: theme.colorScheme.error.withValues(alpha: 0.6),
+                                      onPressed: () => _dismissWithUndo(
+                                        context: context,
+                                        notifier: notifier,
+                                        label: 'Removed "$name"',
+                                        onOptimistic: () => notifier.removeItemLocally(i),
+                                        onConfirm: () => notifier.confirmRemoveItem(i),
+                                      ),
                                     ),
-                                  ],
                                 ],
                               ),
                               onTap: _multiSelect ? null : () => _flyToActivity(a),

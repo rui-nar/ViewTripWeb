@@ -57,6 +57,18 @@ void main() {
     expect(find.byIcon(Icons.delete_forever), findsOneWidget);
   });
 
+  testWidgets(
+      'local (negative-id) activity shows exactly one delete icon (#120)',
+      (tester) async {
+    final notifier = notifierWith(activityId: -7);
+    await pumpPanel(tester, notifier);
+
+    // Regression: it must NOT also show the generic delete affordance
+    // alongside the dedicated one.
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
+    expect(find.byIcon(Icons.delete_forever), findsOneWidget);
+  });
+
   testWidgets('normal (positive-id) activity does NOT show it', (tester) async {
     final notifier = notifierWith(activityId: 42);
     await pumpPanel(tester, notifier);
