@@ -737,7 +737,12 @@ class _SearchRow extends StatelessWidget {
             ),
           ],
         ),
-        Text(user['email'] as String? ?? '', style: theme.textTheme.bodySmall),
+        // An email is a single unbreakable token: ellipsize rather than let it
+        // wrap (per-character, in a squeezed slot).
+        Text(user['email'] as String? ?? '',
+            style: theme.textTheme.bodySmall,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis),
       ],
     );
 
@@ -772,6 +777,7 @@ class _SearchRow extends StatelessWidget {
     final controls = Wrap(
       spacing: 12,
       runSpacing: 8,
+      alignment: WrapAlignment.end,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         _TierChip(tier: tier),
@@ -798,9 +804,12 @@ class _SearchRow extends StatelessWidget {
             return Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Expanded(child: info),
+                Expanded(flex: 2, child: info),
                 const SizedBox(width: 12),
-                controls,
+                // Also flexed: as a non-flex child the Wrap would be laid out
+                // with unbounded width, put every control on one line and take
+                // the whole row — leaving `info` 0 px wide.
+                Expanded(flex: 3, child: controls),
               ],
             );
           }

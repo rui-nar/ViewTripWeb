@@ -280,32 +280,55 @@ void main() {
     expect(find.text('MeToo'), findsOneWidget); // row stays since the call failed
   });
 
-  testWidgets('search row stays readable (no per-character wrap) on a narrow width',
-      (tester) async {
-    final svc = _FakeAdminService()
-      ..searchResult = [
-        {
-          'id': 30, 'email': 'narrow@x.com', 'display_name': 'Narrow Name',
-          'encryption_tier': 'none', 'is_admin': false,
-        },
-      ];
-    // Narrow enough to force the stacked (non-Row) layout branch, but not so
-    // narrow that the (pre-existing, unrelated) _SectionCard header overflows.
-    tester.view.physicalSize = const Size(560, 900);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(MaterialApp(home: AdminScreen(service: svc)));
-    await tester.pumpAndSettle();
+  // The controls (chip + 3 buttons) must never squeeze the name/email column to
+  // zero width: that made the email wrap one character per line and pushed the
+  // buttons off the card. Asserting the widget exists is not enough — a 0 px
+  // wide Text still "exists", so measure the rendered geometry.
+  //
+  // 560 is the layout's stacked/Row breakpoint; 700-900 is the range the Row
+  // branch previously broke in. Stay >= 560 so the (pre-existing, unrelated)
+  // _SectionCard header does not overflow.
+  for (final width in [1400.0, 960.0, 900.0, 800.0, 700.0, 600.0, 560.0]) {
+    testWidgets('search row keeps the email on one line at width $width',
+        (tester) async {
+      const email = 'a.long.user.name@example.com';
+      final svc = _FakeAdminService()
+        ..searchResult = [
+          {
+            'id': 30, 'email': email, 'display_name': 'Narrow Name',
+            'encryption_tier': 'none', 'is_admin': false,
+          },
+        ];
+      tester.view.physicalSize = Size(width, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(MaterialApp(home: AdminScreen(service: svc)));
+      await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('admin-search-field')), 'narrow');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pumpAndSettle();
+      await tester.enterText(
+          find.byKey(const Key('admin-search-field')), 'narrow');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
 
-    expect(tester.takeException(), isNull); // no RenderFlex overflow
-    // The full name renders as one Text widget, not split per character.
-    expect(find.text('Narrow Name'), findsOneWidget);
-  });
+      expect(tester.takeException(), isNull); // no RenderFlex overflow
+      expect(find.text('Narrow Name'), findsOneWidget);
+
+      // A single bodySmall line; a per-character wrap of this email would be
+      // ~28 lines tall and a few pixels wide.
+      final size = tester.getSize(find.text(email));
+      expect(size.height, lessThan(32), reason: 'email wrapped onto >1 line');
+      expect(size.width, greaterThan(100), reason: 'email column squeezed');
+
+      // The action buttons stay inside the card instead of being clipped away.
+      for (final label in ['Reset password', 'Make admin', 'Delete user']) {
+        final button = find.widgetWithText(OutlinedButton, label);
+        expect(button, findsOneWidget);
+        expect(tester.getTopRight(button).dx, lessThanOrEqualTo(width),
+            reason: '"$label" is off-screen');
+      }
+    });
+  }
 
   // ── Broadcast email ─────────────────────────────────────────────────────────
 
