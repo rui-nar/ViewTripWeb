@@ -461,7 +461,11 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _weather    = m['weather']    as String?;
     _journalCtrl.text = m['journal'] as String? ?? '';
     final rawTags = m['tags'];
-    _tags = rawTags is List ? List<String>.from(rawTags.cast<String>()) : [];
+    // No own tags yet → pre-select the inherited (previous-day) tags so the
+    // chips reflect what the hero already shows. Not persisted until Save.
+    _tags = rawTags is List
+        ? List<String>.from(rawTags.cast<String>())
+        : List<String>.from(widget.effectiveTags);
     final rawC = m['counters'];
     if (rawC is List) {
       // Current form: a list of {name, value} entries — same counter may repeat.

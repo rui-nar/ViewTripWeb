@@ -124,7 +124,9 @@ void main() {
 
     testWidgets('renders effective tags as the hero context', (tester) async {
       await _pump(tester, effectiveTags: ['EV10 — North Cape']);
-      expect(find.text('EV10 — North Cape'), findsOneWidget);
+      // Appears twice: once in the hero, once as the pre-selected chip in
+      // the Tags section below (see "pre-selects the inherited tag" test).
+      expect(find.text('EV10 — North Cape'), findsNWidgets(2));
     });
   });
 
@@ -188,6 +190,21 @@ void main() {
       await _tapVisible(tester, find.text('Add'));
       await _tapSave(tester);
       expect(h.saved!['tags'], ['Transfer']);
+    });
+
+    testWidgets('a day with no own tags pre-selects the inherited (previous-day) tag',
+        (tester) async {
+      final h = await _pump(tester, effectiveTags: ['EV6']);
+      // Pre-selection alone isn't a user edit — Save stays disabled until
+      // something is actually changed.
+      expect(_saveEnabled(tester), isFalse);
+
+      // Once the day is edited for any reason, the pre-selected tag is
+      // carried into the save as this day's own tag.
+      await tester.tap(find.text('Hard'));
+      await tester.pump();
+      await _tapSave(tester);
+      expect(h.saved!['tags'], ['EV6']);
     });
   });
 
