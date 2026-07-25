@@ -452,9 +452,15 @@ def edit_activity_track(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
         if not _repo.edit_activity_track(sess, activity_id, points):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        # include_elevation=False: the client (see project_notifier.dart
+        # saveActivityTrack) discards this response and immediately re-fetches
+        # via /meta + /geo, so there's no reason to pay for serialising every
+        # activity's full elevation_profile (~12 MB on a large trip) into a
+        # response nobody reads.
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_elevation=False,
         )
     t1 = time.time()
 
@@ -500,9 +506,13 @@ def reset_activity_track(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Activity has no edit to reset",
             )
+        # include_elevation=False: see edit_activity_track for why — the
+        # client discards this response and immediately re-fetches via
+        # /meta + /geo.
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_elevation=False,
         )
 
     bust_geo_cache(owner_id, name)
@@ -562,9 +572,15 @@ def split_activity(
         if tail_id is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         t2 = time.time()
+        # include_elevation=False: the client (see project_notifier.dart
+        # splitActivity) discards this response and immediately re-fetches via
+        # /meta + /geo, so there's no reason to pay for serialising every
+        # activity's full elevation_profile (~12 MB on a large trip) into a
+        # response nobody reads.
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
+            include_elevation=False,
         )
     t3 = time.time()
 

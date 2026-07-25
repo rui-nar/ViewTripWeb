@@ -91,6 +91,28 @@ def test_split_yields_two_activities(env):
     assert tail["is_edited"] is True
 
 
+def test_split_reload_defers_full_elevation_profile(env, monkeypatch):
+    """The split response is discarded by the client (it immediately re-fetches
+    via /meta + /geo — see ProjectNotifier.splitActivity), so the endpoint's
+    final reload must use include_elevation=False rather than pay to
+    serialise every activity's full elevation_profile (~12 MB on a large trip)
+    into a response nobody reads."""
+    client, _ = env
+    import api.activities as activities_mod
+    seen = []
+    orig = activities_mod._repo.get_project
+
+    def _spy(sess, user_info_id, project_name, **kwargs):
+        seen.append(kwargs)
+        return orig(sess, user_info_id, project_name, **kwargs)
+
+    monkeypatch.setattr(activities_mod._repo, "get_project", _spy)
+    resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    assert resp.status_code == 200, resp.text
+    # The final reload (after the containment-check load) must defer elevation.
+    assert seen[-1].get("include_elevation") is False
+
+
 def test_split_distances_sum_to_original(env):
     client, _ = env
     resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})

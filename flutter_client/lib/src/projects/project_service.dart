@@ -153,6 +153,11 @@ class ProjectService {
   /// Replace an activity's track geometry with an edited point list.
   /// PUT /api/projects/{name}/activities/{id}/track
   /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated project.
+  ///
+  /// Generous timeout: see splitActivity below — the same recompute +
+  /// reload can run well over the client's default 30s on a large trip, and
+  /// this response is discarded by the caller anyway (ProjectNotifier just
+  /// re-fetches via _silentReload).
   Future<Map<String, dynamic>> saveActivityTrack(
     ProjectRef ref,
     int activityId,
@@ -161,12 +166,15 @@ class ProjectService {
     final data = await api.put(
       ref.path('/activities/$activityId/track'),
       payload,
+      timeout: const Duration(minutes: 2),
     );
     return data as Map<String, dynamic>;
   }
 
   /// Reset an edited activity's track to the original Strava geometry.
   /// POST /api/projects/{name}/activities/{id}/reset
+  ///
+  /// Generous timeout: see saveActivityTrack above.
   Future<Map<String, dynamic>> resetActivityTrack(
     ProjectRef ref,
     int activityId,
@@ -174,6 +182,7 @@ class ProjectService {
     final data = await api.post(
       ref.path('/activities/$activityId/reset'),
       const {},
+      timeout: const Duration(minutes: 2),
     );
     return data as Map<String, dynamic>;
   }
@@ -182,6 +191,11 @@ class ProjectService {
   /// When [dropBoundary] is true, the tail excludes the shared boundary point
   /// (#104 — used when a transportation segment will bridge the cut).
   /// POST /api/projects/{name}/activities/{id}/split
+  ///
+  /// Generous timeout: on a large trip, committing the split + reloading and
+  /// serialising the updated project can take well over the client's default
+  /// 30s (this response is discarded by the caller anyway — see
+  /// ProjectNotifier.splitActivity — but the request still has to finish).
   Future<Map<String, dynamic>> splitActivity(
     ProjectRef ref,
     int activityId,
@@ -191,6 +205,7 @@ class ProjectService {
     final data = await api.post(
       ref.path('/activities/$activityId/split'),
       {'split_index': splitIndex, 'drop_boundary': dropBoundary},
+      timeout: const Duration(minutes: 2),
     );
     return data as Map<String, dynamic>;
   }

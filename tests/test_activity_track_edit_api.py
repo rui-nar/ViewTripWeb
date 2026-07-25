@@ -120,6 +120,29 @@ def test_trim_reduces_distance_and_sets_edited(env):
         assert row.summary_polyline != row.original_polyline          # geometry changed
 
 
+def test_edit_track_reload_defers_full_elevation_profile(env, monkeypatch):
+    """The edit-track response is discarded by the client (it immediately
+    re-fetches via /meta + /geo — see ProjectNotifier.saveActivityTrack), so
+    the endpoint's final reload must use include_elevation=False rather than
+    pay to serialise every activity's full elevation_profile (~12 MB on a
+    large trip) into a response nobody reads."""
+    client, _ = env
+    import api.activities as activities_mod
+    seen = []
+    orig = activities_mod._repo.get_project
+
+    def _spy(sess, user_info_id, project_name, **kwargs):
+        seen.append(kwargs)
+        return orig(sess, user_info_id, project_name, **kwargs)
+
+    monkeypatch.setattr(activities_mod._repo, "get_project", _spy)
+    points = [{"lat": lat, "lng": lng, "elev": e}
+              for (lat, lng), e in zip(_TRACK[:3], _ELEV[:3])]
+    resp = client.put("/api/projects/My Trip/activities/111/track", json={"points": points})
+    assert resp.status_code == 200, resp.text
+    assert seen[-1].get("include_elevation") is False
+
+
 def test_track_edit_requires_two_points(env):
     client, _ = env
     resp = client.put("/api/projects/My Trip/activities/111/track",
@@ -155,6 +178,28 @@ def test_reset_without_edit_is_conflict(env):
     client, _ = env
     resp = client.post("/api/projects/My Trip/activities/111/reset")
     assert resp.status_code == 409
+
+
+def test_reset_reload_defers_full_elevation_profile(env, monkeypatch):
+    """Same rationale as test_edit_track_reload_defers_full_elevation_profile,
+    for the reset endpoint (ProjectNotifier.resetActivityTrack)."""
+    client, _ = env
+    points = [{"lat": lat, "lng": lng, "elev": e}
+              for (lat, lng), e in zip(_TRACK[:2], _ELEV[:2])]
+    client.put("/api/projects/My Trip/activities/111/track", json={"points": points})
+
+    import api.activities as activities_mod
+    seen = []
+    orig = activities_mod._repo.get_project
+
+    def _spy(sess, user_info_id, project_name, **kwargs):
+        seen.append(kwargs)
+        return orig(sess, user_info_id, project_name, **kwargs)
+
+    monkeypatch.setattr(activities_mod._repo, "get_project", _spy)
+    resp = client.post("/api/projects/My Trip/activities/111/reset")
+    assert resp.status_code == 200, resp.text
+    assert seen[-1].get("include_elevation") is False
 
 
 def test_reset_recovers_original_times(env):
