@@ -123,10 +123,21 @@ if ($LASTEXITCODE -ne 0) { Die "git push tag failed." }
 
 # -- 8. Create GitHub release --------------------------------------------------
 Step "Creating GitHub release $newTag"
-gh release create $newTag `
-    --title "ViewTripWeb $newTag" `
-    --notes $releaseBody
-if ($LASTEXITCODE -ne 0) { Die "gh release create failed." }
+# --notes-file (rather than --notes $releaseBody) avoids passing a multi-line
+# string as a raw CLI argument: on Windows, PowerShell's native-argument
+# marshaling can split it across multiple argv entries at the embedded
+# newlines, and gh then tries to glob-expand a stray trailing line as an
+# asset filename (e.g. a commit subject containing "(...)").
+$notesFile = Join-Path ([System.IO.Path]::GetTempPath()) "viewtrip-release-notes-$newTag.md"
+Set-Content -Path $notesFile -Value $releaseBody -NoNewline
+try {
+    gh release create $newTag `
+        --title "ViewTripWeb $newTag" `
+        --notes-file $notesFile
+    if ($LASTEXITCODE -ne 0) { Die "gh release create failed." }
+} finally {
+    Remove-Item -Path $notesFile -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
