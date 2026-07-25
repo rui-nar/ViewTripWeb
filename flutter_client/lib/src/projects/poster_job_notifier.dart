@@ -24,11 +24,29 @@ Map<String, dynamic> posterMemoryJson(Map<String, dynamic> memory) => {
       'photo_uuids': (memory['photos'] as List?)?.cast<String>() ?? const [],
     };
 
-/// Fetches a fast, low-resolution layout preview PNG for the given poster
-/// request — same request shape as [PosterJobNotifier.start], but synchronous
-/// (no job created, no polling): the server skips the Mapbox basemap fetch
-/// entirely for this endpoint, so it returns in well under a second.
-Future<Uint8List> fetchPosterPreview({
+/// A poster preview: the rendered PNG, plus a [warning] when the server could
+/// render everything *except* the map imagery.
+///
+/// The distinction matters: a grey preview used to be indistinguishable from a
+/// working one, so a broken `MAPBOX_TOKEN` looked like a design choice rather
+/// than a fault the user could act on.
+class PosterPreview {
+  final Uint8List bytes;
+  final String? warning;
+
+  const PosterPreview({required this.bytes, this.warning});
+
+  bool get hasWarning => warning != null && warning!.isNotEmpty;
+}
+
+/// Header the server uses to report a degraded (map-less) preview.
+const kPosterWarningHeader = 'x-poster-warning';
+
+/// Fetches a fast, low-resolution preview of the real poster — same request
+/// shape as [PosterJobNotifier.start], but synchronous (no job created, no
+/// polling). The preview renders the same basemap, cards and placement as the
+/// full job, just small, so what it shows is what the poster will look like.
+Future<PosterPreview> fetchPosterPreview({
   required ProjectRef ref,
   required Map<String, double> bounds,
   required String orientation,
@@ -40,7 +58,11 @@ Future<Uint8List> fetchPosterPreview({
     ref.path('/poster/preview'),
     {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
   );
-  return res.bodyBytes;
+  // Dart's http package lower-cases response header names.
+  return PosterPreview(
+    bytes: res.bodyBytes,
+    warning: res.headers[kPosterWarningHeader],
+  );
 }
 
 /// Creates a poster job, then polls its status on a bounded interval until it

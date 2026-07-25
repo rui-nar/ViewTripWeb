@@ -53,9 +53,22 @@ def _mapbox_token() -> str:
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
 
-DEFAULT_TILE_SIZE = 512  # Mapbox @2x retina tiles — sharper source for A0 print
+DEFAULT_TILE_SIZE = 512  # logical tile grid size (see DEFAULT_PIXEL_RATIO)
 DEFAULT_MAX_ZOOM = 22    # Mapbox's practical raster max zoom (matches flutter_client's kMaxMapZoom)
 DEFAULT_MAX_TILES = 4096  # sanity cap — see render_basemap's docstring for reasoning
+
+# Mapbox's Styles API returns a tile of ``tile_size * pixel_ratio`` actual
+# pixels: a `@2x` request at tilesize=512 yields a 1024x1024 image, NOT a
+# 512x512 one. The two are deliberately kept separate here:
+#   - ``tile_size`` is the *logical* Web Mercator grid unit. All projection
+#     math (lonlat_to_pixel, tile_range_for_bounds, crop_rect_for_bounds, and
+#     poster_renderer._Projector) is expressed in these logical units.
+#   - ``pixel_ratio`` is how many real image pixels each logical unit occupies,
+#     and is applied *only* inside render_basemap's stitch/crop step.
+# Conflating them means pasting 1024px tiles on a 512px stride, which
+# overwrites three quarters of every tile and yields a scrambled, 2x-zoomed
+# basemap misaligned with the route and pins.
+DEFAULT_PIXEL_RATIO = 2
 
 # The style used by the client's "view" satellite basemap
 # (flutter_client/lib/src/projects/basemaps.dart, kMapboxViewUrl) — reused here
@@ -177,6 +190,7 @@ class MapboxTileClient:
         style_username: str = DEFAULT_STYLE_USERNAME,
         style_id: str = DEFAULT_STYLE_ID,
         tile_size: int = DEFAULT_TILE_SIZE,
+        pixel_ratio: int = DEFAULT_PIXEL_RATIO,
         timeout: float = 15.0,
     ):
         if not token:
@@ -185,11 +199,17 @@ class MapboxTileClient:
         self.style_username = style_username
         self.style_id = style_id
         self.tile_size = tile_size
+        self.pixel_ratio = pixel_ratio
         self.timeout = timeout
 
     def fetch_tile(self, z: int, x: int, y: int) -> bytes:
-        """Fetch one raster tile's raw image bytes (PNG) from Mapbox's Styles API."""
-        retina = "@2x" if self.tile_size >= 512 else ""
+        """Fetch one raster tile's raw image bytes (PNG) from Mapbox's Styles API.
+
+        The returned image is ``tile_size * pixel_ratio`` px square — the
+        caller (``render_basemap``) is responsible for stitching on that
+        stride, not on ``tile_size``.
+        """
+        retina = "@2x" if self.pixel_ratio == 2 else ""
         url = (
             f"https://api.mapbox.com/styles/v1/{self.style_username}/{self.style_id}"
             f"/tiles/{self.tile_size}/{z}/{x}/{y}{retina}"
@@ -217,7 +237,9 @@ class MapboxTileClient:
         raise APIError(f"Mapbox tile fetch failed after {self.MAX_RETRIES} attempts: {last_error}")
 
 
-def _default_tile_fetcher() -> TileFetcher:
+def _default_tile_fetcher(
+    tile_size: int = DEFAULT_TILE_SIZE, pixel_ratio: int = DEFAULT_PIXEL_RATIO
+) -> TileFetcher:
     """Build the default network tile_fetcher from the configured MAPBOX_TOKEN.
 
     Constructed lazily — only called from inside ``render_basemap`` when no
@@ -225,7 +247,7 @@ def _default_tile_fetcher() -> TileFetcher:
     pure-math / injected-fetcher tests never requires a token or network
     access.
     """
-    client = MapboxTileClient(_mapbox_token())
+    client = MapboxTileClient(_mapbox_token(), tile_size=tile_size, pixel_ratio=pixel_ratio)
     return client.fetch_tile
 
 
@@ -238,6 +260,7 @@ def render_basemap(
     *,
     tile_fetcher: Optional[TileFetcher] = None,
     tile_size: int = DEFAULT_TILE_SIZE,
+    pixel_ratio: int = DEFAULT_PIXEL_RATIO,
     max_zoom: int = DEFAULT_MAX_ZOOM,
     max_tiles: int = DEFAULT_MAX_TILES,
 ) -> Image.Image:
@@ -254,10 +277,13 @@ def render_basemap(
     exact pixel match).
 
     ``tile_fetcher`` is ``(z, x, y) -> bytes`` (raw tile image bytes, e.g.
-    PNG, sized ``tile_size`` x ``tile_size``) — inject a fake in tests to
-    avoid real network calls; Unit E's tests can do the same. When omitted, a
-    real ``MapboxTileClient`` built from the configured ``MAPBOX_TOKEN`` is
-    used.
+    PNG, sized ``tile_size * pixel_ratio`` square — see
+    ``DEFAULT_PIXEL_RATIO``) — inject a fake in tests to avoid real network
+    calls; Unit E's tests can do the same. When omitted, a real
+    ``MapboxTileClient`` built from the configured ``MAPBOX_TOKEN`` is used.
+    Each fetched tile's own reported size wins over the declared
+    ``pixel_ratio``, so an injected 1x fake fetcher still stitches correctly
+    against the default 2x production setting.
 
     Raises ``ValueError`` if the tile range at the chosen zoom would exceed
     *max_tiles* — a sanity guard against pathological inputs. A legitimate
@@ -279,17 +305,36 @@ def render_basemap(
             "oblong or oversized extent"
         )
 
-    fetcher = tile_fetcher or _default_tile_fetcher()
+    fetcher = tile_fetcher or _default_tile_fetcher(tile_size, pixel_ratio)
 
-    canvas = Image.new("RGB", (tiles_x * tile_size, tiles_y * tile_size))
+    # The stitch stride is the tiles' *actual* pixel width, which is only
+    # known once the first tile is decoded — a `@2x` request returns
+    # tile_size*2 px. Deriving it from the image rather than trusting
+    # ``pixel_ratio`` keeps injected 1x test fetchers working against the 2x
+    # production default, and means a change in Mapbox's response size can
+    # never silently reintroduce the overlapping-paste corruption.
+    canvas: Optional[Image.Image] = None
+    stride = tile_size * pixel_ratio
     for ty in range(y_min, y_max + 1):
         for tx in range(x_min, x_max + 1):
             tile_bytes = fetcher(zoom, tx, ty)
             tile_img = Image.open(io.BytesIO(tile_bytes)).convert("RGB")
-            canvas.paste(tile_img, ((tx - x_min) * tile_size, (ty - y_min) * tile_size))
+            if canvas is None:
+                stride = tile_img.width
+                canvas = Image.new("RGB", (tiles_x * stride, tiles_y * stride))
+            canvas.paste(tile_img, ((tx - x_min) * stride, (ty - y_min) * stride))
 
+    if canvas is None:  # no tiles in range — degenerate bounds
+        raise ValueError("Basemap render produced an empty tile range")
+
+    # crop_rect_for_bounds works in logical grid units; scale into the
+    # stitched canvas's real pixel space.
+    ratio = stride / tile_size
     left, top, right, bottom = crop_rect_for_bounds(bounds, zoom, tile_size)
-    cropped = canvas.crop((round(left), round(top), round(right), round(bottom)))
+    cropped = canvas.crop((
+        round(left * ratio), round(top * ratio),
+        round(right * ratio), round(bottom * ratio),
+    ))
     if cropped.size != (target_width, target_height):
         cropped = cropped.resize((target_width, target_height), Image.LANCZOS)
     return cropped
