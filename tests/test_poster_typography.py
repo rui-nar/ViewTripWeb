@@ -191,6 +191,20 @@ class TestEmojiFallback:
         assert not plain[0].scaled, "bare U+2744 should stay in the text face"
         assert emoji[0].scaled, "U+2744 U+FE0F should use the emoji face"
 
+    def test_presentation_marks_survive_stripping(self):
+        """Regression: strip_unsupported runs *before* split_runs, and no face
+        has a visible glyph for U+FE0F, so an earlier version stripped it — the
+        selector never reached the code that acts on it and colour-requested
+        emoji silently fell back to the monochrome text glyph."""
+        text = "Snow " + chr(0x2744) + chr(0xFE0F)
+        assert chr(0xFE0F) in strip_unsupported(text, self.stack)
+
+    def test_selector_still_forces_emoji_after_a_strip_pass(self):
+        """The end-to-end ordering the card layout actually uses."""
+        text = "Snow " + chr(0x2744) + chr(0xFE0F)
+        runs = split_runs(strip_unsupported(text, self.stack), self.stack)
+        assert any(r.scaled for r in runs), "colour presentation was lost"
+
     def test_characters_no_face_covers_are_still_dropped(self):
         # Neither DejaVu nor Noto Color Emoji covers CJK.
         assert strip_unsupported("ok 中 ok", self.stack) == "ok ok"

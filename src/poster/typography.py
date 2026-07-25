@@ -357,6 +357,13 @@ def covers(font: ImageFont.ImageFont, ch: str) -> bool:
 
 
 _VS16 = chr(0xFE0F)  # variation selector-16: "render the preceding char as emoji"
+_VS15 = chr(0xFE0E)  # variation selector-15: "render as plain text"
+_ZWJ = chr(0x200D)   # zero-width joiner, binds emoji sequences
+
+# Zero-width formatting characters that carry *presentation* information.
+# No face has a visible glyph for them, so coverage tests reject them, but
+# they must survive stripping long enough for split_runs to read them.
+_PRESENTATION_MARKS = frozenset({_VS15, _VS16, _ZWJ})
 
 
 def _resolve_emoji_first(
@@ -391,7 +398,7 @@ def split_runs(text: str, stack: FontStack) -> List[Run]:
 
     characters = list(text)
     for index, ch in enumerate(characters):
-        if ch == _VS16:
+        if ch in _PRESENTATION_MARKS:
             continue  # consumed by the character it follows, below
         if ch.isspace():
             # Whitespace always belongs to the primary text face. Letting it
@@ -437,6 +444,12 @@ def strip_unsupported(text: str, stack_or_font) -> str:
 
     Accepts a bare font as well as a stack so callers that genuinely have only
     one face (the legend, say) do not have to build one.
+
+    Presentation marks (U+FE0E/U+FE0F, ZWJ) are deliberately preserved even
+    though no face "covers" them: they are instructions to ``split_runs``,
+    which consumes them when choosing a face and drops them from the output.
+    Stripping them here would delete the very signal that makes "❄️" render as
+    a colour emoji rather than DejaVu's monochrome ❄.
     """
     if not text:
         return text
@@ -444,7 +457,8 @@ def strip_unsupported(text: str, stack_or_font) -> str:
              else FontStack(faces=(stack_or_font,), size_px=0))
 
     cleaned = "".join(
-        ch for ch in text if ch.isspace() or stack.face_for(ch) is not None
+        ch for ch in text
+        if ch.isspace() or ch in _PRESENTATION_MARKS or stack.face_for(ch) is not None
     )
     # Collapse the runs of spaces that removing characters tends to leave
     # behind, without touching newlines (paragraph structure is preserved
