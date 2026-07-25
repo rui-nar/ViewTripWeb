@@ -846,6 +846,13 @@ class _SegmentDialogState extends State<SegmentDialog> {
   }
 }
 
+/// The label shown in the *closed* dropdown field when no activity is
+/// linked. A custom map pin (lat/lon set with no linked activity) reads as
+/// "Custom" rather than the "— clear —" label, which would otherwise wrongly
+/// imply nothing is selected.
+String endpointClearOptionLabel({required bool hasCoords}) =>
+    hasCoords ? 'Custom' : '— clear —';
+
 // ── Endpoint row (activity picker + map picker, no raw coord fields) ──────────
 
 class _EndpointRow extends StatelessWidget {
@@ -935,6 +942,17 @@ class _EndpointRow extends StatelessWidget {
                       a['name'] as String? ?? 'Activity',
                       overflow: TextOverflow.ellipsis,
                     ),
+                  )),
+            ],
+            // Menu options always offer "— clear —"; but if a custom
+            // map pin is set (no linked activity), the closed field should
+            // read "Custom" rather than implying nothing is selected.
+            selectedItemBuilder: (context) => [
+              Text(endpointClearOptionLabel(hasCoords: hasCoords),
+                  style: const TextStyle(fontStyle: FontStyle.italic)),
+              ...activities.map((a) => Text(
+                    a['name'] as String? ?? 'Activity',
+                    overflow: TextOverflow.ellipsis,
                   )),
             ],
             onChanged: (id) {
