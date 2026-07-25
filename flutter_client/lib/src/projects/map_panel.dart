@@ -770,7 +770,12 @@ class MapPanel extends StatefulWidget {
 class _MapPanelState extends State<MapPanel> {
   // Seeded true when an initial camera position was carried over from the
   // other mode (view/edit toggle) — skips the fit-all-bounds animation.
-  late bool _fittedBounds = widget.initialLat != null;
+  // Seeded in initState, NOT lazily: `_fitBoundsOnce` isn't called until the
+  // project finishes loading, and the camera→URL sync can add lat/lng to the
+  // route in the meantime. A `late` initialiser would then read that
+  // self-written param as "the user arrived with an explicit viewport" and
+  // silently skip the fit. The answer is about arrival, so capture it once.
+  late bool _fittedBounds;
   // Points to auto-zoom to after the next full-track fit (issue #34). Set when
   // the selection changes and autoZoom is on; consumed once in build().
   List<LatLng>? _pendingAutoZoomPts;
@@ -804,6 +809,7 @@ class _MapPanelState extends State<MapPanel> {
   @override
   void initState() {
     super.initState();
+    _fittedBounds = widget.initialLat != null;
     if (widget.basemapStyleUri != null) {
       () async {
         try {

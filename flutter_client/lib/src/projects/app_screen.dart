@@ -75,8 +75,11 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   // Seeded true when a camera position was carried over from view mode.
-  late final ValueNotifier<bool> _mapFitted =
-      ValueNotifier(widget.initialLat != null);
+  // Seeded in initState, NOT lazily: the camera→URL sync writes lat/lng onto
+  // our own route, so a `late` initialiser read after that point would mistake
+  // a self-written param for "the user arrived with an explicit viewport" and
+  // skip the fit (the view-mode regression). The answer is about arrival.
+  late final ValueNotifier<bool> _mapFitted;
   final ScrollController _activityScrollController = ScrollController();
   // Separate controller for the narrow-layout overlay panel: wide and narrow
   // are mutually-exclusive LayoutBuilder branches, and sharing one controller
@@ -102,6 +105,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   Timer? _viewportSyncTimer;
 
   void _onMapEvent(MapEvent event) {
+    if (!shouldSyncViewport(event)) return;
     _viewportSyncTimer?.cancel();
     _viewportSyncTimer = Timer(const Duration(milliseconds: 700), () {
       // Guards against a missing GoRouter ancestor (e.g. this widget under
@@ -176,6 +180,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    _mapFitted = ValueNotifier(widget.initialLat != null);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final notifier = context.read<ProjectNotifier>();
       // The URL-derived ref carries no role — resolve it against the signed-in

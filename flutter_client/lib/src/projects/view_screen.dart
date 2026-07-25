@@ -196,6 +196,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
   Timer? _viewportSyncTimer;
 
   void _onMapEvent(MapEvent event) {
+    if (!shouldSyncViewport(event)) return;
     _viewportSyncTimer?.cancel();
     _viewportSyncTimer = Timer(const Duration(milliseconds: 700), () {
       // Guards against a missing GoRouter ancestor (e.g. this widget under
