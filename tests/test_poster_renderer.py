@@ -25,6 +25,7 @@ from src.exceptions.errors import APIError
 from src.poster.poster_renderer import (
     _PIN_COLOR,
     _PREVIEW_MAX_DIMENSION,
+    _PREVIEW_MAX_TILES,
     _Projector,
     _pdf_resolution,
     _target_size,
@@ -77,7 +78,7 @@ def test_all_flags_produce_every_block_kind():
     blocks = assemble_card_content(_ALL_FLAGS, _MEMORY, _METRICS)
     kinds = [b["kind"] for b in blocks]
     assert kinds == [
-        "name", "description", "hero_photo", "photos",
+        "name", "date", "description", "hero_photo", "photos",
         "distance", "elevation", "counters", "tag_pie", "encounters",
     ]
 
@@ -97,7 +98,8 @@ def test_memory_text_on_but_no_description_omits_description_block():
     memory = {**_MEMORY, "description": None}
     config = {**_NO_FLAGS, "memory_text": True}
     blocks = assemble_card_content(config, memory, _METRICS)
-    assert [b["kind"] for b in blocks] == ["name"]
+    # The date rides along with the memory text; only the description drops out.
+    assert [b["kind"] for b in blocks] == ["name", "date"]
 
 
 def test_hero_photo_uses_only_first_uuid():
@@ -336,7 +338,7 @@ def test_render_poster_propagates_tile_fetch_failure(tmp_path, project_id):
 # is small/quick enough to check on every call.
 
 def test_preview_returns_a_small_png_preserving_a0_aspect_ratio(project_id):
-    png_bytes = render_poster_preview(project_id, 1, _BODY)
+    png_bytes, _ = render_poster_preview(project_id, 1, _BODY)
     assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
 
     with Image.open(io.BytesIO(png_bytes)) as img:
@@ -350,28 +352,84 @@ def test_preview_returns_a_small_png_preserving_a0_aspect_ratio(project_id):
 
 def test_preview_portrait_is_taller_than_wide(project_id):
     body = {**_BODY, "orientation": "portrait"}
-    png_bytes = render_poster_preview(project_id, 1, body)
+    png_bytes, _ = render_poster_preview(project_id, 1, body)
     with Image.open(io.BytesIO(png_bytes)) as img:
         w, h = img.size
         assert h > w
 
 
-def test_preview_never_calls_the_network_tile_fetcher(project_id):
-    """No tile_fetcher is accepted/forwarded — render_poster_preview always
-    skips the basemap fetch entirely (flat fallback), regardless of whether
-    MAPBOX_TOKEN happens to be configured in the test environment."""
-    # If this accidentally tried a real Mapbox fetch, it would either raise
-    # (no token/network in CI) or take much longer than a layout preview
-    # should — either way the assertion below on a normal, fast return is
-    # enough coverage without needing to mock `requests`.
-    png_bytes = render_poster_preview(project_id, 1, _BODY)
-    assert len(png_bytes) > 0
+def test_preview_renders_the_real_basemap(project_id):
+    """The preview shows the *actual* map, not a grey stand-in.
+
+    It used to hard-skip the basemap and paint flat grey, so the map "looked
+    grey" in the preview no matter what the token or network were doing —
+    which is exactly what issue #14's feedback reported.
+    """
+    calls = []
+
+    def fetcher(z, x, y):
+        calls.append((z, x, y))
+        return _solid_tile(color=(11, 222, 33))
+
+    png_bytes, warning = render_poster_preview(
+        project_id, 1, _BODY, tile_fetcher=fetcher)
+
+    assert calls, "preview did not fetch any basemap tiles"
+    assert warning is None
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        pixels = img.convert("RGB").load()
+        w, h = img.size
+        assert any(
+            pixels[x, y] == (11, 222, 33)
+            for x in range(0, w, 3) for y in range(0, h, 3)
+        ), "the fetched basemap does not appear in the preview"
+
+
+def test_preview_uses_a_small_tile_budget(project_id):
+    """The preview must stay cheap: a handful of tiles, not a print run."""
+    calls = []
+
+    def fetcher(z, x, y):
+        calls.append((z, x, y))
+        return _solid_tile()
+
+    render_poster_preview(project_id, 1, _BODY, tile_fetcher=fetcher)
+    assert len(calls) <= _PREVIEW_MAX_TILES, (
+        f"preview fetched {len(calls)} tiles, over its {_PREVIEW_MAX_TILES} budget"
+    )
+
+
+def test_preview_degrades_with_a_warning_when_the_basemap_fails(project_id):
+    """A basemap failure must not fail the preview outright, and must not be
+    silent either — the client needs something to show the user."""
+    def boom(z, x, y):
+        raise APIError("MAPBOX_TOKEN is not configured")
+
+    png_bytes, warning = render_poster_preview(project_id, 1, _BODY, tile_fetcher=boom)
+
+    with Image.open(io.BytesIO(png_bytes)) as img:  # still a valid image
+        assert img.size[0] > 0
+    assert warning is not None
+    assert "MAPBOX_TOKEN" in warning
+
+
+def test_full_render_still_fails_hard_when_the_basemap_fails(project_id, tmp_path):
+    """Unlike the preview, the real poster must never be produced on grey:
+    a poster without its map is not a useful output (issue #14, PR 1)."""
+    def boom(z, x, y):
+        raise APIError("Mapbox unreachable")
+
+    with pytest.raises(APIError):
+        render_poster(
+            job_id=1, user_info_id=1, project_id=project_id, request=_BODY,
+            poster_dir=tmp_path, progress=lambda stage: None, tile_fetcher=boom,
+        )
 
 
 def test_preview_shows_pins_scaled_down_but_still_visible(project_id):
     """Regression coverage mirroring the golden-path pin-pixel check above,
     at preview scale — pins/cards must still be visible, just smaller."""
-    png_bytes = render_poster_preview(project_id, 1, _BODY)
+    png_bytes, _ = render_poster_preview(project_id, 1, _BODY)
     with Image.open(io.BytesIO(png_bytes)) as img:
         pixels = img.load()
         w, h = img.size

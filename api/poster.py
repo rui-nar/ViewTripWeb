@@ -185,12 +185,15 @@ def preview_poster(
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: OwnerParam = None,
 ):
-    """Return a small PNG preview of the poster layout (pins/cards/legend)
-    for the given request, synchronously — no job row, no background task,
-    no Mapbox basemap fetch (see ``render_poster_preview``), so this returns
-    in well under a second and never depends on ``MAPBOX_TOKEN``/network.
-    Lets the client show what the layout will look like before committing to
-    the slower full-resolution job.
+    """Return a small PNG preview of the real poster for the given request,
+    synchronously — no job row, no background task.
+
+    The preview renders the same basemap, cards and placement as the full job,
+    just small, so it shows what the poster will actually look like. If the
+    basemap alone is unavailable (missing ``MAPBOX_TOKEN``, Mapbox
+    unreachable), the preview still renders on flat grey and says so in the
+    ``X-Poster-Warning`` response header rather than silently implying the
+    finished poster will be grey too.
     """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
@@ -199,7 +202,7 @@ def preview_poster(
         owner_id = row.user_info_id
 
     try:
-        png_bytes = render_poster_preview(project_id, owner_id, body.model_dump())
+        png_bytes, warning = render_poster_preview(project_id, owner_id, body.model_dump())
     except Exception as exc:
         # Unlike the async job (whose failure lands in job.error_message), a
         # preview failure would otherwise surface as a bare 500 with no
@@ -210,4 +213,11 @@ def preview_poster(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Preview render failed: {exc}",
         )
-    return Response(content=png_bytes, media_type="image/png")
+
+    headers = {}
+    if warning:
+        # Header rather than a JSON envelope so the body stays a plain PNG the
+        # client can hand straight to Image.memory.
+        headers["X-Poster-Warning"] = warning
+        headers["Access-Control-Expose-Headers"] = "X-Poster-Warning"
+    return Response(content=png_bytes, media_type="image/png", headers=headers)

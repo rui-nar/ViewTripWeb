@@ -163,7 +163,7 @@ void main() {
       });
       final client = ApiClient(httpClient: mock)..setToken('jwt');
 
-      final bytes = await fetchPosterPreview(
+      final preview = await fetchPosterPreview(
         ref: const ProjectRef(name: 'Trip'),
         bounds: {'north': 1, 'south': 0, 'east': 1, 'west': 0},
         orientation: 'landscape',
@@ -174,7 +174,9 @@ void main() {
         client: client,
       );
 
-      expect(bytes, pngBytes);
+      expect(preview.bytes, pngBytes);
+      expect(preview.warning, isNull);
+      expect(preview.hasWarning, isFalse);
       expect(capturedBody, {
         'bounds': {'north': 1, 'south': 0, 'east': 1, 'west': 0},
         'orientation': 'landscape',
@@ -201,6 +203,53 @@ void main() {
         ),
         throwsA(isA<ApiException>()),
       );
+    });
+
+    test('surfaces the X-Poster-Warning header when the basemap is missing',
+        () async {
+      // A degraded preview still returns 200 with a usable PNG; the warning
+      // is what tells the user the grey background is a fault, not a design.
+      final mock = MockClient((req) async => http.Response.bytes(
+            [0x89, 0x50, 0x4E, 0x47],
+            200,
+            headers: {
+              'content-type': 'image/png',
+              'x-poster-warning': 'Map imagery unavailable: MAPBOX_TOKEN is not configured',
+            },
+          ));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final preview = await fetchPosterPreview(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: const {},
+        orientation: 'landscape',
+        config: const {},
+        memories: const [],
+        client: client,
+      );
+
+      expect(preview.hasWarning, isTrue);
+      expect(preview.warning, contains('MAPBOX_TOKEN'));
+      expect(preview.bytes, isNotEmpty, reason: 'preview still renders');
+    });
+
+    test('an empty warning header is not treated as a warning', () async {
+      final mock = MockClient((req) async => http.Response.bytes(
+            [0x89, 0x50, 0x4E, 0x47], 200,
+            headers: {'content-type': 'image/png', 'x-poster-warning': ''},
+          ));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final preview = await fetchPosterPreview(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: const {},
+        orientation: 'landscape',
+        config: const {},
+        memories: const [],
+        client: client,
+      );
+
+      expect(preview.hasWarning, isFalse);
     });
   });
 }

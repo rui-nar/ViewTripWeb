@@ -7,6 +7,7 @@ Mapbox. No test in this file requires MAPBOX_TOKEN or network access.
 """
 from __future__ import annotations
 
+import functools
 import io
 import math
 
@@ -316,3 +317,145 @@ def test_mapbox_tile_client_raises_immediately_on_4xx(monkeypatch):
     with pytest.raises(APIError, match="401"):
         client.fetch_tile(1, 0, 0)
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Retina (@2x) tiles: pixel_ratio vs logical tile_size
+#
+# Mapbox returns `tile_size * pixel_ratio` real pixels per tile — a @2x request
+# at tilesize=512 yields a 1024x1024 image. Stitching those on a `tile_size`
+# stride silently overwrites three quarters of every tile, producing a
+# scrambled, 2x-zoomed basemap that no longer lines up with the projected route
+# and pins. These tests pin the separation of the two concepts.
+# ---------------------------------------------------------------------------
+
+def _tile_id_blue(x: int, y: int) -> int:
+    """A per-tile identifying value carried in the blue channel."""
+    return 40 + (x * 53 + y * 97) % 200
+
+
+def _png_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+@functools.lru_cache(maxsize=None)
+def _ramp_png(blue: int, px: int) -> bytes:
+    """A tile with *internal structure*: red and green ramp from 0 at the
+    tile's edges up to 255 at its centre, with ``blue`` identifying the tile.
+
+    Internal structure is essential. A tile painted one flat colour cannot
+    detect the stride bug at all: pasting `tile_size * pixel_ratio` px tiles on
+    a `tile_size` stride still leaves the correct tile covering each slot — it
+    just draws that tile's top-left quadrant blown up 2x. Flat colours look
+    identical either way, so the ramps are what make the corruption visible.
+
+    The ramp is a triangle wave rather than a sawtooth so it is continuous
+    across tile seams: the only difference between a 1x and a 2x render is
+    then resampling, not ringing at a hard edge.
+    """
+    ramp = bytes(int(255 * (2 * u if u < 0.5 else 2 * (1 - u)))
+                 for u in (i / px for i in range(px)))
+    red = Image.frombytes("L", (px, px), ramp * px)
+    green = Image.frombytes("L", (px, px), b"".join(bytes([v]) * px for v in ramp))
+    return _png_bytes(Image.merge("RGB", (red, green, Image.new("L", (px, px), blue))))
+
+
+def _ramp_fetcher(tile_size: int, pixel_ratio: int):
+    px = tile_size * pixel_ratio
+    return lambda z, x, y: _ramp_png(_tile_id_blue(x, y), px)
+
+
+def _output_xy_for_world_point(bounds, zoom, tile_size, wx, wy, target_w, target_h):
+    """Map a logical world-pixel point to output-image pixel coords, mirroring
+    render_basemap's crop + resize (and poster_renderer._Projector)."""
+    x_min, _, y_min, _ = tile_range_for_bounds(bounds, zoom, tile_size)
+    left, top, right, bottom = crop_rect_for_bounds(bounds, zoom, tile_size)
+    abs_left = x_min * tile_size + left
+    abs_top = y_min * tile_size + top
+    ox = (wx - abs_left) * target_w / (right - left)
+    oy = (wy - abs_top) * target_h / (bottom - top)
+    return ox, oy
+
+
+def test_render_basemap_places_each_retina_tile_at_its_geographic_position():
+    """Each tile's *centre* must land at that geographic point's output
+    position, showing the tile's own centre (mid-ramp, ~127/127).
+
+    Pasting `tile_size * 2` px tiles on a `tile_size` stride draws each tile's
+    top-left quadrant stretched 2x, so a tile's centre pixel would instead show
+    that quadrant's own mid-ramp (~127) rather than the tile centre's peak
+    (255) — which this asserts against.
+    """
+    tile_size = 256
+    target_w, target_h = 700, 700
+    zoom = zoom_for_target_size(_PARIS_BOUNDS, target_w, target_h, tile_size, 22)
+    x_min, x_max, y_min, y_max = tile_range_for_bounds(_PARIS_BOUNDS, zoom, tile_size)
+    assert (x_max - x_min + 1) * (y_max - y_min + 1) >= 4, "need a multi-tile range"
+
+    img = render_basemap(
+        _PARIS_BOUNDS, target_width=target_w, target_height=target_h,
+        tile_fetcher=_ramp_fetcher(tile_size, 2), tile_size=tile_size, pixel_ratio=2,
+    )
+    pixels = img.convert("RGB").load()
+
+    checked = 0
+    for tx in range(x_min, x_max + 1):
+        for ty in range(y_min, y_max + 1):
+            wx = (tx + 0.5) * tile_size  # tile centre, in logical world pixels
+            wy = (ty + 0.5) * tile_size
+            ox, oy = _output_xy_for_world_point(
+                _PARIS_BOUNDS, zoom, tile_size, wx, wy, target_w, target_h)
+            if not (4 <= ox < target_w - 4 and 4 <= oy < target_h - 4):
+                continue
+            r, g, b = pixels[int(ox), int(oy)]
+            assert b == _tile_id_blue(tx, ty), (
+                f"wrong tile at ({int(ox)},{int(oy)}): expected tile ({tx},{ty})")
+            assert r >= 245 and g >= 245, (
+                f"tile ({tx},{ty}) centre shows ramp ({r},{g}), expected ~(255,255) "
+                "- tile content is scaled wrong")
+            checked += 1
+    assert checked >= 2, "test asserted on too few tiles to be meaningful"
+
+
+def test_render_basemap_output_identical_for_1x_and_2x_tiles():
+    """The same map data at two pixel densities must render the same picture."""
+    tile_size = 256
+    kwargs = dict(bounds=_PARIS_BOUNDS, target_width=300, target_height=240,
+                  tile_size=tile_size)
+    one_x = render_basemap(**kwargs, pixel_ratio=1,
+                           tile_fetcher=_ramp_fetcher(tile_size, 1))
+    two_x = render_basemap(**kwargs, pixel_ratio=2,
+                           tile_fetcher=_ramp_fetcher(tile_size, 2))
+
+    a, b = one_x.convert("RGB").load(), two_x.convert("RGB").load()
+    # Red/green only: the blue tile-id channel steps at every seam, and that
+    # discontinuity resamples differently from a 512px than from a 256px
+    # source. The ramps carry the signal that matters here.
+    worst = max(
+        max(abs(a[i, j][c] - b[i, j][c]) for c in (0, 1))
+        for j in range(0, 240, 3) for i in range(0, 300, 3)
+    )
+    # A stride bug halves the ramp's slope, a >100/255 divergence.
+    assert worst <= 12, f"1x and 2x renders disagree by {worst}/255"
+
+
+def test_fetch_tile_requests_retina_suffix_only_for_pixel_ratio_2(monkeypatch):
+    urls = []
+
+    class _Resp:
+        status_code = 200
+        content = b"x"
+
+    def fake_get(url, **k):
+        urls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("src.poster.tile_stitcher.requests.get", fake_get)
+
+    MapboxTileClient("tok", tile_size=512, pixel_ratio=2).fetch_tile(3, 4, 5)
+    MapboxTileClient("tok", tile_size=512, pixel_ratio=1).fetch_tile(3, 4, 5)
+
+    assert urls[0].endswith("/512/3/4/5@2x")
+    assert urls[1].endswith("/512/3/4/5")

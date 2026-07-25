@@ -17,6 +17,7 @@ import 'download_stub.dart' if (dart.library.html) 'download_web.dart';
 import 'elevation_chart.dart';
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
+import '../core/design_tokens.dart' show kWarning, kWarningDark;
 import '../core/last_opened_project.dart';
 import '../core/perf_timing.dart' show kPerfNoMap;
 import '../core/project_ref.dart';
@@ -1099,6 +1100,7 @@ class _PosterPreviewDialog extends StatefulWidget {
 
 class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
   Uint8List? _bytes;
+  String? _warning;
   String? _error;
 
   @override
@@ -1108,8 +1110,13 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
   }
 
   Future<void> _load() async {
+    setState(() {
+      _error = null;
+      _bytes = null;
+      _warning = null;
+    });
     try {
-      final bytes = await fetchPosterPreview(
+      final preview = await fetchPosterPreview(
         ref: widget.projectRef,
         bounds: posterBoundsFromLatLngBounds(widget.bounds),
         orientation: widget.orientation,
@@ -1117,10 +1124,15 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
         memories: widget.memories,
       );
       if (!mounted) return;
-      setState(() => _bytes = bytes);
+      setState(() {
+        _bytes = preview.bytes;
+        _warning = preview.hasWarning ? preview.warning : null;
+      });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'Could not load the preview.');
+      // Surface the real reason: "Could not load the preview" gave the user
+      // nothing to act on (issue #14 feedback).
+      setState(() => _error = '$e');
     }
   }
 
@@ -1136,9 +1148,24 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
       content: SizedBox(
         width: 420,
         child: _error != null
-            ? Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'The preview could not be rendered.',
+                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(_error!, style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                    onPressed: _load,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('Try again'),
+                  ),
+                ],
               )
             : _bytes == null
                 ? const SizedBox(
@@ -1150,9 +1177,13 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
                     children: [
                       Image.memory(_bytes!, fit: BoxFit.contain),
                       const SizedBox(height: 8),
+                      if (_warning != null) ...[
+                        _PosterWarningBanner(message: _warning!, onRetry: _load),
+                        const SizedBox(height: 8),
+                      ],
                       Text(
-                        'Low-resolution layout only — the real poster uses a full '
-                        'map basemap and print resolution.',
+                        'Low-resolution preview — the poster prints at full size '
+                        'and print resolution.',
                         style: Theme.of(context).textTheme.bodySmall,
                         textAlign: TextAlign.center,
                       ),
@@ -1170,6 +1201,64 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
           child: const Text('Generate poster'),
         ),
       ],
+    );
+  }
+}
+
+/// Inline notice shown over a poster preview that rendered everything except
+/// the map imagery (issue #14 feedback).
+///
+/// Without this the user sees a plain grey map and has no way to tell a
+/// misconfigured `MAPBOX_TOKEN` from an intentional design — which is exactly
+/// how the "the map is still grey" report came about.
+class _PosterWarningBanner extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const _PosterWarningBanner({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final amber = Theme.of(context).brightness == Brightness.dark
+        ? kWarningDark
+        : kWarning;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: amber.withValues(alpha: 0.10),
+        border: Border.all(color: amber.withValues(alpha: 0.45)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 20, color: amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Map imagery unavailable — the preview below shows the layout '
+                  'on a blank background. Generating the poster will fail until '
+                  'this is fixed.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  message,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
     );
   }
 }
