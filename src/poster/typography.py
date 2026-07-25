@@ -25,13 +25,18 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
 _log = logging.getLogger(__name__)
+
+# One scratch context for text measurement; ImageDraw.textlength needs a draw
+# object but never touches these pixels.
+_SCRATCH = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
 _ASSET_FONT_DIR = Path(__file__).resolve().parents[2] / "assets" / "fonts"
 
@@ -58,14 +63,35 @@ _SYSTEM_FALLBACKS: Dict[str, Tuple[str, ...]] = {
     "regular": ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "segoeui.ttf", "Helvetica.ttc"),
     "medium": ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf", "segoeuisb.ttf", "Helvetica.ttc"),
     "bold": ("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf", "segoeuib.ttf", "Helvetica.ttc"),
+    # Emoji is a *fallback* face, only consulted for characters the text face
+    # has no glyph for. Text faces (Inter, DejaVu) cover no emoji at all, so
+    # without one of these the U+1F300+ blocks cannot be drawn and are dropped.
+    "emoji": ("NotoColorEmoji.ttf", "seguiemj.ttf", "AppleColorEmoji.ttf",
+              "NotoColorEmoji-Regular.ttf", "NotoEmoji-Regular.ttf"),
 }
 
+# Emoji faces are looked for under the same names in assets/fonts/ first.
+_EMOJI_CANDIDATES: Tuple[str, ...] = (
+    "NotoColorEmoji.ttf",      # colour (CBDT bitmap) — the intended production face
+    "NotoColorEmoji-Regular.ttf",
+    "NotoEmoji-Regular.ttf",   # monochrome outline alternative
+    "seguiemj.ttf",
+)
+
+# Many colour emoji fonts (Noto Color Emoji in particular) are CBDT bitmap
+# fonts that only contain one fixed strike, and FreeType refuses any other
+# size outright. Pillow then scales the loaded face to the requested size, so
+# the file has to be opened at its native size rather than the text size.
+_EMOJI_NATIVE_SIZES: Tuple[int, ...] = (109, 128, 136, 160)
+
 _warned_default = False
+_warned_no_emoji = False
 
 
 def _find_face_file(weight: str) -> Optional[Path]:
     """Locate a TTF file for *weight*, or None if only the bitmap default is available."""
-    for name in _FACE_CANDIDATES.get(weight, ()):
+    names = _EMOJI_CANDIDATES if weight == "emoji" else _FACE_CANDIDATES.get(weight, ())
+    for name in names:
         candidate = _ASSET_FONT_DIR / name
         if candidate.exists():
             return candidate
@@ -74,6 +100,46 @@ def _find_face_file(weight: str) -> Optional[Path]:
             candidate = directory / name
             if candidate.exists():
                 return candidate
+    return None
+
+
+@functools.lru_cache(maxsize=64)
+def load_emoji_face(size_px: int) -> Optional[Tuple[ImageFont.ImageFont, int]]:
+    """Load the emoji fallback face for *size_px*, as ``(face, native_size)``.
+
+    Returns None if no emoji font is installed. That is deliberate rather than
+    an error: emoji rendering is a progressive enhancement. With no emoji face
+    the stack simply has nothing covering those characters, and they are
+    dropped — the previous behaviour — instead of printing .notdef boxes.
+
+    ``native_size`` is the pixel size the face was actually opened at, which is
+    not necessarily *size_px*. Colour emoji fonts are typically CBDT bitmap
+    fonts carrying a single fixed strike (Noto Color Emoji has one, at 109px);
+    FreeType rejects every other size with "invalid pixel size". Such a face
+    must be rendered at its native strike and scaled down by the caller, so the
+    size it opened at has to be reported back rather than assumed.
+    """
+    global _warned_no_emoji
+    path = _find_face_file("emoji")
+    if path is None:
+        if not _warned_no_emoji:
+            _warned_no_emoji = True
+            _log.info(
+                "No emoji face found in %s; emoji will be omitted from poster "
+                "text. Drop NotoColorEmoji.ttf there to render them.",
+                _ASSET_FONT_DIR,
+            )
+        return None
+
+    size_px = max(1, int(size_px))
+    # An outline emoji face (e.g. monochrome Noto Emoji) opens at the exact
+    # size and needs no scaling; a bitmap one only opens at its strike.
+    for size in (size_px, *_EMOJI_NATIVE_SIZES):
+        try:
+            return ImageFont.truetype(str(path), size), size
+        except OSError:
+            continue
+    _log.warning("Found emoji face %s but could not load it at any size", path)
     return None
 
 
@@ -157,6 +223,7 @@ class TypeScale:
     def __init__(self, dpi: float):
         self.dpi = dpi
         self._fonts: Dict[str, ImageFont.ImageFont] = {}
+        self._stacks: Dict[str, "FontStack"] = {}
 
     def px(self, points: float) -> int:
         """Convert *points* to device pixels at this render's DPI."""
@@ -171,6 +238,30 @@ class TypeScale:
             self._fonts[name] = load_face(style.weight, self.px(style.size_pt))
         return self._fonts[name]
 
+    def stack(self, name: str) -> "FontStack":
+        """The face for *name* plus the emoji fallback, as one stack.
+
+        All text measurement and drawing goes through a stack rather than a
+        single face, because Pillow has no automatic font fallback: a string
+        mixing Latin and emoji has to be split into runs and each run drawn
+        with the face that actually covers it.
+        """
+        if name not in self._stacks:
+            size = self.px(TYPE_SCALE[name].size_pt)
+            faces = [self.font(name)]
+            scales = [1.0]
+            loaded = load_emoji_face(size)
+            if loaded is not None:
+                emoji_face, native = loaded
+                faces.append(emoji_face)
+                # A fixed-strike bitmap face renders at `native` px however
+                # small the text is, so it has to be scaled down to sit on the
+                # same line as the type.
+                scales.append(size / native if native else 1.0)
+            self._stacks[name] = FontStack(
+                faces=tuple(faces), size_px=size, scales=tuple(scales))
+        return self._stacks[name]
+
     def line_height(self, name: str) -> int:
         style = TYPE_SCALE[name]
         return max(1, round(self.px(style.size_pt) * style.line_height))
@@ -183,38 +274,194 @@ class TypeScale:
         return text.upper() if TYPE_SCALE[name].uppercase else text
 
 
-# ── Text shaping helpers ──────────────────────────────────────────────────────
+# ── Font stacks and run segmentation ─────────────────────────────────────────
+# Pillow performs no font fallback of its own: `draw.text` uses exactly the one
+# face it is handed, and draws .notdef for anything that face lacks. Mixing
+# Latin text with emoji therefore means doing the fallback by hand — splitting
+# each string into maximal runs of characters covered by the same face, then
+# measuring and drawing run by run while tracking the x advance.
 
-def strip_unsupported(text: str, font: ImageFont.ImageFont) -> str:
-    """Drop characters the face has no glyph for (emoji, most notably).
+@dataclass(frozen=True)
+class Run:
+    """A maximal slice of a string drawn with one face at one scale."""
 
-    Memory names and descriptions routinely contain emoji, and neither Inter
-    nor DejaVu covers them — Pillow renders missing glyphs as blank boxes,
-    which is what made poster cards look garbled. Removing them is better than
-    printing tofu.
+    text: str
+    face: ImageFont.ImageFont
+    # Factor the rendered glyphs must be scaled by to match the text size.
+    # 1.0 for ordinary text; < 1 for a fixed-strike bitmap emoji face.
+    scale: float = 1.0
+
+    @property
+    def scaled(self) -> bool:
+        return abs(self.scale - 1.0) > 1e-6
+
+    @property
+    def advance(self) -> float:
+        return _SCRATCH.textlength(self.text, font=self.face) * self.scale
+
+
+@dataclass(frozen=True)
+class FontStack:
+    """A primary text face plus fallback faces, tried in order."""
+
+    faces: Tuple[ImageFont.ImageFont, ...]
+    size_px: int
+    # Per-face render scale, parallel to ``faces``.
+    scales: Tuple[float, ...] = ()
+
+    @property
+    def primary(self) -> ImageFont.ImageFont:
+        return self.faces[0]
+
+    @property
+    def has_fallback(self) -> bool:
+        return len(self.faces) > 1
+
+    def scale_for(self, index: int) -> float:
+        return self.scales[index] if index < len(self.scales) else 1.0
+
+    def face_for(self, ch: str) -> Optional[Tuple[ImageFont.ImageFont, float]]:
+        """First ``(face, scale)`` covering *ch*, or None if nothing does."""
+        for index, face in enumerate(self.faces):
+            if covers(face, ch):
+                return face, self.scale_for(index)
+        return None
+
+
+def covers(font: ImageFont.ImageFont, ch: str) -> bool:
+    """True if *font* has a real glyph for *ch*.
+
+    Determined by rendering: a character is NOT covered when it draws the
+    face's .notdef glyph, or when it draws nothing at all. The second rule
+    matters because Pillow's layout differs by platform — builds with
+    Raqm/HarfBuzz (the Linux wheels) silently delete default-ignorable
+    codepoints such as variation selectors and zero-width joiners, so those
+    render blank rather than as .notdef. Neither contributes to a printed
+    poster.
+
+    Note that checking ``getbbox() is not None`` does not work: .notdef is
+    usually a hollow box with a perfectly good bounding box.
     """
-    if not text or getattr(font, "getmask", None) is None:
-        return text
-
+    if ch.isspace():
+        return True
+    if getattr(font, "getmask", None) is None:
+        return True
+    signature = _glyph_signature(font, ch)
+    if signature is None:
+        return True
+    blank = _glyph_signature(font, " ")
     notdef = _notdef_signature(font)
-    if notdef is None:  # can't tell what "missing" looks like — leave text alone
-        return text
+    if notdef is None and blank is None:
+        return True  # can't characterise this face; assume coverage
+    return signature != notdef and signature != blank
 
-    kept = [ch for ch in text if ch.isspace() or _glyph_signature(font, ch) != notdef]
-    cleaned = "".join(kept)
-    # Collapse the runs of spaces that removing emoji tends to leave behind,
-    # without touching newlines (paragraph structure is preserved downstream).
+
+_VS16 = chr(0xFE0F)  # variation selector-16: "render the preceding char as emoji"
+
+
+def _resolve_emoji_first(
+    stack: FontStack, ch: str
+) -> Optional[Tuple[ImageFont.ImageFont, float]]:
+    """Resolve *ch* preferring a fallback (emoji) face over the primary one."""
+    for index in range(len(stack.faces) - 1, -1, -1):
+        if covers(stack.faces[index], ch):
+            return stack.faces[index], stack.scale_for(index)
+    return None
+
+
+def split_runs(text: str, stack: FontStack) -> List[Run]:
+    """Split *text* into maximal runs, each drawn with one face.
+
+    Characters no face in the stack covers are dropped: with an emoji font
+    installed that leaves only genuinely unrenderable codepoints, and with none
+    installed it reproduces the strip-the-emoji behaviour rather than printing
+    boxes.
+    """
+    runs: List[Run] = []
+    if not text:
+        return runs
+
+    current: List[str] = []
+    current_face: Optional[ImageFont.ImageFont] = None
+    current_scale = 1.0
+
+    def flush() -> None:
+        if current and current_face is not None:
+            runs.append(Run("".join(current), current_face, current_scale))
+
+    characters = list(text)
+    for index, ch in enumerate(characters):
+        if ch == _VS16:
+            continue  # consumed by the character it follows, below
+        if ch.isspace():
+            # Whitespace always belongs to the primary text face. Letting it
+            # trail the run in progress would measure a space in the emoji
+            # face — which is a 109px fixed strike, so a single space after an
+            # emoji would be several times too wide and wrapping would be off.
+            face, scale = stack.primary, stack.scale_for(0)
+        else:
+            # U+FE0F (variation selector-16) explicitly asks for the *emoji*
+            # presentation of a character that also has a text form — ❄ vs ❄️.
+            # Text faces like DejaVu carry monochrome glyphs for many of these,
+            # so without this the primary face would claim them and the author's
+            # requested colour presentation would be silently downgraded.
+            wants_emoji = (index + 1 < len(characters)
+                           and characters[index + 1] == _VS16)
+            resolved = _resolve_emoji_first(stack, ch) if wants_emoji else stack.face_for(ch)
+            if resolved is None:
+                continue
+            face, scale = resolved
+        if face is not current_face:
+            flush()
+            current = []
+            current_face = face
+            current_scale = scale
+        current.append(ch)
+
+    flush()
+    return runs
+
+
+def measure_runs(runs: Sequence[Run]) -> float:
+    """Total advance width of a sequence of runs."""
+    return sum(run.advance for run in runs)
+
+
+def strip_unsupported(text: str, stack_or_font) -> str:
+    """Drop characters no face in the stack has a glyph for.
+
+    Kept as the single place that decides what a face cannot print. With an
+    emoji face in the stack, emoji now survive this and are rendered by
+    ``split_runs``; without one, they are dropped as before rather than
+    printed as .notdef boxes.
+
+    Accepts a bare font as well as a stack so callers that genuinely have only
+    one face (the legend, say) do not have to build one.
+    """
+    if not text:
+        return text
+    stack = (stack_or_font if isinstance(stack_or_font, FontStack)
+             else FontStack(faces=(stack_or_font,), size_px=0))
+
+    cleaned = "".join(
+        ch for ch in text if ch.isspace() or stack.face_for(ch) is not None
+    )
+    # Collapse the runs of spaces that removing characters tends to leave
+    # behind, without touching newlines (paragraph structure is preserved
+    # downstream).
     return "\n".join(" ".join(line.split()) for line in cleaned.split("\n"))
 
 
 _GLYPH_BOX = (48, 48)
 
 
+@functools.lru_cache(maxsize=4096)
 def _glyph_signature(font: ImageFont.ImageFont, ch: str):
     """Rendered bitmap of *ch*, used to recognise the .notdef glyph.
 
     Rendered through ``ImageDraw`` rather than ``font.getmask``: the latter
     returns an ``ImagingCore``, which exposes no way to read its pixels back.
+    Cached because layout re-measures the same characters many times.
     """
     try:
         img = Image.new("L", _GLYPH_BOX, 0)
@@ -224,11 +471,12 @@ def _glyph_signature(font: ImageFont.ImageFont, ch: str):
         return None
 
 
-# Codepoints no real text face maps: a noncharacter, a permanently unassigned
-# point, and a variation selector. Several are probed because DejaVu (and many
-# other faces) *do* map parts of the Private Use Area, so a single PUA probe
-# would come back a real glyph and silently disable stripping altogether.
-_NOTDEF_PROBES = ("￿", "⿠", "󠄀")
+# Codepoints in unassigned Unicode planes: no font maps them, and — unlike the
+# noncharacters and variation selectors tried previously — no text-shaping
+# engine treats them as ignorable and deletes them before rendering. Several
+# are probed, and the most common result wins, so one probe behaving oddly on
+# some platform cannot disable stripping altogether.
+_NOTDEF_PROBES = (chr(0x3FFFD), chr(0x4FFFD), chr(0x5FFFD))
 
 
 @functools.lru_cache(maxsize=16)
@@ -241,30 +489,32 @@ def _notdef_signature(font: ImageFont.ImageFont):
     that cannot be mapped and remember that bitmap; any character rendering
     identically is missing from the font.
 
-    The probes must agree with each other and differ from a blank: a face that
-    draws nothing for unmapped points gives no signal to separate "missing"
-    from "space", so stripping is disabled rather than guessed at.
+    Returns None if every probe came back blank, which means this face/engine
+    draws nothing for unmapped codepoints; ``strip_unsupported``'s blank rule
+    covers that case on its own.
     """
-    sigs = {_glyph_signature(font, p) for p in _NOTDEF_PROBES}
-    if len(sigs) != 1:
+    blank = _glyph_signature(font, " ")
+    signatures = [
+        s for s in (_glyph_signature(font, p) for p in _NOTDEF_PROBES)
+        if s is not None and s != blank
+    ]
+    if not signatures:
         return None
-    signature = sigs.pop()
-    if signature is None or signature == _glyph_signature(font, " "):
-        return None
-    return signature
+    return Counter(signatures).most_common(1)[0][0]
 
-def wrap_paragraphs(
-    text: str,
-    font: ImageFont.ImageFont,
-    max_width: float,
-    measure,
-) -> List[str]:
+
+def wrap_paragraphs(text: str, stack: FontStack, max_width: float) -> List[str]:
     """Word-wrap *text* to *max_width*, preserving its paragraph breaks.
 
-    The old implementation called ``text.split()``, which discards every
+    Width is measured through the whole stack, so a line mixing text and emoji
+    is measured with each part in the face that will actually draw it — an
+    emoji measured in the text face would be badly wrong (it has no glyph for
+    it) and lines would wrap in the wrong places.
+
+    An earlier implementation called ``text.split()``, which discards every
     newline and welds separate paragraphs into one run-on block. Here each
-    line of the source is wrapped independently and blank lines are kept, so
-    a multi-paragraph memory description still reads as paragraphs.
+    line of the source is wrapped independently and blank lines are kept, so a
+    multi-paragraph memory description still reads as paragraphs.
     """
     lines: List[str] = []
     for paragraph in text.split("\n"):
@@ -275,7 +525,7 @@ def wrap_paragraphs(
         current = ""
         for word in stripped.split():
             trial = f"{current} {word}".strip()
-            if not current or measure(trial, font) <= max_width:
+            if not current or measure_runs(split_runs(trial, stack)) <= max_width:
                 current = trial
             else:
                 lines.append(current)

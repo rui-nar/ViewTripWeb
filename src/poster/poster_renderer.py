@@ -63,6 +63,9 @@ ProgressFn = Callable[[str], None]
 
 _repo = ProjectRepo()
 
+# Scratch context for measuring emoji runs at their native size.
+_MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
 # ── Resolution ────────────────────────────────────────────────────────────────
 # A0 paper: 841mm x 1189mm = 33.11in x 46.81in.
 _A0_SHORT_IN = 841.0 / 25.4
@@ -395,6 +398,44 @@ def _draw_card_chrome(canvas: Image.Image, rect: Rect, dpi: float) -> None:
     )
 
 
+def _draw_scaled_run(
+    canvas: Image.Image, op: TextOp, scale: TypeScale, ox: int, oy: int
+) -> None:
+    """Draw one emoji run, rendered at its face's native size then scaled down.
+
+    Colour emoji fonts are CBDT bitmap fonts carrying a single fixed strike —
+    Noto Color Emoji only opens at 109px — so they cannot simply be drawn at
+    8pt body size. The run is rasterised at that native size onto a
+    transparent tile with ``embedded_color`` (which is what actually produces
+    colour rather than a monochrome mask), resized to the text size, and
+    composited onto the card.
+
+    The tile is aligned to the text's ascent so emoji sit on the same visual
+    line as the type around them rather than floating above or below it.
+    """
+    face = op.face
+    try:
+        width = max(1, round(_MEASURE.textlength(op.text, font=face)))
+        ascent, descent = face.getmetrics()
+        height = max(1, ascent + descent)
+
+        tile = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((0, 0), op.text, font=face, embedded_color=True)
+
+        target_w = max(1, round(width * op.scale))
+        target_h = max(1, round(height * op.scale))
+        tile = tile.resize((target_w, target_h), Image.LANCZOS)
+
+        # Sit the emoji's optical block on the text baseline: the surrounding
+        # text is drawn from its ascender at op.y, so nudge down by the
+        # difference between the text ascent and the scaled tile's own.
+        text_ascent = scale.font(op.style).getmetrics()[0]
+        dy = max(0, text_ascent - round(ascent * op.scale))
+        canvas.alpha_composite(tile, (ox + op.x, oy + op.y + dy))
+    except Exception:
+        _log.warning("Could not draw emoji run %r", op.text, exc_info=True)
+
+
 def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale) -> None:
     """Execute one card's measured layout ops at its placed position."""
     _draw_card_chrome(canvas, rect, scale.dpi)
@@ -404,8 +445,11 @@ def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale) -> Non
     for op in layout.ops:
         if isinstance(op, TextOp):
             style = scale.style(op.style)
-            draw.text((ox + op.x, oy + op.y), op.text,
-                      font=scale.font(op.style), fill=style.color)
+            if op.face is not None:
+                _draw_scaled_run(canvas, op, scale, ox, oy)
+            else:
+                draw.text((ox + op.x, oy + op.y), op.text,
+                          font=scale.font(op.style), fill=style.color)
         elif isinstance(op, PhotoOp):
             _paste_cover(canvas, op.path, (ox + op.x, oy + op.y, op.w, op.h))
         elif isinstance(op, RuleOp):

@@ -12,8 +12,13 @@ from PIL import Image, ImageDraw
 
 from src.poster.typography import (
     TYPE_SCALE,
+    FontStack,
     TypeScale,
+    covers,
+    load_emoji_face,
     load_face,
+    measure_runs,
+    split_runs,
     strip_unsupported,
     wrap_paragraphs,
 )
@@ -78,55 +83,132 @@ class TestHierarchy:
 
 class TestParagraphPreservingWrap:
     def setup_method(self):
-        self.font = TypeScale(150.0).font("body")
+        self.stack = TypeScale(150.0).stack("body")
 
     def test_blank_line_between_paragraphs_is_kept(self):
-        lines = wrap_paragraphs("First para.\n\nSecond para.", self.font, 10_000, _measure)
+        lines = wrap_paragraphs("First para.\n\nSecond para.", self.stack, 10_000)
         assert lines == ["First para.", "", "Second para."]
 
     def test_single_newlines_start_a_new_line(self):
-        lines = wrap_paragraphs("Line one\nLine two", self.font, 10_000, _measure)
+        lines = wrap_paragraphs("Line one\nLine two", self.stack, 10_000)
         assert lines == ["Line one", "Line two"]
 
     def test_long_paragraph_wraps_within_the_width(self):
         text = " ".join(["word"] * 50)
-        lines = wrap_paragraphs(text, self.font, 300, _measure)
+        lines = wrap_paragraphs(text, self.stack, 300)
         assert len(lines) > 1
         for line in lines:
-            assert _measure(line, self.font) <= 300
+            assert measure_runs(split_runs(line, self.stack)) <= 300
 
     def test_trailing_blank_lines_are_dropped(self):
-        lines = wrap_paragraphs("Only para.\n\n\n", self.font, 10_000, _measure)
+        lines = wrap_paragraphs("Only para.\n\n\n", self.stack, 10_000)
         assert lines == ["Only para."]
 
     def test_a_word_longer_than_the_line_is_not_dropped(self):
-        lines = wrap_paragraphs("supercalifragilistic", self.font, 5, _measure)
+        lines = wrap_paragraphs("supercalifragilistic", self.stack, 5)
         assert lines == ["supercalifragilistic"]
 
 
-class TestGlyphStripping:
-    def setup_method(self):
-        self.font = TypeScale(150.0).font("body")
+class TestFontAvailability:
+    def test_a_real_truetype_face_is_bundled(self):
+        """Guard rail. If the bundled face can't be found or loaded, the render
+        silently drops to Pillow's bitmap default — which has no bold weight
+        and no usable cmap, so the *symptom* is unrelated-looking failures
+        elsewhere (glyph stripping quietly turning itself off, flat type).
+        Fail here instead, where the cause is obvious."""
+        from PIL.ImageFont import FreeTypeFont
 
-    def test_emoji_are_removed(self):
-        # Emoji have no glyph in Inter or DejaVu; Pillow would draw .notdef
-        # boxes, which is what made cards look garbled.
-        assert strip_unsupported("Sunrise \U0001F3D4 ridge \U0001F392", self.font) == "Sunrise ridge"
+        for weight in ("regular", "medium", "bold"):
+            assert isinstance(load_face(weight, 20), FreeTypeFont), (
+                f"no TrueType face resolved for '{weight}' — check assets/fonts/"
+            )
+
+
+class TestEmojiFallback:
+    """Emoji are *rendered*, not suppressed, when an emoji face is available.
+
+    Pillow performs no font fallback of its own, so mixed text has to be split
+    into runs and each drawn with the face that covers it. These cover that
+    segmentation; the drawing itself is exercised in test_poster_renderer.
+    """
+
+    def setup_method(self):
+        self.scale = TypeScale(150.0)
+        self.stack = self.scale.stack("body")
+
+    def test_an_emoji_face_is_bundled(self):
+        assert load_emoji_face(17) is not None, (
+            "no emoji face resolved - check assets/fonts/NotoColorEmoji.ttf"
+        )
+
+    def test_emoji_survive_when_an_emoji_face_is_present(self):
+        text = "Sunrise 🏔 ridge 🎒"
+        assert strip_unsupported(text, self.stack) == text
+
+    def test_emoji_are_dropped_when_only_a_text_face_is_available(self):
+        """Graceful degradation: with no emoji face, dropping them still beats
+        printing .notdef boxes."""
+        text_only = FontStack(faces=(self.scale.font("body"),), size_px=17)
+        assert strip_unsupported("Sunrise 🏔 ridge", text_only) == "Sunrise ridge"
+
+    def test_text_and_emoji_are_split_into_separate_runs(self):
+        runs = split_runs("Hi 🏔 there", self.stack)
+        assert [r.text for r in runs] == ["Hi ", "🏔", " there"]
+        assert not runs[0].scaled and not runs[2].scaled
+        assert runs[1].face is not self.stack.primary
+
+    def test_a_pure_text_string_stays_one_unscaled_run(self):
+        runs = split_runs("no emoji here", self.stack)
+        assert len(runs) == 1
+        assert not runs[0].scaled
+
+    def test_measuring_pure_text_matches_single_face_measurement(self):
+        """Routing text through the stack must not change ordinary layout."""
+        text = "Sunrise ridge done"
+        assert measure_runs(split_runs(text, self.stack)) == pytest.approx(
+            _measure(text, self.scale.font("body"))
+        )
+
+    def test_emoji_advance_is_close_to_the_text_size(self):
+        """A fixed-strike bitmap face renders at 109px; without the per-run
+        scale an emoji would advance several times the text size and wreck
+        both wrapping and alignment."""
+        run = split_runs("🏔", self.stack)[0]
+        assert self.stack.size_px <= run.advance <= self.stack.size_px * 2
+
+    def test_whitespace_is_measured_in_the_text_face(self):
+        """A space swept into an emoji run would be measured at the emoji
+        face's native size and come out far too wide."""
+        for run in split_runs("a 🏔 b", self.stack):
+            if run.text.strip() == "":
+                assert not run.scaled
+
+    def test_variation_selector_16_forces_the_emoji_presentation(self):
+        """U+2744 has a monochrome glyph in DejaVu, so the text face would
+        claim it; U+FE0F explicitly asks for the colour emoji form."""
+        plain = split_runs("❄", self.stack)
+        emoji = split_runs("❄️", self.stack)
+        assert not plain[0].scaled, "bare U+2744 should stay in the text face"
+        assert emoji[0].scaled, "U+2744 U+FE0F should use the emoji face"
+
+    def test_characters_no_face_covers_are_still_dropped(self):
+        # Neither DejaVu nor Noto Color Emoji covers CJK.
+        assert strip_unsupported("ok 中 ok", self.stack) == "ok ok"
 
     def test_accented_latin_is_preserved(self):
         text = "Café Zürich Ångström"
-        assert strip_unsupported(text, self.font) == text
+        assert strip_unsupported(text, self.stack) == text
 
     def test_typographic_punctuation_is_preserved(self):
         text = "Day 3 — the col – done"
-        assert strip_unsupported(text, self.font) == text
+        assert strip_unsupported(text, self.stack) == text
 
     def test_plain_ascii_is_untouched(self):
-        assert strip_unsupported("plain ascii text", self.font) == "plain ascii text"
+        assert strip_unsupported("plain ascii text", self.stack) == "plain ascii text"
 
-    def test_paragraph_breaks_survive_stripping(self):
-        out = strip_unsupported("One \U0001F3D4\n\nTwo", self.font)
-        assert out == "One\n\nTwo"
+    def test_paragraph_breaks_survive(self):
+        text = "One " + chr(0x1F3D4) + chr(10) + chr(10) + "Two"
+        assert strip_unsupported(text, self.stack) == text
 
     def test_empty_input_is_safe(self):
-        assert strip_unsupported("", self.font) == ""
+        assert strip_unsupported("", self.stack) == ""

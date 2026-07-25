@@ -24,15 +24,23 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw
 
-from src.poster.typography import TypeScale, strip_unsupported, wrap_paragraphs
+from src.poster.typography import (
+    FontStack,
+    TypeScale,
+    measure_runs,
+    split_runs,
+    strip_unsupported,
+    wrap_paragraphs,
+)
 
-# One scratch canvas for text measurement. ImageDraw.textlength needs a draw
-# context but never touches these pixels.
-_SCRATCH = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
+def measure_text(text: str, stack: FontStack) -> float:
+    """Width of *text* laid out through a whole font stack.
 
-def measure_text(text: str, font) -> float:
-    return _SCRATCH.textlength(text, font=font)
+    Always stack-aware: a string containing emoji measured in the text face
+    alone would be badly wrong, because that face has no glyph for them.
+    """
+    return measure_runs(split_runs(text, stack))
 
 
 # ── Drawing operations ────────────────────────────────────────────────────────
@@ -43,6 +51,11 @@ class TextOp:
     y: int
     text: str
     style: str
+    # Set when this run must be drawn with a face other than the style's own
+    # (the emoji fallback). ``scale`` < 1 means the face renders at a fixed
+    # size larger than the text and the renderer must scale it down.
+    face: Any = None
+    scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -223,16 +236,16 @@ def _text_block(
     max_lines: Optional[int] = None,
 ) -> List[TextOp]:
     """Wrap and position one run of text, advancing the cursor."""
-    font = scale.font(style)
-    cleaned = strip_unsupported(scale.prepare(style, text or ""), font)
+    stack = scale.stack(style)
+    cleaned = strip_unsupported(scale.prepare(style, text or ""), stack)
     if not cleaned.strip():
         return []
 
-    lines = wrap_paragraphs(cleaned, font, cur.width, measure_text)
+    lines = wrap_paragraphs(cleaned, stack, cur.width)
     if max_lines is not None and len(lines) > max_lines:
         lines = lines[:max_lines]
         if lines[-1]:
-            lines[-1] = _ellipsize(lines[-1], font, cur.width)
+            lines[-1] = _ellipsize(lines[-1], stack, cur.width)
 
     line_h = scale.line_height(style)
     ops: List[TextOp] = []
@@ -240,22 +253,47 @@ def _text_block(
         if not cur.fits(line_h):
             break
         if line:  # blank lines are paragraph spacing, nothing to draw
-            ops.append(TextOp(cur.x, cur.y, line, style))
+            ops.extend(_line_ops(line, stack, style, cur.x, cur.y))
         cur.y += line_h
     cur.y += scale.space_after(style)
     return ops
 
 
-def _ellipsize(line: str, font, max_width: float) -> str:
+def _line_ops(line: str, stack: FontStack, style: str, x: int, y: int) -> List[TextOp]:
+    """Turn one laid-out line into a TextOp per font run.
+
+    A line mixing text and emoji cannot be drawn in a single call, because
+    Pillow uses exactly the face it is given and has no fallback of its own.
+    Each run is emitted at its own x, advancing by that run's measured width.
+    """
+    ops: List[TextOp] = []
+    runs = split_runs(line, stack)
+    if len(runs) == 1 and not runs[0].scaled:
+        # Overwhelmingly the common case: plain text, one op, no per-run x.
+        return [TextOp(x, y, line, style)]
+
+    offset = 0.0
+    for run in runs:
+        if run.text.strip():
+            ops.append(TextOp(
+                round(x + offset), y, run.text, style,
+                face=run.face if run.scaled else None,
+                scale=run.scale,
+            ))
+        offset += run.advance
+    return ops
+
+
+def _ellipsize(line: str, stack: FontStack, max_width: float) -> str:
     """Trim *line* so it plus an ellipsis fits within *max_width*."""
     ellipsis = "…"
-    if measure_text(line + ellipsis, font) <= max_width:
+    if measure_text(line + ellipsis, stack) <= max_width:
         return line + ellipsis
     words = line.split()
     while words:
         words.pop()
         candidate = " ".join(words) + ellipsis
-        if measure_text(candidate, font) <= max_width:
+        if measure_text(candidate, stack) <= max_width:
             return candidate
     return ellipsis
 
@@ -276,16 +314,16 @@ def _stat_block(cur: _Cursor, stats: List[Tuple[str, str]], scale: TypeScale) ->
     if not cur.fits(gap + label_h + value_h):
         return ops
 
-    label_font = scale.font("label")
-    value_font = scale.font("stat_value")
+    label_stack = scale.stack("label")
+    value_stack = scale.stack("stat_value")
     prepared = [
-        (scale.prepare("label", strip_unsupported(label, label_font)), value)
+        (scale.prepare("label", strip_unsupported(label, label_stack)), value)
         for label, value in stats
     ]
     # Each column must hold its own label AND its own value.
     col_gap = mm_to_px(PHOTO_GAP_MM, scale.dpi) * 2
     widths = [
-        max(measure_text(label, label_font), measure_text(value, value_font))
+        max(measure_text(label, label_stack), measure_text(value, value_stack))
         for label, value in prepared
     ]
     fits_in_a_row = sum(widths) + col_gap * (len(widths) - 1) <= cur.width
@@ -317,14 +355,14 @@ def _rows_block(cur: _Cursor, rows: List[Tuple[str, str]], scale: TypeScale) -> 
     if not rows:
         return ops
     line_h = scale.line_height("body")
-    label_font = scale.font("label")
-    value_font = scale.font("body")
+    label_stack = scale.stack("label")
+    value_stack = scale.stack("body")
     for label, value in rows:
         if not cur.fits(line_h):
             break
-        clean_label = scale.prepare("label", strip_unsupported(label, label_font))
-        ops.append(TextOp(cur.x, cur.y, clean_label, "label"))
-        value_w = measure_text(value, value_font)
+        clean_label = scale.prepare("label", strip_unsupported(label, label_stack))
+        ops.extend(_line_ops(clean_label, label_stack, "label", cur.x, cur.y))
+        value_w = measure_text(value, value_stack)
         ops.append(TextOp(round(cur.x + cur.width - value_w), cur.y, value, "body"))
         cur.y += line_h
     cur.y += scale.space_after("body")
