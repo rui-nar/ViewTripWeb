@@ -87,8 +87,10 @@ class _PeopleScreenState extends State<PeopleScreen> {
   }
 
   Widget _peopleBody(ThemeData theme) {
-    final notesByPerson = encounterNotesByPerson(widget.notifier.items);
-    final counts = encounterCountByPerson(widget.notifier.items);
+    final notesByPerson =
+        encounterNotesByPerson(widget.notifier.items, widget.notifier.people);
+    final counts =
+        encounterCountByPerson(widget.notifier.items, widget.notifier.people);
     final filtered =
         filterPeople(widget.notifier.people, _search.text, notesByPerson);
     return Column(
@@ -273,6 +275,41 @@ Widget _encounterPlaceIcon(
     borderRadius: BorderRadius.circular(14),
     onTap: () => onLocationTap(lat, lon),
     child: const Icon(Icons.place_outlined, size: 18),
+  );
+}
+
+/// The subtitle for an encounter tile in the person detail sheet: the note, and
+/// — for an encounter inherited from the person's group (issue #124) — a line
+/// naming the group so it reads as a group meeting, not a one-to-one one.
+/// Returns null when there is nothing to show.
+Widget? _encounterSubtitle(ThemeData theme, Map<String, dynamic> encounter) {
+  final note = (encounter['description'] as String?) ?? '';
+  final groupLabel = inheritedGroupLabel(encounter);
+  if (groupLabel == null) {
+    return note.isEmpty ? null : _EncounterDescription(text: note);
+  }
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.groups_outlined,
+              size: 14, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              groupLabel,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      if (note.isNotEmpty) _EncounterDescription(text: note),
+    ],
   );
 }
 
@@ -522,9 +559,7 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
                       dense: true,
                       leading: _encounterPlaceIcon(e, widget.onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
-                      subtitle: (e['description'] as String?)?.isNotEmpty ?? false
-                          ? _EncounterDescription(text: e['description'] as String)
-                          : null,
+                      subtitle: _encounterSubtitle(theme, e),
                     ),
                 ],
               ),

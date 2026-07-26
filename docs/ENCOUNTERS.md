@@ -40,7 +40,9 @@ export/import round-trips people + groups + encounters (excluded from public
 shares).
 
 ## API
-- People: `POST /api/people`, `GET/PUT/DELETE /api/people/{id}`, avatar
+- People: `POST /api/people`, `GET/PUT/DELETE /api/people/{id}` (the GET returns
+  the person's own encounters **plus the ones logged against their group**, see
+  Groups below), avatar
   `POST/DELETE /api/people/{id}/avatar`, `GET .../avatar[/thumb]`.
 - Encounters: `POST /api/encounters`, `PUT/DELETE /api/encounters/{id}` — the
   body takes either `person_id` or `group_id` (exactly one, issue #56).
@@ -80,3 +82,12 @@ views.
   — not just a grouped person (which is still auto-masked as the group on the
   map, `classifyEncounterPin` in `people_search.dart`). Useful when you met the
   group collectively rather than a specific known member.
+- **Members inherit their group's encounters** (issue #124): meeting a group
+  means meeting its members, so a group-encounter also counts as an encounter
+  with everyone in the group. `GET /api/people/{id}` merges both lists (sorted by
+  date/time) and tags each row `source: "person" | "group"`, carrying
+  `group_id`/`group_name` for the inherited ones so the person sheet can label
+  them "With <group>". The People list's per-person encounter count and the
+  keyword search over encounter notes follow the same rule
+  (`encountersByPerson` in `people_search.dart`). The reverse does **not** hold:
+  a group's own encounter list stays limited to its direct encounters.

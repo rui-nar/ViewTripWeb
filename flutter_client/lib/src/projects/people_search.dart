@@ -56,34 +56,77 @@ List<Map<String, dynamic>> membersOfGroup(
   return (kind: 'person', entity: person);
 }
 
-/// Map of person id → that person's encounter notes, derived from project [items].
-/// Used to make encounter descriptions searchable from the People list.
-Map<int, List<String>> encounterNotesByPerson(
-    List<Map<String, dynamic>> items) {
-  final out = <int, List<String>>{};
+/// The label for an encounter a person inherited from the group they belong to
+/// (issue #124 — `source: "group"` in the `GET /api/people/{id}` payload), or
+/// null for a direct, one-to-one encounter with that person.
+String? inheritedGroupLabel(Map<String, dynamic> encounter) {
+  if (encounter['source'] != 'group') return null;
+  final name = (encounter['group_name'] as String?)?.trim();
+  return 'With ${(name == null || name.isEmpty) ? 'the group' : name}';
+}
+
+/// Map of person id → every encounter that applies to them, derived from project
+/// [items] and [people]: the ones logged against the person, plus the ones
+/// logged directly against the group they belong to (issue #124 — meeting the
+/// group means meeting its members). Encounter order follows [items].
+Map<int, List<Map<String, dynamic>>> encountersByPerson(
+  List<Map<String, dynamic>> items,
+  List<Map<String, dynamic>> people,
+) {
+  final membersByGroup = <int, List<int>>{};
+  for (final p in people) {
+    final gid = p['group_id'];
+    final pid = p['id'];
+    if (gid is int && pid is int) (membersByGroup[gid] ??= []).add(pid);
+  }
+  final out = <int, List<Map<String, dynamic>>>{};
   for (final it in items) {
     if (it['item_type'] != 'encounter') continue;
     final enc = it['encounter'];
     if (enc is! Map) continue;
-    final pid = enc['person_id'];
-    final note = (enc['description'] as String?)?.trim();
-    if (pid is int && note != null && note.isNotEmpty) {
-      (out[pid] ??= []).add(note);
+    final e = enc.cast<String, dynamic>();
+    final pid = e['person_id'];
+    if (pid is int) {
+      (out[pid] ??= []).add(e);
+      continue;
+    }
+    final gid = e['group_id'];
+    if (gid is int) {
+      for (final memberId in membersByGroup[gid] ?? const <int>[]) {
+        (out[memberId] ??= []).add(e);
+      }
     }
   }
   return out;
 }
 
-/// How many encounters each person has, derived from project [items].
-Map<int, int> encounterCountByPerson(List<Map<String, dynamic>> items) {
-  final out = <int, int>{};
-  for (final it in items) {
-    if (it['item_type'] != 'encounter') continue;
-    final pid = (it['encounter'] as Map?)?['person_id'];
-    if (pid is int) out[pid] = (out[pid] ?? 0) + 1;
-  }
+/// Map of person id → that person's encounter notes (own + inherited from their
+/// group, see [encountersByPerson]). Used to make encounter descriptions
+/// searchable from the People list.
+Map<int, List<String>> encounterNotesByPerson(
+  List<Map<String, dynamic>> items,
+  List<Map<String, dynamic>> people,
+) {
+  final out = <int, List<String>>{};
+  encountersByPerson(items, people).forEach((pid, encounters) {
+    final notes = [
+      for (final e in encounters)
+        if (((e['description'] as String?)?.trim() ?? '').isNotEmpty)
+          (e['description'] as String).trim(),
+    ];
+    if (notes.isNotEmpty) out[pid] = notes;
+  });
   return out;
 }
+
+/// How many encounters each person has — their own plus the ones inherited from
+/// their group (see [encountersByPerson]).
+Map<int, int> encounterCountByPerson(
+  List<Map<String, dynamic>> items,
+  List<Map<String, dynamic>> people,
+) =>
+    encountersByPerson(items, people)
+        .map((pid, encounters) => MapEntry(pid, encounters.length));
 
 /// Map of group id → that group's encounter notes, derived from project
 /// [items] (issue #56 — direct group encounters, mirrors [encounterNotesByPerson]).

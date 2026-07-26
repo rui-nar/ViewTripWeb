@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
 from api.deps import get_current_user
+from api.encounters import router as encounters_router
 from api.groups import router as groups_router
 from api.people import router as people_router
 from api.projects import router as projects_router
@@ -47,6 +48,7 @@ def env(monkeypatch):
     app.include_router(groups_router)
     app.include_router(people_router)
     app.include_router(projects_router)
+    app.include_router(encounters_router)
     return TestClient(app), engine, alice, bob, other
 
 
@@ -54,6 +56,14 @@ def _create_group(client, **kw):
     body = {"project_name": "Trip"}
     body.update(kw)
     r = client.post("/api/groups/", json=body)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _create_encounter(client, **kw):
+    body = {"project_name": "Trip", "date": "2026-01-01"}
+    body.update(kw)
+    r = client.post("/api/encounters/", json=body)
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -140,6 +150,58 @@ def test_set_members_rejects_foreign_person(env):
         sid = stranger.id
     r = client.put(f"/api/groups/{gid}/members", json={"person_ids": [sid]})
     assert r.status_code == 404
+
+
+# ── A person inherits their group's encounters (issue #124) ──────────────────
+
+def test_person_inherits_group_encounters(env):
+    client, _, alice, bob, _ = env
+    gid = _create_group(client, name="Hostel crew")
+    client.put(f"/api/groups/{gid}/members", json={"person_ids": [alice]})
+
+    own = _create_encounter(client, person_id=alice, date="2026-01-03",
+                            description="coffee")
+    shared = _create_encounter(client, group_id=gid, date="2026-01-02",
+                               description="karaoke night")
+
+    body = client.get(f"/api/people/{alice}").json()
+    assert body["group_id"] == gid
+    encounters = body["encounters"]
+    # Own + inherited, merged and ordered by date.
+    assert [e["id"] for e in encounters] == [shared, own]
+    assert encounters[0]["source"] == "group"
+    assert encounters[0]["group_id"] == gid
+    assert encounters[0]["group_name"] == "Hostel crew"
+    assert encounters[0]["description"] == "karaoke night"
+    assert encounters[1]["source"] == "person"
+    assert encounters[1]["group_id"] is None
+    assert encounters[1]["group_name"] is None
+
+    # A non-member sees nothing of it.
+    assert client.get(f"/api/people/{bob}").json()["encounters"] == []
+
+
+def test_person_stops_inheriting_once_ungrouped(env):
+    client, _, alice, _, _ = env
+    gid = _create_group(client, name="Crew")
+    client.put(f"/api/groups/{gid}/members", json={"person_ids": [alice]})
+    _create_encounter(client, group_id=gid, date="2026-01-02")
+    assert len(client.get(f"/api/people/{alice}").json()["encounters"]) == 1
+
+    client.put(f"/api/groups/{gid}/members", json={"person_ids": []})
+    body = client.get(f"/api/people/{alice}").json()
+    assert body["group_id"] is None
+    assert body["encounters"] == []
+
+
+def test_inherited_encounter_of_unnamed_group_has_no_name(env):
+    client, _, alice, _, _ = env
+    gid = _create_group(client)  # no name
+    client.put(f"/api/groups/{gid}/members", json={"person_ids": [alice]})
+    _create_encounter(client, group_id=gid, date="2026-01-02")
+    enc = client.get(f"/api/people/{alice}").json()["encounters"][0]
+    assert enc["source"] == "group"
+    assert enc["group_name"] is None
 
 
 def test_cannot_access_another_users_group(env):
