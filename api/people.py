@@ -5,7 +5,7 @@ belongs to one project and may be referenced by any number of encounters.
 
 Routes:
     POST   /api/people                         — create a person
-    GET    /api/people/{id}                     — person + their encounters
+    GET    /api/people/{id}                     — person + their encounters (incl. their group's)
     PUT    /api/people/{id}                     — update a person
     DELETE /api/people/{id}                     — delete a person + their encounters
     POST   /api/people/{id}/avatar              — upload/replace the avatar photo
@@ -38,7 +38,13 @@ from api.polarsteps import (
     _require_client,
 )
 from api.project_access import OwnerParam, assert_project_access, resolve_project
-from models.project_db import DBEncounter, DBPerson, DBProject, DBProjectItem
+from models.project_db import (
+    DBEncounter,
+    DBPerson,
+    DBPersonGroup,
+    DBProject,
+    DBProjectItem,
+)
 from src.api.polarsteps_client import format_step, format_trip
 from src.models.person import polarsteps_from_socials
 
@@ -91,6 +97,7 @@ def _person_out(row: DBPerson) -> dict:
         "socials": _loads_list(row.socials_json),
         "nationalities": _loads_list(row.nationalities_json),
         "residence": row.residence,
+        "group_id": row.group_id,
     }
 
 
@@ -186,34 +193,57 @@ def create_person(
     return {"id": person_id}
 
 
+def _encounter_out(e: DBEncounter, group_name: str | None = None) -> dict:
+    """Serialise an encounter for the person sheet.
+
+    [group_name] is set (and `source` becomes "group") for encounters inherited
+    from the person's group — see [get_person].
+    """
+    return {
+        "id": e.id,
+        "date": e.date,
+        "time": e.time,
+        "description": e.description,
+        "lat": e.lat,
+        "lon": e.lon,
+        "source": "group" if e.group_id is not None else "person",
+        "group_id": e.group_id,
+        "group_name": group_name,
+    }
+
+
 @router.get("/{person_id}", summary="Get a person and their encounters")
 def get_person(
     person_id: int,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
-    """Return a person plus every encounter (date, place, note) with them."""
+    """Return a person plus every encounter (date, place, note) with them.
+
+    A person inherits the encounters logged directly against the group they
+    belong to (issue #124): meeting the group means meeting its members, so those
+    show up here too, tagged `source: "group"` with the group's name so the
+    client can label them as inherited rather than one-to-one.
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_person(sess, person_id, user_info_id, min_role="viewer")
-        encounters = sess.exec(
-            select(DBEncounter)
-            .where(DBEncounter.person_id == person_id)
-            .order_by(DBEncounter.date, DBEncounter.time)
-        ).all()
-        return {
-            **_person_out(row),
-            "encounters": [
-                {
-                    "id": e.id,
-                    "date": e.date,
-                    "time": e.time,
-                    "description": e.description,
-                    "lat": e.lat,
-                    "lon": e.lon,
-                }
-                for e in encounters
-            ],
-        }
+        encounters = list(sess.exec(
+            select(DBEncounter).where(DBEncounter.person_id == person_id)
+        ).all())
+        out = [_encounter_out(e) for e in encounters]
+
+        if row.group_id is not None:
+            group = sess.get(DBPersonGroup, row.group_id)
+            inherited = sess.exec(
+                select(DBEncounter).where(DBEncounter.group_id == row.group_id)
+            ).all()
+            out += [
+                _encounter_out(e, group_name=group.name if group else None)
+                for e in inherited
+            ]
+
+        out.sort(key=lambda e: (e["date"] or "", e["time"] or ""))
+        return {**_person_out(row), "encounters": out}
 
 
 @router.put("/{person_id}", status_code=status.HTTP_204_NO_CONTENT,

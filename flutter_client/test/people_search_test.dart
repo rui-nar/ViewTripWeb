@@ -91,8 +91,45 @@ void main() {
         _enc(2, note: 'trail'),
         {'item_type': 'activity'},
       ];
-      expect(encounterCountByPerson(items), {1: 2, 2: 1});
-      expect(encounterNotesByPerson(items), {1: ['cafe', 'beach'], 2: ['trail']});
+      final people = [_p(1), _p(2)];
+      expect(encounterCountByPerson(items, people), {1: 2, 2: 1});
+      expect(encounterNotesByPerson(items, people),
+          {1: ['cafe', 'beach'], 2: ['trail']});
+    });
+
+    test('members inherit their group\'s encounters (#124)', () {
+      final people = [
+        {'id': 1, 'name': 'A', 'group_id': 10},
+        {'id': 2, 'name': 'B', 'group_id': 10},
+        {'id': 3, 'name': 'C'}, // ungrouped
+      ];
+      final items = [
+        _enc(1, note: 'cafe'),
+        _groupEnc(10, note: 'met the crew', date: '2024-06-02'),
+        _groupEnc(20, note: 'other crew', date: '2024-06-03'),
+        _enc(3, note: 'trail'),
+      ];
+      // Both members pick up the group encounter; the group-20 one belongs to
+      // nobody here, and the ungrouped person is unaffected.
+      expect(encounterCountByPerson(items, people), {1: 2, 2: 1, 3: 1});
+      expect(encounterNotesByPerson(items, people), {
+        1: ['cafe', 'met the crew'],
+        2: ['met the crew'],
+        3: ['trail'],
+      });
+      expect(encountersByPerson(items, people)[2]!.single['date'], '2024-06-02');
+    });
+
+    test('inheritedGroupLabel only labels group-sourced encounters (#124)', () {
+      expect(inheritedGroupLabel({'source': 'person', 'group_name': 'Crew'}),
+          isNull);
+      expect(inheritedGroupLabel({'description': 'cafe'}), isNull);
+      expect(inheritedGroupLabel({'source': 'group', 'group_name': 'Crew'}),
+          'With Crew');
+      // Unnamed group → generic wording, never a blank "With ".
+      expect(inheritedGroupLabel({'source': 'group', 'group_name': '  '}),
+          'With the group');
+      expect(inheritedGroupLabel({'source': 'group'}), 'With the group');
     });
 
     test('counts, collects notes, and lists encounters per group (#56)', () {
