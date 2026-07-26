@@ -7,6 +7,15 @@ import 'package:http/http.dart' as http;
 import '../api/client.dart';
 import '../core/project_ref.dart';
 
+/// The steps of a Polarsteps trip that can actually be drawn — those carrying
+/// coordinates. A trip whose steps are all coordinate-less yields an empty
+/// list, which callers must treat as "nothing to show" rather than as an
+/// (invisible) overlay (#123).
+List<Map<String, dynamic>> mappablePolarstepsSteps(List<dynamic> raw) => raw
+    .cast<Map<String, dynamic>>()
+    .where((s) => s['lat'] != null && s['lon'] != null)
+    .toList();
+
 mixin ProjectPeopleCrudMixin on ChangeNotifier {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
@@ -284,16 +293,20 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
     }
   }
 
-  /// Load one trip's steps and show it as the map overlay. Returns false on failure.
+  /// Load one trip's steps and show it as the map overlay. Returns false on
+  /// failure — including a trip whose steps carry no coordinates, which would
+  /// otherwise "succeed" into an invisible overlay (#123).
   Future<bool> showPersonPolarstepsTrip(
       int personId, int tripId, String label) async {
     try {
       final res =
           await api.get('/api/people/$personId/polarsteps/trips/$tripId/steps');
-      final steps = (res as List)
-          .cast<Map<String, dynamic>>()
-          .where((s) => s['lat'] != null && s['lon'] != null)
-          .toList();
+      final steps = mappablePolarstepsSteps(res as List);
+      if (steps.isEmpty) {
+        error = 'That trip has no mapped steps yet';
+        notifyListeners();
+        return false;
+      }
       polarstepsOverlaySteps = steps;
       polarstepsOverlayLabel = label;
       notifyListeners();

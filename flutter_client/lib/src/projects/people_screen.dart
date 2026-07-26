@@ -197,6 +197,13 @@ class _PersonTile extends StatelessWidget {
             // point so the caller (map/activity panel) can focus it (#72).
             Navigator.of(context).pop();
             Navigator.of(context).pop({'lat': lat, 'lon': lon});
+          },
+          onTripShown: () {
+            // Same two pops: the trip overlay is drawn on the map behind this
+            // full-screen route, so leaving it up looks like nothing happened
+            // (#123). The map fits its own camera to the overlay.
+            Navigator.of(context).pop();
+            Navigator.of(context).pop();
           }),
     );
   }
@@ -242,18 +249,28 @@ class PersonAvatar extends StatelessWidget {
 /// [onLocationTap], when given, is invoked with an encounter's coordinates
 /// when its place icon is tapped (issue #72); the caller decides whether/how
 /// to dismiss any sheet(s) — see call sites for the pop conventions used.
+///
+/// [onTripShown], when given, is invoked once one of the person's Polarsteps
+/// trips has been loaded onto the map overlay (issue #123) and likewise owns
+/// the dismissal: the sheet alone defaults to closing itself, which is not
+/// enough when a full-screen route (PeopleScreen) still covers the map.
 Future<void> showPersonDetailSheet(
   BuildContext context,
   ProjectNotifier notifier,
   Map<String, dynamic> person, {
   void Function(double lat, double lon)? onLocationTap,
+  VoidCallback? onTripShown,
 }) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
     builder: (_) => _PersonDetailSheet(
-        notifier: notifier, person: person, onLocationTap: onLocationTap),
+      notifier: notifier,
+      person: person,
+      onLocationTap: onLocationTap,
+      onTripShown: onTripShown,
+    ),
   );
 }
 
@@ -339,10 +356,12 @@ class _PersonDetailSheet extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> person;
   final void Function(double lat, double lon)? onLocationTap;
+  final VoidCallback? onTripShown;
   const _PersonDetailSheet({
     required this.notifier,
     required this.person,
     this.onLocationTap,
+    this.onTripShown,
   });
 
   @override
@@ -400,7 +419,12 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
         _personId, (trip['id'] as num).toInt(), label);
     if (!mounted) return;
     if (ok) {
-      navigator.pop(); // close sheet so the overlay is visible on the map
+      final onTripShown = widget.onTripShown;
+      if (onTripShown != null) {
+        onTripShown();
+      } else {
+        navigator.pop(); // close sheet so the overlay is visible on the map
+      }
     } else {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(widget.notifier.error ?? 'Could not load that trip'),
@@ -645,6 +669,11 @@ class _GroupTile extends StatelessWidget {
             // point so the caller (map/activity panel) can focus it (#72).
             Navigator.of(context).pop();
             Navigator.of(context).pop({'lat': lat, 'lon': lon});
+          },
+          onTripShown: () {
+            // A member's trip, picked from their sheet — see the person tile.
+            Navigator.of(context).pop();
+            Navigator.of(context).pop();
           }),
     );
   }
@@ -652,19 +681,25 @@ class _GroupTile extends StatelessWidget {
 
 /// Per-group detail sheet: info + members (tap a member → their sheet).
 ///
-/// [onLocationTap] — see [showPersonDetailSheet].
+/// [onLocationTap] and [onTripShown] — see [showPersonDetailSheet]; both are
+/// forwarded to a member's own sheet, opened from the members list.
 Future<void> showGroupDetailSheet(
   BuildContext context,
   ProjectNotifier notifier,
   Map<String, dynamic> group, {
   void Function(double lat, double lon)? onLocationTap,
+  VoidCallback? onTripShown,
 }) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
     builder: (_) => _GroupDetailSheet(
-        notifier: notifier, group: group, onLocationTap: onLocationTap),
+      notifier: notifier,
+      group: group,
+      onLocationTap: onLocationTap,
+      onTripShown: onTripShown,
+    ),
   );
 }
 
@@ -672,10 +707,12 @@ class _GroupDetailSheet extends StatelessWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> group;
   final void Function(double lat, double lon)? onLocationTap;
+  final VoidCallback? onTripShown;
   const _GroupDetailSheet({
     required this.notifier,
     required this.group,
     this.onLocationTap,
+    this.onTripShown,
   });
 
   int get _groupId => (group['id'] as num).toInt();
@@ -799,7 +836,8 @@ class _GroupDetailSheet extends StatelessWidget {
                       onTap: () {
                         Navigator.of(context).pop();
                         showPersonDetailSheet(context, notifier, p,
-                            onLocationTap: onLocationTap);
+                            onLocationTap: onLocationTap,
+                            onTripShown: onTripShown);
                       },
                     ),
                 ],

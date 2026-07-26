@@ -499,6 +499,133 @@ List<Marker> buildEncounterMarkers(
   return markers;
 }
 
+// ── Polarsteps trip overlay (issue #40) ──────────────────────────────────────
+//
+// A person's shared Polarsteps trip, shown on demand from the People directory
+// and never persisted. Shared by MapPanel (view mode) and ManageMapPanel — both
+// read the same ProjectNotifier overlay state.
+
+const Color _kPolarstepsOverlay = Color(0xFF7C3AED);
+
+/// Map points of the overlay [steps], in step order. Steps without coordinates
+/// are already filtered out by `showPersonPolarstepsTrip`.
+List<LatLng> polarstepsOverlayPoints(List<Map<String, dynamic>> steps) => [
+      for (final s in steps)
+        LatLng((s['lat'] as num).toDouble(), (s['lon'] as num).toDouble()),
+    ];
+
+/// Route line + step dots for the current overlay; empty when no trip is shown.
+List<Widget> polarstepsOverlayLayers(ProjectNotifier notifier) {
+  final points = polarstepsOverlayPoints(notifier.polarstepsOverlaySteps);
+  if (points.isEmpty) return const [];
+  return [
+    PolylineLayer(
+      polylines: [
+        Polyline(
+            points: points, color: _kPolarstepsOverlay, strokeWidth: 3),
+      ],
+    ),
+    MarkerLayer(
+      markers: [
+        for (final p in points)
+          Marker(
+            point: p,
+            width: 12,
+            height: 12,
+            child: const DecoratedBox(
+              decoration: BoxDecoration(
+                color: _kPolarstepsOverlay,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+      ],
+    ),
+  ];
+}
+
+/// Top-of-map banner naming the trip on show, with a button to clear it.
+Widget polarstepsOverlayBanner(ProjectNotifier notifier) {
+  return Positioned(
+    top: 12,
+    left: 12,
+    right: 12,
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: Material(
+        color: _kPolarstepsOverlay,
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.only(left: 14, right: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.travel_explore, size: 16, color: Colors.white),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  notifier.polarstepsOverlayLabel ?? 'Polarsteps trip',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, size: 16, color: Colors.white),
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Clear overlay',
+                onPressed: notifier.clearPolarstepsOverlay,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// Frames [points] on the map. A trip is usually nowhere near the project's own
+/// track, so without this the overlay is drawn off-screen and picking a trip
+/// looks like it did nothing (#123).
+void fitCameraToPolarstepsOverlay(
+    AnimatedMapController controller, List<LatLng> points) {
+  if (points.isEmpty) return;
+  if (points.length == 1) {
+    controller.centerOnPoint(points.first, zoom: 12);
+    return;
+  }
+  controller.animatedFitCamera(
+    cameraFit: CameraFit.bounds(
+      bounds: LatLngBounds.fromPoints(points),
+      padding: const EdgeInsets.all(32),
+    ),
+    curve: Curves.easeInOut,
+  );
+}
+
+/// Fits the camera once per newly-shown Polarsteps overlay. Driven from the map
+/// panels' `build` rather than from the call site that loaded the trip: the
+/// People directory is a full-screen route on top of the map, so the map only
+/// rebuilds (and can only sensibly animate) while the overlay state changes
+/// underneath it.
+mixin _PolarstepsOverlayFit<T extends StatefulWidget> on State<T> {
+  List<Map<String, dynamic>>? _fittedPolarstepsOverlay;
+
+  void fitPolarstepsOverlayOnce(
+      ProjectNotifier notifier, AnimatedMapController controller) {
+    final steps = notifier.polarstepsOverlaySteps;
+    // The notifier assigns a fresh list per overlay, so identity is the change
+    // signal — re-showing the same trip after clearing it fits again.
+    if (identical(steps, _fittedPolarstepsOverlay)) return;
+    _fittedPolarstepsOverlay = steps;
+    final points = polarstepsOverlayPoints(steps);
+    if (points.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      fitCameraToPolarstepsOverlay(controller, points);
+    });
+  }
+}
+
 // ── Selection stats overlay (issue #74) ──────────────────────────────────────
 //
 // Shows the distance/climb/day-number of the current activity or day(s)
@@ -767,7 +894,7 @@ class MapPanel extends StatefulWidget {
   State<MapPanel> createState() => _MapPanelState();
 }
 
-class _MapPanelState extends State<MapPanel> {
+class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   // Seeded true when an initial camera position was carried over from the
   // other mode (view/edit toggle) — skips the fit-all-bounds animation.
   // Seeded in initState, NOT lazily: `_fitBoundsOnce` isn't called until the
@@ -1185,6 +1312,13 @@ class _MapPanelState extends State<MapPanel> {
       });
     }
 
+    // Last, so picking a person's trip wins over the fits scheduled above.
+    if (widget.showEncounters) {
+      fitPolarstepsOverlayOnce(notifier, widget.mapController);
+    }
+    final showPolarstepsBanner =
+        widget.showEncounters && notifier.polarstepsOverlaySteps.isNotEmpty;
+
     // FlutterMap stays mounted throughout loading so the MapController stays
     // attached and tiles don't get torn down on every load.  A spinner is
     // overlaid on top while data is in flight.
@@ -1264,6 +1398,10 @@ class _MapPanelState extends State<MapPanel> {
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             if (widget.hereLatLng != null)
               MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
+            // A person's Polarsteps trip (#40), shown from the People
+            // directory. Gated on [showEncounters]: same owner-only PII, and
+            // the same single screen is the only one that can populate it.
+            if (widget.showEncounters) ...polarstepsOverlayLayers(notifier),
             // Preview arc uses ValueListenableBuilder so only this layer rebuilds
             // when the segment dialog updates coordinates — not the whole map.
             ValueListenableBuilder<List<GeoPoint>?>(
@@ -1308,10 +1446,13 @@ class _MapPanelState extends State<MapPanel> {
         ),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
+        if (showPolarstepsBanner) polarstepsOverlayBanner(notifier),
         if (_cachedMemoryMarkers.isNotEmpty ||
             (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty))
           Positioned(
-            top: 12,
+            // Drop below the full-width Polarsteps trip banner so the two
+            // never overlap on a narrow screen.
+            top: showPolarstepsBanner ? 64 : 12,
             left: 12,
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1353,7 +1494,7 @@ class _MapPanelState extends State<MapPanel> {
             ),
           ),
         Positioned(
-          top: 12,
+          top: showPolarstepsBanner ? 64 : 12,
           right: 12,
           child: SelectionStatsOverlay(notifier: notifier),
         ),
@@ -1557,7 +1698,8 @@ class ManageMapPanel extends StatefulWidget {
   State<ManageMapPanel> createState() => ManageMapPanelState();
 }
 
-class ManageMapPanelState extends State<ManageMapPanel> {
+class ManageMapPanelState extends State<ManageMapPanel>
+    with _PolarstepsOverlayFit {
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
 
@@ -2038,6 +2180,9 @@ class ManageMapPanelState extends State<ManageMapPanel> {
       });
     }
 
+    // Last, so picking a person's trip wins over the fits scheduled above.
+    fitPolarstepsOverlayOnce(notifier, widget.mapController);
+
     final perfBuilt = Stack(
       children: [
         FlutterMap(
@@ -2091,38 +2236,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             if (widget.hereLatLng != null)
               MarkerLayer(markers: [youAreHereMarker(widget.hereLatLng!)]),
             // Owner-only, view-only Polarsteps trip overlay for a person (#40).
-            if (notifier.polarstepsOverlaySteps.isNotEmpty) ...[
-              PolylineLayer(
-                polylines: [
-                  Polyline(
-                    points: [
-                      for (final s in notifier.polarstepsOverlaySteps)
-                        LatLng((s['lat'] as num).toDouble(),
-                            (s['lon'] as num).toDouble()),
-                    ],
-                    color: const Color(0xFF7C3AED),
-                    strokeWidth: 3,
-                  ),
-                ],
-              ),
-              MarkerLayer(
-                markers: [
-                  for (final s in notifier.polarstepsOverlaySteps)
-                    Marker(
-                      point: LatLng((s['lat'] as num).toDouble(),
-                          (s['lon'] as num).toDouble()),
-                      width: 12,
-                      height: 12,
-                      child: const DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Color(0xFF7C3AED),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ],
+            ...polarstepsOverlayLayers(notifier),
             ValueListenableBuilder<List<GeoPoint>?>(
               valueListenable: notifier.previewArcNotifier,
               builder: (_, arc, __) {
@@ -2189,43 +2303,7 @@ class ManageMapPanelState extends State<ManageMapPanel> {
             ),
           ),
         if (notifier.polarstepsOverlaySteps.isNotEmpty)
-          Positioned(
-            top: 12,
-            left: 12,
-            right: 12,
-            child: Align(
-              alignment: Alignment.topCenter,
-              child: Material(
-                color: const Color(0xFF7C3AED),
-                borderRadius: BorderRadius.circular(20),
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 14, right: 4),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.travel_explore,
-                          size: 16, color: Colors.white),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          notifier.polarstepsOverlayLabel ?? 'Polarsteps trip',
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close,
-                            size: 16, color: Colors.white),
-                        visualDensity: VisualDensity.compact,
-                        tooltip: 'Clear overlay',
-                        onPressed: notifier.clearPolarstepsOverlay,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          polarstepsOverlayBanner(notifier),
         Positioned(
           // Drop below the Polarsteps trip banner (also top:12, full-width)
           // so the two never overlap — the banner's close button otherwise
