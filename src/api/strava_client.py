@@ -9,55 +9,144 @@ from typing import Any, Dict, Optional
 from src.config.settings import Config
 from src.auth.oauth import OAuth2Session
 from src.auth.token_store import TokenStore
-from src.exceptions.errors import APIError, AuthenticationError, TokenError
-from src.utils.metrics import normalise_path, outcome_for_status, track_external
+from src.exceptions.errors import (
+    APIError,
+    AuthenticationError,
+    RateLimitError,
+    TokenError,
+)
+from src.utils.metrics import (
+    STRAVA_RATE_LIMIT_CAPACITY,
+    STRAVA_RATE_LIMIT_USAGE,
+    STRAVA_THROTTLED,
+    normalise_path,
+    outcome_for_status,
+    track_external,
+)
 
 
 class RateLimiter:
-    """Sliding-window rate limiter: max 100 requests per 15 minutes.
+    """Sliding-window rate limiter, defaulting to Strava's 100 req/15 min.
 
-    Strava enforces 100 req/15min and 1000 req/day. This class enforces
-    the per-15-min limit. The lock is held during sleep to prevent two
-    concurrent threads from double-booking the same slot.
+    Strava enforces 100 requests per 15 minutes *and* 1000 per day, per
+    application — not per user, not per request. A limiter is therefore only
+    meaningful if every caller in the process shares one; see
+    :data:`_SHORT_TERM_LIMITER` / :data:`_DAILY_LIMITER` below.
+
+    ``acquire`` waits at most ``max_wait`` seconds for a free slot and then
+    raises, rather than blocking indefinitely. A shared limiter genuinely fills
+    up, and a request thread parked for the remainder of a 15-minute window (or
+    the rest of the day, for the daily quota) turns a quota problem into an
+    outage. Callers that can defer work check :attr:`remaining` first and
+    reschedule instead — see ``_enrich_activities`` in api/activities.py.
     """
 
     WINDOW_SECONDS: int = 900  # 15 minutes
     MAX_REQUESTS: int = 100
+    MAX_WAIT_SECONDS: float = 60.0
+    _POLL_SECONDS: float = 0.5
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_requests: int = MAX_REQUESTS,
+        window_seconds: int = WINDOW_SECONDS,
+        name: str = "15min",
+    ) -> None:
+        self._max_requests = max_requests
+        self._window_seconds = window_seconds
+        self.name = name
         self._timestamps: deque = deque()
         self._lock: threading.Lock = threading.Lock()
 
-    def acquire(self) -> None:
-        """Block until a request slot is available, then claim it."""
-        with self._lock:
-            now = time.monotonic()
-            cutoff = now - self.WINDOW_SECONDS
+    def _prune(self, now: float) -> None:
+        """Drop timestamps that have fallen out of the window. Caller holds the lock."""
+        cutoff = now - self._window_seconds
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
 
-            # Discard timestamps outside the current window
-            while self._timestamps and self._timestamps[0] < cutoff:
-                self._timestamps.popleft()
+    def acquire(self, max_wait: Optional[float] = None) -> None:
+        """Claim a request slot, waiting up to *max_wait* seconds for one.
 
-            if len(self._timestamps) >= self.MAX_REQUESTS:
-                # Wait until the oldest timestamp falls outside the window
-                sleep_for = self.WINDOW_SECONDS - (now - self._timestamps[0])
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                # Re-prune after sleeping
+        Raises :class:`RateLimitError` if no slot comes free in time. The lock
+        is released while waiting and the window re-checked on each pass, so a
+        slot freed by another thread is picked up promptly and two threads can
+        never both claim the last one.
+        """
+        limit = self.MAX_WAIT_SECONDS if max_wait is None else max_wait
+        deadline = time.monotonic() + limit
+
+        while True:
+            with self._lock:
                 now = time.monotonic()
-                cutoff = now - self.WINDOW_SECONDS
-                while self._timestamps and self._timestamps[0] < cutoff:
-                    self._timestamps.popleft()
+                self._prune(now)
+                if len(self._timestamps) < self._max_requests:
+                    self._timestamps.append(now)
+                    return
+                wait_for = self._timestamps[0] + self._window_seconds - now
 
-            self._timestamps.append(time.monotonic())
+            if time.monotonic() + wait_for > deadline:
+                raise RateLimitError(
+                    f"Strava {self.name} rate limit reached "
+                    f"({self._max_requests} requests); a slot frees up in "
+                    f"{wait_for:.0f}s. Please try again later."
+                )
+            time.sleep(min(wait_for, self._POLL_SECONDS))
 
     @property
     def current_usage(self) -> int:
-        """Return number of requests made in the current window."""
+        """Number of requests made in the current window."""
         with self._lock:
-            now = time.monotonic()
-            cutoff = now - self.WINDOW_SECONDS
-            return sum(1 for t in self._timestamps if t >= cutoff)
+            self._prune(time.monotonic())
+            return len(self._timestamps)
+
+    @property
+    def remaining(self) -> int:
+        """Slots left in the current window."""
+        return self._max_requests - self.current_usage
+
+    def reset(self) -> None:
+        """Forget every recorded request. For tests — the shared limiters are
+        process-wide, so without this one test's calls leak into the next."""
+        with self._lock:
+            self._timestamps.clear()
+
+
+# Strava's quotas are per *application*, so these are shared by every StravaAPI
+# instance in the process (issue #130 — they used to be per-instance, and
+# StravaAPI is constructed per request, so the window was always empty and the
+# limiter never actually limited anything).
+#
+# Process-wide is as far as this design goes: a second uvicorn/gunicorn worker
+# would get its own counters and the app could exceed the quota by a factor of
+# the worker count. entrypoint.sh runs a single worker; going wider means moving
+# this state somewhere shared (Redis, or the DB).
+_SHORT_TERM_LIMITER = RateLimiter(
+    max_requests=RateLimiter.MAX_REQUESTS,
+    window_seconds=RateLimiter.WINDOW_SECONDS,
+    name="15min",
+)
+_DAILY_LIMITER = RateLimiter(max_requests=1000, window_seconds=86400, name="daily")
+
+_ALL_LIMITERS = (_SHORT_TERM_LIMITER, _DAILY_LIMITER)
+
+
+def reset_rate_limiters() -> None:
+    """Clear both shared windows. For tests."""
+    for limiter in _ALL_LIMITERS:
+        limiter.reset()
+
+
+# Now that usage is process-wide it is worth reporting: near-100 in the 15-min
+# window means imports are about to start deferring (issue #125 skipped this
+# gauge precisely because the per-instance limiter made it meaningless).
+STRAVA_RATE_LIMIT_USAGE.labels("15min").set_function(
+    lambda: _SHORT_TERM_LIMITER.current_usage
+)
+STRAVA_RATE_LIMIT_USAGE.labels("daily").set_function(
+    lambda: _DAILY_LIMITER.current_usage
+)
+STRAVA_RATE_LIMIT_CAPACITY.labels("15min").set(RateLimiter.MAX_REQUESTS)
+STRAVA_RATE_LIMIT_CAPACITY.labels("daily").set(1000)
 
 
 class StravaAPI:
@@ -71,7 +160,9 @@ class StravaAPI:
         self.user_id = user_id
         self.oauth = OAuth2Session(config)
         self.token_data = TokenStore.load_token(user_id) or {}
-        self._rate_limiter = RateLimiter()
+        # Shared, not per-instance: Strava's quota belongs to the application,
+        # and this object is built fresh for every request (issue #130).
+        self._rate_limiters = _ALL_LIMITERS
 
     def _ensure_token(self) -> None:
         """Ensure access token is valid, refresh if needed."""
@@ -112,6 +203,11 @@ class StravaAPI:
           - HTTP 429: wait Retry-After (or 60s) then retry
           - HTTP 5xx: exponential backoff (1s, 2s, 4s) then retry
           - HTTP 4xx (not 401/429): raise APIError immediately, no retry
+
+        Raises :class:`RateLimitError` (an ``APIError``, so it surfaces as a
+        502) if the application's own quota window is full and stays full — no
+        call is made in that case, which is the point: the 429 path above is
+        only reached once Strava has already rejected us.
         """
         self._ensure_token()
         headers = {"Authorization": f"Bearer {self.token_data['access_token']}"}
@@ -122,7 +218,7 @@ class StravaAPI:
         # Templated so an activity ID never becomes a metric label value.
         endpoint = normalise_path(path)
         for attempt in range(max_retries):
-            self._rate_limiter.acquire()
+            self._acquire_slot()
             # Inside the retry loop: each attempt is a real call against
             # Strava's quota and is counted as one.
             with track_external("strava", endpoint) as call:
@@ -184,7 +280,27 @@ class StravaAPI:
             params={"keys": "latlng,altitude,time,distance", "key_by_type": "true"},
         )
 
+    def _acquire_slot(self) -> None:
+        """Claim a slot in every quota window before calling Strava.
+
+        Both windows must have room. Failing here means no HTTP call is made at
+        all — which is the whole point of a limiter, versus discovering the
+        quota is gone from a 429.
+        """
+        for limiter in self._rate_limiters:
+            try:
+                limiter.acquire()
+            except RateLimitError:
+                STRAVA_THROTTLED.labels(limiter.name).inc()
+                raise
+
     @property
     def remaining_requests(self) -> int:
-        """Requests still available in the current 15-min rate-limit window."""
-        return RateLimiter.MAX_REQUESTS - self._rate_limiter.current_usage
+        """Requests still available before the tightest quota window is full.
+
+        Callers use this to decide whether to keep fetching or defer the rest
+        (``_enrich_activities`` in api/activities.py). It only became a real
+        signal once the limiters were shared process-wide — per instance it
+        reported a near-full quota on every request (issue #130).
+        """
+        return min(limiter.remaining for limiter in self._rate_limiters)

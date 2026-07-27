@@ -61,6 +61,26 @@ EXTERNAL_DURATION = Histogram(
     ["service", "endpoint"],
 )
 
+# Strava's quotas belong to the application, and the limiters enforcing them are
+# process-wide (issue #130), which is what makes these worth exporting.
+STRAVA_RATE_LIMIT_USAGE = Gauge(
+    "viewtrip_strava_rate_limit_usage",
+    "Strava requests made in the current quota window.",
+    ["window"],
+)
+
+STRAVA_RATE_LIMIT_CAPACITY = Gauge(
+    "viewtrip_strava_rate_limit_capacity",
+    "Strava requests allowed per quota window.",
+    ["window"],
+)
+
+STRAVA_THROTTLED = Counter(
+    "viewtrip_strava_throttled_total",
+    "Calls refused by our own limiter before reaching Strava.",
+    ["window"],
+)
+
 # ── Background jobs (APScheduler) ─────────────────────────────────────────────
 
 JOB_RUNS = Counter(

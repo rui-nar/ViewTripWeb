@@ -32,6 +32,7 @@ from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
 from src.config.settings import Config
+from src.exceptions.errors import RateLimitError
 from src.models.activity import Activity
 from src.utils.logging import get_logger
 
@@ -81,7 +82,7 @@ def _enrich_activities(
     Returns any activities that could not be enriched due to rate limiting.
     """
     pending: List[Activity] = []
-    for act in activities:
+    for index, act in enumerate(activities):
         if act.id is None:
             continue
         if act.is_edited:
@@ -109,6 +110,15 @@ def _enrich_activities(
                     [distance[i] / 1000 for i in range(n)],
                     [altitude[i]        for i in range(n)],
                 )
+        except RateLimitError:
+            # The quota window filled between the check above and the call
+            # (another request got there first — the limiter is process-wide
+            # since issue #130). Defer this one and stop: every remaining
+            # activity would hit the same wall.
+            pending.append(act)
+            pending.extend(a for a in activities[index + 1:]
+                           if a.id is not None and not a.is_edited)
+            break
         except Exception:
             pass  # private activity or network error — skip silently
     return pending

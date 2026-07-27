@@ -98,6 +98,20 @@ templated (`/activities/{id}/streams`). `outcome` ∈ `success`, `client_error`,
 
 Strava counts **every retry attempt**, because each one spends real quota.
 
+Strava's own quotas are tracked separately (issue #130):
+
+| Metric | Labels |
+|---|---|
+| `viewtrip_strava_rate_limit_usage` | `window` (`15min`\|`daily`) |
+| `viewtrip_strava_rate_limit_capacity` | `window` |
+| `viewtrip_strava_throttled_total` | `window` |
+
+`throttled_total` counts calls **our own** limiter refused before they reached
+Strava — distinct from `outcome="rate_limited"`, which means Strava returned a
+429. Usage is process-wide, which is the same single-worker assumption noted
+under *Constraints*: a second worker would keep its own count and the app could
+exceed the quota by a factor of the worker count.
+
 ### Background jobs
 
 | Metric | Labels |
@@ -131,7 +145,8 @@ between scrapes.
 | Pool exhaustion — the issue #35 hang | `viewtrip_db_pool_connections{state="in_use"}` approaching `viewtrip_db_pool_capacity` (60), or any `viewtrip_db_errors_total{kind="pool_timeout"}` |
 | WAL checkpointing has stopped | `viewtrip_db_file_size_bytes{file="wal"}` climbing without ever dropping — `wal_autocheckpoint=0` means only the `wal_checkpoint` job folds it back |
 | Backup silently stopped | `time() - viewtrip_job_last_success_timestamp_seconds{job="daily_backup"} > 90000` |
-| Strava quota being hit | `rate(viewtrip_external_requests_total{service="strava",outcome="rate_limited"}[15m])` |
+| Strava quota nearly spent | `viewtrip_strava_rate_limit_usage / viewtrip_strava_rate_limit_capacity > 0.8` — imports start deferring past this |
+| Strava quota actually hit | any `viewtrip_strava_throttled_total` (our limiter refused), or `viewtrip_external_requests_total{service="strava",outcome="rate_limited"}` (Strava refused) |
 | Credential stuffing | `rate(viewtrip_logins_total{result="failure"}[5m])` |
 | Write contention | `rate(viewtrip_stale_writes_total[5m])` |
 
