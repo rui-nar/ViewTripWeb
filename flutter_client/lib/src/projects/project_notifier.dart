@@ -497,6 +497,7 @@ class ProjectNotifier extends ChangeNotifier
     selectedDays = {};
     pendingSync = null;
     members = [];
+    pendingInvites = [];
     memberInviteToken = null;
     memberInviteRole = null;
     notifyListeners();
@@ -974,6 +975,7 @@ class ProjectNotifier extends ChangeNotifier
     dayMeta = {};
     sleepingOptions = [];
     members = [];
+    pendingInvites = [];
     memberInviteToken = null;
     memberInviteRole = null;
     previewArcNotifier.value = null;
@@ -1184,6 +1186,10 @@ class ProjectNotifier extends ChangeNotifier
   /// if an invite already existed (creation is idempotent).
   String? memberInviteRole;
 
+  /// Invites emailed to someone who hasn't joined yet (issue #110). Co-owner+;
+  /// empty for editors and viewers, who never fetch them.
+  List<PendingInvite> pendingInvites = [];
+
   /// GET members into [members]. Throws ([ApiException] passes through) so
   /// the caller can show an inline error.
   Future<void> loadMembers() async {
@@ -1191,6 +1197,40 @@ class ProjectNotifier extends ChangeNotifier
     if (ref == null) return;
     members = await _membersService.listMembers(ref);
     notifyListeners();
+  }
+
+  /// GET pending email invites into [pendingInvites] (issue #110). Co-owner+
+  /// only, so a 403 for an editor/viewer is expected and leaves the list
+  /// empty rather than surfacing as an error — the section simply has no
+  /// pending block for them.
+  Future<void> loadPendingInvites() async {
+    final ref = this.ref;
+    if (ref == null) return;
+    try {
+      pendingInvites = await _membersService.listPendingInvites(ref);
+    } on ApiException catch (e) {
+      if (e.statusCode != 403) rethrow;
+      pendingInvites = [];
+    }
+    notifyListeners();
+  }
+
+  /// Revoke one pending invite (issue #110). Optimistic, mirroring
+  /// [removeMember]: the row disappears immediately and is restored if the
+  /// request fails (rethrown).
+  Future<void> revokePendingInvite(int inviteId) async {
+    final ref = this.ref;
+    if (ref == null) return;
+    final prev = pendingInvites;
+    pendingInvites = [for (final p in pendingInvites) if (p.id != inviteId) p];
+    notifyListeners();
+    try {
+      await _membersService.revokePendingInvite(ref, inviteId);
+    } on Exception {
+      pendingInvites = prev;
+      notifyListeners();
+      rethrow;
+    }
   }
 
   /// Create (or re-fetch — idempotent) the invite token with the given
