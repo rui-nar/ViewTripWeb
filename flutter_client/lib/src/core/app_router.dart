@@ -11,6 +11,7 @@ import '../auth/auth_notifier.dart';
 import '../auth/forced_change_password_screen.dart';
 import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
+import '../auth/verify_email_screen.dart';
 import '../auth/welcome_screen.dart';
 import 'last_opened_project.dart';
 import 'return_to.dart';
@@ -56,6 +57,12 @@ Future<String?> authRedirectTarget(AuthNotifier auth, Uri uri) async {
 
   // Shared-project links are accessible without login.
   if (loc.startsWith('/share/')) return null;
+
+  // Email-verification links (issue #110) are accessible either way: the
+  // recipient clicks from their inbox, which may be a different browser with
+  // no session — and a signed-in user must not be bounced to /projects before
+  // the token is consumed.
+  if (loc.startsWith('/verify-email/')) return null;
 
   // Invite deep links (issue #106) require login. Send the visitor to
   // the login screen with the invite URL as return_to — the same
@@ -212,6 +219,11 @@ GoRouter buildRouter(BuildContext context) {
         path: '/join/:token',
         builder: (context, state) =>
             JoinTripScreen(token: state.pathParameters['token']!),
+      ),
+      GoRoute(
+        path: '/verify-email/:token',
+        builder: (context, state) =>
+            VerifyEmailScreen(token: state.pathParameters['token']!),
       ),
       GoRoute(
         path: '/share/:token',

@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
+import '../auth/verify_email_banner.dart';
 import '../core/project_ref.dart';
 import 'projects_notifier.dart';
 
@@ -180,6 +181,8 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // ── Unverified-email prompt (issue #110) ──────────────────
+                const VerifyEmailBanner(),
                 // ── Error banner ──────────────────────────────────────────
                 Consumer<ProjectsNotifier>(
                   builder: (_, notifier, __) {

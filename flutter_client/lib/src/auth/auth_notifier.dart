@@ -12,6 +12,10 @@ class User {
   final String avatarUrl;
   final String authProvider; // "local" | "google"
   final bool isAdmin;
+
+  /// Whether the account's email address has been confirmed (issue #110).
+  /// Gates sending invite mail and being matched to a pending invite.
+  final bool emailVerified;
   final bool passwordChangeRequired;
 
   const User({
@@ -21,6 +25,7 @@ class User {
     required this.avatarUrl,
     required this.authProvider,
     this.isAdmin = false,
+    this.emailVerified = false,
     this.passwordChangeRequired = false,
   });
 
@@ -31,6 +36,7 @@ class User {
         avatarUrl: map['avatar_url'] as String? ?? '',
         authProvider: map['auth_provider'] as String? ?? 'local',
         isAdmin: map['is_admin'] == true,
+        emailVerified: map['email_verified'] == true,
         passwordChangeRequired: map['password_change_required'] == true,
       );
 
@@ -186,6 +192,18 @@ class AuthNotifier extends ChangeNotifier {
       notifyListeners();
     } catch (_) {}
   }
+
+  /// Consume an emailed verification token (issue #110), then refresh the
+  /// profile so the "verify your email" banner clears without a re-login.
+  /// Rethrows so the screen can show why a link failed.
+  Future<void> verifyEmail(String token) async {
+    await _service.verifyEmail(token);
+    if (_user != null) await refreshProfile();
+  }
+
+  /// Request a fresh verification email. Rethrows [ApiException] so the caller
+  /// can distinguish a 429 (too many requests) from a network failure.
+  Future<void> resendVerification() => _service.resendVerification();
 
   void clearError() {
     _error = null;

@@ -4,6 +4,8 @@ Routes:
     POST   /api/auth/token           — email + password → JWT
     POST   /api/auth/register        — create account → JWT
     POST   /api/auth/google          — Google id_token → JWT
+    POST   /api/auth/verify-email    — confirm an address from an emailed token
+    POST   /api/auth/resend-verification — reissue and resend that token
     GET    /api/auth/me              — current user profile
     PUT    /api/auth/me              — update display name → refreshed JWT
     POST   /api/auth/change-password — change password (local accounts only)
@@ -14,13 +16,19 @@ from __future__ import annotations
 from typing import Annotated
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import select
 
+from src.auth.email_verification import (
+    consume_token,
+    issue_token,
+    send_verification_email,
+)
 from src.email.address import is_valid_email, normalize_email
+from src.utils.rate_limit import consume_rate_limit
 
 from models.db import get_session
 from models.user import LocalUser
@@ -110,6 +118,9 @@ class GoogleTokenRequest(BaseModel):
 class UpdateProfileRequest(BaseModel):
     display_name: str = Field(description="New public display name")
 
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(description="Verification token from the emailed link")
+
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(description="Current password for verification")
     new_password: str = Field(description="New password to set")
@@ -143,6 +154,7 @@ def _token_response(
             "avatar_url": user_info.avatar_url,
             "auth_provider": user_info.auth_provider,
             "is_admin": bool(user_info.is_admin),
+            "email_verified": bool(user_info.email_verified),
             "password_change_required": bool(password_change_required),
         },
     )
@@ -188,8 +200,13 @@ def login(body: TokenRequest):
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
              summary="Register a new account")
-def register(body: RegisterRequest):
-    """Create a new local account — returns a JWT."""
+def register(body: RegisterRequest, background_tasks: BackgroundTasks):
+    """Create a new local account — returns a JWT.
+
+    Also queues a verification email (issue #110). Queued, not awaited: the
+    account is usable immediately and a slow or dead relay must never fail a
+    registration that otherwise succeeded.
+    """
     with get_session() as sess:
         existing = sess.exec(
             select(LocalUser).where(LocalUser.username == body.username)
@@ -221,6 +238,12 @@ def register(body: RegisterRequest):
         sess.commit()
         sess.refresh(user_info)
         REGISTRATIONS.labels("password").inc()
+
+        verification = issue_token(sess, user_info)
+        background_tasks.add_task(
+            send_verification_email, user_info.email, user_info.display_name,
+            verification.token)
+
         return _token_response(user_info)
 
 
@@ -293,10 +316,72 @@ def google_login(body: GoogleTokenRequest):
         return _token_response(user_info)
 
 
+@router.post("/verify-email", response_model=OkOut, summary="Confirm an email address")
+def verify_email(body: VerifyEmailRequest):
+    """Consume a verification token and mark the account's address verified.
+
+    Unauthenticated on purpose: the recipient clicks this from their inbox and
+    may not have a session in that browser. The token is the proof — it is
+    single-use, expires, and only matches the address it was issued for.
+    """
+    with get_session() as sess:
+        user = consume_token(sess, body.token)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This verification link is invalid or has expired. "
+                       "Request a new one from your account.",
+            )
+        return {"ok": True}
+
+
+@router.post("/resend-verification", response_model=OkOut,
+             summary="Resend the verification email")
+def resend_verification(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+):
+    """Issue a fresh verification token and email it, invalidating the previous
+    one. No-op (still 200) for an already-verified account, so the client never
+    has to branch on it."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        user_info = sess.get(UserInfo, user_info_id)
+        if user_info is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="User not found")
+        if user_info.email_verified or not user_info.email:
+            return {"ok": True}
+
+        if not consume_rate_limit(f"verify-resend:{user_info_id}"):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many verification emails requested. "
+                       "Please wait a few minutes and try again.",
+            )
+
+        verification = issue_token(sess, user_info)
+        background_tasks.add_task(
+            send_verification_email, user_info.email, user_info.display_name,
+            verification.token)
+        return {"ok": True}
+
+
 @router.get("/me", summary="Get current user profile")
 def me(current_user: Annotated[dict, Depends(get_current_user)]):
-    """Return the current user's profile decoded from the JWT."""
-    return current_user
+    """Return the current user's profile decoded from the JWT.
+
+    ``email_verified`` is re-read from the database rather than trusted from
+    the token (issue #110): verifying does not mint a new JWT, so the claim
+    would keep reporting False until the old token expired — the client would
+    show "verify your email" to someone who just did.
+    """
+    profile = dict(current_user)
+    with get_session() as sess:
+        user_info = sess.get(UserInfo, int(current_user["sub"]))
+        if user_info is not None:
+            profile["email_verified"] = bool(user_info.email_verified)
+    return profile
 
 
 @router.put("/me", response_model=TokenResponse, summary="Update display name")

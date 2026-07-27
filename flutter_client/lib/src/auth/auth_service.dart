@@ -54,6 +54,21 @@ class AuthService {
     return data['user'] as Map<String, dynamic>;
   }
 
+  /// POST /api/auth/verify-email — consumes an emailed verification token
+  /// (issue #110). Unauthenticated: the recipient may click the link in a
+  /// browser with no session. Throws [ApiException] 404 when the token is
+  /// unknown, expired, or already used.
+  Future<void> verifyEmail(String token) async {
+    await api.post('/api/auth/verify-email', {'token': token});
+  }
+
+  /// POST /api/auth/resend-verification — reissues and resends the token,
+  /// invalidating the previous one. Throws [ApiException] 429 when the
+  /// caller has requested too many recently.
+  Future<void> resendVerification() async {
+    await api.post('/api/auth/resend-verification', {});
+  }
+
   /// Fetches the current user's profile from the server.
   /// Requires a valid token to already be set on [api].
   Future<Map<String, dynamic>> getMe() async {

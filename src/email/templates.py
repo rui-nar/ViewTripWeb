@@ -32,3 +32,17 @@ def render_invite_email(
     text_body = _env.get_template("invite.txt.jinja2").render(ctx)
     html_body = _env.get_template("invite.html.jinja2").render(ctx)
     return text_body, html_body
+
+
+def render_verification_email(
+    *, display_name: str, verify_url: str, expires_hours: int
+) -> tuple[str, str]:
+    """Render the email-verification message (issue #110). Returns (text, html)."""
+    ctx = {
+        "display_name": display_name,
+        "verify_url": verify_url,
+        "expires_hours": expires_hours,
+    }
+    text_body = _env.get_template("verify.txt.jinja2").render(ctx)
+    html_body = _env.get_template("verify.html.jinja2").render(ctx)
+    return text_body, html_body
