@@ -17,8 +17,10 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlmodel import select
+
+from src.email.address import is_valid_email, normalize_email
 
 from models.db import get_session
 from models.user import LocalUser
@@ -71,9 +73,36 @@ class TokenRequest(BaseModel):
     password: str = Field(description="Account password")
 
 class RegisterRequest(BaseModel):
-    username: str = Field(description="Email address or username")
+    """New accounts are keyed by email address (issue #110).
+
+    An address is required because pending invites are matched against it —
+    an account with no email can never receive one. Existing accounts are
+    unaffected: only registration validates, so the seeded ``admin`` account
+    (``src/admin/bootstrap.py``, username "admin", no email) still logs in.
+    """
+
+    username: str = Field(description="Email address — also the login identifier")
     password: str = Field(description="Account password")
-    display_name: str = Field("", description="Public display name (defaults to username)")
+    first_name: str = Field(description="Given name; combined into the display name")
+    last_name: str = Field(description="Family name; combined into the display name")
+
+    @field_validator("username")
+    @classmethod
+    def _must_be_email(cls, v: str) -> str:
+        if not is_valid_email(v):
+            raise ValueError("Must be a valid email address")
+        return normalize_email(v)
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def _must_not_be_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Must not be empty")
+        return v.strip()
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.first_name} {self.last_name}"
 
 class GoogleTokenRequest(BaseModel):
     id_token: str = Field(description="JWT credential from Google One Tap or GIS")
@@ -180,8 +209,11 @@ def register(body: RegisterRequest):
 
         user_info = UserInfo(
             local_auth_id=local_user.id,
-            display_name=body.display_name or body.username,
-            email="",
+            display_name=body.display_name,
+            # The username *is* the address (validated above), so the account
+            # is reachable from the moment it exists — previously this was
+            # hardcoded empty, which left every local account unmailable.
+            email=body.username,
             auth_provider="local",
             is_admin=_is_admin_email(body.username),
         )

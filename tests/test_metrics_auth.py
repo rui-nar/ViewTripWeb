@@ -39,7 +39,9 @@ def client(engine):
 
 def _register(client, username="rider@example.com", password="s3cret"):
     return client.post(
-        "/api/auth/register", json={"username": username, "password": password}
+        "/api/auth/register",
+        json={"username": username, "password": password,
+              "first_name": "Test", "last_name": "Rider"},
     )
 
 

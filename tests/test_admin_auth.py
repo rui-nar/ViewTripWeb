@@ -151,6 +151,7 @@ class TestAdminEmailsPromotion:
         monkeypatch.setenv("ADMIN_EMAILS", "Boss@Corp.IO, other@x.io")
         resp = auth_client.post("/api/auth/register", json={
             "username": "boss@corp.io", "password": "pw",
+            "first_name": "Boss", "last_name": "Person",
         })
         assert resp.status_code == 201
         assert resp.json()["user"]["is_admin"] is True
@@ -158,7 +159,8 @@ class TestAdminEmailsPromotion:
     def test_login_promotes_existing_user(self, engine, auth_client, monkeypatch):
         # Register a non-admin first (no ADMIN_EMAILS set).
         auth_client.post("/api/auth/register",
-                         json={"username": "later@x.io", "password": "pw"})
+                         json={"username": "later@x.io", "password": "pw",
+                               "first_name": "Later", "last_name": "User"})
         with Session(engine) as sess:
             ui = sess.exec(
                 select(UserInfo).join(LocalUser,
@@ -176,7 +178,8 @@ class TestAdminEmailsPromotion:
     def test_non_matching_email_not_promoted(self, engine, auth_client, monkeypatch):
         monkeypatch.setenv("ADMIN_EMAILS", "someone@else.io")
         resp = auth_client.post("/api/auth/register",
-                                json={"username": "nobody@x.io", "password": "pw"})
+                                json={"username": "nobody@x.io", "password": "pw",
+                                      "first_name": "No", "last_name": "Body"})
         assert resp.json()["user"]["is_admin"] is False
 
 
@@ -195,7 +198,8 @@ class TestTokenAndMeFields:
 
     def test_regular_user_me_has_false_flags(self, engine, auth_client):
         reg = auth_client.post("/api/auth/register",
-                               json={"username": "plain@x.io", "password": "pw"})
+                               json={"username": "plain@x.io", "password": "pw",
+                                     "first_name": "Plain", "last_name": "User"})
         token = reg.json()["access_token"]
         me = auth_client.get("/api/auth/me",
                              headers={"Authorization": f"Bearer {token}"}).json()

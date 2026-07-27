@@ -127,19 +127,22 @@ class AuthNotifier extends ChangeNotifier {
     }
   }
 
+  /// [email] is the login identifier as well as the address the account is
+  /// reachable at (issue #110). [firstName] / [lastName] become the display
+  /// name server-side.
   Future<void> register(
-    String username,
+    String email,
     String password, {
-    String displayName = '',
-    String email = '',
+    required String firstName,
+    required String lastName,
   }) async {
     _setLoading(true);
     try {
       final map = await _service.register(
-        username,
+        email,
         password,
-        displayName: displayName,
-        email: email,
+        firstName: firstName,
+        lastName: lastName,
       );
       _user = User.fromMap(map);
       _error = null;
