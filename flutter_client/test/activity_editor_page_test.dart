@@ -54,6 +54,80 @@ Map<String, dynamic> _activity({bool edited = false}) {
   };
 }
 
+/// A longer fixture (6 points, lon 2.00..2.05) for the split/cut tests: after a
+/// deletion the track must still leave a valid "Cut & add transport" boundary,
+/// which needs index <= length - 3.
+Map<String, dynamic> _longActivity() {
+  final track = <GeoPoint>[
+    for (var i = 0; i < 6; i++) (lat: 48.0, lon: 2.0 + i * 0.01),
+  ];
+  return {
+    'id': 111,
+    'name': 'Test Ride',
+    'is_edited': false,
+    'map': {'summary_polyline': _encode(track)},
+    'elevation_profile': [for (var i = 0; i < 6; i++) [i.toDouble(), 100.0 + i * 10]],
+  };
+}
+
+/// Captures the split calls the page makes instead of reaching the network.
+class _RecordingNotifier extends ProjectNotifier {
+  _RecordingNotifier() : super(ProjectService()) {
+    ref = const ProjectRef(name: 'Trip');
+  }
+
+  final List<({int index, bool dropBoundary, Map<String, dynamic>? payload})>
+      splits = [];
+
+  @override
+  Future<void> splitActivity(
+    int activityId,
+    int splitIndex, {
+    bool dropBoundary = false,
+    Map<String, dynamic>? payload,
+  }) async {
+    splits.add(
+        (index: splitIndex, dropBoundary: dropBoundary, payload: payload));
+  }
+}
+
+/// Push the editor onto a route (as ActivityPanel does) so the page's pop-on-
+/// success has a route to return to.
+Future<void> _pumpPushed(
+  WidgetTester tester,
+  Map<String, dynamic> activity,
+  ProjectNotifier notifier,
+) async {
+  tester.view.physicalSize = const Size(1200, 1000);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+
+  await tester.pumpWidget(MaterialApp(
+    home: Scaffold(
+      body: Builder(
+        builder: (ctx) => TextButton(
+          onPressed: () => Navigator.of(ctx).push(MaterialPageRoute(
+            builder: (_) =>
+                ActivityEditorPage(notifier: notifier, activity: activity),
+          )),
+          child: const Text('open editor'),
+        ),
+      ),
+    ),
+  ));
+  await tester.tap(find.text('open editor'));
+  await tester.pumpAndSettle();
+}
+
+/// Long-press the vertex handle at [index] and choose [label] from its menu.
+Future<void> _pointMenu(WidgetTester tester, int index, String label) async {
+  await tester.longPress(find.byKey(ValueKey('vertex_$index')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label));
+  await tester.pumpAndSettle();
+}
+
 Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity) async {
   tester.view.physicalSize = const Size(1200, 1000);
   tester.view.devicePixelRatio = 1.0;
@@ -209,5 +283,70 @@ void main() {
     // The move is committed through moveVertex → the save payload reflects it.
     final payload = (c.toSavePayload()['points'] as List).first as Map;
     expect(payload['lat'], closeTo(after.lat, 1e-9));
+  });
+
+  // ── Edits compound with Split / Cut (issue #127) ───────────────────────────
+  // The editor holds edits locally until Save, so a split that sent only an
+  // index discarded them — and applied that index to a different point list
+  // than the one on screen. Both actions now carry the current points.
+
+  List<double> lngsOf(Map<String, dynamic>? payload) => [
+        for (final p in (payload?['points'] as List? ?? [])) (p as Map)['lng'] as double,
+      ];
+
+  testWidgets('Cut & add transport carries the points left after a deletion',
+      (tester) async {
+    final notifier = _RecordingNotifier();
+    await _pumpPushed(tester, _longActivity(), notifier);
+
+    // Delete the vertex at index 1 (lon 2.01), then cut at index 2 of what's left.
+    await _pointMenu(tester, 1, 'Delete point');
+    await _pointMenu(tester, 2, 'Cut & add transport');
+    await tester.tap(find.widgetWithText(FilledButton, 'Cut'));
+    await tester.pumpAndSettle();
+
+    expect(notifier.splits, hasLength(1));
+    final call = notifier.splits.single;
+    expect(call.dropBoundary, isTrue);
+    expect(call.index, 2);
+    // The cut carries the post-deletion track: 5 points, without lon 2.01.
+    expect(lngsOf(call.payload), hasLength(5));
+    expect(lngsOf(call.payload).any((l) => (l - 2.01).abs() < 1e-6), isFalse,
+        reason: 'the deleted point must not come back with the cut');
+  });
+
+  testWidgets('Split here carries the edited points too', (tester) async {
+    final notifier = _RecordingNotifier();
+    await _pumpPushed(tester, _longActivity(), notifier);
+
+    await _pointMenu(tester, 1, 'Delete point');
+    await _pointMenu(tester, 2, 'Split here');
+    await tester.tap(find.widgetWithText(FilledButton, 'Split'));
+    await tester.pumpAndSettle();
+
+    final call = notifier.splits.single;
+    expect(call.dropBoundary, isFalse);
+    expect(lngsOf(call.payload), hasLength(5));
+    expect(lngsOf(call.payload).any((l) => (l - 2.01).abs() < 1e-6), isFalse);
+  });
+
+  testWidgets('the confirmation says pending edits are applied, only when dirty',
+      (tester) async {
+    final notifier = _RecordingNotifier();
+    await _pumpPushed(tester, _longActivity(), notifier);
+
+    // Clean editor: no note.
+    await tester.longPress(find.byKey(const ValueKey('vertex_2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cut & add transport'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('unsaved point edits'), findsNothing);
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    // After an edit, the same confirmation warns that it will be applied.
+    await _pointMenu(tester, 1, 'Delete point');
+    await _pointMenu(tester, 2, 'Cut & add transport');
+    expect(find.textContaining('unsaved point edits'), findsOneWidget);
   });
 }

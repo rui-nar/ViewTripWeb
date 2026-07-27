@@ -297,6 +297,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     }
   }
 
+  /// Note appended to the Split / Cut confirmations when the editor holds
+  /// unsaved changes: those points are what gets cut (#127), so say so rather
+  /// than let the user assume the stored track is being split.
+  String get _pendingEditsNote => _c.isDirty
+      ? '\n\nYour unsaved point edits will be applied as part of this.'
+      : '';
+
   Future<void> _confirmSplit(int index) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -304,7 +311,7 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         title: const Text('Split activity'),
         content: Text(
           'Split into two activities at point ${index + 1}? '
-          'The second half becomes a new local activity.',
+          'The second half becomes a new local activity.$_pendingEditsNote',
         ),
         actions: [
           TextButton(
@@ -323,7 +330,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      await widget.notifier.splitActivity(_activityId, index);
+      await widget.notifier
+          .splitActivity(_activityId, index, payload: _c.toSavePayload());
       if (!mounted) return;
       navigator.pop(true);
     } catch (e) {
@@ -345,7 +353,7 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         content: Text(
           'Cut the track at point ${index + 1}? The portion after this point '
           'becomes a new local activity, and you\'ll be prompted to add a '
-          'transportation segment to bridge the gap.',
+          'transportation segment to bridge the gap.$_pendingEditsNote',
         ),
         actions: [
           TextButton(
@@ -364,8 +372,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      await widget.notifier
-          .splitActivity(_activityId, index, dropBoundary: true);
+      await widget.notifier.splitActivity(_activityId, index,
+          dropBoundary: true, payload: _c.toSavePayload());
       if (!mounted) return;
       navigator.pop({'openSegmentFor': _activityId});
     } catch (e) {

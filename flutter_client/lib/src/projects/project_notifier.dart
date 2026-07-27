@@ -1504,15 +1504,20 @@ class ProjectNotifier extends ChangeNotifier
   /// Split [activityId] at [splitIndex]; the tail becomes a new local activity.
   /// When [dropBoundary] is true, the tail excludes the shared boundary point
   /// (#104 — used when a transportation segment will bridge the cut).
+  ///
+  /// [payload] is the editor's TrackEditModel.toSavePayload, i.e. the point list
+  /// [splitIndex] indexes into, so pending edits are cut along with the track
+  /// rather than discarded (#127).
   Future<void> splitActivity(
     int activityId,
     int splitIndex, {
     bool dropBoundary = false,
+    Map<String, dynamic>? payload,
   }) async {
     final ref = this.ref;
     if (ref == null) return;
     await _service.splitActivity(ref, activityId, splitIndex,
-        dropBoundary: dropBoundary);
+        dropBoundary: dropBoundary, payload: payload);
     await _silentReload(ref);
   }
 

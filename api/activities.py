@@ -530,6 +530,14 @@ class SplitRequest(BaseModel):
         description="If true, exclude the boundary point from the tail instead "
                     "of sharing it — used when a transportation segment will "
                     "bridge the gap at the cut (issue #104)")
+    points: Optional[List[TrackPointIn]] = Field(
+        default=None,
+        description="The client's current (possibly unsaved) edited track. When "
+                    "given, the split is taken from these points and split_index "
+                    "indexes into them; when omitted the stored geometry is used. "
+                    "Issue #127: without this the editor's pending trims/deletes "
+                    "were discarded by a split and split_index was applied to a "
+                    "different point list than the one the user was looking at.")
 
 
 @router.post("/{name}/activities/{activity_id}/split",
@@ -545,8 +553,23 @@ def split_activity(
     """Split an activity at *split_index*: the head keeps its Strava id, the tail
     becomes a new LOCAL activity (negative id, manual, "<name> (2)") inserted
     right after the head. Both pieces are marked edited. Returns the updated project.
+
+    When *points* is supplied the split is taken from that (edited) track rather
+    than the stored one, so unsaved editor changes compound with the cut instead
+    of being discarded (issue #127).
     """
+    from src.models.track_edit import TrackPoint
+
     user_info_id = int(current_user["sub"])
+    edited_points = (
+        [TrackPoint(lat=p.lat, lng=p.lng, elev=p.elev) for p in body.points]
+        if body.points is not None else None
+    )
+    if edited_points is not None and len(edited_points) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="A track needs at least 2 points",
+        )
     # Phase-timed (issue #45 follow-up) — see edit_activity_track for why.
     t0 = time.time()
     with get_session() as sess:
@@ -565,7 +588,7 @@ def split_activity(
         try:
             tail_id = _repo.split_activity(
                 sess, owner_id, row.id, activity_id, body.split_index,
-                drop_boundary=body.drop_boundary)
+                drop_boundary=body.drop_boundary, points=edited_points)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))

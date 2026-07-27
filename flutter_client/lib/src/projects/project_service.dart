@@ -192,6 +192,12 @@ class ProjectService {
   /// (#104 — used when a transportation segment will bridge the cut).
   /// POST /api/projects/{name}/activities/{id}/split
   ///
+  /// [payload] is the editor's current TrackEditModel.toSavePayload — the point
+  /// list [splitIndex] indexes into. Sending it lets the server cut the track
+  /// the user is actually looking at, so unsaved trims/deletes compound with
+  /// the split instead of being discarded (#127). Omit it to split the stored
+  /// geometry.
+  ///
   /// Generous timeout: on a large trip, committing the split + reloading and
   /// serialising the updated project can take well over the client's default
   /// 30s (this response is discarded by the caller anyway — see
@@ -201,10 +207,15 @@ class ProjectService {
     int activityId,
     int splitIndex, {
     bool dropBoundary = false,
+    Map<String, dynamic>? payload,
   }) async {
     final data = await api.post(
       ref.path('/activities/$activityId/split'),
-      {'split_index': splitIndex, 'drop_boundary': dropBoundary},
+      {
+        'split_index': splitIndex,
+        'drop_boundary': dropBoundary,
+        if (payload != null) ...payload,
+      },
       timeout: const Duration(minutes: 2),
     );
     return data as Map<String, dynamic>;
