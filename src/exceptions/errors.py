@@ -25,6 +25,17 @@ class APIError(ViewTripException):
     pass
 
 
+class RateLimitError(APIError):
+    """Raised when the app's own Strava quota window is full.
+
+    A subclass of APIError so the existing app-level handler still maps it to a
+    502 "integration temporarily unavailable" — the client-facing outcome is the
+    same, but no request is sent to Strava at all.
+    """
+
+    pass
+
+
 class TokenError(ViewTripException):
     """Raised when token management fails."""
 

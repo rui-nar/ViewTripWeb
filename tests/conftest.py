@@ -8,6 +8,21 @@ from prometheus_client import REGISTRY
 from src.models.activity import Activity
 
 
+@pytest.fixture(autouse=True)
+def _reset_strava_rate_limiters():
+    """Clear the process-wide Strava quota windows around every test.
+
+    The limiters are shared by design (issue #130 — Strava's quota is per
+    application), which means one test's mocked calls otherwise count against
+    the next one's, and a suite making 100+ calls would start really sleeping.
+    """
+    from src.api.strava_client import reset_rate_limiters
+
+    reset_rate_limiters()
+    yield
+    reset_rate_limiters()
+
+
 @pytest.fixture
 def metric():
     """Read a Prometheus sample by name + labels, 0.0 if the series is absent.
