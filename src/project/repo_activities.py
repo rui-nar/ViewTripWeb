@@ -262,8 +262,16 @@ class ActivityMixin:
         activity_id: int,
         split_index: int,
         drop_boundary: bool = False,
+        points: Optional[list] = None,
     ) -> Optional[int]:
         """Split an activity into a head (keeps id) and a local tail (negative id).
+
+        *points* is the caller's current track. The editor holds its edits locally
+        until Save, so a split driven from the stored geometry silently discarded
+        them AND applied *split_index* to a different point list than the one the
+        user was looking at (issue #127); passing the edited points makes the cut
+        compound with them in this one commit. When None the stored geometry is
+        used, which is what a split with no pending edits sends.
 
         The boundary point at *split_index* is shared by default: the head keeps
         ``points[:split_index+1]`` and the tail gets ``points[split_index:]`` so
@@ -281,13 +289,15 @@ class ActivityMixin:
         Returns the new tail activity id, or None if the activity is missing.
         Raises ValueError if *split_index* does not yield two non-trivial pieces.
         """
-        from src.models.track_edit import align_points, points_to_polyline
+        from src.models.track_edit import align_points
 
         head = sess.get(DBActivity, activity_id)
         if head is None:
             return None
 
-        points = align_points(head.summary_polyline, _parse_ep(head.elevation_profile_json))
+        if points is None:
+            points = align_points(
+                head.summary_polyline, _parse_ep(head.elevation_profile_json))
         # Need at least 2 points on each side of the boundary (3 on the tail side
         # when dropping the boundary, so 2 remain once it's excluded).
         min_tail_start = split_index + 1 if drop_boundary else split_index
@@ -337,6 +347,12 @@ class ActivityMixin:
         # Seed the tail with the FULL pre-split geometry + the original scalar
         # times so _write_track_geometry apportions the tail's time to its own
         # retained fraction (tail_length / full_length), mirroring the head.
+        # This stays the STORED geometry even when the caller supplied edited
+        # points (issue #127): the head's own apportioning below also measures
+        # against the stored track, so both pieces share one denominator and
+        # their times sum to the edited track's share of the original. Seeding
+        # from the edited points instead would give the tail a smaller
+        # denominator than the head and inflate it.
         tail.summary_polyline = head.summary_polyline
         tail.elevation_profile_json = head.elevation_profile_json
         sess.add(tail)

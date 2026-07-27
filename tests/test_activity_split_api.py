@@ -191,6 +191,108 @@ def test_split_drop_boundary_requires_two_points_after_boundary(env):
     assert resp.status_code == 200, resp.text
 
 
+# ── Splitting on top of unsaved editor edits (issue #127) ─────────────────────
+# The track editor holds trims/deletes/moves locally until Save. A split driven
+# from the stored geometry therefore discarded them AND applied split_index to a
+# point list the user was not looking at, so the cut also landed in the wrong
+# place. The client now sends its current points along with the split.
+
+# The stored track with the middle point (2.02) deleted — the state on the
+# user's screen, which the server has never been told about.
+_EDITED = _TRACK[:2] + _TRACK[3:]
+
+
+def _points_body(track):
+    return [{"lat": lat, "lng": lng} for lat, lng in track]
+
+
+def _decoded(engine, activity_id):
+    with Session(engine) as sess:
+        return polyline_lib.decode(sess.get(DBActivity, activity_id).summary_polyline)
+
+
+def test_split_uses_supplied_edited_points(env):
+    """A cut made on top of unsaved edits compounds with them (issue #127)."""
+    client, engine = env
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 1, "points": _points_body(_EDITED)},
+    )
+    assert resp.status_code == 200, resp.text
+    tail_id = next(i for i in (a["id"] for a in resp.json()["activities"]) if i < 0)
+
+    head_pts, tail_pts = _decoded(engine, 111), _decoded(engine, tail_id)
+    # The deleted point survives in neither piece.
+    assert all(lng != 2.02 for _, lng in head_pts + tail_pts)
+    # And the cut landed at index 1 of the EDITED list, not of the stored one.
+    assert head_pts == [(48.0, 2.0), (48.0, 2.01)]
+    assert tail_pts == [(48.0, 2.01), (48.0, 2.03), (48.0, 2.04)]
+
+
+def test_split_index_validated_against_supplied_points(env):
+    """An index valid for the stored track but out of range for the shorter
+    edited one is rejected, not silently applied to the stored geometry."""
+    client, _ = env
+    # The stored track has 5 points, so split_index=3 is fine there; the edited
+    # list has 4, leaving only one point for the tail.
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 3, "points": _points_body(_EDITED)},
+    )
+    assert resp.status_code == 422
+
+
+def test_split_rejects_a_degenerate_supplied_track(env):
+    client, _ = env
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 1, "points": _points_body(_TRACK[:1])},
+    )
+    assert resp.status_code == 422
+
+
+def test_split_without_points_uses_stored_track(env):
+    """Omitting points keeps the pre-#127 behaviour — the split is taken from
+    the stored geometry."""
+    client, engine = env
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    assert resp.status_code == 200, resp.text
+    tail_id = next(i for i in (a["id"] for a in resp.json()["activities"]) if i < 0)
+    assert _decoded(engine, 111) == _TRACK[:3]
+    assert _decoded(engine, tail_id) == _TRACK[2:]
+
+
+def test_split_with_edited_points_apportions_times_against_the_stored_track(env):
+    """Head and tail share ONE denominator — the stored track — so their times
+    sum to the edited track's share of the original, with the trimmed section's
+    share dropped rather than redistributed between the two pieces.
+
+    Seeding the tail from the edited points instead would give it a smaller
+    denominator than the head and inflate it.
+
+    Uses a trim rather than _EDITED: deleting a collinear midpoint leaves the
+    path length unchanged, so it cannot tell the two apportionings apart.
+    """
+    client, _ = env
+    trimmed = _TRACK[:4]
+    resp = client.post(
+        "/api/projects/My Trip/activities/111/split",
+        json={"split_index": 1, "points": _points_body(trimmed)},
+    )
+    assert resp.status_code == 200, resp.text
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    tail = next(a for i, a in acts.items() if i < 0)
+
+    def _len(track):
+        return recompute_track_metrics(
+            align_points(polyline_lib.encode(track), None)).distance
+
+    expected = 1000 * _len(trimmed) / _len(_TRACK)   # moving_time seeded at 1000
+    assert acts[111]["moving_time"] + tail["moving_time"] == pytest.approx(
+        expected, abs=2)
+
+
 def test_delete_local_removes_row_and_item(env):
     client, engine = env
     resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
