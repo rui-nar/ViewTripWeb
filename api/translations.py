@@ -7,6 +7,8 @@ from typing import Optional
 
 import httpx
 
+from src.utils.metrics import outcome_for_status, track_external
+
 _TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2"
 _GOOGLE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "")
 
@@ -35,6 +37,8 @@ async def translate_text(
         params["source"] = source_lang
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(_TRANSLATE_URL, params=params)
-        r.raise_for_status()
+        with track_external("google_translate", "/translate") as call:
+            r = await client.post(_TRANSLATE_URL, params=params)
+            call.outcome = outcome_for_status(r.status_code)
+            r.raise_for_status()
         return r.json()["data"]["translations"][0]["translatedText"]

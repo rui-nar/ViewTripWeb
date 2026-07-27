@@ -41,6 +41,7 @@ class TestTranslateText:
         from api.translations import translate_text
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "data": {"translations": [{"translatedText": "Bonjour"}]}
@@ -62,6 +63,7 @@ class TestTranslateText:
         from api.translations import translate_text
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "data": {"translations": [{"translatedText": "Hola"}]}
@@ -87,6 +89,7 @@ class TestTranslateText:
         from api.translations import translate_text
 
         mock_response = MagicMock()
+        mock_response.status_code = 403
         mock_response.raise_for_status = MagicMock(
             side_effect=httpx.HTTPStatusError(
                 "403 Forbidden", request=MagicMock(), response=MagicMock()
@@ -108,6 +111,7 @@ class TestTranslateText:
         from api.translations import translate_text
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "data": {"translations": [{"translatedText": "Ciao"}]}

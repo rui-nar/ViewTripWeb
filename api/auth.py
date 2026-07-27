@@ -29,6 +29,7 @@ import os
 
 from src.config.settings import Config
 from src.utils.logging import get_logger
+from src.utils.metrics import LOGINS, REGISTRATIONS
 
 _log = get_logger(__name__)
 
@@ -128,6 +129,7 @@ def login(body: TokenRequest):
             select(LocalUser).where(LocalUser.username == body.username)
         ).first()
         if not user or not user.enabled or not user.verify(body.password):
+            LOGINS.labels("password", "failure").inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials",
@@ -151,6 +153,7 @@ def login(body: TokenRequest):
             sess.add(user_info)
             sess.commit()
             sess.refresh(user_info)
+        LOGINS.labels("password", "success").inc()
         return _token_response(user_info, user.password_change_required)
 
 
@@ -185,6 +188,7 @@ def register(body: RegisterRequest):
         sess.add(user_info)
         sess.commit()
         sess.refresh(user_info)
+        REGISTRATIONS.labels("password").inc()
         return _token_response(user_info)
 
 
@@ -209,6 +213,7 @@ def google_login(body: GoogleTokenRequest):
         # The client only ever sees a generic 401, so log the real reason here —
         # without it every Google auth failure is undiagnosable.
         _log.warning("Google id_token verification failed: %s", exc)
+        LOGINS.labels("google", "failure").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Google id_token",
@@ -225,6 +230,7 @@ def google_login(body: GoogleTokenRequest):
         ).first()
 
         if user_info is None:
+            REGISTRATIONS.labels("google").inc()  # first sight of this Google account
             shadow = LocalUser()  # type: ignore
             shadow.username = f"google_{google_sub[:16]}"
             shadow.password_hash = b""
@@ -251,6 +257,7 @@ def google_login(body: GoogleTokenRequest):
             sess.commit()
             sess.refresh(user_info)
 
+        LOGINS.labels("google", "success").inc()
         return _token_response(user_info)
 
 

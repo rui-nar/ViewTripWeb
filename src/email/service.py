@@ -20,6 +20,8 @@ from email.message import EmailMessage as MimeMessage
 
 import aiosmtplib
 
+from src.utils.metrics import track_external
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,14 +66,15 @@ class SmtpEmailService(EmailService):
         mime["Subject"] = message.subject
         mime.set_content(message.text_body)
         mime.add_alternative(message.html_body, subtype="html")
-        await aiosmtplib.send(
-            mime,
-            hostname=self._host,
-            port=self._port,
-            username=self._username,
-            password=self._password,
-            start_tls=True,
-        )
+        with track_external("smtp", "/send"):
+            await aiosmtplib.send(
+                mime,
+                hostname=self._host,
+                port=self._port,
+                username=self._username,
+                password=self._password,
+                start_tls=True,
+            )
 
 
 _service: EmailService | None = None

@@ -3,7 +3,22 @@
 from datetime import datetime
 import pytest
 
+from prometheus_client import REGISTRY
+
 from src.models.activity import Activity
+
+
+@pytest.fixture
+def metric():
+    """Read a Prometheus sample by name + labels, 0.0 if the series is absent.
+
+    The default registry is process-wide and counters only ever increase, so
+    tests must assert on the *delta* around the code under test — never on an
+    absolute value, which depends on whatever else ran earlier in the session.
+    """
+    def _read(name: str, **labels) -> float:
+        return REGISTRY.get_sample_value(name, labels or None) or 0.0
+    return _read
 
 
 @pytest.fixture

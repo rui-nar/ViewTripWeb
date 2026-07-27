@@ -26,3 +26,6 @@ httpx>=0.27.0
 # Transactional email (issue #113): SMTP transport + template rendering.
 aiosmtplib>=3.0.0
 jinja2>=3.1.0
+# Prometheus metrics (issue #125): client library + FastAPI request middleware.
+prometheus-client>=0.21.0
+prometheus-fastapi-instrumentator>=7.0.0
