@@ -74,7 +74,8 @@ def test_full_companion_journey(env):
     # Companion previews and accepts the invite.
     act_as("companion")
     preview = client.get(f"/api/invites/{token}").json()
-    assert preview == {"project_name": "Japan 2026", "owner_name": "Owner", "role": "editor"}
+    assert preview == {"project_name": "Japan 2026", "owner_name": "Owner",
+                       "role": "editor", "invited_email": None}
     accepted = client.post(f"/api/invites/{token}/accept").json()
     assert accepted == {"name": "Japan 2026", "owner_id": ids["owner"]}
 

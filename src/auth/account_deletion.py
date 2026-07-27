@@ -28,6 +28,7 @@ from models.project_db import (
     DBProjectInvite,
     DBProjectItem,
     DBProjectMember,
+    DBProjectPendingInvite,
     DBProjectSyncMeta,
     DBActivity,
     DBShareMemoryContent,
@@ -37,7 +38,13 @@ from models.project_db import (
     DBJournalEntry,
     DBRecoveryWrap,
 )
-from models.user import LocalUser, PolarstepsToken, StravaToken, UserInfo
+from models.user import (
+    EmailVerification,
+    LocalUser,
+    PolarstepsToken,
+    StravaToken,
+    UserInfo,
+)
 from src.admin import storage as _storage_mod
 
 
@@ -87,9 +94,17 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
         _delete_all(DBProjectItem, DBProjectItem.activity_id.in_(activity_ids))
     _delete_all(DBProjectMember, DBProjectMember.user_info_id == user_info_id)
     _delete_all(DBProjectInvite, DBProjectInvite.created_by == user_info_id)
+    # Pending invites (issue #110) point at the sender via invited_by, so they
+    # outlive them as dangling rows unless removed here.
+    _delete_all(DBProjectPendingInvite,
+                DBProjectPendingInvite.invited_by == user_info_id)
+    _delete_all(EmailVerification,
+                EmailVerification.user_info_id == user_info_id)
     if project_ids:
         _delete_all(DBProjectMember, DBProjectMember.project_id.in_(project_ids))
         _delete_all(DBProjectInvite, DBProjectInvite.project_id.in_(project_ids))
+        _delete_all(DBProjectPendingInvite,
+                    DBProjectPendingInvite.project_id.in_(project_ids))
 
     if project_ids:
         _delete_all(DBMemory, DBMemory.project_id.in_(project_ids))
