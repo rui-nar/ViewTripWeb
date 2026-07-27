@@ -110,7 +110,8 @@ These are read by the backend at **runtime** (`os.getenv`) — a value passed to
 | `DATABASE_URL` | SQLAlchemy URL for the DB (defaults to local `viewtripweb.db`) |
 | `GOOGLE_TRANSLATE_API_KEY` | Enables memory translation endpoints (optional) |
 | `GOOGLE_CLIENT_ID` | Google OAuth client id; takes priority over `config.json` (optional) |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `MAIL_FROM` | Transactional email via any provider's SMTP relay (optional — without `SMTP_HOST`, emails are logged to the console instead of sent) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `MAIL_FROM` | Transactional email via any provider's SMTP relay (optional — without `SMTP_HOST`, emails are logged to the console instead of sent). `MAIL_FROM` must be on a domain verified with the provider, or mail is delivered to spam |
+| `FRONTEND_ORIGIN` | Base URL for links in outgoing mail (invites, email verification) — must be where users actually reach the app |
 | `APP_VERSION` | Running version; set automatically from the git tag at image build |
 
 **Local dev:** export the vars before launching (`export $(grep -v '^#' .env | xargs)`),
@@ -139,7 +140,7 @@ image with a Dockerfile `ENV`; the published image is public.
 - **Journals** — private day notes with photos.
 - **Encounters & Groups** — a per-project directory of people (and groups of people) you meet — name, social links, nationalities, residence city, avatar — and where/when you met them, shown inline on their day and as owner-only map pins. People, groups, and encounters are never included in shared views.
 - **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.
-- **Travel companions** — invite other accounts to a trip as viewer (read-only), editor (full content access), or co-owner (editor + rename/sharing/member management); each companion's journal stays private to them. Invite links are copyable or, once SMTP is configured, emailed directly.
+- **Travel companions** — invite other accounts to a trip as viewer (read-only), editor (full content access), or co-owner (editor + rename/sharing/member management); each companion's journal stays private to them. Invite links are copyable or, once SMTP is configured, emailed directly. An emailed invite is addressed to that person: it shows in the owner's "waiting to accept" list, can be revoked on its own without affecting anyone else, and is offered to the recipient as an Accept/Decline prompt once they sign in with that (confirmed) address — including on an account they create afterwards.
 - **Sharing** — read-only public links (with or without memories); social-media composer that posts a memory's photos, a trip map image, and a durable deep link via the OS share sheet / WhatsApp / Facebook.
 - **Zero-knowledge encryption (optional)** — encrypt memory/journal text and activity GPS/name client-side so the server admin can't read it. Device-key based (passwordless daily use across trusted devices) with a recovery key or security-Q&A backstop. Sharing an encrypted memory uses a per-share content key embedded in the link's URL fragment, never sent to the server.
 - **Export** — GPX, `.viewtrip` (JSON), or ZIP (`.viewtrip` + photos).
@@ -159,13 +160,13 @@ Routes are grouped by tag (router prefix):
 
 | Tag | Prefix | Covers |
 |---|---|---|
-| `auth` | `/api/auth` | login (`/token`), register, Google login, profile, change/delete account |
+| `auth` | `/api/auth` | login (`/token`), register, Google login, email verification, profile, change/delete account |
 | `projects` | `/api/projects` | project CRUD, import/export, stats, day-meta, track style, item ordering, segments, share-token management, async route resolution (split across several route modules, one prefix) |
 | `activities` | `/api/activities` | add/refresh/track-edit/split/delete Strava activities within a project |
 | `geo` | `/api/geo` | full + low-res GeoJSON FeatureCollections for the map |
 | `memories` | `/api/memories` | memory CRUD, photos, comments, likes, translations |
 | `journal` | `/api/journal` | journal entry CRUD + photos |
-| `members` | `/api/projects/{name}/members`, `/api/invites` | travel-companion invites (viewer/editor/co-owner), member list/removal, invite email |
+| `members` | `/api/projects/{name}/members`, `/api/invites` | travel-companion invites (viewer/editor/co-owner), member list/removal, invite email, pending invites (list/revoke/accept/decline) |
 | `encounters` | `/api/encounters` | people-you-met CRUD, tied to a day/place |
 | `people` | `/api/people` | per-project people directory CRUD, avatars |
 | `groups` | `/api/groups` | groups of people CRUD + membership |
