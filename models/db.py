@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
+from src.utils.metrics import track_db_session
+
 _DB_URL = os.environ.get("DATABASE_URL", "sqlite:///viewtripweb.db")
 
 
@@ -126,6 +128,13 @@ def create_db_and_tables() -> None:
 
 @contextmanager
 def get_session():
-    """Context manager that yields a SQLModel session — mirrors rx.session()."""
-    with Session(engine) as session:
-        yield session
+    """Context manager that yields a SQLModel session — mirrors rx.session().
+
+    Every DB access in the app goes through here, which makes it the one place
+    that can time a unit of database work and classify the failures leaving it
+    (pool exhaustion, "database is locked"). Application exceptions travelling
+    through are left alone — see ``db_error_kind``.
+    """
+    with track_db_session():
+        with Session(engine) as session:
+            yield session

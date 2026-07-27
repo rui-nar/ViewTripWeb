@@ -10,6 +10,7 @@ from src.config.settings import Config
 from src.auth.oauth import OAuth2Session
 from src.auth.token_store import TokenStore
 from src.exceptions.errors import APIError, AuthenticationError, TokenError
+from src.utils.metrics import normalise_path, outcome_for_status, track_external
 
 
 class RateLimiter:
@@ -118,9 +119,15 @@ class StravaAPI:
 
         _refreshed = False
         last_error: Optional[str] = None
+        # Templated so an activity ID never becomes a metric label value.
+        endpoint = normalise_path(path)
         for attempt in range(max_retries):
             self._rate_limiter.acquire()
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            # Inside the retry loop: each attempt is a real call against
+            # Strava's quota and is counted as one.
+            with track_external("strava", endpoint) as call:
+                resp = requests.request(method, url, headers=headers, **kwargs)
+                call.outcome = outcome_for_status(resp.status_code)
 
             if resp.status_code < 400:
                 return resp.json()

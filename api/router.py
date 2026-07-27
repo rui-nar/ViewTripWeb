@@ -23,6 +23,7 @@ from api.groups import router as groups_router
 from api.journal import router as journal_router
 from api.members import router as members_router, invites_router
 from api.memories import router as memories_router
+from api.metrics import router as metrics_router
 from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
 from api.poster import router as poster_router
@@ -35,11 +36,18 @@ from api.share import router as share_router
 from api.strava import router as strava_router
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from models.db import checkpoint_wal
+from models.db import checkpoint_wal, engine
 from models.project_db import _check_schema_contract
 from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
 from src.utils.logging import configure_logging, get_logger
+from src.utils.metrics import (
+    JOB_EVENT_MASK,
+    STALE_WRITES,
+    install_db_metrics,
+    instrument_http,
+    record_job_event,
+)
 
 # Wire app loggers (api.*, src.*) to a console handler as early as possible —
 # this is the process entry point (uvicorn api.router:app), so configuring here
@@ -63,6 +71,9 @@ async def lifespan(_app: FastAPI):
     seed_admin()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
+    # One listener covers every job — current and future — with run counts,
+    # duration and a last-success timestamp (issue #125).
+    _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)
     _scheduler.start()
     _log.info("Backup scheduler started — daily at 02:00 UTC")
     yield
@@ -82,6 +93,14 @@ app = FastAPI(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Request rate / latency / error rate (issue #125). The scrape endpoint itself
+# is ours (api/metrics.py) so it can require a token.
+instrument_http(app)
+
+# Query volume/latency, pool saturation (issue #35's early warning) and SQLite
+# file + WAL growth (silent failure mode of wal_autocheckpoint=0).
+install_db_metrics(engine)
 
 # Allow Flutter dev clients (and web) to call the API
 app.add_middleware(
@@ -104,6 +123,7 @@ app.include_router(journal_router)
 app.include_router(members_router)
 app.include_router(invites_router)
 app.include_router(memories_router)
+app.include_router(metrics_router)
 app.include_router(people_router)
 app.include_router(polarsteps_router)
 app.include_router(poster_router)
@@ -119,6 +139,7 @@ app.include_router(strava_router)
 @app.exception_handler(StaleWriteError)
 async def _stale_write_handler(_request, exc: StaleWriteError):
     """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
+    STALE_WRITES.inc()  # write contention signal — spikes when writers collide
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

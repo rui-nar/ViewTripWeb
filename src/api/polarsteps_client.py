@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from src.utils.metrics import normalise_path, outcome_for_status, track_external
+
 
 # A step's `type` marks publication state: 0 = draft (unpublished/offline),
 # 1 = published. Imports surface published steps only (issue #23).
@@ -62,7 +64,9 @@ class PolarstepsClient:
 
     def _get(self, path: str, **params: Any) -> Any:
         url = f"{self.BASE_URL}{path}"
-        resp = self._session.get(url, params=params or None, timeout=20)
+        with track_external("polarsteps", normalise_path(path)) as call:
+            resp = self._session.get(url, params=params or None, timeout=20)
+            call.outcome = outcome_for_status(resp.status_code)
         # Capture any rotated cookie before raising, so even a final successful
         # call's refreshed token is kept.
         rotated = self._read_cookie()
