@@ -46,6 +46,8 @@ from models.project_db import (
     DBProjectItem,
 )
 from src.api.polarsteps_client import format_step, format_trip
+from src.billing.entitlements import ensure_storage_quota
+from src.billing.usage import record_written, unlink_and_record
 from src.models.person import polarsteps_from_socials
 
 router = APIRouter(prefix="/api/people", tags=["people"])
@@ -103,8 +105,9 @@ def _person_out(row: DBPerson) -> dict:
 
 def _delete_avatar_files(user_id: str, person_id: int, uuid_str: str) -> None:
     photo_path = _avatar_dir(user_id, person_id)
-    for suffix in ["", "_thumb"]:
-        (photo_path / f"{uuid_str}{suffix}.jpg").unlink(missing_ok=True)
+    unlink_and_record(user_id, [
+        photo_path / f"{uuid_str}{suffix}.jpg" for suffix in ("", "_thumb")
+    ])
 
 
 def _parse_ps_username(raw: str | None) -> str | None:
@@ -304,12 +307,17 @@ async def upload_avatar(
     """Upload a JPEG avatar; a 400×400 thumbnail is generated. Replaces any existing avatar."""
     user_info_id = int(current_user["sub"])
     raw = await file.read()
+    with get_session() as sess:
+        ensure_storage_quota(sess, user_info_id, len(raw))
     new_uuid = str(uuid_lib.uuid4())
     photo_path = _avatar_dir(current_user["sub"], person_id)
-    (photo_path / f"{new_uuid}.jpg").write_bytes(raw)
+    full = photo_path / f"{new_uuid}.jpg"
+    thumb = photo_path / f"{new_uuid}_thumb.jpg"
+    full.write_bytes(raw)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
-    img.save(str(photo_path / f"{new_uuid}_thumb.jpg"), "JPEG", quality=85)
+    img.save(str(thumb), "JPEG", quality=85)
+    record_written(current_user["sub"], full, thumb)
 
     with get_session() as sess:
         row = _get_owned_person(sess, person_id, user_info_id)

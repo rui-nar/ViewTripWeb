@@ -22,6 +22,7 @@ import 'project_filters.dart';
 import 'project_journal_crud_mixin.dart';
 import 'project_memory_crud_mixin.dart';
 import 'project_people_crud_mixin.dart';
+import 'project_quota_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
@@ -72,7 +73,7 @@ int progressiveGeoBatchSize(int activityCount) =>
 }
 
 class ProjectNotifier extends ChangeNotifier
-    with ProjectFilterMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
+    with ProjectFilterMixin, ProjectQuotaMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
   final MembersService _membersService;
 

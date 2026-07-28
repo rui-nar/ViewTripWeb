@@ -36,6 +36,22 @@ class RateLimitError(APIError):
     pass
 
 
+class QuotaExceeded(ViewTripException):
+    """Raised when an action would push a user past their plan's limits.
+
+    Carries the numbers so the API handler can turn it into a 402 the client can
+    render ("2 of 1 trips used") without a second round trip.
+    """
+
+    def __init__(self, message: str, *, plan: str, limit: int | None,
+                 used: int, resource: str):
+        super().__init__(message)
+        self.plan = plan
+        self.limit = limit
+        self.used = used
+        self.resource = resource  # "projects" | "storage"
+
+
 class TokenError(ViewTripException):
     """Raised when token management fails."""
 

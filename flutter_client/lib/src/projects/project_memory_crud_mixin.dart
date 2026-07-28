@@ -11,13 +11,14 @@ import 'package:http/http.dart' as http;
 import '../api/client.dart';
 import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
+import 'project_quota_mixin.dart';
 
 /// Thrown by [ProjectMemoryCrudMixin.fetchTranslation] when a memory is
 /// encrypted — a permanent state, not a transient failure, so callers should
 /// show a distinct message rather than the generic "please try again" (#27).
 class TranslationUnavailableException implements Exception {}
 
-mixin ProjectMemoryCrudMixin on ChangeNotifier {
+mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
@@ -174,6 +175,9 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
         final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(res.body);
         return match?.group(1);
       }
+      // A plan limit (issue #121) must not vanish into this null — record it so
+      // the dialog can offer an upgrade instead of dropping the photo silently.
+      recordQuotaRefusal(res.statusCode, res.body);
       return null;
     } catch (_) {
       return null;
@@ -215,7 +219,10 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
     try {
       final streamed = await request.send();
       final res = await http.Response.fromStream(streamed);
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        recordQuotaRefusal(res.statusCode, res.body);
+        return null;
+      }
       final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(res.body);
       final newUuid = match?.group(1);
       if (newUuid == null) return null;

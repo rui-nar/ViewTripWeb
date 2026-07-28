@@ -40,8 +40,14 @@ from api.project_access import (
     translate_insert_after,
 )
 from models.project_db import DBJournalEntry, DBProjectItem
+from src.billing.entitlements import ensure_storage_quota
+from src.billing.usage import record_written, unlink_and_record
+from src.exceptions.errors import QuotaExceeded
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/journal", tags=["journal"])
+
+_log = get_logger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
@@ -127,10 +133,15 @@ def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
 
 def _save_photo_files(user_id: str, journal_id: int, uuid_str: str, raw: bytes) -> None:
     photo_path = _photo_dir(user_id, journal_id)
-    (photo_path / f"{uuid_str}.jpg").write_bytes(raw)
+    full = photo_path / f"{uuid_str}.jpg"
+    thumb = photo_path / f"{uuid_str}_thumb.jpg"
+    full.write_bytes(raw)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
-    img.save(str(photo_path / f"{uuid_str}_thumb.jpg"), "JPEG", quality=85)
+    img.save(str(thumb), "JPEG", quality=85)
+    # Storage accounting for quota checks (issue #121) — see api/memories.py.
+    # Journals are per-user, so the bytes are the writing user's own.
+    record_written(user_id, full, thumb)
 
 
 def _append_photo(journal_id: int, uuid_str: str) -> None:
@@ -151,6 +162,13 @@ def _download_photo_from_url(journal_id: int, url: str, user_id: str) -> None:
         resp = _req.get(url, timeout=30)
         resp.raise_for_status()
     except Exception:
+        return
+    # Background task — no request left to answer 402 on, so it declines to store.
+    try:
+        with get_session() as sess:
+            ensure_storage_quota(sess, int(user_id), len(resp.content))
+    except QuotaExceeded:
+        _log.info("Skipped photo download for user %s: storage quota reached", user_id)
         return
     uuid_str = str(uuid_lib.uuid4())
     _save_photo_files(user_id, journal_id, uuid_str, resp.content)
@@ -284,10 +302,11 @@ def delete_journal(
 
         photos: List[str] = json.loads(row.photos_json or "[]")
         photo_path = Path(_DATA_DIR) / "users" / current_user["sub"] / "journal" / str(journal_id)
-        for photo_uuid in photos:
-            for suffix in ["", "_thumb"]:
-                f = photo_path / f"{photo_uuid}{suffix}.jpg"
-                f.unlink(missing_ok=True)
+        unlink_and_record(current_user["sub"], [
+            photo_path / f"{photo_uuid}{suffix}.jpg"
+            for photo_uuid in photos
+            for suffix in ("", "_thumb")
+        ])
         if photo_path.exists():
             try:
                 photo_path.rmdir()
@@ -318,6 +337,8 @@ async def upload_photo(
     with get_session() as sess:
         _get_owned_journal(sess, journal_id, user_info_id)
     raw = await file.read()
+    with get_session() as sess:
+        ensure_storage_quota(sess, user_info_id, len(raw))
     photo_uuid = str(uuid_lib.uuid4())
     _save_photo_files(current_user["sub"], journal_id, photo_uuid, raw)
     _append_photo(journal_id, photo_uuid)
@@ -356,9 +377,9 @@ def delete_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
         photo_path = _photo_dir(current_user["sub"], journal_id)
-        for suffix in ["", "_thumb"]:
-            f = photo_path / f"{photo_uuid}{suffix}.jpg"
-            f.unlink(missing_ok=True)
+        unlink_and_record(current_user["sub"], [
+            photo_path / f"{photo_uuid}{suffix}.jpg" for suffix in ("", "_thumb")
+        ])
 
         photos.remove(photo_uuid)
         row.photos_json = json.dumps(photos)
@@ -383,6 +404,8 @@ async def replace_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
+    with get_session() as sess:
+        ensure_storage_quota(sess, user_info_id, len(raw))
     new_uuid = str(uuid_lib.uuid4())
     _save_photo_files(current_user["sub"], journal_id, new_uuid, raw)
 
@@ -396,9 +419,9 @@ async def replace_photo(
         sess.commit()
 
     photo_path = _photo_dir(current_user["sub"], journal_id)
-    for suffix in ["", "_thumb"]:
-        f = photo_path / f"{old_uuid}{suffix}.jpg"
-        f.unlink(missing_ok=True)
+    unlink_and_record(current_user["sub"], [
+        photo_path / f"{old_uuid}{suffix}.jpg" for suffix in ("", "_thumb")
+    ])
 
     return {"uuid": new_uuid}
 

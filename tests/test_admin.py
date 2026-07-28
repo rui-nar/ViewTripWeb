@@ -21,6 +21,7 @@ from api.admin import router as admin_router
 from api.deps import get_current_user
 from models.project_db import DBActivity, DBMemory, DBProject
 from models.user import LocalUser, UserInfo
+from src.billing.subscriptions import get_subscription
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -544,3 +545,50 @@ class TestBroadcastEmail:
         assert "&lt;b&gt;" in html_body
         assert "<b>" not in html_body
         assert "<br>" in html_body
+
+
+# ── 19. Plan override (issue #121) ─────────────────────────────────────────────
+
+class TestSetPlan:
+    @pytest.fixture
+    def ctx(self, engine):
+        with Session(engine) as sess:
+            admin, _ = _mk_user(sess, display_name="admin", email="admin@x.io",
+                                is_admin=True)
+            plain, _ = _mk_user(sess, display_name="Plain", email="plain@x.io")
+            aid, pid = admin.id, plain.id
+        payload = {"sub": str(aid), "email": "admin@x.io", "auth_provider": "local"}
+        return TestClient(_admin_app(engine, payload)), engine, pid
+
+    def test_comp_an_account(self, ctx):
+        client, engine, pid = ctx
+        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        assert resp.status_code == 200
+        with Session(engine) as sess:
+            assert get_subscription(sess, pid).admin_override_plan == "cloud"
+
+    def test_clear_the_comp(self, ctx):
+        client, engine, pid = ctx
+        client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        client.put(f"/api/admin/users/{pid}/plan", json={"plan": ""})
+        with Session(engine) as sess:
+            assert get_subscription(sess, pid).admin_override_plan == ""
+
+    def test_unknown_plan_is_rejected(self, ctx):
+        client, _, pid = ctx
+        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "enterprise"})
+        assert resp.status_code == 422
+
+    def test_unknown_user_404(self, ctx):
+        client, *_ = ctx
+        resp = client.put("/api/admin/users/999999/plan", json={"plan": "cloud"})
+        assert resp.status_code == 404
+
+    def test_requires_admin(self, engine):
+        with Session(engine) as sess:
+            plain, _ = _mk_user(sess, display_name="Plain", email="plain@x.io")
+            pid = plain.id
+        payload = {"sub": str(pid), "email": "plain@x.io", "auth_provider": "local"}
+        client = TestClient(_admin_app(engine, payload))
+        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        assert resp.status_code == 403

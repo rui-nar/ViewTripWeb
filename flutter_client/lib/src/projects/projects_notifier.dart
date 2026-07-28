@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../billing/billing_service.dart';
 import 'projects_service.dart';
 
 class ProjectsNotifier extends ChangeNotifier {
@@ -13,12 +14,21 @@ class ProjectsNotifier extends ChangeNotifier {
   List<Map<String, dynamic>> _projects = [];
   bool _isLoading = false;
   String? _error;
+  QuotaError? _quotaError;
 
   ProjectsNotifier(this._service);
 
   List<Map<String, dynamic>> get projects => List.unmodifiable(_projects);
   bool get isLoading => _isLoading;
   String? get error => _error;
+
+  /// Set when the last action was refused by a plan limit (402, issue #121).
+  /// The screen turns this into an upgrade prompt instead of an error message.
+  QuotaError? get quotaError => _quotaError;
+
+  void clearQuotaError() {
+    _quotaError = null;
+  }
 
   /// Called by [ChangeNotifierProxyProvider] whenever [AuthNotifier] changes.
   void onAuthChanged(bool isLoggedIn) {
@@ -64,11 +74,13 @@ class ProjectsNotifier extends ChangeNotifier {
     if (name.trim().isEmpty) return;
     _isLoading = true;
     _error = null;
+    _quotaError = null;
     notifyListeners();
     try {
       final project = await _service.create(name.trim());
       _projects = [..._projects, project];
     } on Exception catch (e) {
+      _quotaError = _quota(e);
       _error = _msg(e);
     } finally {
       _isLoading = false;
@@ -117,6 +129,7 @@ class ProjectsNotifier extends ChangeNotifier {
   }) async {
     _isLoading = true;
     _error = null;
+    _quotaError = null;
     notifyListeners();
     try {
       final data =
@@ -124,6 +137,7 @@ class ProjectsNotifier extends ChangeNotifier {
       await load();
       return data['name'] as String?;
     } on Exception catch (e) {
+      _quotaError = _quota(e);
       _error = _msg(e);
       _isLoading = false;
       notifyListeners();
@@ -171,4 +185,8 @@ class ProjectsNotifier extends ChangeNotifier {
     final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(s);
     return m?.group(1) ?? s.replaceFirst('Exception: ', '');
   }
+
+  /// A plan-limit refusal, or null for any other failure (issue #121).
+  QuotaError? _quota(Exception e) =>
+      e is ApiException ? QuotaError.fromApiException(e) : null;
 }

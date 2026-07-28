@@ -9,13 +9,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
-from src.exceptions.errors import APIError, AuthenticationError
+from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
 from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
+from api.billing import router as billing_router
 from api.encounters import router as encounters_router
 from api.encryption import router as encryption_router
 from api.geo import router as geo_router
@@ -40,6 +41,7 @@ from models.db import checkpoint_wal, engine
 from models.project_db import _check_schema_contract
 from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
+from src.billing.usage import reconcile_all_usage
 from src.utils.logging import configure_logging, get_logger
 from src.utils.metrics import (
     JOB_EVENT_MASK,
@@ -71,6 +73,11 @@ async def lifespan(_app: FastAPI):
     seed_admin()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
+    # Correct any drift between the per-user storage counters used for quota
+    # checks and what is actually on disk (issue #121). No-op unless billing is
+    # enabled, so a self-hosted instance never pays for the walk.
+    _scheduler.add_job(reconcile_all_usage, "cron", hour=3, minute=30,
+                       id="usage_reconcile", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)
@@ -115,6 +122,7 @@ app.include_router(activity_fields_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(backup_router)
+app.include_router(billing_router)
 app.include_router(encounters_router)
 app.include_router(encryption_router)
 app.include_router(geo_router)
@@ -141,6 +149,27 @@ async def _stale_write_handler(_request, exc: StaleWriteError):
     """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
     STALE_WRITES.inc()  # write contention signal — spikes when writers collide
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(QuotaExceeded)
+async def _quota_handler(_request, exc: QuotaExceeded):
+    """Map a plan limit to 402 Payment Required, with the numbers to render it.
+
+    402 rather than 403: the request is well-formed and the caller is allowed to
+    do this in principle — they need a bigger plan, and the client turns this
+    into an upgrade prompt rather than an error toast.
+    """
+    return JSONResponse(
+        status_code=402,
+        content={
+            "detail": str(exc),
+            "code": "quota_exceeded",
+            "resource": exc.resource,
+            "plan": exc.plan,
+            "limit": exc.limit,
+            "used": exc.used,
+        },
+    )
 
 
 @app.exception_handler(AuthenticationError)

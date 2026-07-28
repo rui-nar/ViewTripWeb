@@ -7,8 +7,9 @@ import 'package:http/http.dart' as http;
 import '../api/client.dart';
 import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
+import 'project_quota_mixin.dart';
 
-mixin ProjectJournalCrudMixin on ChangeNotifier {
+mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
@@ -155,6 +156,9 @@ mixin ProjectJournalCrudMixin on ChangeNotifier {
         final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(res.body);
         return match?.group(1);
       }
+      // A plan limit (issue #121) must not vanish into this null — record it so
+      // the dialog can offer an upgrade instead of dropping the photo silently.
+      recordQuotaRefusal(res.statusCode, res.body);
       return null;
     } catch (_) {
       return null;

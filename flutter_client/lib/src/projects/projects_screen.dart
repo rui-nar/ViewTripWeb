@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
 import '../auth/verify_email_banner.dart';
+import '../billing/upgrade_sheet.dart';
 import '../core/project_ref.dart';
 import 'pending_invites_card.dart';
 import 'projects_notifier.dart';
@@ -97,7 +98,18 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
       _nameCtrl.clear();
       final encoded = Uri.encodeComponent(name);
       context.go('/view?project=$encoded');
+      return;
     }
+    await _maybeShowUpgrade(notifier);
+  }
+
+  /// A plan limit is not an error the user made — show the upgrade prompt
+  /// instead of leaving them with a red message (issue #121).
+  Future<void> _maybeShowUpgrade(ProjectsNotifier notifier) async {
+    final quota = notifier.quotaError;
+    if (quota == null || !mounted) return;
+    notifier.clearQuotaError();
+    await showUpgradeSheet(context, quota);
   }
 
   @override
@@ -351,6 +363,8 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                                     if (result != null && context.mounted) {
                                       context.go(
                                           '/view?project=${Uri.encodeComponent(result)}');
+                                    } else if (context.mounted) {
+                                      await _maybeShowUpgrade(notifier);
                                     }
                                   } on Exception catch (e) {
                                     notifier.setError(e.toString());
