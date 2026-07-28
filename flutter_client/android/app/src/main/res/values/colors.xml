@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cold-start window background. Matches lightTheme's scaffoldBackgroundColor
+         (_lightBg in lib/src/core/theme.dart) so the launch window blends into the
+         first Flutter frame instead of flashing plain white. -->
+    <color name="launch_background">#F1F5F9</color>
+    <!-- Adaptive launcher-icon background layer; written by flutter_launcher_icons. -->
+    <color name="ic_launcher_background">#FC4C02</color>
+</resources>

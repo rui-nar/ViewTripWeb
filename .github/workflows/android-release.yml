@@ -1,0 +1,111 @@
+name: Build and publish Android APK
+
+# Runs alongside docker-build.yml on every vX.Y.Z tag: that one ships the server
+# image and the web client, this one ships the Android app for the same tag.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release upload
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Fail fast without signing secrets
+        # An unsigned (or debug-signed) APK cannot be upgraded in place and must
+        # never reach a release page. Say so up front rather than 40 minutes into
+        # a gradle build. See docs/ANDROID.md for creating these.
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set. Run scripts/new-android-keystore.ps1 and add the ANDROID_* repository secrets (docs/ANDROID.md)."
+            exit 1
+          fi
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Gradle 8.14 (android/gradle/wrapper) does not support JDK 25.
+          java-version: '21'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Read by flutter_client/android/app/build.gradle.kts.
+          cat > flutter_client/android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Build signed APK
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # versionCode must increase every release or Android refuses the
+          # upgrade; pubspec's +1 never moves, so derive it from the tag.
+          BUILD_NUMBER=$(python3 scripts/android_version_code.py "$TAG")
+          echo "versionCode for $TAG: $BUILD_NUMBER"
+          cd flutter_client
+          flutter pub get
+          flutter build apk --release \
+            --build-number="$BUILD_NUMBER" \
+            --build-name="${TAG#v}" \
+            --dart-define=APP_VERSION="$TAG" \
+            --dart-define=MAPBOX_TOKEN="${{ secrets.MAPBOX_TOKEN }}" \
+            --dart-define=API_BASE_URL=https://traxjourney.com
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             "$RUNNER_TEMP/traxjourney-$TAG.apk"
+
+      - name: Verify the APK is release-signed
+        # Catches a keystore that decoded but signed with the wrong identity —
+        # the failure mode that only shows up as "app not installed" on a device
+        # that already has a copy signed by the real key.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort | tail -1)
+          "$APKSIGNER" verify --print-certs "$RUNNER_TEMP/traxjourney-$TAG.apk" | tee certs.txt
+          grep -qi "SHA-256 digest" certs.txt
+          if grep -qi "CN=Android Debug" certs.txt; then
+            echo "::error::APK is signed with the debug key."
+            exit 1
+          fi
+
+      - name: Attach the APK to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # bump_version_and_release.ps1 creates the release seconds after
+          # pushing the tag, and this job has been building for far longer than
+          # that — but a hand-pushed tag may have no release at all, so poll
+          # briefly and create one rather than dropping the APK on the floor.
+          for _ in $(seq 12); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            echo "waiting for release $TAG ..."
+            sleep 10
+          done
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "ViewTripWeb $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP/traxjourney-$TAG.apk" --clobber

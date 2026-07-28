@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only (src/debug), so release keeps Android's default: no
+     cleartext, anywhere. Without this, `run-android.ps1 -Local` fails with an
+     opaque connection error, because the dev server is plain http and the
+     emulator reaches the host at 10.0.2.2. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- The host machine, as seen from inside the emulator. -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- A server running on the device/emulator itself (adb reverse). -->
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

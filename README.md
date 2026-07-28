@@ -78,6 +78,16 @@ flutter run -d chrome --web-port 5500 \
 Windows helper scripts: `dev-client.ps1` (Flutter client), `deploy.ps1` (build
 + push image + deploy to NAS), `bump_version_and_release.ps1` (tag a release).
 
+### Android
+
+```powershell
+.\run-android.ps1            # build, install and run on an emulator
+.\run-android.ps1 -Local     # ...against the dev server on this machine
+```
+
+Each release tag also builds a signed APK and attaches it to the GitHub
+release. See [docs/ANDROID.md](docs/ANDROID.md).
+
 ---
 
 ## Configuration

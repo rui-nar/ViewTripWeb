@@ -217,6 +217,51 @@ async def app_version():
     return {"version": _APP_VERSION}
 
 
+# ── Android App Links ─────────────────────────────────────────────────────────
+# Must be registered before the SPA fallback below, which would otherwise answer
+# it with index.html and quietly fail link verification.
+ANDROID_PACKAGE_NAME = "com.traxjourney.app"
+
+
+def _android_cert_fingerprints() -> list[str]:
+    """SHA-256 fingerprints of the release signing certificate, from the env.
+
+    Comma-separated so a key rotation can list old and new at once. Set from the
+    keystore that CI signs with — `scripts/new-android-keystore.ps1` prints it.
+    """
+    raw = os.getenv("ANDROID_CERT_FINGERPRINTS", "")
+    return [fp.strip().upper() for fp in raw.split(",") if fp.strip()]
+
+
+@app.get("/.well-known/assetlinks.json", include_in_schema=False)
+async def android_assetlinks():
+    """Digital Asset Links statement that lets the Android app claim our URLs.
+
+    Android fetches this over https when the app is installed and, if it lists
+    the app's package and signing fingerprint, stops offering a browser chooser
+    for traxjourney.com/share|join|verify-email links — they open in the app.
+
+    404s when no fingerprint is configured: publishing an empty statement is
+    worse than publishing none, since Android caches the failed verification.
+    """
+    fingerprints = _android_cert_fingerprints()
+    if not fingerprints:
+        return JSONResponse(status_code=404, content={"detail": "Not configured"})
+    return JSONResponse(
+        content=[
+            {
+                "relation": ["delegate_permission/common.handle_all_urls"],
+                "target": {
+                    "namespace": "android_app",
+                    "package_name": ANDROID_PACKAGE_NAME,
+                    "sha256_cert_fingerprints": fingerprints,
+                },
+            }
+        ],
+        media_type="application/json",
+    )
+
+
 # ── Flutter web SPA — must be registered last so /api/... routes take priority ─
 _web_dir = os.path.join(os.path.dirname(__file__), "..", "web_client")
 

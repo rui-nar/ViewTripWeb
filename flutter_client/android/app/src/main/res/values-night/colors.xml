@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode counterpart: darkTheme's scaffoldBackgroundColor (_darkBg in
+         lib/src/core/theme.dart). -->
+    <color name="launch_background">#0D1B2A</color>
+</resources>
