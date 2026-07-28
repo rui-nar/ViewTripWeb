@@ -33,7 +33,11 @@ void _delta(StringBuffer sb, int v) {
   sb.writeCharCode(zig + 63);
 }
 
-Map<String, dynamic> _activity({bool edited = false, int id = 111}) {
+Map<String, dynamic> _activity({
+  bool edited = false,
+  int id = 111,
+  int? splitRootId,
+}) {
   final track = <GeoPoint>[
     (lat: 48.0, lon: 2.00),
     (lat: 48.0, lon: 2.01),
@@ -44,6 +48,7 @@ Map<String, dynamic> _activity({bool edited = false, int id = 111}) {
     'id': id,
     'name': 'Test Ride',
     'is_edited': edited,
+    'split_root_id': splitRootId,
     'map': {'summary_polyline': _encode(track)},
     'elevation_profile': [
       [0.0, 100.0],
@@ -70,7 +75,7 @@ Map<String, dynamic> _longActivity() {
   };
 }
 
-/// Captures the split calls the page makes instead of reaching the network.
+/// Captures the split/reset calls the page makes instead of reaching the network.
 class _RecordingNotifier extends ProjectNotifier {
   _RecordingNotifier() : super(ProjectService()) {
     ref = const ProjectRef(name: 'Trip');
@@ -78,6 +83,7 @@ class _RecordingNotifier extends ProjectNotifier {
 
   final List<({int index, bool dropBoundary, Map<String, dynamic>? payload})>
       splits = [];
+  final List<int> resets = [];
 
   @override
   Future<void> splitActivity(
@@ -89,7 +95,19 @@ class _RecordingNotifier extends ProjectNotifier {
     splits.add(
         (index: splitIndex, dropBoundary: dropBoundary, payload: payload));
   }
+
+  @override
+  Future<void> resetActivityTrack(int activityId) async {
+    resets.add(activityId);
+  }
 }
+
+/// A notifier holding a split family: root 111 plus [pieces] local pieces.
+_RecordingNotifier _familyNotifier(int pieces) => _RecordingNotifier()
+  ..activities = [
+    {'id': 111, 'split_root_id': null},
+    for (var i = 1; i <= pieces; i++) {'id': -i, 'split_root_id': 111},
+  ];
 
 /// Push the editor onto a route (as ActivityPanel does) so the page's pop-on-
 /// success has a route to return to.
@@ -200,6 +218,77 @@ void main() {
     await _pump(tester, _activity(edited: true, id: -1));
     expect(find.text('Reset to Strava'), findsNothing);
     expect(find.text('Reset track'), findsOneWidget);
+  });
+
+  // ── Reset on a split root warns first (issue #141) ────────────────────────
+  //
+  // Resetting the root restores the whole pre-split track, so the server undoes
+  // the split rather than leave the pieces duplicating it. That destroys those
+  // pieces and any edits on them, so the editor must say so before calling.
+
+  testWidgets('resetting a split root warns that the pieces will be removed',
+      (tester) async {
+    final notifier = _familyNotifier(1);
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('cut it into 2 pieces'), findsOneWidget);
+    expect(find.textContaining('The other piece'), findsOneWidget);
+    expect(find.textContaining('cannot be undone'), findsOneWidget);
+    expect(notifier.resets, isEmpty); // nothing sent until confirmed
+  });
+
+  testWidgets('cancelling the warning leaves the split alone', (tester) async {
+    final notifier = _familyNotifier(2);
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('The other 2 pieces'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(notifier.resets, isEmpty);
+  });
+
+  testWidgets('confirming the warning sends the reset', (tester) async {
+    final notifier = _familyNotifier(1);
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Reset'));
+    await tester.pumpAndSettle();
+
+    expect(notifier.resets, [111]);
+  });
+
+  testWidgets('resetting a piece of a split does not warn', (tester) async {
+    // A piece points at the root, never at pieces cut out of itself, so its
+    // reset takes nothing else with it — it just undoes its own edits (#131).
+    final notifier = _familyNotifier(1);
+    await _pumpPushed(
+        tester, _activity(edited: true, id: -1, splitRootId: 111), notifier);
+
+    await tester.tap(find.text('Reset track'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(notifier.resets, [-1]);
+  });
+
+  testWidgets('resetting an activity that was never split does not warn',
+      (tester) async {
+    final notifier = _familyNotifier(0);
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(notifier.resets, [111]);
   });
 
   testWidgets('an edit via the controller enables Save', (tester) async {

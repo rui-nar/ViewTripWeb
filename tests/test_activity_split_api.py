@@ -543,3 +543,121 @@ def test_reset_on_an_edited_tail_restores_the_post_split_track(env):
         assert polyline_lib.decode(row.summary_polyline) == _TRACK[2:]
         assert row.is_edited is False
         assert row.original_polyline is None
+
+
+# ── Reset on a split root undoes the split (issue #141) ─────────────────────
+#
+# The root's snapshot IS the whole pre-split Strava track — correct in isolation,
+# but restoring it while the pieces cut out of it survive leaves them sitting on
+# top of that track. Reset on a root therefore removes the pieces and restores
+# the plain pre-split name. The editor warns first (see the widget tests).
+
+
+def _items(client):
+    return client.get("/api/projects/My Trip").json()["items"]
+
+
+def test_reset_on_a_split_root_removes_the_pieces(env):
+    client, engine = env
+    tail_id = _split_and_get_tail(client)
+
+    resp = client.post("/api/projects/My Trip/activities/111/reset")
+    assert resp.status_code == 200, resp.text
+
+    with Session(engine) as sess:
+        head = sess.get(DBActivity, 111)
+        # The full Strava track is back...
+        assert polyline_lib.decode(head.summary_polyline) == _TRACK
+        assert head.is_edited is False
+        # ...and nothing overlaps it: the tail row is gone, not merely unlinked.
+        assert sess.get(DBActivity, tail_id) is None
+
+    # Its timeline item went with it, and the trip is back to its pre-split shape.
+    assert [it["item_type"] for it in _items(client)] == [
+        "segment", "activity", "segment"]
+    with Session(engine) as sess:
+        positions = sess.exec(
+            select(DBProjectItem.position).order_by(DBProjectItem.position)).all()
+        assert positions == list(range(len(positions)))   # stayed contiguous
+
+
+def test_reset_on_a_split_root_restores_the_plain_name(env):
+    client, engine = env
+    _split_and_get_tail(client)
+    with Session(engine) as sess:
+        assert sess.get(DBActivity, 111).name == "Ride (1/2)"
+
+    assert client.post("/api/projects/My Trip/activities/111/reset").status_code == 200
+
+    with Session(engine) as sess:
+        # "(1/2)" is meaningless once it is no longer one of two.
+        assert sess.get(DBActivity, 111).name == "Ride"
+
+
+def test_reset_on_a_split_root_removes_pieces_split_out_of_pieces(env):
+    """Every piece of a family points at the SAME root, however deep the chain,
+    so a grandchild is removed too — not stranded pointing at a reset root."""
+    client, engine = env
+    first_tail = _split_and_get_tail(client)
+    # Cut the tail again: its own tail still points at 111, not at first_tail.
+    resp = client.post(f"/api/projects/My Trip/activities/{first_tail}/split",
+                       json={"split_index": 1})
+    assert resp.status_code == 200, resp.text
+    second_tail = next(i for i in (a["id"] for a in resp.json()["activities"])
+                       if i < 0 and i != first_tail)
+    with Session(engine) as sess:
+        assert sess.get(DBActivity, second_tail).split_root_id == 111
+
+    assert client.post("/api/projects/My Trip/activities/111/reset").status_code == 200
+
+    with Session(engine) as sess:
+        assert sess.get(DBActivity, first_tail) is None
+        assert sess.get(DBActivity, second_tail) is None
+        assert polyline_lib.decode(sess.get(DBActivity, 111).summary_polyline) == _TRACK
+
+
+def test_reset_on_a_tail_leaves_its_siblings_alone(env):
+    """Only a ROOT cascades. Resetting a piece undoes its own post-split edits
+    (#131) and must not take the rest of the family with it."""
+    client, engine = env
+    tail_id = _split_and_get_tail(client)
+
+    assert client.post(
+        f"/api/projects/My Trip/activities/{tail_id}/reset").status_code == 200
+
+    with Session(engine) as sess:
+        # Both pieces still there, still named as a family of two.
+        assert sess.get(DBActivity, tail_id) is not None
+        assert sess.get(DBActivity, 111).name == "Ride (1/2)"
+        assert polyline_lib.decode(
+            sess.get(DBActivity, 111).summary_polyline) == _TRACK[:3]
+
+
+def test_reset_on_an_unsplit_activity_touches_no_items(env):
+    """The cascade must not fire for an ordinary edited activity — it has no
+    family, so reset is still just a geometry restore."""
+    client, engine = env
+    before = len(_items(client))
+    resp = client.put("/api/projects/My Trip/activities/111/track",
+                      json={"points": _points_body(_TRACK[:3])})
+    assert resp.status_code == 200, resp.text
+
+    assert client.post("/api/projects/My Trip/activities/111/reset").status_code == 200
+
+    assert len(_items(client)) == before
+    with Session(engine) as sess:
+        row = sess.get(DBActivity, 111)
+        assert polyline_lib.decode(row.summary_polyline) == _TRACK
+        assert row.name == "Ride"
+
+
+def test_split_root_id_reaches_the_client(env):
+    """The editor decides whether to warn from this field, so it has to survive
+    serialisation — a piece carries its root's id, the root carries None."""
+    client, _ = env
+    resp = client.post("/api/projects/My Trip/activities/111/split",
+                       json={"split_index": 2})
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    tail = next(a for i, a in acts.items() if i < 0)
+    assert acts[111]["split_root_id"] is None
+    assert tail["split_root_id"] == 111

@@ -163,16 +163,77 @@ class ActivityMixin:
         sess.commit()
         return True
 
-    def reset_activity_track(self, sess: Session, activity_id: int) -> bool:
+    def _undo_split(self, sess: Session, project_id: int, root: DBActivity) -> int:
+        """Delete every LOCAL piece cut out of *root* and unlink its timeline items.
+
+        Returns how many pieces were removed. Only meaningful for a family ROOT:
+        every piece of a family carries the SAME ``split_root_id`` (the first
+        piece ever split, never the immediate parent — see ``split_activity``),
+        so this one query reaches pieces cut out of other pieces too.
+
+        The ``id < 0`` filter is a guard, not a subtlety: only split tails point
+        at a root and they are always local, but a Strava row is shared across
+        every project that references it and must never be row-deleted here.
+        """
+        pieces = sess.exec(
+            select(DBActivity).where(
+                DBActivity.split_root_id == root.id, DBActivity.id < 0
+            )
+        ).all()
+        if not pieces:
+            return 0
+
+        sess.execute(
+            delete(DBProjectItem).where(
+                DBProjectItem.project_id == project_id,
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id.in_([p.id for p in pieces]),
+            )
+        )
+        for piece in pieces:
+            sess.delete(piece)
+
+        # Keep item positions contiguous, then let _renumber_split_family drop the
+        # now-meaningless "(i/N)" suffix and restore the plain pre-split name.
+        remaining = sess.exec(
+            select(DBProjectItem)
+            .where(DBProjectItem.project_id == project_id)
+            .order_by(DBProjectItem.position)
+        ).all()
+        for pos, it in enumerate(remaining):
+            it.position = pos
+            sess.add(it)
+        self._renumber_split_family(sess, root.id)
+        return len(pieces)
+
+    def reset_activity_track(
+        self, sess: Session, project_id: int, activity_id: int
+    ) -> bool:
         """Restore an edited activity's geometry from its original snapshot.
 
         Recomputes scalar metrics from the restored geometry and clears
         is_edited + the snapshot columns.  Returns False if the row does not
         exist or was never edited (nothing to reset).
+
+        When the activity is the ROOT of a split family, the snapshot is the
+        whole pre-split track, so restoring it would leave the pieces cut out of
+        it sitting on top of that track — a duplicate of every piece (issue
+        #141). The split is therefore undone as part of the reset: each local
+        piece is deleted, its timeline item unlinked, and the plain pre-split
+        name restored. That destroys any edits made to those pieces, so the
+        editor confirms first; see _splitPiecesRemovedByReset in
+        activity_editor_page.dart.
+
+        A non-root piece cascades nothing — it carries no pointer to pieces cut
+        out of IT, only to the family root — so resetting one undoes just its own
+        post-split edits (issue #131).
         """
         row = sess.get(DBActivity, activity_id)
         if row is None or not row.is_edited:
             return False
+
+        if row.split_root_id is None:
+            self._undo_split(sess, project_id, row)
 
         from src.models.track_edit import align_points, recompute_track_metrics
 
@@ -720,6 +781,7 @@ class ActivityMixin:
             # responses can render the chart before the full profile arrives.
             elevation_profile_low_res=elevation_profile_low_res,
             is_edited=bool(getattr(row, "is_edited", False)),
+            split_root_id=getattr(row, "split_root_id", None),
             start_latlng_enc=start_latlng_enc,
             end_latlng_enc=end_latlng_enc,
             # Prefer the full profile's ciphertext; fall back to the low-res

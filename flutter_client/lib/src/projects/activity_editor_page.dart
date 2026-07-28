@@ -94,6 +94,20 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// reset only undoes edits made since the piece was created (issue #131).
   bool get _isLocal => _activityId < 0;
 
+  /// How many pieces resetting this activity would destroy.
+  ///
+  /// Only a family ROOT cascades: its snapshot is the whole pre-split track, so
+  /// the server undoes the split rather than leave the pieces duplicating it
+  /// (issue #141). A piece carries a pointer to the root, never to pieces cut
+  /// out of itself, so resetting one takes nothing else with it — it just undoes
+  /// its own post-split edits (issue #131).
+  int get _splitPiecesRemovedByReset {
+    if (widget.activity['split_root_id'] != null) return 0; // not a root
+    return widget.notifier.activities
+        .where((a) => (a['split_root_id'] as num?)?.toInt() == _activityId)
+        .length;
+  }
+
   /// Test-only access to the editor controller so widget tests can drive edits
   /// without simulating map-tile gestures.
   @visibleForTesting
@@ -287,7 +301,41 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     }
   }
 
+  /// Warn before a reset that also removes the pieces this activity was split
+  /// into — restoring the full track destroys them and any edits they carry, so
+  /// that has to be a choice rather than a surprise (issue #141).
+  Future<bool> _confirmResetRemovesPieces(int pieces) async {
+    final n = pieces + 1; // the pieces plus this one, i.e. the whole family
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset to Strava'),
+        content: Text(
+          'This restores the full original track from Strava, undoing the '
+          'split that cut it into $n pieces.\n\n'
+          '${pieces == 1 ? 'The other piece' : 'The other $pieces pieces'} '
+          'will be removed from the trip, along with any track edits made to '
+          '${pieces == 1 ? 'it' : 'them'}. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
   Future<void> _reset() async {
+    final pieces = _splitPiecesRemovedByReset;
+    if (pieces > 0 && !await _confirmResetRemovesPieces(pieces)) return;
+    if (!mounted) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);

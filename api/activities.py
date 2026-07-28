@@ -495,7 +495,12 @@ def reset_activity_track(
     background_tasks: BackgroundTasks,
     owner: OwnerParam = None,
 ):
-    """Restore an edited activity's geometry from its snapshot and clear is_edited."""
+    """Restore an edited activity's geometry from its snapshot and clear is_edited.
+
+    On the root of a split family this also undoes the split — the pieces cut out
+    of it would otherwise duplicate the restored full track (#141). The editor
+    confirms before calling this; see reset_activity_track in the repo.
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
@@ -511,7 +516,7 @@ def reset_activity_track(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
-        if not _repo.reset_activity_track(sess, activity_id):
+        if not _repo.reset_activity_track(sess, row.id, activity_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Activity has no edit to reset",
