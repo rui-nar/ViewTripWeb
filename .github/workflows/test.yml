@@ -58,3 +58,33 @@ jobs:
       - name: Run tests
         working-directory: flutter_client
         run: flutter test
+
+  android:
+    # The Android build is the only thing that exercises the gradle config, the
+    # manifest merge and the plugin set on that platform — `flutter test` runs on
+    # the VM and would stay green through a broken APK (issue #136).
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Gradle 8.14 (android/gradle/wrapper) does not support JDK 25.
+          java-version: '21'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        working-directory: flutter_client
+        run: flutter pub get
+
+      - name: Build debug APK
+        # Debug, so no signing secrets are needed and forks can run it.
+        working-directory: flutter_client
+        run: flutter build apk --debug
