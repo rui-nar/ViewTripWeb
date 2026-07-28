@@ -8,8 +8,8 @@ Both are empty on upgrade — a user with no row is on the free plan with zero
 counted storage, which is the correct starting state. The nightly reconcile job
 fills the counters in.
 
-Revision ID: c8f1a2b3d4e5
-Revises: f68e7e215b0f
+Revision ID: d7c4b9e1f206
+Revises: c8f1a2b3d4e5
 Create Date: 2026-07-28 00:00:00.000000
 
 """
@@ -20,8 +20,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = 'c8f1a2b3d4e5'
-down_revision: Union[str, Sequence[str], None] = 'f68e7e215b0f'
+revision: str = 'd7c4b9e1f206'
+down_revision: Union[str, Sequence[str], None] = 'c8f1a2b3d4e5'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
