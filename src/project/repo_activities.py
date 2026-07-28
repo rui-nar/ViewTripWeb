@@ -377,6 +377,16 @@ class ActivityMixin:
         tail.start_date = _shift(head.start_date)
         tail.start_date_local = _shift(head.start_date_local)
         self._write_track_geometry(tail, tail_points)
+        # Re-point the tail's snapshot at its OWN geometry. The seeding above is
+        # a time-apportioning device, but _write_track_geometry snapshots whatever
+        # sat on the row before the write — for a fresh tail that's the head's
+        # full pre-split track, so "Reset" expanded the tail back into a duplicate
+        # of the whole track it was cut out of (issue #131). A tail has no upstream
+        # original; the only thing reset can meaningfully undo is edits made to the
+        # tail AFTER the split, so snapshot the post-split geometry instead. This
+        # keeps the seeding trick and decouples it from the snapshot.
+        tail.original_polyline = tail.summary_polyline
+        tail.original_elevation_profile_json = tail.elevation_profile_json
 
         # Insert the tail item directly after the head item, renumbering positions.
         item_rows = sess.exec(

@@ -89,6 +89,11 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   int get _activityId => (widget.activity['id'] as num).toInt();
   bool get _isEdited => widget.activity['is_edited'] == true;
 
+  /// Local activities (split tails, added transport) carry a synthetic negative
+  /// id and never came from Strava, so there is no Strava original to reset to —
+  /// reset only undoes edits made since the piece was created (issue #131).
+  bool get _isLocal => _activityId < 0;
+
   /// Test-only access to the editor controller so widget tests can drive edits
   /// without simulating map-tile gestures.
   @visibleForTesting
@@ -423,7 +428,7 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
             TextButton.icon(
               onPressed: _saving ? null : _reset,
               icon: const Icon(Icons.restore, size: 18),
-              label: const Text('Reset to Strava'),
+              label: Text(_isLocal ? 'Reset track' : 'Reset to Strava'),
               style: TextButton.styleFrom(
                 foregroundColor: theme.colorScheme.onSurfaceVariant,
               ),

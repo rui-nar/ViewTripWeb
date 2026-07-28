@@ -459,3 +459,87 @@ def test_delete_split_item_removes_local_row_and_allows_resplit(env):
     # in-range boundary now.
     r2 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 1})
     assert r2.status_code == 200, r2.text
+
+
+# ── Reset on a split tail (issue #131) ──────────────────────────────────────
+#
+# split_activity seeds the tail row with the head's FULL pre-split geometry so
+# the tail's time apportioning has the right denominator. _write_track_geometry
+# used to snapshot that seed into original_*, so "Reset" expanded the tail back
+# into a duplicate of the whole track it was cut out of. The snapshot must be
+# the tail's OWN post-split geometry instead.
+
+
+def _split_and_get_tail(client):
+    resp = client.post("/api/projects/My Trip/activities/111/split",
+                       json={"split_index": 2})
+    assert resp.status_code == 200, resp.text
+    return next(i for i in (a["id"] for a in resp.json()["activities"]) if i < 0)
+
+
+def test_split_tail_snapshots_its_own_geometry(env):
+    client, engine = env
+    tail_id = _split_and_get_tail(client)
+
+    with Session(engine) as sess:
+        tail = sess.get(DBActivity, tail_id)
+        # The snapshot is the tail's own track, not the whole pre-split one.
+        assert polyline_lib.decode(tail.original_polyline) == _TRACK[2:]
+        assert tail.original_polyline == tail.summary_polyline
+        assert tail.original_elevation_profile_json == tail.elevation_profile_json
+        # The head still snapshots the full pre-split track: it IS the Strava
+        # activity, so its own reset target is unchanged by this fix.
+        assert sess.get(DBActivity, 111).original_polyline == polyline_lib.encode(_TRACK)
+
+
+def test_reset_on_a_fresh_tail_is_a_noop(env):
+    """A tail with no post-split edits has nothing to undo, so reset must leave
+    its geometry, distance and times exactly as the split left them — it used to
+    restore the whole pre-split track and its full duration."""
+    client, engine = env
+    tail_id = _split_and_get_tail(client)
+
+    with Session(engine) as sess:
+        before = sess.get(DBActivity, tail_id)
+        poly, dist = before.summary_polyline, before.distance
+        moving, elapsed = before.moving_time, before.elapsed_time
+
+    resp = client.post(f"/api/projects/My Trip/activities/{tail_id}/reset")
+    assert resp.status_code == 200, resp.text
+
+    with Session(engine) as sess:
+        after = sess.get(DBActivity, tail_id)
+        assert after.summary_polyline == poly
+        assert polyline_lib.decode(after.summary_polyline) == _TRACK[2:]
+        assert after.distance == pytest.approx(dist, rel=1e-6)
+        assert after.moving_time == pytest.approx(moving, abs=1)
+        assert after.elapsed_time == pytest.approx(elapsed, abs=1)
+        assert after.is_edited is False
+        # And the head is untouched — the two pieces still tile the original
+        # track rather than overlapping.
+        assert polyline_lib.decode(
+            sess.get(DBActivity, 111).summary_polyline) == _TRACK[:3]
+
+
+def test_reset_on_an_edited_tail_restores_the_post_split_track(env):
+    """Reset stays useful on a tail: it undoes edits made AFTER the split, back
+    to the piece the split produced — not back to the whole pre-split track."""
+    client, engine = env
+    tail_id = _split_and_get_tail(client)
+
+    # Trim the tail to its first two points.
+    resp = client.put(f"/api/projects/My Trip/activities/{tail_id}/track",
+                      json={"points": _points_body(_TRACK[2:4])})
+    assert resp.status_code == 200, resp.text
+    with Session(engine) as sess:
+        assert polyline_lib.decode(
+            sess.get(DBActivity, tail_id).summary_polyline) == _TRACK[2:4]
+
+    resp = client.post(f"/api/projects/My Trip/activities/{tail_id}/reset")
+    assert resp.status_code == 200, resp.text
+
+    with Session(engine) as sess:
+        row = sess.get(DBActivity, tail_id)
+        assert polyline_lib.decode(row.summary_polyline) == _TRACK[2:]
+        assert row.is_edited is False
+        assert row.original_polyline is None
