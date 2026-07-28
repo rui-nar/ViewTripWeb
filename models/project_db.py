@@ -317,6 +317,12 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     # original_* snapshot columns above.
     split_root_id: Optional[int] = sqlmodel.Field(default=None, index=True)
     split_base_name: Optional[str] = sqlmodel.Field(default=None)
+    # The piece this one was cut directly OUT of — the immediate parent, where
+    # split_root_id is the family's first piece however deep the chain (issue
+    # #143). Both are needed: the root answers "which family is this", the parent
+    # answers "what does resetting this piece grow back over", which is exactly
+    # its transitive descendants. NULL on a row that was never cut out of another.
+    split_parent_id: Optional[int] = sqlmodel.Field(default=None, index=True)
 
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")

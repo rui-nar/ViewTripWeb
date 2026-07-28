@@ -163,23 +163,49 @@ class ActivityMixin:
         sess.commit()
         return True
 
-    def _undo_split(self, sess: Session, project_id: int, root: DBActivity) -> int:
-        """Delete every LOCAL piece cut out of *root* and unlink its timeline items.
+    @staticmethod
+    def _split_descendants(sess: Session, activity_id: int) -> List[DBActivity]:
+        """Every LOCAL piece transitively cut out of *activity_id*.
 
-        Returns how many pieces were removed. Only meaningful for a family ROOT:
-        every piece of a family carries the SAME ``split_root_id`` (the first
-        piece ever split, never the immediate parent — see ``split_activity``),
-        so this one query reaches pieces cut out of other pieces too.
+        Walks ``split_parent_id`` breadth-first: a piece records which piece it
+        was cut directly out of, so this is exactly the set that resetting
+        *activity_id* would grow back over. ``split_root_id`` cannot answer this
+        — it points every piece of a family at the family's FIRST piece however
+        deep the chain, which says nothing about who cut whom (issue #143).
 
-        The ``id < 0`` filter is a guard, not a subtlety: only split tails point
-        at a root and they are always local, but a Strava row is shared across
-        every project that references it and must never be row-deleted here.
+        The ``id < 0`` filter is a guard, not a subtlety: only split tails have a
+        parent and they are always local, but a Strava row is shared across every
+        project that references it and must never be row-deleted here. ``seen``
+        likewise guards a cycle that split_activity cannot create (a new tail's
+        id is always below every existing id, so parents are strictly greater).
         """
-        pieces = sess.exec(
-            select(DBActivity).where(
-                DBActivity.split_root_id == root.id, DBActivity.id < 0
-            )
-        ).all()
+        found: List[DBActivity] = []
+        seen = {activity_id}
+        frontier = [activity_id]
+        while frontier:
+            children = sess.exec(
+                select(DBActivity).where(
+                    DBActivity.split_parent_id.in_(frontier), DBActivity.id < 0
+                )
+            ).all()
+            children = [c for c in children if c.id not in seen]
+            if not children:
+                break
+            found.extend(children)
+            seen.update(c.id for c in children)
+            frontier = [c.id for c in children]
+        return found
+
+    def _remove_split_descendants(
+        self, sess: Session, project_id: int, row: DBActivity
+    ) -> int:
+        """Delete the pieces cut out of *row* and unlink their timeline items.
+
+        Returns how many were removed. On a family root this removes the whole
+        family, i.e. undoes the split outright (issue #141); on a piece that was
+        itself split again it removes just that piece's own children (#143).
+        """
+        pieces = self._split_descendants(sess, row.id)
         if not pieces:
             return 0
 
@@ -194,7 +220,8 @@ class ActivityMixin:
             sess.delete(piece)
 
         # Keep item positions contiguous, then let _renumber_split_family drop the
-        # now-meaningless "(i/N)" suffix and restore the plain pre-split name.
+        # now-meaningless "(i/N)" suffix — restoring the plain pre-split name when
+        # the family is down to one piece, renumbering the survivors otherwise.
         remaining = sess.exec(
             select(DBProjectItem)
             .where(DBProjectItem.project_id == project_id)
@@ -203,7 +230,8 @@ class ActivityMixin:
         for pos, it in enumerate(remaining):
             it.position = pos
             sess.add(it)
-        self._renumber_split_family(sess, root.id)
+        self._renumber_split_family(
+            sess, row.split_root_id if row.split_root_id is not None else row.id)
         return len(pieces)
 
     def reset_activity_track(
@@ -215,25 +243,25 @@ class ActivityMixin:
         is_edited + the snapshot columns.  Returns False if the row does not
         exist or was never edited (nothing to reset).
 
-        When the activity is the ROOT of a split family, the snapshot is the
-        whole pre-split track, so restoring it would leave the pieces cut out of
-        it sitting on top of that track — a duplicate of every piece (issue
-        #141). The split is therefore undone as part of the reset: each local
-        piece is deleted, its timeline item unlinked, and the plain pre-split
-        name restored. That destroys any edits made to those pieces, so the
-        editor confirms first; see _splitPiecesRemovedByReset in
-        activity_editor_page.dart.
+        The snapshot is whatever geometry the row held before its last edit, so
+        on anything that has been split it spans the pieces cut out of it too.
+        Restoring it verbatim would leave those pieces sitting on top of the
+        restored track, duplicating it. They are therefore deleted as part of the
+        reset, their timeline items unlinked and the family renamed — on a root
+        that undoes the split outright (issue #141), on a piece that was itself
+        split again it removes just that piece's own children (issue #143).
 
-        A non-root piece cascades nothing — it carries no pointer to pieces cut
-        out of IT, only to the family root — so resetting one undoes just its own
-        post-split edits (issue #131).
+        That destroys any edits made to those pieces, so the editor confirms
+        first; see _splitPiecesRemovedByReset in activity_editor_page.dart.
+
+        A piece with no children of its own cascades nothing: resetting it undoes
+        just its own post-split edits (issue #131).
         """
         row = sess.get(DBActivity, activity_id)
         if row is None or not row.is_edited:
             return False
 
-        if row.split_root_id is None:
-            self._undo_split(sess, project_id, row)
+        self._remove_split_descendants(sess, project_id, row)
 
         from src.models.track_edit import align_points, recompute_track_metrics
 
@@ -393,6 +421,10 @@ class ActivityMixin:
             user_info_id=user_info_id,
             name=f"{head.name} (2)",
             split_root_id=root_id,
+            # ...and the piece it was cut directly out of, which is the head
+            # whatever its depth. Unlike split_root_id this is the IMMEDIATE
+            # parent, so reset can find a piece's own children (issue #143).
+            split_parent_id=head.id,
             type=head.type,
             moving_time=head.moving_time,
             elapsed_time=head.elapsed_time,
@@ -488,6 +520,15 @@ class ActivityMixin:
         if row is None:
             return False
         root_id = row.split_root_id
+        # Adopt this row's children onto its own parent before it goes, so the
+        # split chain stays connected. Left dangling they would be unreachable
+        # from any ancestor, and a later reset would restore a track right over
+        # the top of them without knowing they were there (issue #143).
+        for child in sess.exec(
+            select(DBActivity).where(DBActivity.split_parent_id == activity_id)
+        ).all():
+            child.split_parent_id = row.split_parent_id
+            sess.add(child)
         sess.execute(
             delete(DBProjectItem).where(
                 DBProjectItem.project_id == project_id,
@@ -781,7 +822,7 @@ class ActivityMixin:
             # responses can render the chart before the full profile arrives.
             elevation_profile_low_res=elevation_profile_low_res,
             is_edited=bool(getattr(row, "is_edited", False)),
-            split_root_id=getattr(row, "split_root_id", None),
+            split_parent_id=getattr(row, "split_parent_id", None),
             start_latlng_enc=start_latlng_enc,
             end_latlng_enc=end_latlng_enc,
             # Prefer the full profile's ciphertext; fall back to the low-res

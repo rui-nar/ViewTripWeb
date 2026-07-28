@@ -594,19 +594,27 @@ def test_reset_on_a_split_root_restores_the_plain_name(env):
         assert sess.get(DBActivity, 111).name == "Ride"
 
 
-def test_reset_on_a_split_root_removes_pieces_split_out_of_pieces(env):
-    """Every piece of a family points at the SAME root, however deep the chain,
-    so a grandchild is removed too — not stranded pointing at a reset root."""
-    client, engine = env
-    first_tail = _split_and_get_tail(client)
-    # Cut the tail again: its own tail still points at 111, not at first_tail.
-    resp = client.post(f"/api/projects/My Trip/activities/{first_tail}/split",
+def _split_twice(client, engine):
+    """111 → [111, first] → [111, first, second], second cut out of first."""
+    first = _split_and_get_tail(client)
+    resp = client.post(f"/api/projects/My Trip/activities/{first}/split",
                        json={"split_index": 1})
     assert resp.status_code == 200, resp.text
-    second_tail = next(i for i in (a["id"] for a in resp.json()["activities"])
-                       if i < 0 and i != first_tail)
+    second = next(i for i in (a["id"] for a in resp.json()["activities"])
+                  if i < 0 and i != first)
     with Session(engine) as sess:
-        assert sess.get(DBActivity, second_tail).split_root_id == 111
+        # The whole family shares one root, but the parents form the real chain.
+        assert sess.get(DBActivity, second).split_root_id == 111
+        assert sess.get(DBActivity, first).split_parent_id == 111
+        assert sess.get(DBActivity, second).split_parent_id == first
+    return first, second
+
+
+def test_reset_on_a_split_root_removes_pieces_split_out_of_pieces(env):
+    """The walk is transitive, so a grandchild goes too — not left stranded
+    below a root that has been restored over the top of it."""
+    client, engine = env
+    first_tail, second_tail = _split_twice(client, engine)
 
     assert client.post("/api/projects/My Trip/activities/111/reset").status_code == 200
 
@@ -616,9 +624,57 @@ def test_reset_on_a_split_root_removes_pieces_split_out_of_pieces(env):
         assert polyline_lib.decode(sess.get(DBActivity, 111).summary_polyline) == _TRACK
 
 
+def test_reset_on_a_resplit_piece_removes_its_own_children_only(env):
+    """Issue #143. Resetting the middle piece restores the span it covered before
+    it was cut again — which is exactly where its child sits — so the child goes
+    with it. Its parent, the root, is untouched: it is not below the reset."""
+    client, engine = env
+    first_tail, second_tail = _split_twice(client, engine)
+    with Session(engine) as sess:
+        assert polyline_lib.decode(
+            sess.get(DBActivity, first_tail).summary_polyline) == _TRACK[2:4]
+
+    assert client.post(
+        f"/api/projects/My Trip/activities/{first_tail}/reset").status_code == 200
+
+    with Session(engine) as sess:
+        # The middle piece grew back over its child's span...
+        assert polyline_lib.decode(
+            sess.get(DBActivity, first_tail).summary_polyline) == _TRACK[2:]
+        # ...so the child must be gone rather than duplicated underneath it.
+        assert sess.get(DBActivity, second_tail) is None
+        # The root above the reset is untouched, and the family renumbered.
+        assert polyline_lib.decode(
+            sess.get(DBActivity, 111).summary_polyline) == _TRACK[:3]
+        assert sess.get(DBActivity, 111).name == "Ride (1/2)"
+        assert sess.get(DBActivity, first_tail).name == "Ride (2/2)"
+
+
+def test_deleting_a_middle_piece_reparents_its_children(env):
+    """A deleted piece's children are adopted by its own parent, so the chain
+    stays connected — otherwise they are unreachable from any ancestor and a
+    later reset restores a track straight over the top of them (#143)."""
+    client, engine = env
+    first_tail, second_tail = _split_twice(client, engine)
+
+    items = _items(client)
+    idx = next(i for i, it in enumerate(items)
+               if it.get("activity_id") == first_tail)
+    assert client.delete(f"/api/projects/My Trip/items/{idx}").status_code == 204
+
+    with Session(engine) as sess:
+        # The grandchild now hangs off the root directly.
+        assert sess.get(DBActivity, second_tail).split_parent_id == 111
+
+    # ...so resetting the root still reaches it.
+    assert client.post("/api/projects/My Trip/activities/111/reset").status_code == 200
+    with Session(engine) as sess:
+        assert sess.get(DBActivity, second_tail) is None
+
+
 def test_reset_on_a_tail_leaves_its_siblings_alone(env):
-    """Only a ROOT cascades. Resetting a piece undoes its own post-split edits
-    (#131) and must not take the rest of the family with it."""
+    """A piece with nothing cut out of it cascades nothing: resetting it undoes
+    its own post-split edits (#131) and leaves the rest of the family alone."""
     client, engine = env
     tail_id = _split_and_get_tail(client)
 
@@ -651,13 +707,16 @@ def test_reset_on_an_unsplit_activity_touches_no_items(env):
         assert row.name == "Ride"
 
 
-def test_split_root_id_reaches_the_client(env):
-    """The editor decides whether to warn from this field, so it has to survive
-    serialisation — a piece carries its root's id, the root carries None."""
+def test_split_parent_id_reaches_the_client(env):
+    """The editor walks this field to decide whether to warn, so it has to
+    survive serialisation — a piece carries its parent's id, the root None."""
     client, _ = env
     resp = client.post("/api/projects/My Trip/activities/111/split",
                        json={"split_index": 2})
     acts = {a["id"]: a for a in resp.json()["activities"]}
     tail = next(a for i, a in acts.items() if i < 0)
-    assert acts[111]["split_root_id"] is None
-    assert tail["split_root_id"] == 111
+    assert acts[111]["split_parent_id"] is None
+    assert tail["split_parent_id"] == 111
+    # split_root_id stays DB-only: it answers "which family", not "what is below
+    # this piece", which is the question the warning needs (#143).
+    assert "split_root_id" not in tail

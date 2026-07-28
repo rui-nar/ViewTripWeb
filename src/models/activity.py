@@ -58,12 +58,13 @@ class Activity:
     # Strava sync must skip this activity. Round-trips through the DB and the REST
     # API; the pre-edit snapshot itself stays DB-only.
     is_edited: bool = False
-    # Split-family membership (issue #45). None on an activity that was never cut
-    # out of another; otherwise the id of the family's first piece. Round-trips
-    # through the DB and the REST API so the client can tell a family ROOT (this
-    # is None, and other activities point at its id) from a piece — resetting a
-    # root destroys the pieces cut from it, and the editor must warn first (#141).
-    split_root_id: Optional[int] = None
+    # The piece this activity was cut directly out of (issue #143), None if it
+    # never was. Round-trips through the DB and the REST API so the editor can
+    # walk it to find the pieces cut out of an activity: resetting destroys those
+    # pieces, and the user has to be warned first (#141). The DB's split_root_id
+    # is deliberately NOT surfaced — it points every piece at the family's first
+    # piece however deep the chain, which cannot answer "what is below this one".
+    split_parent_id: Optional[int] = None
 
     # Client-side E2EE ciphertext passthrough (issue #29). start_latlng/end_latlng/
     # elevation_profile are parsed structures (list/tuple) — they can't carry a
@@ -125,7 +126,7 @@ class Activity:
                 "elevations_m": self.elevation_profile[1],
             } if self.elevation_profile else None,
             "is_edited": self.is_edited,
-            "split_root_id": self.split_root_id,
+            "split_parent_id": self.split_parent_id,
             "start_latlng_enc": self.start_latlng_enc,
             "end_latlng_enc": self.end_latlng_enc,
             "elevation_profile_enc": self.elevation_profile_enc,
@@ -186,7 +187,7 @@ class Activity:
                 else None
             ),
             is_edited=data.get("is_edited", False),
-            split_root_id=data.get("split_root_id"),
+            split_parent_id=data.get("split_parent_id"),
             start_latlng_enc=data.get("start_latlng_enc"),
             end_latlng_enc=data.get("end_latlng_enc"),
             elevation_profile_enc=data.get("elevation_profile_enc"),

@@ -36,7 +36,7 @@ void _delta(StringBuffer sb, int v) {
 Map<String, dynamic> _activity({
   bool edited = false,
   int id = 111,
-  int? splitRootId,
+  int? splitParentId,
 }) {
   final track = <GeoPoint>[
     (lat: 48.0, lon: 2.00),
@@ -48,7 +48,7 @@ Map<String, dynamic> _activity({
     'id': id,
     'name': 'Test Ride',
     'is_edited': edited,
-    'split_root_id': splitRootId,
+    'split_parent_id': splitParentId,
     'map': {'summary_polyline': _encode(track)},
     'elevation_profile': [
       [0.0, 100.0],
@@ -102,11 +102,20 @@ class _RecordingNotifier extends ProjectNotifier {
   }
 }
 
-/// A notifier holding a split family: root 111 plus [pieces] local pieces.
+/// A notifier holding a flat split family: root 111 with [pieces] children.
 _RecordingNotifier _familyNotifier(int pieces) => _RecordingNotifier()
   ..activities = [
-    {'id': 111, 'split_root_id': null},
-    for (var i = 1; i <= pieces; i++) {'id': -i, 'split_root_id': 111},
+    {'id': 111, 'split_parent_id': null},
+    for (var i = 1; i <= pieces; i++) {'id': -i, 'split_parent_id': 111},
+  ];
+
+/// A notifier holding a CHAIN: 111 → -1 → -2, each cut out of the one before.
+/// The flat fixture cannot tell a transitive walk from a single-level one.
+_RecordingNotifier _chainNotifier() => _RecordingNotifier()
+  ..activities = [
+    {'id': 111, 'split_parent_id': null},
+    {'id': -1, 'split_parent_id': 111},
+    {'id': -2, 'split_parent_id': -1},
   ];
 
 /// Push the editor onto a route (as ActivityPanel does) so the page's pop-on-
@@ -234,8 +243,8 @@ void main() {
     await tester.tap(find.text('Reset to Strava'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('cut it into 2 pieces'), findsOneWidget);
-    expect(find.textContaining('The other piece'), findsOneWidget);
+    expect(find.textContaining('before it was split'), findsOneWidget);
+    expect(find.textContaining('The piece cut out of it'), findsOneWidget);
     expect(find.textContaining('cannot be undone'), findsOneWidget);
     expect(notifier.resets, isEmpty); // nothing sent until confirmed
   });
@@ -246,7 +255,7 @@ void main() {
 
     await tester.tap(find.text('Reset to Strava'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('The other 2 pieces'), findsOneWidget);
+    expect(find.textContaining('The 2 pieces cut out of it'), findsOneWidget);
 
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
@@ -265,18 +274,45 @@ void main() {
     expect(notifier.resets, [111]);
   });
 
-  testWidgets('resetting a piece of a split does not warn', (tester) async {
-    // A piece points at the root, never at pieces cut out of itself, so its
-    // reset takes nothing else with it — it just undoes its own edits (#131).
+  testWidgets('resetting a piece with nothing under it does not warn',
+      (tester) async {
+    // A leaf piece takes nothing with it — reset just undoes its edits (#131).
     final notifier = _familyNotifier(1);
     await _pumpPushed(
-        tester, _activity(edited: true, id: -1, splitRootId: 111), notifier);
+        tester, _activity(edited: true, id: -1, splitParentId: 111), notifier);
 
     await tester.tap(find.text('Reset track'));
     await tester.pumpAndSettle();
 
     expect(find.byType(AlertDialog), findsNothing);
     expect(notifier.resets, [-1]);
+  });
+
+  testWidgets('resetting a piece that was split again warns about its child',
+      (tester) async {
+    // Issue #143: -1 grows back over -2, so -2 goes with it — and only -2. The
+    // root above the reset is not below it and must not be counted.
+    final notifier = _chainNotifier();
+    await _pumpPushed(
+        tester, _activity(edited: true, id: -1, splitParentId: 111), notifier);
+
+    await tester.tap(find.text('Reset track'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('The piece cut out of it'), findsOneWidget);
+    expect(notifier.resets, isEmpty);
+  });
+
+  testWidgets('resetting the root of a chain counts the grandchild too',
+      (tester) async {
+    // The walk is transitive: 111 → -1 → -2 is two pieces, not one.
+    final notifier = _chainNotifier();
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('The 2 pieces cut out of it'), findsOneWidget);
   });
 
   testWidgets('resetting an activity that was never split does not warn',
