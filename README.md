@@ -113,6 +113,7 @@ These are read by the backend at **runtime** (`os.getenv`) — a value passed to
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `MAIL_FROM` | Transactional email via any provider's SMTP relay (optional — without `SMTP_HOST`, emails are logged to the console instead of sent). `MAIL_FROM` must be on a domain verified with the provider, or mail is delivered to spam |
 | `FRONTEND_ORIGIN` | Base URL for links in outgoing mail (invites, email verification) — must be where users actually reach the app |
 | `APP_VERSION` | Running version; set automatically from the git tag at image build |
+| `BILLING_ENABLED` / `STRIPE_*` / `FREE_MAX_*` / `CLOUD_MAX_*` | Tier plans and payments (optional — **unset means no billing at all: self-hosted instances are never metered**). See [docs/BILLING.md](docs/BILLING.md) |
 
 **Local dev:** export the vars before launching (`export $(grep -v '^#' .env | xargs)`),
 or use `dev.ps1` / `dev-server.ps1`, which inject them for you.

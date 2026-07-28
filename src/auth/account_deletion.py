@@ -38,6 +38,7 @@ from models.project_db import (
     DBJournalEntry,
     DBRecoveryWrap,
 )
+from models.billing import Subscription, UserUsage
 from models.user import (
     EmailVerification,
     LocalUser,
@@ -123,6 +124,11 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
     _delete_all(PolarstepsToken, PolarstepsToken.user_info_id == user_info_id)
     _delete_all(DBDeviceKey, DBDeviceKey.user_info_id == user_info_id)
     _delete_all(DBRecoveryWrap, DBRecoveryWrap.user_info_id == user_info_id)
+    # Billing rows (issue #121). Deleting the account here does not cancel a
+    # live subscription at the provider — that is the provider's own record and
+    # must be cancelled through it (or through the billing portal) first.
+    _delete_all(Subscription, Subscription.user_info_id == user_info_id)
+    _delete_all(UserUsage, UserUsage.user_info_id == user_info_id)
 
     user_info = sess.get(UserInfo, user_info_id)
     local_auth_id = user_info.local_auth_id if user_info else None

@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../billing/billing_service.dart';
 import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 
@@ -173,6 +174,14 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier {
       if (res.statusCode >= 200 && res.statusCode < 300) {
         final match = RegExp(r'"uuid"\s*:\s*"([^"]+)"').firstMatch(res.body);
         return match?.group(1);
+      }
+      // A plan limit (issue #121) is worth telling the user about — without it
+      // the upload just silently does nothing.
+      final quota = QuotaError.fromApiException(
+          ApiException(res.statusCode, res.body));
+      if (quota != null) {
+        error = quota.detail;
+        notifyListeners();
       }
       return null;
     } catch (_) {

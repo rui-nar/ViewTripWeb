@@ -46,6 +46,9 @@ from api.project_access import (
 from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
+from src.billing.entitlements import ensure_storage_quota
+from src.billing.usage import record_written, unlink_and_record
+from src.exceptions.errors import QuotaExceeded
 from src.models.memory import Memory
 from src.project.memory_match import step_key
 from src.utils.encryption_check import is_encrypted_envelope as _is_encrypted_envelope
@@ -395,11 +398,13 @@ def delete_memory(
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
 
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
-        photo_path = Path(_DATA_DIR) / "users" / _owner_dir_id(sess, mem_row) / "memories" / str(memory_id)
-        for photo_uuid in photos:
-            for suffix in ["", "_thumb"]:
-                f = photo_path / f"{photo_uuid}{suffix}.jpg"
-                f.unlink(missing_ok=True)
+        owner_dir = _owner_dir_id(sess, mem_row)
+        photo_path = Path(_DATA_DIR) / "users" / owner_dir / "memories" / str(memory_id)
+        unlink_and_record(owner_dir, [
+            photo_path / f"{photo_uuid}{suffix}.jpg"
+            for photo_uuid in photos
+            for suffix in ("", "_thumb")
+        ])
         if photo_path.exists():
             try:
                 photo_path.rmdir()
@@ -422,18 +427,27 @@ def delete_memory(
 
 def _save_photo_files(user_id: str, memory_id: int, uuid_str: str, raw: bytes) -> None:
     photo_path = _photo_dir(user_id, memory_id)
-    (photo_path / f"{uuid_str}.jpg").write_bytes(raw)
+    full = photo_path / f"{uuid_str}.jpg"
+    thumb = photo_path / f"{uuid_str}_thumb.jpg"
+    full.write_bytes(raw)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
-    img.save(str(photo_path / f"{uuid_str}_thumb.jpg"), "JPEG", quality=85)
+    img.save(str(thumb), "JPEG", quality=85)
+    # Storage accounting for quota checks (issue #121). Done here rather than at
+    # each call site so every path that writes a photo — upload, replace,
+    # from-url, Polarsteps import — is counted by construction. Attribution
+    # follows the directory: photos live under the project OWNER's tree.
+    record_written(user_id, full, thumb)
 
 
 def _delete_photo_files(user_id: str, memory_id: int, photo_uuids: List[str]) -> None:
     """Remove the on-disk full-res + thumbnail files for the given photo UUIDs."""
     photo_path = _photo_dir(user_id, memory_id)
-    for photo_uuid in photo_uuids:
-        for suffix in ["", "_thumb"]:
-            (photo_path / f"{photo_uuid}{suffix}.jpg").unlink(missing_ok=True)
+    unlink_and_record(user_id, [
+        photo_path / f"{photo_uuid}{suffix}.jpg"
+        for photo_uuid in photo_uuids
+        for suffix in ("", "_thumb")
+    ])
 
 
 def _clear_memory_photos(sess, user_id: str, mem_row: DBMemory) -> None:
@@ -468,6 +482,14 @@ def _download_photo_from_url(memory_id: int, url: str, user_id: str) -> None:
         resp.raise_for_status()
     except Exception:
         return
+    # Same quota rule as a direct upload, but this runs in a background task —
+    # there is no request left to answer 402 on, so it just declines to store.
+    try:
+        with get_session() as sess:
+            ensure_storage_quota(sess, int(user_id), len(resp.content))
+    except QuotaExceeded:
+        _log.info("Skipped photo download for user %s: storage quota reached", user_id)
+        return
     uuid_str = str(uuid_lib.uuid4())
     _save_photo_files(user_id, memory_id, uuid_str, resp.content)
     _append_photo_to_memory(memory_id, uuid_str)
@@ -490,6 +512,10 @@ async def upload_photo(
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         owner_dir = _owner_dir_id(sess, mem_row)
     raw = await file.read()
+    # The bytes land in the owner's tree, so it is the owner's quota that
+    # applies — a companion uploading to a shared trip spends the owner's space.
+    with get_session() as sess:
+        ensure_storage_quota(sess, int(owner_dir), len(raw))
     photo_uuid = str(uuid_lib.uuid4())
     _save_photo_files(owner_dir, memory_id, photo_uuid, raw)
     _append_photo_to_memory(memory_id, photo_uuid)
@@ -554,6 +580,8 @@ async def replace_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
+    with get_session() as sess:
+        ensure_storage_quota(sess, int(owner_dir), len(raw))
     new_uuid = str(uuid_lib.uuid4())
     _save_photo_files(owner_dir, memory_id, new_uuid, raw)
 

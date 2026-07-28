@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from api.project_shared import _DATA_DIR, _legacy_path, _projects_dir, _repo
+from src.billing.entitlements import ensure_project_quota, ensure_storage_quota
+from src.billing.usage import reconcile_usage
 from src.models.great_circle import great_circle_points
 from src.project.project_io import ProjectIO
 from src.utils.encryption_check import is_encrypted_envelope
@@ -64,12 +66,23 @@ async def import_project(
     pdir = _projects_dir(user_id)
     tmp_path = os.path.join(pdir, fname)
     contents = await file.read()
+
+    # Plan limits (issue #121): an import creates a trip and lands its bytes on
+    # disk, so both quotas apply — checked before writing anything.
+    with get_session() as sess:
+        ensure_project_quota(sess, user_info_id)
+        ensure_storage_quota(sess, user_info_id, len(contents))
+
     with open(tmp_path, "wb") as fh:
         fh.write(contents)
 
     name = fname[: -len(ProjectIO.EXTENSION)]
     with get_session() as sess:
         _repo.ingest_project(sess, user_info_id, tmp_path)
+
+    # An archive expands into project files and photos; rather than trying to
+    # account for each write inside the ingest, re-measure the tree once.
+    reconcile_usage(user_info_id)
 
     return {"name": name, "filename": fname}
 

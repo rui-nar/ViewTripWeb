@@ -39,6 +39,7 @@ from api.project_shared import _legacy_path, _refresh_stats_background, _repo
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
+from src.billing.entitlements import ensure_project_quota
 from src.models.activity import Activity
 from src.models.project import DEFAULT_SLEEPING_GROUPS
 from src.project.project_io import ProjectIO
@@ -118,6 +119,9 @@ def create_project(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Project '{name}' already exists",
             )
+        # Plan limit (issue #121) — raises QuotaExceeded → 402. No-op unless the
+        # deployment sells plans *and* has quota enforcement switched on.
+        ensure_project_quota(sess, user_info_id)
         _repo.create_project(sess, user_info_id, name)
     return {"name": name, "filename": name + ProjectIO.EXTENSION}
 

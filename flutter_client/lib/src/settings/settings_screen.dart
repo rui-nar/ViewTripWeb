@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
+import '../billing/billing_section.dart';
 import '../core/version_reload_stub.dart'
     if (dart.library.html) '../core/version_reload_web.dart';
 import '../crypto/enable_encryption_screen.dart';
@@ -433,6 +434,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
 
                 const SizedBox(height: 16),
+
+                // ── Plan ───────────────────────────────────────────────
+                // Renders nothing on a self-hosted instance (issue #121).
+                const BillingSection(),
 
                 // ── Account ────────────────────────────────────────────
                 _SectionCard(

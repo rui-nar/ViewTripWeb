@@ -26,6 +26,8 @@ from models.project_db import DBActivity, DBMemory, DBProject
 from models.user import LocalUser, UserInfo
 from src.admin.storage import cached_user_storage, refresh_storage_cache
 from src.admin.tiers import user_encryption_tier
+from src.billing.plans import PLAN_ORDER
+from src.billing.subscriptions import set_admin_override
 from src.email.service import EmailMessage, get_email_service
 from src.utils.logging import get_logger
 
@@ -95,6 +97,14 @@ class SetAdminRequest(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool = True
+
+
+class SetPlanRequest(BaseModel):
+    plan: str = Field(
+        description='Plan to grant regardless of payment — "free", "cloud", or '
+                    '"" to clear the override and fall back to what the payment '
+                    'provider says.'
+    )
 
 
 class BroadcastEmailRequest(BaseModel):
@@ -262,6 +272,36 @@ def set_admin(
     _log.info(
         "Admin set is_admin=%s for user_info_id=%s", body.is_admin, user_info_id
     )
+    return {"ok": True}
+
+
+@router.put("/users/{user_info_id}/plan", response_model=OkResponse,
+            summary="Grant or clear a plan override for a user")
+def set_plan(
+    user_info_id: int,
+    body: SetPlanRequest,
+    _admin: Annotated[dict, Depends(require_admin)],
+):
+    """Comp an account, or undo a comp.
+
+    The override is stored beside the provider state, never on top of it, so a
+    later webhook cannot silently wipe a comped plan — and clearing the override
+    returns the user to whatever they are actually paying for.
+    """
+    plan = (body.plan or "").strip().lower()
+    if plan and plan not in PLAN_ORDER:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown plan '{plan}'",
+        )
+    with get_session() as sess:
+        if sess.get(UserInfo, user_info_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
+        set_admin_override(sess, user_info_id, plan)
+
+    _log.info("Admin set plan override '%s' for user_info_id=%s", plan, user_info_id)
     return {"ok": True}
 
 
