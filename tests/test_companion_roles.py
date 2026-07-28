@@ -19,7 +19,12 @@ from api.deps import get_current_user
 from api.members import router as members_router, invites_router
 from api.people import router as people_router
 from api.projects import router as projects_router
-from models.project_db import DBProject, DBProjectInvite, DBProjectMember
+from models.project_db import (
+    DBProject,
+    DBProjectInvite,
+    DBProjectMember,
+    DBProjectPendingInvite,
+)
 from models.user import UserInfo
 
 
@@ -34,8 +39,11 @@ def env(monkeypatch):
     SQLModel.metadata.create_all(engine)
 
     with Session(engine) as sess:
+        # email_verified: these stand in for real accounts, and sending an
+        # invite requires a confirmed sender address (issue #110).
         users = {
-            role: UserInfo(display_name=role.capitalize(), email=f"{role}@e.com")
+            role: UserInfo(display_name=role.capitalize(), email=f"{role}@e.com",
+                           email_verified=True)
             for role in ("owner", "coowner", "editor", "viewer", "stranger")
         }
         for u in users.values():
@@ -281,7 +289,7 @@ def fake_email(monkeypatch):
 
 
 def test_invite_with_email_queues_a_send(env, fake_email):
-    client, _, _, act_as = env
+    client, engine, _, act_as = env
     act_as("owner")
 
     r = client.post("/api/projects/Trip/members/invite",
@@ -292,8 +300,16 @@ def test_invite_with_email_queues_a_send(env, fake_email):
     msg = fake_email.sent[0]
     assert msg.to == "friend@example.com"
     assert "Trip" in msg.subject
-    assert f"/join/{r.json()['token']}" in msg.text_body
-    assert f"/join/{r.json()['token']}" in msg.html_body
+
+    # The emailed link carries the recipient's own pending token (issue #110),
+    # not the shared one the response returns — that is what lets this invite
+    # be revoked without cutting off everyone else.
+    with Session(engine) as sess:
+        pending = sess.exec(select(DBProjectPendingInvite)).one()
+    assert pending.email == "friend@example.com"
+    assert pending.token != r.json()["token"]
+    assert f"/join/{pending.token}" in msg.text_body
+    assert f"/join/{pending.token}" in msg.html_body
 
 
 def test_invite_without_email_sends_nothing(env, fake_email):
@@ -331,7 +347,11 @@ def test_invite_email_still_enforces_the_coowner_gate(env, fake_email):
 
 def test_invite_email_reuses_the_existing_token_and_can_be_resent(env, fake_email):
     """Emailing an already-existing invite to a second address doesn't
-    create a second DBProjectInvite row, and both sends are queued."""
+    create a second DBProjectInvite row, and both sends are queued.
+
+    Each address does get its own pending invite (issue #110) — that is what
+    makes them individually revocable — but the shared link is untouched.
+    """
     client, engine, _, act_as = env
     act_as("owner")
 
@@ -344,3 +364,5 @@ def test_invite_email_reuses_the_existing_token_and_can_be_resent(env, fake_emai
     assert [m.to for m in fake_email.sent] == ["one@example.com", "two@example.com"]
     with Session(engine) as sess:
         assert len(sess.exec(select(DBProjectInvite)).all()) == 1
+        pending = sess.exec(select(DBProjectPendingInvite)).all()
+    assert {p.email for p in pending} == {"one@example.com", "two@example.com"}

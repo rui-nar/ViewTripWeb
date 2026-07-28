@@ -42,16 +42,76 @@ class InvitePreview {
   /// The role this invite grants on accept (issue #109).
   final String role;
 
+  /// For a targeted invite (issue #110), the address it was sent to; null for
+  /// the shared link, which anyone signed in may accept. Lets the join screen
+  /// say who an invite is for instead of explaining a 403 after the fact.
+  final String? invitedEmail;
+
   const InvitePreview({
     required this.projectName,
     required this.ownerName,
     required this.role,
+    this.invitedEmail,
   });
+
+  bool get isTargeted => invitedEmail != null;
 
   factory InvitePreview.fromJson(Map<String, dynamic> json) => InvitePreview(
         projectName: json['project_name'] as String? ?? '',
         ownerName: json['owner_name'] as String? ?? '',
         role: json['role'] as String? ?? 'editor',
+        invitedEmail: json['invited_email'] as String?,
+      );
+}
+
+/// One row of GET /api/projects/{name}/members/pending — an invite emailed to
+/// someone who hasn't joined yet (issue #110).
+class PendingInvite {
+  final int id;
+  final String email;
+  final String role;
+  final DateTime createdAt;
+
+  const PendingInvite({
+    required this.id,
+    required this.email,
+    required this.role,
+    required this.createdAt,
+  });
+
+  factory PendingInvite.fromJson(Map<String, dynamic> json) => PendingInvite(
+        id: (json['id'] as num?)?.toInt() ?? 0,
+        email: json['email'] as String? ?? '',
+        role: json['role'] as String? ?? 'editor',
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (((json['created_at'] as num?) ?? 0) * 1000).round()),
+      );
+}
+
+/// One row of GET /api/invites/pending — an invite addressed to *me*.
+class MyPendingInvite {
+  final String token;
+  final String projectName;
+  final String ownerName;
+  final String role;
+  final DateTime createdAt;
+
+  const MyPendingInvite({
+    required this.token,
+    required this.projectName,
+    required this.ownerName,
+    required this.role,
+    required this.createdAt,
+  });
+
+  factory MyPendingInvite.fromJson(Map<String, dynamic> json) =>
+      MyPendingInvite(
+        token: json['token'] as String? ?? '',
+        projectName: json['project_name'] as String? ?? '',
+        ownerName: json['owner_name'] as String? ?? '',
+        role: json['role'] as String? ?? 'editor',
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (((json['created_at'] as num?) ?? 0) * 1000).round()),
       );
 }
 
@@ -106,6 +166,43 @@ class MembersService {
   /// DELETE /api/projects/{name}/members/invite — co-owner+ revoke.
   Future<void> revokeInvite(ProjectRef ref) async {
     await _api.delete(ref.path('/members/invite'));
+  }
+
+  /// GET /api/projects/{name}/members/pending — co-owner+. Invites emailed to
+  /// an address that hasn't joined yet (issue #110), oldest first.
+  Future<List<PendingInvite>> listPendingInvites(ProjectRef ref) async {
+    final data =
+        await _api.get(ref.path('/members/pending')) as Map<String, dynamic>;
+    final raw = data['invites'];
+    return [
+      if (raw is List)
+        for (final p in raw) PendingInvite.fromJson(p as Map<String, dynamic>),
+    ];
+  }
+
+  /// DELETE /api/projects/{name}/members/pending/{id} — co-owner+. Revokes one
+  /// person's invite; its token stops working immediately. Unlike
+  /// [revokeInvite], this does not affect anyone else.
+  Future<void> revokePendingInvite(ProjectRef ref, int inviteId) async {
+    await _api.delete(ref.path('/members/pending/$inviteId'));
+  }
+
+  /// GET /api/invites/pending — invites addressed to the caller's confirmed
+  /// address (issue #110). Empty for an unverified account.
+  Future<List<MyPendingInvite>> listMyPendingInvites() async {
+    final data = await _api.get('/api/invites/pending') as Map<String, dynamic>;
+    final raw = data['invites'];
+    return [
+      if (raw is List)
+        for (final p in raw) MyPendingInvite.fromJson(p as Map<String, dynamic>),
+    ];
+  }
+
+  /// DELETE /api/invites/{token} — decline an invite addressed to me
+  /// (issue #110). Throws [ApiException] 409 for a shared link, which has no
+  /// per-person state to decline.
+  Future<void> declineInvite(String token) async {
+    await _api.delete('/api/invites/${Uri.encodeComponent(token)}');
   }
 
   /// DELETE /api/projects/{name}/members/{userId} — co-owner+ removes an

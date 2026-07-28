@@ -182,6 +182,39 @@ class DBProjectInvite(sqlmodel.SQLModel, table=True):
     created_at: float = sqlmodel.Field(default_factory=time.time)
 
 
+class DBProjectPendingInvite(sqlmodel.SQLModel, table=True):
+    """An invite addressed to one email address (issue #110).
+
+    Distinct from :class:`DBProjectInvite`, which is a single multi-use link
+    per project that anyone signed in may accept. A pending invite is targeted:
+    it carries its own token, only the named address may accept it, and it can
+    be revoked individually — revoking the shared link cannot do that, since it
+    would cut off everyone at once.
+
+    ``email`` is stored normalised (``src/email/address.normalize_email``); the
+    unique constraint with ``project_id`` is what makes re-inviting the same
+    person a re-send rather than a second row.
+
+    ``accepted_at`` stays NULL while pending. Accepted rows are kept rather
+    than deleted so the owner's list can show that an invite was taken up, and
+    so re-accepting the same token is idempotent instead of a 404.
+    """
+
+    __tablename__ = "projectpendinginvite"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    email: str = sqlmodel.Field(index=True)
+    token: str = sqlmodel.Field(
+        default_factory=lambda: uuid.uuid4().hex, index=True, unique=True)
+    role: str = sqlmodel.Field(default="editor")
+    invited_by: int = sqlmodel.Field(foreign_key="userinfo.id")
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+    accepted_at: Optional[float] = sqlmodel.Field(default=None)
+
+    __table_args__ = (UniqueConstraint("project_id", "email"),)
+
+
 class DBProjectSyncMeta(sqlmodel.SQLModel, table=True):
     """Per-project auto-sync configuration and last-synced timestamps."""
 

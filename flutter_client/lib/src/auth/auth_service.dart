@@ -35,20 +35,38 @@ class AuthService {
     return data['user'] as Map<String, dynamic>;
   }
 
+  /// Registers a new account. The server requires [email] to be a valid
+  /// address — it is both the login identifier and where invite mail is sent
+  /// (issue #110) — and builds the display name from [firstName] / [lastName].
   Future<Map<String, dynamic>> register(
-    String username,
+    String email,
     String password, {
-    String displayName = '',
-    String email = '',
+    required String firstName,
+    required String lastName,
   }) async {
     final data = await api.post('/api/auth/register', {
-      'username': username,
+      'username': email,
       'password': password,
-      'display_name': displayName,
-      if (email.isNotEmpty) 'email': email,
+      'first_name': firstName,
+      'last_name': lastName,
     });
     await _persist(data['access_token'] as String);
     return data['user'] as Map<String, dynamic>;
+  }
+
+  /// POST /api/auth/verify-email — consumes an emailed verification token
+  /// (issue #110). Unauthenticated: the recipient may click the link in a
+  /// browser with no session. Throws [ApiException] 404 when the token is
+  /// unknown, expired, or already used.
+  Future<void> verifyEmail(String token) async {
+    await api.post('/api/auth/verify-email', {'token': token});
+  }
+
+  /// POST /api/auth/resend-verification — reissues and resends the token,
+  /// invalidating the previous one. Throws [ApiException] 429 when the
+  /// caller has requested too many recently.
+  Future<void> resendVerification() async {
+    await api.post('/api/auth/resend-verification', {});
   }
 
   /// Fetches the current user's profile from the server.

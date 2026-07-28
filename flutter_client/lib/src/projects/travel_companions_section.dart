@@ -78,6 +78,10 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
   bool _inviteBusy = false;
   bool _leaving = false;
 
+  /// Pending invite currently being revoked, so only that row's button
+  /// disables rather than the whole list (issue #110).
+  int? _revokingId;
+
   // Role picked for the *next* invite creation (issue #109) — not the role
   // of an already-created link, which is memberInviteRole on the notifier.
   String _inviteRoleChoice = 'editor';
@@ -105,8 +109,9 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
       _loading = true;
       _loadError = null;
     });
+    final notifier = context.read<ProjectNotifier>();
     try {
-      await context.read<ProjectNotifier>().loadMembers();
+      await notifier.loadMembers();
       if (mounted) setState(() => _loading = false);
     } on Exception catch (e) {
       if (mounted) {
@@ -115,6 +120,15 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
           _loadError = companionErrorMessage(e);
         });
       }
+      return;
+    }
+    // Supplementary (issue #110), and co-owner+ only — so its failure must not
+    // take down the member list the section exists to show. A 403 for an
+    // editor/viewer is expected and already swallowed by the notifier.
+    try {
+      await notifier.loadPendingInvites();
+    } on Exception {
+      // Leaves the pending block hidden; the member list stands.
     }
   }
 
@@ -145,6 +159,8 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
         _inviteEmailCtrl.clear();
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('Invite sent to $email')));
+        // Show the new row in "Waiting to accept" straight away (issue #110).
+        await context.read<ProjectNotifier>().loadPendingInvites();
       }
     } on Exception catch (e) {
       // 409 (E2EE-enabled account), 422 (malformed email), and any other
@@ -152,6 +168,21 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
       if (mounted) setState(() => _inviteError = companionErrorMessage(e));
     } finally {
       if (mounted) setState(() => _inviteBusy = false);
+    }
+  }
+
+  Future<void> _revokePending(PendingInvite invite) async {
+    setState(() {
+      _revokingId = invite.id;
+      _inviteError = null;
+    });
+    try {
+      await context.read<ProjectNotifier>().revokePendingInvite(invite.id);
+    } on Exception catch (e) {
+      // The notifier restores the row on failure, so the list stays honest.
+      if (mounted) setState(() => _inviteError = companionErrorMessage(e));
+    } finally {
+      if (mounted) setState(() => _revokingId = null);
     }
   }
 
@@ -304,6 +335,10 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
                     : null,
               ),
             if (canManage) ...[
+              if (notifier.pendingInvites.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _pendingBlock(notifier),
+              ],
               const SizedBox(height: 8),
               _inviteBlock(notifier),
             ],
@@ -331,6 +366,45 @@ class _TravelCompanionsSectionState extends State<TravelCompanionsSection> {
       ),
     );
   }
+
+  /// Invites emailed but not yet accepted (issue #110), each revocable on its
+  /// own — revoking the shared link below would instead cut off everyone.
+  Widget _pendingBlock(ProjectNotifier notifier) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('Waiting to accept',
+              style: TextStyle(
+                  color: _kMuted,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.4)),
+          const SizedBox(height: 6),
+          for (final p in notifier.pendingInvites)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
+                  const Icon(Icons.schedule, size: 15, color: _kDim),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(p.email,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: _kText2, fontSize: 13)),
+                  ),
+                  Text(roleLabel(p.role),
+                      style: const TextStyle(color: _kDim, fontSize: 11.5)),
+                  IconButton(
+                    tooltip: 'Revoke invite',
+                    icon: const Icon(Icons.close, size: 15, color: _kMuted),
+                    onPressed: _revokingId == p.id
+                        ? null
+                        : () => _revokePending(p),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      );
 
   Widget _emailField() => TextField(
         controller: _inviteEmailCtrl,

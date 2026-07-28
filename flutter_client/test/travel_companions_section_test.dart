@@ -49,6 +49,20 @@ class _FakeMembersService extends MembersService {
     revokeCalls++;
   }
 
+  /// Pending email invites (issue #110). Empty unless a test sets them.
+  List<PendingInvite> pending = [];
+  final revokedPendingIds = <int>[];
+
+  @override
+  Future<List<PendingInvite>> listPendingInvites(ProjectRef ref) async =>
+      pending;
+
+  @override
+  Future<void> revokePendingInvite(ProjectRef ref, int inviteId) async {
+    revokedPendingIds.add(inviteId);
+    pending = [for (final p in pending) if (p.id != inviteId) p];
+  }
+
   @override
   Future<void> removeMember(ProjectRef ref, int userId) async {
     removedIds.add(userId);
@@ -334,5 +348,75 @@ void main() {
     // Neither the owner row, the caller's own co-owner row, nor Dee's
     // co-owner row is removable by a fellow (non-strict-owner) co-owner.
     expect(find.byIcon(Icons.person_remove_outlined), findsNothing);
+  });
+
+  // ── Pending email invites (issue #110) ──────────────────────────────────
+
+  testWidgets('owner sees invites waiting to be accepted', (tester) async {
+    final svc = _FakeMembersService([_owner])
+      ..pending = [
+        PendingInvite(
+            id: 1,
+            email: 'friend@example.com',
+            role: 'editor',
+            createdAt: DateTime(2026, 7, 1)),
+      ];
+    final notifier = _notifierWith(svc, const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '1'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Waiting to accept'), findsOneWidget);
+    expect(find.text('friend@example.com'), findsOneWidget);
+  });
+
+  testWidgets('no pending block when nobody is waiting', (tester) async {
+    final svc = _FakeMembersService([_owner]);
+    final notifier = _notifierWith(svc, const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '1'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Waiting to accept'), findsNothing);
+  });
+
+  testWidgets('revoking one pending invite leaves the others', (tester) async {
+    // The whole point of #110: revoking the shared link cuts off everyone.
+    final svc = _FakeMembersService([_owner])
+      ..pending = [
+        PendingInvite(
+            id: 1, email: 'a@example.com', role: 'editor',
+            createdAt: DateTime(2026, 7, 1)),
+        PendingInvite(
+            id: 2, email: 'b@example.com', role: 'viewer',
+            createdAt: DateTime(2026, 7, 2)),
+      ];
+    final notifier = _notifierWith(svc, const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '1'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Revoke invite').first);
+    await tester.pumpAndSettle();
+
+    expect(svc.revokedPendingIds, [1]);
+    expect(find.text('a@example.com'), findsNothing);
+    expect(find.text('b@example.com'), findsOneWidget);
+  });
+
+  testWidgets('editor sees no pending block', (tester) async {
+    final svc = _FakeMembersService([_owner, _editor])
+      ..pending = [
+        PendingInvite(
+            id: 1, email: 'friend@example.com', role: 'editor',
+            createdAt: DateTime(2026, 7, 1)),
+      ];
+    final notifier = _notifierWith(
+        svc, const ProjectRef(name: 'Trip', ownerId: 1, role: 'editor'));
+
+    await tester.pumpWidget(_harness(notifier: notifier, authUserId: '7'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Waiting to accept'), findsNothing);
   });
 }

@@ -1,4 +1,8 @@
-/// Register screen — username, display name, email (optional), password.
+/// Register screen — email, first/last name, password (issue #110).
+///
+/// The email is the login identifier as well as the address the account is
+/// reachable at, so it is validated here and again server-side; first and
+/// last name are combined into the display name by the server.
 library;
 
 import 'package:flutter/material.dart';
@@ -16,9 +20,9 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
-  final _usernameCtrl = TextEditingController();
-  final _displayNameCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
+  final _firstNameCtrl = TextEditingController();
+  final _lastNameCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _confirmCtrl = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -27,9 +31,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   @override
   void dispose() {
-    _usernameCtrl.dispose();
-    _displayNameCtrl.dispose();
     _emailCtrl.dispose();
+    _firstNameCtrl.dispose();
+    _lastNameCtrl.dispose();
     _passwordCtrl.dispose();
     _confirmCtrl.dispose();
     super.dispose();
@@ -50,10 +54,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final auth = context.read<AuthNotifier>();
 
     await auth.register(
-      _usernameCtrl.text.trim(),
+      _emailCtrl.text.trim(),
       _passwordCtrl.text,
-      displayName: _displayNameCtrl.text.trim(),
-      email: _emailCtrl.text.trim(),
+      firstName: _firstNameCtrl.text.trim(),
+      lastName: _lastNameCtrl.text.trim(),
     );
 
     if (!mounted) return;
@@ -122,55 +126,56 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            // Username
-                            TextFormField(
-                              controller: _usernameCtrl,
-                              decoration: const InputDecoration(
-                                labelText: 'Username',
-                                prefixIcon: Icon(Icons.person_outline),
-                              ),
-                              autocorrect: false,
-                              textInputAction: TextInputAction.next,
-                              validator: (v) {
-                                if (v == null || v.trim().isEmpty) {
-                                  return 'Username is required';
-                                }
-                                if (v.trim().length < 3) {
-                                  return 'Minimum 3 characters';
-                                }
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 16),
-
-                            // Display name (optional)
-                            TextFormField(
-                              controller: _displayNameCtrl,
-                              decoration: const InputDecoration(
-                                labelText: 'Display name (optional)',
-                                prefixIcon: Icon(Icons.badge_outlined),
-                              ),
-                              textInputAction: TextInputAction.next,
-                            ),
-                            const SizedBox(height: 16),
-
-                            // Email (optional)
+                            // Email — the login identifier and the address
+                            // invites are matched against (issue #110).
                             TextFormField(
                               controller: _emailCtrl,
                               decoration: const InputDecoration(
-                                labelText: 'Email (optional)',
+                                labelText: 'Email',
                                 prefixIcon: Icon(Icons.email_outlined),
                               ),
                               keyboardType: TextInputType.emailAddress,
                               autocorrect: false,
                               textInputAction: TextInputAction.next,
                               validator: (v) {
-                                if (v == null || v.trim().isEmpty) return null;
+                                if (v == null || v.trim().isEmpty) {
+                                  return 'Email is required';
+                                }
                                 final ok = RegExp(
                                         r'^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$')
                                     .hasMatch(v.trim());
                                 return ok ? null : 'Enter a valid email';
                               },
+                            ),
+                            const SizedBox(height: 16),
+
+                            // First / last name — combined into the display
+                            // name server-side.
+                            TextFormField(
+                              controller: _firstNameCtrl,
+                              decoration: const InputDecoration(
+                                labelText: 'First name',
+                                prefixIcon: Icon(Icons.badge_outlined),
+                              ),
+                              textInputAction: TextInputAction.next,
+                              validator: (v) =>
+                                  (v == null || v.trim().isEmpty)
+                                      ? 'First name is required'
+                                      : null,
+                            ),
+                            const SizedBox(height: 16),
+
+                            TextFormField(
+                              controller: _lastNameCtrl,
+                              decoration: const InputDecoration(
+                                labelText: 'Last name',
+                                prefixIcon: Icon(Icons.badge_outlined),
+                              ),
+                              textInputAction: TextInputAction.next,
+                              validator: (v) =>
+                                  (v == null || v.trim().isEmpty)
+                                      ? 'Last name is required'
+                                      : null,
                             ),
                             const SizedBox(height: 16),
 

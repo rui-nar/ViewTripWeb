@@ -44,6 +44,7 @@ def create_access_token(
         "avatar_url": user_info.avatar_url,
         "auth_provider": user_info.auth_provider,
         "is_admin": bool(user_info.is_admin),
+        "email_verified": bool(user_info.email_verified),
         "password_change_required": bool(password_change_required),
         "exp": datetime.datetime.now(datetime.timezone.utc)
         + datetime.timedelta(hours=_JWT_EXPIRY_HOURS),

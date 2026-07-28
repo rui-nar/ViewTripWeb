@@ -3,7 +3,9 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
+import '../auth/verify_email_banner.dart';
 import '../core/project_ref.dart';
+import 'pending_invites_card.dart';
 import 'projects_notifier.dart';
 
 class ProjectsScreen extends StatefulWidget {
@@ -180,6 +182,10 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // ── Unverified-email prompt (issue #110) ──────────────────
+                const VerifyEmailBanner(),
+                // ── Invites addressed to me (issue #110) ──────────────────
+                const PendingInvitesCard(),
                 // ── Error banner ──────────────────────────────────────────
                 Consumer<ProjectsNotifier>(
                   builder: (_, notifier, __) {

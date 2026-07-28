@@ -259,7 +259,8 @@ class TestSelfDeleteEndpoint:
         client = TestClient(app)
 
         reg = client.post("/api/auth/register", json={
-            "username": "jane", "password": "hunter2pass", "display_name": "Jane",
+            "username": "jane@example.com", "password": "hunter2pass",
+            "first_name": "Jane", "last_name": "Doe",
         })
         token = reg.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}

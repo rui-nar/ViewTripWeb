@@ -7,8 +7,12 @@ Routes:
     DELETE /api/projects/{name}/members/invite     — revoke the invite link
     GET    /api/projects/{name}/members            — list members (owner first)
     DELETE /api/projects/{name}/members/{user_id}  — remove a member; a member removes themself
+    GET    /api/projects/{name}/members/pending    — list invites emailed but not yet accepted
+    DELETE /api/projects/{name}/members/pending/{id} — revoke one pending invite
+    GET    /api/invites/pending                    — invites addressed to me
     GET    /api/invites/{token}                    — preview an invite (project + owner name + role)
     POST   /api/invites/{token}/accept             — join the project with the invite's role
+    DELETE /api/invites/{token}                    — decline an invite addressed to me
 
 Member management (invite create/revoke, removing editors/viewers) is
 co-owner+. Only the strict owner may create a "co-owner" invite or remove a
@@ -21,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
-import re
+import time
 from typing import Annotated, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -31,21 +35,28 @@ from sqlmodel import select
 
 from api.deps import get_current_user
 from api.project_access import require_role, resolve_project
-from models.project_db import DBProject, DBProjectInvite, DBProjectMember
+from models.project_db import (
+    DBProject,
+    DBProjectInvite,
+    DBProjectMember,
+    DBProjectPendingInvite,
+)
 from models.user import UserInfo
+from src.email.address import is_valid_email, normalize_email
 from src.email.service import EmailMessage, get_email_service
 from src.email.templates import render_invite_email
+from src.utils.rate_limit import consume_rate_limit
 
-# Loose sanity check only — not full RFC 5322 validation. A malformed address
-# just fails at SMTP-send time inside the background task (logged, never
-# surfaces to the caller); this only catches obviously-not-an-email input
-# before bothering to queue a send.
 _logger = logging.getLogger(__name__)
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # Same var/default as api/strava.py's OAuth-callback redirects — the base URL
 # for links the server hands back to the browser.
 _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5500")
+
+# Ceiling on invites awaiting acceptance for one trip (issue #110). Not a
+# security boundary — the per-user send rate limit is — but it stops a
+# runaway script or a typo'd loop from filling the table for one project.
+_MAX_PENDING_PER_PROJECT = 50
 
 router = APIRouter(prefix="/api/projects", tags=["members"])
 invites_router = APIRouter(prefix="/api/invites", tags=["members"])
@@ -85,6 +96,30 @@ class InvitePreviewOut(BaseModel):
     project_name: str = Field(description="Name of the project the invite joins")
     owner_name: str = Field(description="Display name of the project owner")
     role: str = Field(description="Role this invite grants on accept")
+    invited_email: Optional[str] = Field(
+        default=None,
+        description="For a targeted invite (issue #110), the address it was "
+                    "sent to; null for the shared link, which anyone may accept.",
+    )
+
+class PendingInviteOut(BaseModel):
+    id: int = Field(description="Pending invite id; pass to the revoke route")
+    email: str = Field(description="Address the invite was sent to")
+    role: str = Field(description="Role it grants on accept")
+    created_at: float = Field(description="Unix timestamp the invite was created")
+
+class PendingInvitesOut(BaseModel):
+    invites: List[PendingInviteOut] = Field(description="Oldest first")
+
+class MyPendingInviteOut(BaseModel):
+    token: str = Field(description="Accept/decline token for this invite")
+    project_name: str = Field(description="Trip the invite joins")
+    owner_name: str = Field(description="Display name of the trip owner")
+    role: str = Field(description="Role it grants on accept")
+    created_at: float = Field(description="Unix timestamp the invite was created")
+
+class MyPendingInvitesOut(BaseModel):
+    invites: List[MyPendingInviteOut] = Field(description="Oldest first")
 
 class InviteAcceptedOut(BaseModel):
     name: str = Field(description="Name of the joined project")
@@ -136,6 +171,43 @@ def _get_invite(sess, token: str) -> tuple[DBProjectInvite, DBProject]:
     return invite, project
 
 
+def _resolve_any_invite(sess, token: str):
+    """Look *token* up as either kind of invite (issue #110).
+
+    Returns ``(row, project, is_pending)``. A shared link (``DBProjectInvite``)
+    is one multi-use token per project that anyone signed in may accept; a
+    pending invite (``DBProjectPendingInvite``) is addressed to one email and
+    only that address may accept it. The join screen and the accept endpoint
+    take either, so the recipient's experience is the same whichever kind of
+    link they were sent.
+    """
+    pending = sess.exec(
+        select(DBProjectPendingInvite).where(DBProjectPendingInvite.token == token)
+    ).first()
+    if pending is not None:
+        project = sess.get(DBProject, pending.project_id)
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Invite not found")
+        return pending, project, True
+
+    invite, project = _get_invite(sess, token)
+    return invite, project, False
+
+
+def _verified_email(sess, user_info_id: int) -> str:
+    """The caller's confirmed address, or "" when unverified/absent.
+
+    Pending invites match on this rather than on ``UserInfo.email`` directly:
+    an unconfirmed address is only a claim, and matching on a claim is exactly
+    how someone else's invite gets stolen.
+    """
+    user = sess.get(UserInfo, user_info_id)
+    if user is None or not user.email_verified:
+        return ""
+    return normalize_email(user.email)
+
+
 # ── Member management (owner + members) ───────────────────────────────────────
 
 @router.post("/{name}/members/invite", response_model=InviteTokenOut,
@@ -156,8 +228,11 @@ def create_invite(
     user_info_id = int(current_user["sub"])
     invite_body = body or InviteCreateBody()
     role = invite_body.role
-    email = invite_body.email
-    if email is not None and not _EMAIL_RE.match(email):
+    # Normalise before validating: the owner typing a trailing space (or
+    # pasting a capitalised address) is not a malformed address, and the
+    # stored form has to be the normalised one anyway for matching to work.
+    email = normalize_email(invite_body.email) if invite_body.email is not None else None
+    if email is not None and not is_valid_email(email):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Not a valid email address",
@@ -181,10 +256,58 @@ def create_invite(
             sess.add(invite)
             sess.commit()
             sess.refresh(invite)
-        if email is not None:
-            background_tasks.add_task(
-                send_invite_email, email, row.name, _display_name(owner_user),
-                invite.role, invite.token)
+
+        if email is None:
+            return {"token": invite.token, "role": invite.role}
+
+        # Emailing an address creates a *pending* invite with its own token
+        # (issue #110) rather than mailing the shared link, so it can be
+        # revoked individually and matched to the recipient's account.
+        sender = sess.get(UserInfo, user_info_id)
+        if sender is None or not sender.email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Confirm your own email address before sending invites.",
+            )
+        if not consume_rate_limit(f"invite-send:{user_info_id}"):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many invites sent recently. "
+                       "Please wait a few minutes and try again.",
+            )
+
+        target = email  # already normalised above
+        pending = sess.exec(
+            select(DBProjectPendingInvite).where(
+                DBProjectPendingInvite.project_id == row.id,
+                DBProjectPendingInvite.email == target,
+            )
+        ).first()
+        if pending is None:
+            outstanding = len(sess.exec(
+                select(DBProjectPendingInvite).where(
+                    DBProjectPendingInvite.project_id == row.id,
+                    DBProjectPendingInvite.accepted_at == None,  # noqa: E711
+                )
+            ).all())
+            if outstanding >= _MAX_PENDING_PER_PROJECT:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"This trip already has {_MAX_PENDING_PER_PROJECT} "
+                           "invites waiting to be accepted. Revoke some first.",
+                )
+            pending = DBProjectPendingInvite(
+                project_id=row.id, email=target, role=role,
+                invited_by=user_info_id)
+            sess.add(pending)
+            sess.commit()
+            sess.refresh(pending)
+
+        background_tasks.add_task(
+            send_invite_email, target, row.name, _display_name(owner_user),
+            pending.role, pending.token)
+        # The shared link's token is still what's returned: the caller asked to
+        # email someone, not to be handed that person's private join token.
         return {"token": invite.token, "role": invite.role}
 
 
@@ -203,6 +326,58 @@ def revoke_invite(
             select(DBProjectInvite).where(DBProjectInvite.project_id == row.id)
         ).all():
             sess.delete(invite)
+        sess.commit()
+
+
+@router.get("/{name}/members/pending", response_model=PendingInvitesOut,
+            summary="List pending email invites")
+def list_pending_invites(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: Optional[int] = None,
+):
+    """Invites emailed to an address that hasn't joined yet (issue #110).
+    Co-owner+, matching who may create and revoke them."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
+        rows = sess.exec(
+            select(DBProjectPendingInvite)
+            .where(
+                DBProjectPendingInvite.project_id == row.id,
+                DBProjectPendingInvite.accepted_at == None,  # noqa: E711
+            )
+            .order_by(DBProjectPendingInvite.created_at)
+        ).all()
+        return {"invites": [{
+            "id": p.id,
+            "email": p.email,
+            "role": p.role,
+            "created_at": p.created_at,
+        } for p in rows]}
+
+
+@router.delete("/{name}/members/pending/{invite_id}",
+               status_code=status.HTTP_204_NO_CONTENT,
+               summary="Revoke a pending email invite")
+def revoke_pending_invite(
+    name: str,
+    invite_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: Optional[int] = None,
+):
+    """Delete one pending invite; its token stops working immediately. Unlike
+    revoking the shared link, this cuts off exactly one person."""
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner, min_role="co-owner")
+        pending = sess.get(DBProjectPendingInvite, invite_id)
+        # The project check matters: without it, any co-owner of any trip could
+        # revoke an invite belonging to a trip they have nothing to do with.
+        if pending is None or pending.project_id != row.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Invite not found")
+        sess.delete(pending)
         sess.commit()
 
 
@@ -271,18 +446,87 @@ def remove_member(
 
 # ── Invite preview / accept (any authenticated user) ──────────────────────────
 
+@invites_router.get("/pending", response_model=MyPendingInvitesOut,
+                    summary="List invites addressed to me")
+def list_my_pending_invites(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Unaccepted invites sent to the caller's confirmed address (issue #110).
+
+    Empty for an unverified account — matching on an unconfirmed address is
+    exactly how someone else's invite would get stolen.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        email = _verified_email(sess, user_info_id)
+        if not email:
+            return {"invites": []}
+        rows = sess.exec(
+            select(DBProjectPendingInvite)
+            .where(
+                DBProjectPendingInvite.email == email,
+                DBProjectPendingInvite.accepted_at == None,  # noqa: E711
+            )
+            .order_by(DBProjectPendingInvite.created_at)
+        ).all()
+        out = []
+        for p in rows:
+            project = sess.get(DBProject, p.project_id)
+            if project is None or project.user_info_id == user_info_id:
+                continue
+            out.append({
+                "token": p.token,
+                "project_name": project.name,
+                "owner_name": _display_name(sess.get(UserInfo, project.user_info_id)),
+                "role": p.role,
+                "created_at": p.created_at,
+            })
+        return {"invites": out}
+
+
 @invites_router.get("/{token}", response_model=InvitePreviewOut, summary="Preview an invite")
 def preview_invite(
     token: str,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     with get_session() as sess:
-        invite, project = _get_invite(sess, token)
+        invite, project, is_pending = _resolve_any_invite(sess, token)
         return {
             "project_name": project.name,
             "owner_name": _display_name(sess.get(UserInfo, project.user_info_id)),
             "role": invite.role,
+            # Set only for a targeted invite, so the join screen can say up
+            # front who it's for instead of letting the user tap Join and
+            # then explaining the 403.
+            "invited_email": invite.email if is_pending else None,
         }
+
+
+@invites_router.delete("/{token}", status_code=status.HTTP_204_NO_CONTENT,
+                       summary="Decline a pending invite")
+def decline_invite(
+    token: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Decline an invite addressed to the caller (issue #110).
+
+    Only pending invites can be declined — the shared link has no per-person
+    state to decline, and deleting it would revoke everyone's access on behalf
+    of an owner who never asked.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        invite, _project, is_pending = _resolve_any_invite(sess, token)
+        if not is_pending:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This kind of invite link can't be declined.",
+            )
+        if invite.email != _verified_email(sess, user_info_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Invite not found")
+        sess.delete(invite)
+        sess.commit()
 
 
 @invites_router.post("/{token}/accept", response_model=InviteAcceptedOut,
@@ -292,14 +536,26 @@ def accept_invite(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """Join the invite's project with its role. Idempotent for existing
-    members (role is not changed by re-accepting)."""
+    members (role is not changed by re-accepting).
+
+    A shared link may be accepted by anyone signed in. A pending invite
+    (issue #110) may only be accepted from the confirmed address it was sent
+    to — otherwise a forwarded link would hand membership to whoever received
+    it, which is the whole point of addressing an invite in the first place.
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        invite, project = _get_invite(sess, token)
+        invite, project, is_pending = _resolve_any_invite(sess, token)
         if project.user_info_id == user_info_id:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="You already own this trip",
+            )
+        if is_pending and invite.email != _verified_email(sess, user_info_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"This invite was sent to {invite.email}. Sign in with "
+                       "that address and confirm it to accept.",
             )
         existing = sess.exec(
             select(DBProjectMember).where(
@@ -312,7 +568,12 @@ def accept_invite(
                 project_id=project.id,
                 user_info_id=user_info_id,
                 role=invite.role,
-                invited_by=invite.created_by,
+                invited_by=invite.invited_by if is_pending else invite.created_by,
             ))
-            sess.commit()
+        if is_pending and invite.accepted_at is None:
+            # Kept rather than deleted so the owner's list can show the invite
+            # was taken up, and so re-accepting is idempotent instead of a 404.
+            invite.accepted_at = time.time()
+            sess.add(invite)
+        sess.commit()
         return {"name": project.name, "owner_id": project.user_info_id}
