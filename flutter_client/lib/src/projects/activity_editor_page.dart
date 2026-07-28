@@ -96,16 +96,33 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
   /// How many pieces resetting this activity would destroy.
   ///
-  /// Only a family ROOT cascades: its snapshot is the whole pre-split track, so
-  /// the server undoes the split rather than leave the pieces duplicating it
-  /// (issue #141). A piece carries a pointer to the root, never to pieces cut
-  /// out of itself, so resetting one takes nothing else with it — it just undoes
-  /// its own post-split edits (issue #131).
+  /// Reset restores the track this activity held before its last edit, which on
+  /// anything that has been split spans the pieces cut out of it — so the server
+  /// deletes them rather than leave them duplicating the restored track. That is
+  /// the whole family on a root (issue #141) and just its own children on a piece
+  /// that was itself split again (issue #143), which is exactly the transitive
+  /// walk of split_parent_id below. An activity with no pieces under it returns
+  /// 0 and resets silently, undoing only its own edits (issue #131).
   int get _splitPiecesRemovedByReset {
-    if (widget.activity['split_root_id'] != null) return 0; // not a root
-    return widget.notifier.activities
-        .where((a) => (a['split_root_id'] as num?)?.toInt() == _activityId)
-        .length;
+    final acts = widget.notifier.activities;
+    final removed = <int>{};
+    var frontier = {_activityId};
+    while (frontier.isNotEmpty) {
+      final children = <int>{};
+      for (final a in acts) {
+        final id = (a['id'] as num?)?.toInt();
+        final parent = (a['split_parent_id'] as num?)?.toInt();
+        if (id != null &&
+            parent != null &&
+            frontier.contains(parent) &&
+            id != _activityId &&
+            removed.add(id)) {
+          children.add(id);
+        }
+      }
+      frontier = children;
+    }
+    return removed.length;
   }
 
   /// Test-only access to the editor controller so widget tests can drive edits
@@ -305,17 +322,18 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// into — restoring the full track destroys them and any edits they carry, so
   /// that has to be a choice rather than a surprise (issue #141).
   Future<bool> _confirmResetRemovesPieces(int pieces) async {
-    final n = pieces + 1; // the pieces plus this one, i.e. the whole family
+    // Worded to hold for a root (restoring the whole Strava track, undoing the
+    // split outright) and for a piece that was itself split again (#143).
+    final one = pieces == 1;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Reset to Strava'),
+        title: Text(_isLocal ? 'Reset track' : 'Reset to Strava'),
         content: Text(
-          'This restores the full original track from Strava, undoing the '
-          'split that cut it into $n pieces.\n\n'
-          '${pieces == 1 ? 'The other piece' : 'The other $pieces pieces'} '
-          'will be removed from the trip, along with any track edits made to '
-          '${pieces == 1 ? 'it' : 'them'}. This cannot be undone.',
+          'This restores the track this activity had before it was split.\n\n'
+          '${one ? 'The piece' : 'The $pieces pieces'} cut out of it will be '
+          'removed from the trip, along with any track edits made to '
+          '${one ? 'it' : 'them'}. This cannot be undone.',
         ),
         actions: [
           TextButton(
