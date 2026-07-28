@@ -1,9 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The whole app talks to the API over the network. The Flutter template
+         declares this in the debug/profile manifests only, which leaves a
+         release build with no network access at all. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Device location for the encounter location picker (defaults to current position). -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <application
-        android:label="viewtrip_client"
+        android:label="TraxJourney"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -23,9 +27,28 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Hand the incoming intent URL to the Flutter engine as a route,
+                 which go_router picks up (see buildRouter's initialLocation). -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="true" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Android App Links: the three link shapes a user receives out of
+                 band — a shared trip, a trip invite, an email verification —
+                 open in the app instead of the browser. autoVerify requires
+                 https://traxjourney.com/.well-known/assetlinks.json to list this
+                 package with the release keystore's SHA-256 (served by
+                 api/router.py from ANDROID_CERT_FINGERPRINTS). -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="traxjourney.com" android:pathPrefix="/share"/>
+                <data android:scheme="https" android:host="traxjourney.com" android:pathPrefix="/join"/>
+                <data android:scheme="https" android:host="traxjourney.com" android:pathPrefix="/verify-email"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

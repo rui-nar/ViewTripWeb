@@ -1,4 +1,4 @@
-package com.example.viewtrip_client
+package com.traxjourney.app
 
 import io.flutter.embedding.android.FlutterActivity
 
