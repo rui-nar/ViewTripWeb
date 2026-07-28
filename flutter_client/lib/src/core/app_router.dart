@@ -28,12 +28,21 @@ import '../projects/project_stats_screen.dart';
 import '../settings/settings_screen.dart';
 import '../shared/shared_project_screen.dart';
 
+/// The router's `initialLocation` for [base] on this platform, or null to let
+/// the platform choose.
+///
 /// On web, derive the starting location from the actual browser URL so that
 /// deep links (e.g. /share/TOKEN) are honoured even before auth resolves.
-/// Falls back to /login on non-web platforms.
-String _initialLocation() {
-  if (!kIsWeb) return '/';
-  final path = Uri.base.path;
+///
+/// On Android/iOS, null is the answer that makes App Links work: go_router then
+/// starts from the platform's default route, which is the path of the intent
+/// that launched the app (`https://traxjourney.com/share/TOKEN` arrives as
+/// `/share/TOKEN`). Returning '/' here — as this did — silently discarded every
+/// incoming deep link. With no intent, the platform default is '/' anyway, so
+/// a normal launch is unaffected.
+String? initialLocationFor({required bool isWeb, required Uri base}) {
+  if (!isWeb) return null;
+  final path = base.path;
   return (path.isEmpty || path == '/') ? '/' : path;
 }
 
@@ -107,7 +116,7 @@ GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
 
   return GoRouter(
-    initialLocation: _initialLocation(),
+    initialLocation: initialLocationFor(isWeb: kIsWeb, base: Uri.base),
     // Re-evaluate redirect whenever auth state changes (login / logout / init).
     refreshListenable: authNotifier,
 
