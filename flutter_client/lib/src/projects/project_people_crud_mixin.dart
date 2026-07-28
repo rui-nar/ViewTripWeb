@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../core/project_ref.dart';
+import 'project_quota_mixin.dart';
 
 /// The steps of a Polarsteps trip that can actually be drawn — those carrying
 /// coordinates. A trip whose steps are all coordinate-less yields an empty
@@ -16,7 +17,7 @@ List<Map<String, dynamic>> mappablePolarstepsSteps(List<dynamic> raw) => raw
     .where((s) => s['lat'] != null && s['lon'] != null)
     .toList();
 
-mixin ProjectPeopleCrudMixin on ChangeNotifier {
+mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
   List<Map<String, dynamic>> get items;
@@ -158,6 +159,9 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier {
         await reloadDetailsOnly(ref);
         return true;
       }
+      // A plan limit (issue #121) must not vanish into this false — record it
+      // so the screen can offer an upgrade instead of doing nothing visible.
+      recordQuotaRefusal(res.statusCode, res.body);
       return false;
     } catch (_) {
       return false;

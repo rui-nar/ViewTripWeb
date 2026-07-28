@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
+import '../billing/upgrade_sheet.dart';
 import '../core/countries.dart';
 import '../core/design_tokens.dart';
 import 'group_form_dialog.dart';
@@ -480,7 +481,13 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
     final result = await FilePicker.pickFiles(type: FileType.image, withData: true);
     final f = result?.files.firstOrNull;
     if (f?.bytes == null) return;
-    await widget.notifier.uploadPersonAvatar(_personId, f!.bytes!, f.name);
+    final ok = await widget.notifier.uploadPersonAvatar(
+        _personId, f!.bytes!, f.name);
+    if (!ok && mounted) {
+      // Refused on a plan limit (issue #121) — offer the upgrade rather than
+      // leaving the avatar silently unchanged.
+      await maybeShowUpgradeSheet(context, widget.notifier.takeQuotaError());
+    }
     await _load();
   }
 

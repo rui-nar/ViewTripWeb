@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../billing/upgrade_sheet.dart';
 import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
 
@@ -145,6 +146,9 @@ class _MemoryDialogState extends State<MemoryDialog> {
       );
       return;
     }
+    // Captured before the dialog pops: an upload refused on a plan limit opens
+    // the upgrade sheet afterwards, and this dialog's context is gone by then.
+    final hostContext = Navigator.of(context, rootNavigator: true).context;
     setState(() => _saving = true);
     try {
       final dateStr = _toIso(_date!);
@@ -217,6 +221,10 @@ class _MemoryDialogState extends State<MemoryDialog> {
       }
 
       if (mounted) Navigator.of(context).pop();
+      final quota = widget.notifier.takeQuotaError();
+      if (hostContext.mounted) {
+        await maybeShowUpgradeSheet(hostContext, quota);
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

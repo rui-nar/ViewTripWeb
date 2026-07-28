@@ -121,6 +121,19 @@ class _UpgradeSheetState extends State<UpgradeSheet> {
   }
 }
 
+/// Show the prompt only if there was a refusal — the shape every caller wants,
+/// since they hand over whatever a notifier's `takeQuotaError()` returned.
+Future<bool> maybeShowUpgradeSheet(
+  BuildContext context,
+  QuotaError? error, {
+  BillingService? service,
+  Future<void> Function(String url)? launcher,
+}) async {
+  if (error == null || !context.mounted) return false;
+  await showUpgradeSheet(context, error, service: service, launcher: launcher);
+  return true;
+}
+
 /// Show the upgrade prompt for a quota refusal.
 Future<void> showUpgradeSheet(
   BuildContext context,
