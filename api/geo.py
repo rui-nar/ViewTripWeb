@@ -9,6 +9,7 @@ import gzip as gzip_lib
 import json
 import os
 from threading import Lock
+from time import monotonic
 from typing import Annotated, Any, Dict, List
 
 import polyline as polyline_lib
@@ -30,20 +31,68 @@ router = APIRouter(prefix="/api/geo", tags=["geo"])
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _repo = ProjectRepo()
 
-# In-memory full-res GeoJSON cache: (user_info_id, project_name) → gzip-compressed JSON bytes
-_geo_cache: dict[tuple, bytes] = {}
+# In-memory full-res GeoJSON cache:
+#   (user_info_id, project_name, encoded) → (gzip-compressed JSON bytes, expiry)
+# where expiry is a ``monotonic()`` deadline. Entries older than that are treated
+# as a MISS: the generation guard below is what actually prevents a stale entry,
+# but a TTL bounds *any* future bug of that class to minutes rather than forever,
+# and a recompute is already the fallback so expiring early is cheap.
+_geo_cache: dict[tuple, tuple[bytes, float]] = {}
 _geo_cache_lock = Lock()
+_GEO_CACHE_TTL_S = 300.0
+
+# Per-project invalidation counter, bumped by every bust (issue #132). A reader
+# captures it *before* its DB read and declines to persist its result if the
+# counter moved meanwhile — otherwise a read that started before a mutation can
+# refill the cache with the pre-mutation snapshot that mutation just evicted,
+# wedging it there until the next bust.
+_geo_gen: dict[tuple, int] = {}
 
 
 def bust_geo_cache(user_info_id: int, project_name: str) -> None:
     """Invalidate every full-res GeoJSON cache entry for this project.
 
     The cache keys on (user_info_id, name, encoded) so both the expanded and
-    encoded payload variants are dropped.
+    encoded payload variants are dropped. Also bumps the project's generation
+    counter so any read already in flight refuses to write its now-stale result.
     """
     with _geo_cache_lock:
         for key in [k for k in _geo_cache if k[0] == user_info_id and k[1] == project_name]:
             _geo_cache.pop(key, None)
+        gen_key = (user_info_id, project_name)
+        _geo_gen[gen_key] = _geo_gen.get(gen_key, 0) + 1
+
+
+def _geo_generation(user_info_id: int, project_name: str) -> int:
+    """Current invalidation generation for a project. Read before the DB load."""
+    with _geo_cache_lock:
+        return _geo_gen.get((user_info_id, project_name), 0)
+
+
+def _geo_cache_get(cache_key: tuple) -> bytes | None:
+    """Cached bytes for *cache_key*, or None when absent or expired."""
+    with _geo_cache_lock:
+        entry = _geo_cache.get(cache_key)
+        if entry is None:
+            return None
+        gz_bytes, deadline = entry
+        if monotonic() >= deadline:
+            _geo_cache.pop(cache_key, None)
+            return None
+        return gz_bytes
+
+
+def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
+    """Persist *gz_bytes* only if nothing busted the project since generation *gen*.
+
+    The caller still serves what it computed — that payload is as fresh as the
+    read that produced it. We only decline to *persist* an entry that may already
+    be superseded; the cost is at most a redundant recompute on the next request.
+    """
+    with _geo_cache_lock:
+        if _geo_gen.get((cache_key[0], cache_key[1]), 0) != gen:
+            return
+        _geo_cache[cache_key] = (gz_bytes, monotonic() + _GEO_CACHE_TTL_S)
 
 
 def _legacy_path(user_id: str, name: str) -> str:
@@ -263,14 +312,17 @@ def warm_geo_cache(user_info_id: int, name: str) -> None:
     since the endpoint will simply recompute on demand.
     """
     try:
+        gen = _geo_generation(user_info_id, name)
         with get_session() as sess:
             project = _repo.get_project(sess, user_info_id, name, include_elevation=False)
         if project is None:
             return
-        with _geo_cache_lock:
-            for enc in (True, False):
-                _geo_cache[(user_info_id, name, enc)] = _gzip_geo(
-                    _build_full_geo_features(project, encoded=enc))
+        for enc in (True, False):
+            _geo_cache_store(
+                (user_info_id, name, enc),
+                _gzip_geo(_build_full_geo_features(project, encoded=enc)),
+                gen,
+            )
     except Exception:
         pass
 
@@ -298,8 +350,7 @@ def project_geo(
         owner_id = row.user_info_id
 
         cache_key = (owner_id, name, encoded)
-        with _geo_cache_lock:
-            cached_bytes = _geo_cache.get(cache_key)
+        cached_bytes = _geo_cache_get(cache_key)
         if cached_bytes is not None:
             return Response(
                 content=cached_bytes,
@@ -307,6 +358,7 @@ def project_geo(
                 headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
             )
 
+        gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
         project = _repo.get_project(
             sess, owner_id, name,
             legacy_path=_legacy_path(str(owner_id), name),
@@ -316,8 +368,7 @@ def project_geo(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     gz_bytes = _gzip_geo(_build_full_geo_features(project, encoded=encoded))
-    with _geo_cache_lock:
-        _geo_cache[cache_key] = gz_bytes
+    _geo_cache_store(cache_key, gz_bytes, gen)
     return Response(
         content=gz_bytes,
         media_type="application/json",

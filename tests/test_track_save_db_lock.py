@@ -113,7 +113,7 @@ def env(tmp_path, monkeypatch):
     engine = _make_file_engine(tmp_path)
     monkeypatch.setattr(db_module, "engine", engine)
     # Isolate the module-level coalescing state between tests.
-    monkeypatch.setattr(shared_module, "_stats_refresh_state", {})
+    monkeypatch.setattr(shared_module, "_coalesce_state", {})
     uid = _seed(engine)
     return engine, uid
 
