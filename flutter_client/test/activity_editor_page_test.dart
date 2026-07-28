@@ -33,7 +33,7 @@ void _delta(StringBuffer sb, int v) {
   sb.writeCharCode(zig + 63);
 }
 
-Map<String, dynamic> _activity({bool edited = false}) {
+Map<String, dynamic> _activity({bool edited = false, int id = 111}) {
   final track = <GeoPoint>[
     (lat: 48.0, lon: 2.00),
     (lat: 48.0, lon: 2.01),
@@ -41,7 +41,7 @@ Map<String, dynamic> _activity({bool edited = false}) {
     (lat: 48.0, lon: 2.03),
   ];
   return {
-    'id': 111,
+    'id': id,
     'name': 'Test Ride',
     'is_edited': edited,
     'map': {'summary_polyline': _encode(track)},
@@ -191,6 +191,15 @@ void main() {
 
     await _pump(tester, _activity(edited: true));
     expect(find.text('Reset to Strava'), findsOneWidget);
+  });
+
+  testWidgets('a local activity gets the non-Strava reset label',
+      (tester) async {
+    // Split tails and added transport carry a synthetic negative id and never
+    // came from Strava, so reset only undoes their own edits (issue #131).
+    await _pump(tester, _activity(edited: true, id: -1));
+    expect(find.text('Reset to Strava'), findsNothing);
+    expect(find.text('Reset track'), findsOneWidget);
   });
 
   testWidgets('an edit via the controller enables Save', (tester) async {
