@@ -33,6 +33,7 @@ from src.billing.entitlements import (
     project_count,
     quotas_enforced,
     storage_used,
+    subscription_is_live,
 )
 from src.billing.gateway import GatewayError, get_gateway
 from src.billing.plans import PAID_PLANS, catalogue
@@ -194,6 +195,22 @@ def create_checkout(
         email = user.email
         row = subs.get_or_create(sess, user_info_id)
         customer_id = row.provider_customer_id
+        # Checkout in subscription mode always creates a *new* subscription — it
+        # never replaces one. Without this a subscriber tapping a different tier
+        # in the plan picker ends up paying for two (issue #163). Changing tier
+        # is the billing portal's job; see docs/BILLING.md.
+        #
+        # Only a live subscription blocks: one that is cancelled but still inside
+        # its paid period is someone choosing their next plan, not double-buying,
+        # and refusing them would mean waiting for the period to end.
+        already_subscribed = subscription_is_live(row.status or "")
+
+    if already_subscribed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You already have an active subscription — change your plan "
+                   "from the billing portal.",
+        )
 
     try:
         result = gateway.create_checkout_session(
