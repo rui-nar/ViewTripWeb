@@ -255,6 +255,40 @@ class TestPlanFromSubscription:
         assert plan_from_subscription("", "active", 0, now=1000) == FREE
 
 
+class TestPriceLookupKeys:
+    """Account-independent handles for provider prices (issue #154)."""
+
+    def test_round_trips_for_every_paid_plan(self):
+        for plan in plans.PAID_PLANS:
+            assert plans.plan_for_lookup_key(plans.price_lookup_key(plan)) == plan
+
+    def test_keys_are_distinct(self):
+        keys = {plans.price_lookup_key(p) for p in plans.PAID_PLANS}
+        assert len(keys) == len(plans.PAID_PLANS)
+
+    def test_the_key_carries_the_currency(self):
+        """So a second currency can be added without colliding with these."""
+        assert plans.price_lookup_key(TIER_2).endswith(f"_{plans.LOOKUP_CURRENCY}")
+
+    def test_a_foreign_key_is_not_ours(self):
+        assert plans.plan_for_lookup_key("someone_elses_key") is None
+        assert plans.plan_for_lookup_key("") is None
+
+    def test_the_provisioner_and_the_server_agree(self):
+        """scripts/stripe_catalog.py stamps the key the server later resolves by.
+        Two definitions would mean prices nothing can find."""
+        import importlib.util
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parent.parent / "scripts" / "stripe_catalog.py"
+        spec = importlib.util.spec_from_file_location("stripe_catalog", script)
+        catalog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(catalog)
+
+        for plan in plans.PAID_PLANS:
+            assert catalog.lookup_key(plan) == plans.price_lookup_key(plan)
+
+
 class TestSubscriptionIsLive:
     """"Live" is not the same question as "which plan is in force" (issue #163).
 

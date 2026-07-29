@@ -74,15 +74,35 @@ past 500 MB before the limits existed is locked out the moment you deploy.
 
 ## Stripe setup
 
-1. **Products and prices** — create one recurring monthly price per paid tier
-   and copy each `price_...` id into `STRIPE_PRICE_TIER_1`,
-   `STRIPE_PRICE_TIER_2` and `STRIPE_PRICE_TIER_3`.
+1. **Products and prices** — run the provisioner against the account:
 
-   A price id the server does not recognise (rotated in the dashboard, say)
-   grants **Tier 1** and logs a warning. Free would be wrong — the customer is
-   paying for something — and granting the top tier would turn a config typo
-   into an invisible revenue leak. Fix the config, or lift the account with the
-   admin plan override.
+   ```bash
+   export STRIPE_SECRET_KEY=sk_test_...
+   python scripts/stripe_catalog.py            # show what it would do
+   python scripts/stripe_catalog.py --apply    # create or update
+   ```
+
+   It is idempotent (re-running an unchanged catalogue reports `ok` and touches
+   nothing) and refuses an `sk_live_` key unless you also pass `--live`. Product
+   names and descriptions come from `src/billing/plans.py`, so a Stripe product
+   cannot advertise limits the server will not grant.
+
+   **You do not need to copy any `price_...` id anywhere.** Each price is
+   stamped with a lookup key (`traxjourney_tier_2_monthly_eur`) and the server
+   resolves by that at runtime, caching for ten minutes. Lookup keys are ours and
+   identical in every account, so one configuration is correct in a sandbox, in
+   test mode and in live — while a price id belongs to exactly one account.
+   Setting `STRIPE_PRICE_TIER_N` still works and wins, as a pin or an escape
+   hatch.
+
+   Note that **sandboxes are separate accounts**, not the same thing as test
+   mode: products, prices, webhook endpoints and portal configuration all have to
+   be provisioned in each one.
+
+   A price the server cannot map to a tier grants **Tier 1** and logs a warning.
+   Free would be wrong — the customer is paying for something — and granting the
+   top tier would turn a config typo into an invisible revenue leak. Re-run the
+   provisioner, or lift the account with the admin plan override.
 2. **Webhook endpoint** — point it at `https://<host>/api/billing/webhook` and
    subscribe to:
    - `checkout.session.completed`
@@ -105,7 +125,7 @@ All four are **runtime** environment variables. Never pass them to
 ```bash
 export BILLING_ENABLED=1 BILLING_ENFORCE_QUOTAS=1
 export STRIPE_SECRET_KEY=sk_test_...
-export STRIPE_PRICE_TIER_1=price_... STRIPE_PRICE_TIER_2=price_... STRIPE_PRICE_TIER_3=price_...
+python scripts/stripe_catalog.py --apply     # once per account; no ids to copy
 stripe listen --forward-to localhost:8000/api/billing/webhook
 # copy the whsec_... it prints into STRIPE_WEBHOOK_SECRET, then restart the server
 ```
@@ -137,20 +157,27 @@ that would have allowed it, rather than always pushing the most expensive.
 
 ## How it holds together
 
-- `src/billing/plans.py` — the catalogue, the limits, and `cheapest_plan_with`.
-  Pure.
+- `src/billing/plans.py` — the catalogue, the limits, `cheapest_plan_with`, and
+  the price lookup keys both the provisioner and the server derive from. Pure.
 - `src/billing/trip_days.py` — trip length. The arithmetic is pure; one function
   reads the database and does nothing else.
 - `src/billing/entitlements.py` — which plan is in force, and the quota checks.
   `plan_from_subscription` is pure; the `ensure_*` helpers raise `QuotaExceeded`,
   which `api/router.py` maps to 402.
 - `src/billing/webhook_events.py` — provider event → state. Pure, so every rule
-  is tested against recorded payloads with no network.
+  is tested against recorded payloads with no network. Which tier a subscription
+  grants is read off the payload's price (`lookup_key`, then `metadata.plan`)
+  rather than compared against configured ids, so it resolves correctly even for
+  an account whose price ids were never configured here.
 - `src/billing/subscriptions.py` — applies those updates idempotently. Stripe
   delivers at least once and out of order; a repeated event id is dropped, and
   an event older than the last applied one cannot move state backwards.
 - `src/billing/stripe_gateway.py` — the only module that imports the Stripe SDK,
-  lazily, so a self-hosted instance never loads it.
+  lazily, so a self-hosted instance never loads it. `resolve_price_id` turns a
+  plan into a price id by lookup key, cached for ten minutes — long enough to
+  keep it off the hot path, short enough that a reprice (which moves the lookup
+  key to a new price) is picked up without a deploy. Resolution is lazy for the
+  same reason the import is: billing disabled must mean no Stripe call at all.
 - `src/billing/usage.py` — the storage counter. Every photo write adds its bytes
   and every delete subtracts them, because walking the filesystem (what the
   admin dashboard does) is far too slow to put on an upload path. A nightly job

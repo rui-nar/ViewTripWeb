@@ -16,11 +16,12 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from models.billing import Subscription
 from models.user import UserInfo
-from src.billing.plans import FREE, TIER_1, TIER_2, TIER_3
+from src.billing.plans import FREE, TIER_1, TIER_2, TIER_3, price_lookup_key
 from src.billing.subscriptions import apply_update, get_subscription, set_admin_override
 from src.billing.webhook_events import (
     SubscriptionUpdate,
     plan_for_price,
+    plan_for_price_object,
     subscription_update_from_event,
 )
 
@@ -186,6 +187,71 @@ class TestPlanForPrice:
         for tier in ("TIER_1", "TIER_2", "TIER_3"):
             monkeypatch.delenv(f"STRIPE_PRICE_{tier}", raising=False)
         assert plan_for_price("price_t2") == TIER_1
+
+
+class TestPlanForPriceObject:
+    """Resolution prefers the handles we control over the account-scoped id.
+
+    Order: lookup_key → metadata.plan → configured id → loud TIER_1 (issue #154).
+    """
+
+    def test_the_lookup_key_decides(self):
+        price = {"id": "price_from_some_other_account",
+                 "lookup_key": price_lookup_key(TIER_3)}
+        assert plan_for_price_object(price) == TIER_3
+
+    def test_a_price_id_from_another_account_still_resolves(self, monkeypatch):
+        """The failure this change exists to remove: a sandbox key paired with
+        another account's configured ids. Unwritable before, because the id was
+        the only handle."""
+        for tier in ("TIER_1", "TIER_2", "TIER_3"):
+            monkeypatch.delenv(f"STRIPE_PRICE_{tier}", raising=False)
+        price = {"id": "price_unknown_here", "lookup_key": price_lookup_key(TIER_2)}
+        assert plan_for_price_object(price) == TIER_2
+
+    def test_metadata_covers_a_renamed_lookup_key(self):
+        price = {"id": "price_x", "lookup_key": "renamed_by_hand",
+                 "metadata": {"plan": TIER_3}}
+        assert plan_for_price_object(price) == TIER_3
+
+    def test_falls_back_to_the_configured_id(self):
+        """Prices that predate scripts/stripe_catalog.py carry neither handle."""
+        assert plan_for_price_object({"id": "price_t2"}) == TIER_2
+
+    def test_unknown_everything_grants_the_entry_tier(self):
+        assert plan_for_price_object({"id": "price_mystery"}) == TIER_1
+
+    def test_no_price_object_is_free(self):
+        assert plan_for_price_object({}) == FREE
+
+    def test_a_foreign_lookup_key_does_not_win(self):
+        """Someone else's key must not silently map to one of our tiers."""
+        price = {"id": "price_t3", "lookup_key": "acme_gold_monthly_usd"}
+        assert plan_for_price_object(price) == TIER_3  # falls through to the id
+
+    def test_metadata_naming_a_plan_we_do_not_sell_is_ignored(self):
+        price = {"id": "price_t1", "metadata": {"plan": "tier_99"}}
+        assert plan_for_price_object(price) == TIER_1
+
+
+class TestEventUsesTheLookupKey:
+    def test_a_subscription_event_resolves_by_lookup_key(self, monkeypatch):
+        for tier in ("TIER_1", "TIER_2", "TIER_3"):
+            monkeypatch.delenv(f"STRIPE_PRICE_{tier}", raising=False)
+        event = _subscription_event("customer.subscription.updated")
+        event["data"]["object"]["items"] = {"data": [{
+            "price": {"id": "price_from_elsewhere",
+                      "lookup_key": price_lookup_key(TIER_3)},
+        }]}
+        assert subscription_update_from_event(event).plan == TIER_3
+
+    def test_the_legacy_plan_shape_still_works(self):
+        """Pre-2018 payloads put the same fields under `plan`."""
+        event = _subscription_event("customer.subscription.updated")
+        event["data"]["object"]["items"] = {"data": [{
+            "plan": {"id": "price_x", "lookup_key": price_lookup_key(TIER_2)},
+        }]}
+        assert subscription_update_from_event(event).plan == TIER_2
 
 
 # ── Applying updates to stored state ──────────────────────────────────────────

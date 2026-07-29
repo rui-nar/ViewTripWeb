@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from src.billing.gateway import GatewayError
+from src.billing.plans import PAID_PLANS, price_lookup_key
 from src.billing.webhook_events import price_id_for_plan
 from src.utils.logging import get_logger
 
@@ -42,9 +44,74 @@ def _field(obj, name: str):
     return obj[name] if name in obj else None
 
 
+#: How long a resolved price id is trusted. Prices are immutable, but a reprice
+#: moves the lookup key onto a *new* price and archives the old one
+#: (scripts/stripe_catalog.py), so caching forever would keep selling something
+#: archived until the next deploy. Negative results expire sooner, so fixing a
+#: misconfiguration does not need a restart.
+_CACHE_TTL_SECONDS = 600.0
+_MISS_TTL_SECONDS = 60.0
+
+#: lookup key → (price id or "", expires_at)
+_price_cache: dict[str, tuple[str, float]] = {}
+
+
+def reset_price_cache() -> None:
+    """Drop the resolved-price cache. For tests and after a catalogue change."""
+    _price_cache.clear()
+
+
+def resolve_price_id(plan: str) -> str:
+    """Price id for a paid plan, resolved by lookup key (issue #154).
+
+    ``STRIPE_PRICE_TIER_N`` still wins when set: an explicit pin, and the escape
+    hatch if resolution ever misbehaves. Otherwise the id is looked up by the
+    key :func:`~src.billing.plans.price_lookup_key` derives, which is identical
+    in every Stripe account — so one configuration is correct in a sandbox, in
+    test mode and in live, and pairing a key with another account's price ids
+    stops being expressible.
+
+    Resolution is lazy on purpose. A self-hosted instance with billing disabled
+    must never call Stripe, so this cannot move to import or startup.
+    """
+    if plan not in PAID_PLANS:
+        return ""
+    pinned = price_id_for_plan(plan)
+    if pinned:
+        return pinned
+
+    key = price_lookup_key(plan)
+    cached = _price_cache.get(key)
+    if cached is not None and time.time() < cached[1]:
+        if not cached[0]:
+            raise GatewayError(f"No Stripe price with lookup key {key}")
+        return cached[0]
+
+    stripe = _stripe()
+    try:
+        found = stripe.Price.list(lookup_keys=[key], limit=1)["data"] or []
+    except Exception as exc:
+        # Do not cache a transport failure as "missing" — that would turn a
+        # blip into a minute of refused checkouts.
+        _log.warning("Stripe price lookup failed for %s: %s", key, exc)
+        raise GatewayError(str(exc)) from exc
+
+    if not found:
+        _price_cache[key] = ("", time.time() + _MISS_TTL_SECONDS)
+        _log.warning(
+            "No Stripe price with lookup key %s — run scripts/stripe_catalog.py "
+            "--apply against this account.", key,
+        )
+        raise GatewayError(f"No Stripe price with lookup key {key}")
+
+    price_id = str(found[0]["id"])
+    _price_cache[key] = (price_id, time.time() + _CACHE_TTL_SECONDS)
+    return price_id
+
+
 def cloud_price_id(plan: str) -> str:
-    """Price id for a paid plan, from the environment (``STRIPE_PRICE_TIER_1``…)."""
-    return price_id_for_plan(plan)
+    """Price id for a paid plan. See :func:`resolve_price_id`."""
+    return resolve_price_id(plan)
 
 
 def webhook_secret() -> str:
@@ -60,9 +127,11 @@ class StripeGateway:
         success_url: str, cancel_url: str,
     ) -> dict:
         stripe = _stripe()
+        # Raises GatewayError when the catalogue has no price for this plan;
+        # the empty string is only possible for a plan that is not sold.
         price = cloud_price_id(plan)
         if not price:
-            raise GatewayError(f"STRIPE_PRICE_{plan.upper()} is not configured")
+            raise GatewayError(f"'{plan}' is not a plan that can be bought")
         metadata = {"user_info_id": str(user_info_id), "plan": plan}
         params: dict = {
             "mode": "subscription",
