@@ -163,14 +163,26 @@ never moves. Installing a *lower* versionCode over a higher one fails with
 ## Changing the icon
 
 ```powershell
-python scripts/make_adaptive_icon.py     # regenerate the adaptive foreground
+python scripts/generate_icons.py          # redraw every raster from the mark
 cd flutter_client; dart run flutter_launcher_icons
 ```
 
-`assets/app_icon.png` is the source. The script strips the flat background and
-insets the glyph into the adaptive-icon safe zone, since only the centre ~66% of
-a foreground layer survives launcher masking; the background colour is set as
-`adaptive_icon_background` in `pubspec.yaml`.
+The source is the brand mark itself, not a PNG:
+[generate_icons.py](../scripts/generate_icons.py) draws it and writes the flat
+icon plus both adaptive layers (`assets/app_icon.png`,
+`assets/app_icon_background.png`, `assets/app_icon_foreground.png`), which
+`flutter_launcher_icons` then resizes into `mipmap-*`. The foreground is inset to
+62%, since only the centre ~66% of that layer survives launcher masking.
+
+The same run also writes the cold-start assets: `launch_image.png` per density
+for the pre-Android-12 window (`drawable*/launch_background.xml`) and
+`splash_icon.png` for the Android 12+ system splash (`values-v31/styles.xml`,
+`values-night-v31/styles.xml`). Both are inset for their own masking rules — see
+the constants at the top of the script.
+
+The mark's geometry lives in three places that must move together:
+`assets/mark.svg`, `flutter_client/lib/src/core/brand_mark.dart` and
+`scripts/generate_icons.py`.
 
 ## Not yet done
 

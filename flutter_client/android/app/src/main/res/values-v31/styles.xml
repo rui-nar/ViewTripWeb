@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 replaced the windowBackground cold-start splash with the system
+  SplashScreen API, which ignores drawable/launch_background.xml entirely. Left
+  unset, it would show the launcher icon on ?android:colorBackground — a light
+  tile behind a dark mark. These attributes point it at the same field and mark
+  the pre-12 window and lib/src/core/splash_screen.dart use.
+
+  values-night/styles.xml is a more specific qualifier than -v31, so the dark
+  variant has to be restated in values-night-v31/styles.xml.
+-->
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_background</item>
+        <!-- Inset for the system splash's 192dp circular mask; written per
+             density by scripts/generate_icons.py. -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_icon</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

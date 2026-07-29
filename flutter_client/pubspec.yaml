@@ -70,23 +70,23 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  # Regenerates the Android launcher icons from assets/app_icon.png.
-  # Not part of any build — run by hand when the icon changes:
-  #   python scripts/make_adaptive_icon.py && dart run flutter_launcher_icons
+  # Regenerates the Android launcher icons from the assets/app_icon*.png layers.
+  # Not part of any build — run by hand when the brand mark changes:
+  #   python scripts/generate_icons.py && dart run flutter_launcher_icons
   flutter_launcher_icons: ^0.14.0
 
 flutter:
   uses-material-design: true
 
 # Android only — iOS keeps its own icon pipeline until that platform ships.
-# The background colour is the icon's own field orange (#FC4C02); the foreground
-# is the glyph re-centred into the adaptive-icon safe zone by
-# scripts/make_adaptive_icon.py.
+# All three layers come from scripts/generate_icons.py: the flat icon, and the
+# adaptive icon's dark radial field plus the brand mark inset into its safe zone.
+# The background is an image, not a colour, so the field keeps its radial lift.
 flutter_launcher_icons:
   android: true
   ios: false
   image_path: "../assets/app_icon.png"
-  adaptive_icon_background: "#FC4C02"
+  adaptive_icon_background: "../assets/app_icon_background.png"
   adaptive_icon_foreground: "../assets/app_icon_foreground.png"
   # The generator's default 16% inset would shrink an already-inset glyph twice.
   adaptive_icon_foreground_inset: 0

@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Modify this file to customize your launch splash screen -->
+<!--
+  Cold-start window, shown until the Flutter engine draws its first frame.
+  Deliberately the brand mark on the splash's field, so the handover to
+  SplashScreen (lib/src/core/splash_screen.dart) is invisible.
+
+  launch_image.png is written per density by scripts/generate_icons.py.
+  Android 12+ ignores this and uses values-v31/styles.xml instead.
+-->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/launch_background" />
 
-    <!-- You can insert your own image assets here -->
-    <!-- <item>
+    <item>
         <bitmap
             android:gravity="center"
-            android:src="@mipmap/launch_image" />
-    </item> -->
+            android:src="@drawable/launch_image" />
+    </item>
 </layer-list>
