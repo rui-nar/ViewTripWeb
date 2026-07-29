@@ -1,5 +1,6 @@
 import java.io.FileInputStream
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -30,10 +31,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_21.toString()
     }
 
     defaultConfig {
@@ -68,6 +65,15 @@ android {
                 signingConfigs.getByName("debug")
             }
         }
+    }
+}
+
+// Replaces the android.kotlinOptions block, which the Kotlin Gradle plugin
+// deprecates from 2.x and AGP 9 rejects outright. Must stay in step with
+// compileOptions above.
+kotlin {
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
     }
 }
 
