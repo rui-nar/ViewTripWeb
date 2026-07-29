@@ -154,6 +154,13 @@ class StravaAPI:
 
     BASE_URL = "https://www.strava.com/api/v3"
     MAX_RETRIES: int = 3
+    # (connect, read) seconds. Without this, requests waits forever: a stalled
+    # Strava connection parked a worker thread indefinitely and, before the
+    # refresh moved off the request path, surfaced as the client's own 30 s
+    # TimeoutException with no server-side error at all (issue #148). Every other
+    # outbound client here sets one (hafas 12 s, polarsteps 20 s, overpass 45 s).
+    # The read budget is generous because a streams response is multi-MB.
+    TIMEOUT: tuple = (5, 60)
 
     def __init__(self, config: Config, user_id: str = "default"):
         self.config = config
@@ -208,10 +215,18 @@ class StravaAPI:
         502) if the application's own quota window is full and stays full — no
         call is made in that case, which is the point: the 429 path above is
         only reached once Strava has already rejected us.
+
+        Every branch here can take minutes end to end (a 60 s limiter wait per
+        attempt, plus a >=60 s sleep per 429), which is why no caller may sit on
+        this inside a request/response cycle — see :func:`api.activities._refresh_activity_job`
+        for the background-job pattern that issue #148 moved the re-fetch to.
         """
         self._ensure_token()
         headers = {"Authorization": f"Bearer {self.token_data['access_token']}"}
         url = f"{self.BASE_URL}{path}"
+        # Popped once, outside the retry loop, so every attempt gets the same
+        # budget (popping inside would silently fall back to the default on retry).
+        timeout = kwargs.pop("timeout", self.TIMEOUT)
 
         _refreshed = False
         last_error: Optional[str] = None
@@ -222,7 +237,9 @@ class StravaAPI:
             # Inside the retry loop: each attempt is a real call against
             # Strava's quota and is counted as one.
             with track_external("strava", endpoint) as call:
-                resp = requests.request(method, url, headers=headers, **kwargs)
+                resp = requests.request(
+                    method, url, headers=headers, timeout=timeout, **kwargs,
+                )
                 call.outcome = outcome_for_status(resp.status_code)
 
             if resp.status_code < 400:
