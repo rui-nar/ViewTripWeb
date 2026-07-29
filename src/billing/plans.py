@@ -74,7 +74,7 @@ _EXTRA_FEATURES = {
         "Memories, encounters, journal",
         "Share links",
     ],
-    TIER_1: ["Weekly backups", "Priority support"],
+    TIER_1: ["Weekly backups"],
     TIER_2: ["Weekly backups", "Priority support"],
     TIER_3: ["Daily backups", "Priority support"],
 }
