@@ -6,6 +6,8 @@ by a fake gateway — no network, no API key, no SDK behaviour to mock.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
@@ -208,6 +210,35 @@ class TestCheckout:
         _subscription(engine, provider_customer_id="cus_existing")
         client.post("/api/billing/checkout", json={})
         assert gateway.checkout_calls[0]["customer_id"] == "cus_existing"
+
+    @pytest.mark.parametrize("live_status", ["active", "trialing", "past_due"])
+    def test_a_live_subscriber_is_refused(self, client, engine, gateway, live_status):
+        """Checkout always creates a *new* subscription, so letting a subscriber
+        through the plan picker bills them twice (issue #163)."""
+        _subscription(engine, plan=TIER_2, status=live_status)
+        res = client.post("/api/billing/checkout", json={"plan": TIER_3})
+        assert res.status_code == 409
+        assert gateway.checkout_calls == []
+
+    def test_the_refusal_points_at_the_billing_portal(self, client, engine, gateway):
+        """The user has to be told where tier changes actually happen."""
+        _subscription(engine, plan=TIER_2, status="active")
+        res = client.post("/api/billing/checkout", json={"plan": TIER_3})
+        assert "portal" in res.json()["detail"].lower()
+
+    def test_a_cancelled_subscriber_may_buy_again(self, client, engine, gateway):
+        """Cancelled inside the paid period is someone choosing their next plan,
+        not double-buying — refusing would mean waiting for the period to end."""
+        _subscription(engine, plan=TIER_2, status="canceled",
+                      current_period_end=time.time() + 86_400)
+        res = client.post("/api/billing/checkout", json={"plan": TIER_3})
+        assert res.status_code == 200
+        assert gateway.checkout_calls[0]["plan"] == TIER_3
+
+    def test_a_first_time_buyer_is_unaffected(self, client, gateway):
+        res = client.post("/api/billing/checkout", json={"plan": TIER_2})
+        assert res.status_code == 200
+        assert gateway.checkout_calls[0]["plan"] == TIER_2
 
     def test_return_path_is_honoured(self, client, gateway, monkeypatch):
         monkeypatch.setattr(billing_mod, "_FRONTEND_ORIGIN", "https://app.test")

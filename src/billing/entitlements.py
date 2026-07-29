@@ -91,6 +91,17 @@ def plan_from_subscription(
     return FREE
 
 
+def subscription_is_live(status: str) -> bool:
+    """True while the provider still considers the subscription running.
+
+    Distinct from "the plan is in force": a ``canceled`` subscription inside its
+    paid period still grants the plan (see :func:`plan_from_subscription`) but is
+    *not* live — nothing will renew it. Callers that need to know "would buying
+    again create a second subscription" want this one.
+    """
+    return status in _LIVE_STATUSES
+
+
 def plan_for(sess, user_info_id: int, now: float | None = None) -> str:
     """The plan in force for a user: override > subscription > free.
 

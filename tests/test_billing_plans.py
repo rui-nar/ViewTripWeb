@@ -12,6 +12,7 @@ from src.billing.entitlements import (
     billing_enabled,
     plan_from_subscription,
     quotas_enforced,
+    subscription_is_live,
 )
 from src.billing.plans import (
     FREE,
@@ -252,6 +253,28 @@ class TestPlanFromSubscription:
 
     def test_no_plan_is_free(self):
         assert plan_from_subscription("", "active", 0, now=1000) == FREE
+
+
+class TestSubscriptionIsLive:
+    """"Live" is not the same question as "which plan is in force" (issue #163).
+
+    Callers asking "would buying again create a second subscription" need this
+    one; callers asking "what may this user do today" need plan_from_subscription.
+    """
+
+    @pytest.mark.parametrize("status", ["active", "trialing", "past_due"])
+    def test_live_statuses(self, status):
+        assert subscription_is_live(status) is True
+
+    def test_cancelled_is_not_live_even_while_it_still_grants_the_plan(self):
+        """The distinction the whole helper exists for: nothing will renew it,
+        so buying again is a new purchase rather than a duplicate."""
+        assert subscription_is_live("canceled") is False
+        assert plan_from_subscription(TIER_2, "canceled", 2000, now=1000) == TIER_2
+
+    @pytest.mark.parametrize("status", ["incomplete", "unpaid", "", "nonsense"])
+    def test_everything_else_is_not_live(self, status):
+        assert subscription_is_live(status) is False
 
 
 # ── Deployment switches ───────────────────────────────────────────────────────
