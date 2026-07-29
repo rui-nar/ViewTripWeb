@@ -33,6 +33,34 @@ PAID_PLANS = (TIER_1, TIER_2, TIER_3)
 #: What a deployment without billing behaves as — the strongest plan.
 TOP_PLAN = PLAN_ORDER[-1]
 
+#: Currency the catalogue is priced in. Baked into the lookup key so a second
+#: currency can be added later without colliding with these.
+LOOKUP_CURRENCY = "eur"
+
+_LOOKUP_PREFIX = "traxjourney"
+
+
+def price_lookup_key(plan: str) -> str:
+    """Stable, account-independent handle for a paid plan's provider price.
+
+    Provider price ids are scoped to one account, so the same id is meaningless
+    in a sandbox and in live. Lookup keys are ours: identical everywhere, which
+    is what lets one configuration be correct in every account (issue #154).
+
+    Owned here rather than in scripts/stripe_catalog.py so the provisioner and
+    the server cannot disagree about the format — the same single-source rule
+    that keeps :func:`features_for` and the limits from drifting.
+    """
+    return f"{_LOOKUP_PREFIX}_{plan}_monthly_{LOOKUP_CURRENCY}"
+
+
+def plan_for_lookup_key(key: str) -> str | None:
+    """Inverse of :func:`price_lookup_key`; None when the key is not one of ours."""
+    for plan in PAID_PLANS:
+        if key == price_lookup_key(plan):
+            return plan
+    return None
+
 _MB = 1024 * 1024
 
 #: Environment-variable prefix per plan id.

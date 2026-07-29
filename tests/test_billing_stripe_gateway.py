@@ -14,12 +14,15 @@ exactly how the bug survived.
 from __future__ import annotations
 
 import json
+import time
 import types
 
 import pytest
 from stripe import StripeObject
 
+import src.billing.stripe_gateway as gw
 from src.billing.gateway import GatewayError
+from src.billing.plans import FREE, TIER_1, TIER_2, TIER_3, price_lookup_key
 from src.billing.stripe_gateway import StripeGateway, _field
 
 
@@ -140,3 +143,89 @@ class TestParseWebhook:
         gateway = self._gateway(monkeypatch)
         with pytest.raises(GatewayError):
             gateway.parse_webhook(b"{}", "sig")
+
+
+class TestResolvePriceId:
+    """Prices resolve by lookup key, not by an account-scoped id (issue #154)."""
+
+    def _stripe(self, monkeypatch, *, prices=None, fail=False):
+        """Fake SDK recording how many lookups were actually performed."""
+        calls: list[list[str]] = []
+
+        class _Price:
+            @staticmethod
+            def list(*, lookup_keys, limit):
+                calls.append(list(lookup_keys))
+                if fail:
+                    raise RuntimeError("stripe unreachable")
+                data = [_obj(id=prices[k]) for k in lookup_keys if k in (prices or {})]
+                return _obj(data=data)
+
+        monkeypatch.setattr("src.billing.stripe_gateway._stripe",
+                            lambda: types.SimpleNamespace(Price=_Price))
+        return calls
+
+    @pytest.fixture(autouse=True)
+    def _clear(self, monkeypatch):
+        for plan in ("TIER_1", "TIER_2", "TIER_3"):
+            monkeypatch.delenv(f"STRIPE_PRICE_{plan}", raising=False)
+        gw.reset_price_cache()
+        yield
+        gw.reset_price_cache()
+
+    def test_a_pinned_env_var_wins_without_calling_stripe(self, monkeypatch):
+        """The escape hatch, and what keeps the change non-breaking on rollout."""
+        monkeypatch.setenv("STRIPE_PRICE_TIER_2", "price_pinned")
+        calls = self._stripe(monkeypatch, prices={})
+        assert gw.resolve_price_id(TIER_2) == "price_pinned"
+        assert calls == []
+
+    def test_resolves_by_lookup_key_when_unpinned(self, monkeypatch):
+        key = price_lookup_key(TIER_2)
+        calls = self._stripe(monkeypatch, prices={key: "price_resolved"})
+        assert gw.resolve_price_id(TIER_2) == "price_resolved"
+        assert calls == [[key]]
+
+    def test_the_second_call_is_cached(self, monkeypatch):
+        key = price_lookup_key(TIER_1)
+        calls = self._stripe(monkeypatch, prices={key: "price_x"})
+        assert gw.resolve_price_id(TIER_1) == "price_x"
+        assert gw.resolve_price_id(TIER_1) == "price_x"
+        assert len(calls) == 1
+
+    def test_the_cache_expires_so_a_reprice_is_picked_up(self, monkeypatch):
+        """A reprice transfers the lookup key onto a new price and archives the
+        old one, so caching forever would keep selling something archived."""
+        key = price_lookup_key(TIER_1)
+        prices = {key: "price_old"}
+        calls = self._stripe(monkeypatch, prices=prices)
+        assert gw.resolve_price_id(TIER_1) == "price_old"
+
+        prices[key] = "price_new"
+        # Capture the real clock first: gw.time is the stdlib module, so the
+        # replacement would otherwise call itself.
+        later = time.time() + gw._CACHE_TTL_SECONDS + 1
+        monkeypatch.setattr(gw.time, "time", lambda: later)
+        assert gw.resolve_price_id(TIER_1) == "price_new"
+        assert len(calls) == 2
+
+    def test_a_missing_price_raises_and_is_cached_briefly(self, monkeypatch):
+        calls = self._stripe(monkeypatch, prices={})
+        with pytest.raises(GatewayError, match="lookup key"):
+            gw.resolve_price_id(TIER_3)
+        with pytest.raises(GatewayError):
+            gw.resolve_price_id(TIER_3)
+        assert len(calls) == 1, "a miss should be cached, not re-queried every time"
+
+    def test_a_transport_failure_is_not_cached_as_missing(self, monkeypatch):
+        """Otherwise a blip becomes a minute of refused checkouts."""
+        calls = self._stripe(monkeypatch, fail=True)
+        for _ in range(2):
+            with pytest.raises(GatewayError):
+                gw.resolve_price_id(TIER_2)
+        assert len(calls) == 2
+
+    def test_an_unsellable_plan_resolves_to_nothing(self, monkeypatch):
+        calls = self._stripe(monkeypatch, prices={})
+        assert gw.resolve_price_id(FREE) == ""
+        assert calls == []

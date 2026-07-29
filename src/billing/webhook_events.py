@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from src.billing.plans import FREE, PAID_PLANS, TIER_1
+from src.billing.plans import FREE, PAID_PLANS, TIER_1, plan_for_lookup_key
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -76,6 +76,36 @@ def plan_for_price(price_id: str) -> str:
     return TIER_1
 
 
+def plan_for_price_object(price: dict) -> str:
+    """Map a price *object* from a webhook payload to the plan it grants.
+
+    Prefers the handles we control over the account-scoped id (issue #154):
+
+    1. ``lookup_key`` — ours, and identical in every Stripe account, so this
+       resolves correctly even against a payload from an account whose price
+       ids were never configured here.
+    2. ``metadata.plan`` — also stamped by scripts/stripe_catalog.py; survives a
+       lookup-key rename.
+    3. the configured ``STRIPE_PRICE_*`` ids, for prices that predate the
+       provisioning script.
+
+    Falling through all three lands on :func:`plan_for_price`'s loud ``TIER_1``
+    default, which is deliberately unchanged.
+
+    Reading these off the payload rather than the environment is also what makes
+    this module's "no network, no config" claim true of the reverse mapping.
+    """
+    if not price:
+        return FREE
+    plan = plan_for_lookup_key(str(price.get("lookup_key") or ""))
+    if plan:
+        return plan
+    meta_plan = str(((price.get("metadata") or {}).get("plan") or "")).strip()
+    if meta_plan in PAID_PLANS:
+        return meta_plan
+    return plan_for_price(str(price.get("id") or ""))
+
+
 def _as_float(value) -> float:
     try:
         return float(value or 0)
@@ -114,6 +144,24 @@ def _price_id(sub: dict) -> str:
         if legacy_plan.get("id"):
             return str(legacy_plan["id"])
     return ""
+
+
+def _price_object(sub: dict) -> dict:
+    """The first priced line item's price object, ``{}`` when there is none.
+
+    Returns the whole object rather than just its id so the caller can read the
+    lookup key and metadata — the handles that are stable across accounts. Falls
+    back to the pre-2018 ``plan`` shape, which carried the same fields.
+    """
+    items = (sub.get("items") or {}).get("data") or []
+    for item in items:
+        price = item.get("price") or {}
+        if price.get("id"):
+            return price
+        legacy_plan = item.get("plan") or {}
+        if legacy_plan.get("id"):
+            return legacy_plan
+    return {}
 
 
 def _customer_id(obj: dict) -> str:
@@ -201,7 +249,7 @@ def subscription_update_from_event(event: dict) -> SubscriptionUpdate | None:
         event_at=event_at,
         customer_id=_customer_id(obj),
         subscription_id=str(obj.get("id") or ""),
-        plan=plan_for_price(_price_id(obj)),
+        plan=plan_for_price_object(_price_object(obj)),
         status=str(obj.get("status") or ""),
         current_period_end=_period_end(obj),
         cancel_at_period_end=bool(obj.get("cancel_at_period_end")),

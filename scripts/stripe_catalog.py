@@ -51,8 +51,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.billing import plans  # noqa: E402
 
 #: Single currency for now. The lookup key encodes it so a second currency can
-#: be added later without colliding with these.
-CURRENCY = "eur"
+#: be added later without colliding with these. Owned by plans.py, because the
+#: server now resolves prices by that key at runtime (issue #154) — the two must
+#: agree on the format or nothing resolves.
+CURRENCY = plans.LOOKUP_CURRENCY
 INTERVAL = "month"
 
 #: What to charge, in the smallest currency unit (99 = €0.99). The only numbers
@@ -69,7 +71,8 @@ def product_id(plan: str) -> str:
 
 
 def lookup_key(plan: str) -> str:
-    return f"traxjourney_{plan}_monthly_{CURRENCY}"
+    """Delegates to plans.py — one definition, shared with the server."""
+    return plans.price_lookup_key(plan)
 
 
 def env_var(plan: str) -> str:
