@@ -65,6 +65,13 @@ class Activity:
     # is deliberately NOT surfaced — it points every piece at the family's first
     # piece however deep the chain, which cannot answer "what is below this one".
     split_parent_id: Optional[int] = None
+    # Async Strava re-fetch state (issue #148). Read-only as far as the client is
+    # concerned: set by the re-fetch job's bookkeeping, surfaced here so the
+    # client can poll /meta for a verdict instead of holding a request open for
+    # the minutes a re-fetch can take. NULL status = never re-fetched.
+    refresh_status: Optional[str] = None
+    refresh_started_at: Optional[str] = None
+    refresh_error: Optional[str] = None
 
     # Client-side E2EE ciphertext passthrough (issue #29). start_latlng/end_latlng/
     # elevation_profile are parsed structures (list/tuple) — they can't carry a
@@ -127,6 +134,9 @@ class Activity:
             } if self.elevation_profile else None,
             "is_edited": self.is_edited,
             "split_parent_id": self.split_parent_id,
+            "refresh_status": self.refresh_status,
+            "refresh_started_at": self.refresh_started_at,
+            "refresh_error": self.refresh_error,
             "start_latlng_enc": self.start_latlng_enc,
             "end_latlng_enc": self.end_latlng_enc,
             "elevation_profile_enc": self.elevation_profile_enc,
@@ -188,6 +198,11 @@ class Activity:
             ),
             is_edited=data.get("is_edited", False),
             split_parent_id=data.get("split_parent_id"),
+            # Absent from a real Strava payload — present only when round-tripping
+            # our own to_strava_dict() output (e.g. a .viewtrip file).
+            refresh_status=data.get("refresh_status"),
+            refresh_started_at=data.get("refresh_started_at"),
+            refresh_error=data.get("refresh_error"),
             start_latlng_enc=data.get("start_latlng_enc"),
             end_latlng_enc=data.get("end_latlng_enc"),
             elevation_profile_enc=data.get("elevation_profile_enc"),

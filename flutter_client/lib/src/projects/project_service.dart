@@ -227,6 +227,24 @@ class ProjectService {
     await api.delete(ref.path('/activities/$activityId/local'));
   }
 
+  /// POST /api/projects/{name}/activities/{id}/refresh
+  ///
+  /// Returns immediately with 202 `{refresh_status: pending}` — the Strava
+  /// re-fetch runs server-side as a background job (issue #148). Callers poll
+  /// `/meta` for the verdict; the default 30 s timeout is plenty for the
+  /// trigger, which makes no network calls of its own.
+  Future<Map<String, dynamic>> refreshActivity(
+    ProjectRef ref,
+    int activityId,
+  ) async {
+    final data = await api.post(
+      ref.path('/activities/$activityId/refresh'),
+      {},
+    );
+    return (data as Map?)?.cast<String, dynamic>() ??
+        {'refresh_status': 'pending'};
+  }
+
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
   Future<Map<String, dynamic>> resolveTrainRoute(
     ProjectRef ref,

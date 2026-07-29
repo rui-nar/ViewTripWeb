@@ -2,7 +2,7 @@
 
 Routes:
     POST   /api/projects/{name}/activities                          — add activities to project
-    POST   /api/projects/{name}/activities/{activity_id}/refresh    — refresh activity from Strava
+    POST   /api/projects/{name}/activities/{activity_id}/refresh    — trigger async activity refresh from Strava
     GET    /api/projects/{name}/activities/{activity_id}/track      — get editable track geometry
     PUT    /api/projects/{name}/activities/{activity_id}/track      — replace track geometry
     POST   /api/projects/{name}/activities/{activity_id}/reset      — reset edited track to original
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
@@ -266,21 +267,138 @@ def add_activities(
 
 # ── Single-activity refresh ────────────────────────────────────────────────────
 
-@router.post("/{name}/activities/{activity_id}/refresh", summary="Refresh activity from Strava")
+def _set_refresh_state(
+    activity_id: int,
+    refresh_status: Optional[str],
+    *,
+    started_at: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Write only the refresh bookkeeping columns on an activity row.
+
+    Deliberately separate from :meth:`force_update_activity`, which overwrites
+    the activity's *data* columns and does not touch these — so the job can
+    persist a freshly fetched activity without clobbering its own status.
+    """
+    with get_session() as sess:
+        row = sess.get(DBActivity, activity_id)
+        if row is None:
+            return
+        row.refresh_status = refresh_status
+        row.refresh_started_at = started_at
+        row.refresh_error = error
+        sess.add(row)
+        sess.commit()
+
+
+def _refresh_activity_job(
+    user_info_id: int, owner_id: int, name: str, activity_id: int
+) -> None:
+    """Background task: re-fetch one activity from Strava and persist it.
+
+    Runs off the request path because the two Strava calls below can take
+    minutes end to end — a 60 s rate-limiter wait per attempt plus a >=60 s
+    sleep per 429, times three attempts, times two calls. Held open as a
+    request that reliably blew past the client's 30 s HTTP timeout, so the user
+    saw "re-fetch failed: timeout" for work the server usually finished
+    (issue #148).
+
+    The row was marked ``pending`` synchronously by the trigger; every exit path
+    here writes a terminal ``resolved``/``failed``. Mirrors
+    :func:`api.segments._resolve_route_job`.
+    """
+    try:
+        client = _strava_client_for_user(user_info_id)
+        if client is None:
+            _set_refresh_state(activity_id, "failed", error="Strava not connected")
+            return
+
+        # 1. Fetch fresh activity metadata from Strava
+        try:
+            raw = client.get_activity(activity_id)
+        except Exception as exc:  # noqa: BLE001 — any failure marks the re-fetch failed
+            _log.warning("refresh activity=%s status=failed: %s", activity_id, exc)
+            _set_refresh_state(
+                activity_id, "failed",
+                error=f"Strava fetch failed: {exc}"[:200],
+            )
+            return
+
+        act = Activity.from_strava_api(raw)
+
+        # 2. Enrich with full GPS streams (single call — check rate limit first)
+        if client.remaining_requests > 2:
+            try:
+                streams  = client.get_activity_streams(activity_id)
+                latlng   = streams.get("latlng",   {}).get("data") or []
+                altitude = streams.get("altitude", {}).get("data") or []
+                distance = streams.get("distance", {}).get("data") or []
+                if latlng:
+                    act.summary_polyline = polyline_lib.encode(
+                        [(pt[0], pt[1]) for pt in latlng]
+                    )
+                    # Derive start/end from stream if metadata didn't provide them
+                    if not act.start_latlng:
+                        act.start_latlng = [latlng[0][0], latlng[0][1]]
+                    if not act.end_latlng:
+                        act.end_latlng = [latlng[-1][0], latlng[-1][1]]
+                n = min(len(altitude), len(distance))
+                if n >= 2:
+                    act.elevation_profile = (
+                        [distance[i] / 1000 for i in range(n)],
+                        [altitude[i]        for i in range(n)],
+                    )
+            except Exception:
+                pass  # streams failed — still save the refreshed metadata
+
+        # 3. Overwrite the DB row (all columns, including enrichment)
+        with get_session() as sess:
+            _repo.force_update_activity(sess, user_info_id, act)
+        _set_refresh_state(activity_id, "resolved")
+        _log.info("refresh activity=%s status=resolved", activity_id)
+    except Exception as exc:  # noqa: BLE001
+        # The row was marked "pending" synchronously by the trigger. If the job
+        # crashes anywhere above, nothing writes a terminal status and the tile
+        # spins forever. Best-effort flip it to "failed" and log the cause —
+        # same reasoning as _resolve_route_job's crash guard.
+        _log.exception("refresh activity=%s crashed before persisting a verdict", activity_id)
+        try:
+            _set_refresh_state(activity_id, "failed", error=str(exc)[:200] or "Re-fetch failed")
+        except Exception:  # noqa: BLE001
+            _log.exception("could not mark activity=%s failed after a crashed refresh", activity_id)
+    finally:
+        bust_geo_cache(owner_id, name)
+        # Warm while still off the request path so reopening the project is a
+        # fast cache HIT rather than a cold recompute.
+        warm_geo_cache(owner_id, name)
+
+
+@router.post("/{name}/activities/{activity_id}/refresh",
+             status_code=status.HTTP_202_ACCEPTED,
+             summary="Trigger async activity refresh from Strava")
 def refresh_activity(
     name: str,
     activity_id: int,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: OwnerParam = None,
 ):
-    """Re-fetch a single activity from Strava and update the stored data.
+    """Schedule a re-fetch of one activity from Strava.
 
     Fetches fresh metadata (name, distance, kudos, etc.) plus full GPS streams
     (polyline + elevation).  Useful when the user has edited the activity on
     Strava and wants the local copy to reflect those changes.
 
-    Returns the updated activity dict (same shape as the activities list in
-    GET /api/projects/{name}).
+    The Strava calls can take minutes (rate limiting, 429 backoff), so they run
+    as a background task rather than blocking the request — holding the request
+    open is what made this fail with a client-side timeout (issue #148). Every
+    check that can be answered without calling Strava still happens
+    synchronously, so a permission/edit/connection problem is still an immediate
+    error rather than a job that fails a poll later.
+
+    The activity is marked ``refresh_status="pending"`` synchronously and a 202
+    is returned. The client polls ``/meta`` until it flips to ``resolved`` or
+    ``failed``. See :func:`_refresh_activity_job`.
     """
     user_info_id = int(current_user["sub"])
 
@@ -289,7 +407,8 @@ def refresh_activity(
     # and another editor's account can't see this activity — worse, the
     # overwrite would re-attribute the row to the wrong user.
     with get_session() as sess:
-        resolve_project(sess, user_info_id, name, owner, min_role="editor")
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
+        owner_id = row.user_info_id
         act_row = sess.get(DBActivity, activity_id)
     if act_row is not None and act_row.user_info_id != user_info_id:
         raise HTTPException(
@@ -306,65 +425,23 @@ def refresh_activity(
                    "Reset it to Strava before refreshing.",
         )
 
-    client = _strava_client_for_user(user_info_id)
-    if client is None:
+    # Checked here as well as in the job: a missing Strava connection is knowable
+    # without any network call, so the user gets it as an error on the button
+    # press rather than as a failed poll seconds later.
+    if _strava_client_for_user(user_info_id) is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Strava not connected",
         )
 
-    # 1. Fetch fresh activity metadata from Strava
-    try:
-        raw = client.get_activity(activity_id)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Strava fetch failed: {exc}",
-        )
-
-    act = Activity.from_strava_api(raw)
-
-    # 2. Enrich with full GPS streams (single call — check rate limit first)
-    if client.remaining_requests > 2:
-        try:
-            streams  = client.get_activity_streams(activity_id)
-            latlng   = streams.get("latlng",   {}).get("data") or []
-            altitude = streams.get("altitude", {}).get("data") or []
-            distance = streams.get("distance", {}).get("data") or []
-            if latlng:
-                act.summary_polyline = polyline_lib.encode(
-                    [(pt[0], pt[1]) for pt in latlng]
-                )
-                # Derive start/end from stream if metadata didn't provide them
-                if not act.start_latlng:
-                    act.start_latlng = [latlng[0][0], latlng[0][1]]
-                if not act.end_latlng:
-                    act.end_latlng = [latlng[-1][0], latlng[-1][1]]
-            n = min(len(altitude), len(distance))
-            if n >= 2:
-                act.elevation_profile = (
-                    [distance[i] / 1000 for i in range(n)],
-                    [altitude[i]        for i in range(n)],
-                )
-        except Exception:
-            pass  # streams failed — still save the refreshed metadata
-
-    # 3. Overwrite the DB row (all columns, including enrichment)
-    with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
-        owner_id = row.user_info_id
-        _repo.force_update_activity(sess, user_info_id, act)
-        bust_geo_cache(owner_id, name)
-        # Return the updated project so the client can refresh its state
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-
-    if project is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-
-    return _repo.to_dict(project)
+    _set_refresh_state(
+        activity_id, "pending",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    background_tasks.add_task(
+        _refresh_activity_job, user_info_id, owner_id, name, activity_id
+    )
+    return {"status": "pending", "refresh_status": "pending"}
 
 
 # ── Activity geometry editing (issue #31) ─────────────────────────────────────

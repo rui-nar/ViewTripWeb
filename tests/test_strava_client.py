@@ -100,6 +100,53 @@ def test_request_passes_params(mock_req):
 
 
 # ---------------------------------------------------------------------------
+# Socket timeout (issue #148)
+# ---------------------------------------------------------------------------
+
+@patch("src.api.strava_client.requests.request")
+def test_request_always_passes_a_timeout(mock_req):
+    """Without this, requests waits forever and a stalled Strava connection
+    parks a worker thread indefinitely — the silent half of issue #148."""
+    client = _client_with_token()
+    mock_req.return_value.status_code = 200
+    mock_req.return_value.json.return_value = []
+
+    client.get_activities()
+    _, kwargs = mock_req.call_args
+    assert kwargs["timeout"] == StravaAPI.TIMEOUT
+    assert kwargs["timeout"] is not None
+
+
+@patch("src.api.strava_client.requests.request")
+def test_request_honours_a_caller_supplied_timeout(mock_req):
+    client = _client_with_token()
+    mock_req.return_value.status_code = 200
+    mock_req.return_value.json.return_value = []
+
+    client.request("GET", "/test", timeout=(1, 2))
+    _, kwargs = mock_req.call_args
+    assert kwargs["timeout"] == (1, 2)
+
+
+@patch("src.api.strava_client.time.sleep")
+@patch("src.api.strava_client.requests.request")
+def test_retries_keep_the_caller_supplied_timeout(mock_req, mock_sleep):
+    """The timeout is read once, outside the retry loop: popping it per attempt
+    would silently drop the caller's budget on every retry."""
+    client = _client_with_token()
+    fail = MagicMock(status_code=500, text="oops")
+    success = MagicMock(status_code=200)
+    success.json.return_value = {"ok": True}
+    mock_req.side_effect = [fail, success]
+
+    client.request("GET", "/test", max_retries=3, timeout=(1, 2))
+
+    assert mock_req.call_count == 2
+    for call in mock_req.call_args_list:
+        assert call.kwargs["timeout"] == (1, 2)
+
+
+# ---------------------------------------------------------------------------
 # Retry logic
 # ---------------------------------------------------------------------------
 

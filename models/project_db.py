@@ -324,6 +324,17 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     # its transitive descendants. NULL on a row that was never cut out of another.
     split_parent_id: Optional[int] = sqlmodel.Field(default=None, index=True)
 
+    # Async Strava re-fetch state (issue #148). A re-fetch makes two Strava calls
+    # and can take minutes (rate-limiter waits, 429 backoff), so it runs as a
+    # background job and the client polls /meta for these. NULL means "never
+    # re-fetched"; otherwise "pending" | "resolved" | "failed", mirroring the
+    # segment route_* columns. Written ONLY by the job's own bookkeeping —
+    # force_update_activity deliberately does not touch them, so the job cannot
+    # clobber its own status while writing the freshly fetched activity.
+    refresh_status: Optional[str] = sqlmodel.Field(default=None)
+    refresh_started_at: Optional[str] = sqlmodel.Field(default=None)  # ISO-8601 UTC
+    refresh_error: Optional[str] = sqlmodel.Field(default=None)
+
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")
 

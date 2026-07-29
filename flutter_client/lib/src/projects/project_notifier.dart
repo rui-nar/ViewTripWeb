@@ -1413,33 +1413,126 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Item management ────────────────────────────────────────────────────────
 
-  Future<void> refreshActivity(int activityId) async {
+  /// Trigger an async Strava re-fetch of one activity and poll until it lands.
+  ///
+  /// The server marks the activity `refresh_status="pending"` and returns 202
+  /// immediately — the two Strava calls run in a background task because they
+  /// can take minutes, which used to blow past the client's 30 s HTTP timeout
+  /// and report a failure for work that had actually succeeded (issue #148).
+  ///
+  /// Sets [error] on failure and leaves it null on success; callers read it to
+  /// decide which toast to show.
+  ///
+  /// [pollInterval] and [pollTimeout] exist so tests don't wait real seconds.
+  Future<void> refreshActivity(
+    int activityId, {
+    @visibleForTesting Duration pollInterval = const Duration(seconds: 3),
+    @visibleForTesting Duration pollTimeout = const Duration(minutes: 5),
+  }) async {
     final ref = this.ref;
     if (ref == null) return;
+    // Cleared up front: the caller decides success/failure by reading `error`
+    // after awaiting this, so a stale message from an earlier operation would
+    // otherwise report a perfectly good re-fetch as a failure.
+    error = null;
     try {
-      final result = await api.post(
-        ref.path('/activities/$activityId/refresh'),
-        {},
-      ) as Map<String, dynamic>;
-      final rawActivities = result['activities'];
-      activities = rawActivities is List
-          ? rawActivities.cast<Map<String, dynamic>>()
-          : [];
-      await _revealActivities(activities);
-      final rawItems = result['items'];
-      items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
-      await _revealItems(items);
-      _updateStats();
-      _buildFullTrack();
-      // Refresh GeoJSON so the map polylines reflect the updated track.
-      geo = encryption.isUnlocked
-          ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
-          : await _service.getGeo(ref);
-      notifyListeners();
+      await _service.refreshActivity(ref, activityId);
     } on Exception catch (e) {
       error = _msg(e);
       notifyListeners();
+      return;
     }
+    await _pollActivityRefresh(
+      ref, activityId, interval: pollInterval, timeout: pollTimeout,
+    );
+  }
+
+  /// Poll `/meta` until [activityId] flips from `pending` to `resolved`/`failed`,
+  /// then reload the project data so the map and charts show the new track.
+  ///
+  /// Self-cancels if the user navigates to another project or the activity is
+  /// deleted mid-refresh. Mirrors `pollSegmentResolution`.
+  Future<void> _pollActivityRefresh(
+    ProjectRef ref,
+    int activityId, {
+    Duration interval = const Duration(seconds: 3),
+    Duration timeout = const Duration(minutes: 5),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(interval);
+      if (this.ref != ref) return; // navigated away
+      Map<String, dynamic> meta;
+      try {
+        meta = await _service.getDetailsMeta(ref);
+      } on Exception {
+        continue; // transient network error — retry on the next tick
+      }
+      if (this.ref != ref) return;
+
+      final rawActivities = meta['activities'];
+      final fresh = rawActivities is List
+          ? rawActivities.cast<Map<String, dynamic>>()
+          : <Map<String, dynamic>>[];
+      final match = fresh.firstWhere(
+        (a) => a['id'] == activityId,
+        orElse: () => const {},
+      );
+      if (match.isEmpty) return; // deleted mid-refresh
+      final stat = match['refresh_status'] as String?;
+
+      if (stat == 'failed') {
+        error = (match['refresh_error'] as String?) ?? 'Re-fetch failed';
+        notifyListeners();
+        return;
+      }
+      // Still pending → keep polling. A job orphaned by a server restart never
+      // writes a verdict; [timeout] below is what bounds that case, and the
+      // row's own refresh_started_at is what a later reopen would judge it by.
+      if (stat == 'pending') continue;
+
+      // Terminal and not failed → the row now holds fresh Strava data.
+      await _applyRefreshedProject(ref);
+      return;
+    }
+    error = 'Re-fetch is taking longer than expected. '
+        'Reopen the project to see the result.';
+    notifyListeners();
+  }
+
+  /// Reload the project after a successful re-fetch.
+  ///
+  /// Polling uses `/meta` because it is 10-15× smaller, but `/meta` omits
+  /// summary_polyline and elevation_profile — adopting that payload would blank
+  /// the very track the re-fetch just updated. So the verdict comes from the
+  /// cheap poll and the data from one full fetch here.
+  Future<void> _applyRefreshedProject(ProjectRef ref) async {
+    final Map<String, dynamic> details;
+    try {
+      details = await _service.getDetails(ref);
+    } on Exception catch (e) {
+      error = _msg(e);
+      notifyListeners();
+      return;
+    }
+    if (this.ref != ref) return;
+
+    final rawActivities = details['activities'];
+    activities = rawActivities is List
+        ? rawActivities.cast<Map<String, dynamic>>()
+        : [];
+    await _revealActivities(activities);
+    final rawItems = details['items'];
+    items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
+    await _revealItems(items);
+    if (this.ref != ref) return;
+    _updateStats();
+    _buildFullTrack();
+    // Refresh GeoJSON so the map polylines reflect the updated track.
+    geo = encryption.isUnlocked
+        ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
+        : await _service.getGeo(ref);
+    notifyListeners();
   }
 
   void removeItemLocally(int index) {

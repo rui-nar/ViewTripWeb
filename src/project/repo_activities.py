@@ -823,6 +823,9 @@ class ActivityMixin:
             elevation_profile_low_res=elevation_profile_low_res,
             is_edited=bool(getattr(row, "is_edited", False)),
             split_parent_id=getattr(row, "split_parent_id", None),
+            refresh_status=getattr(row, "refresh_status", None),
+            refresh_started_at=getattr(row, "refresh_started_at", None),
+            refresh_error=getattr(row, "refresh_error", None),
             start_latlng_enc=start_latlng_enc,
             end_latlng_enc=end_latlng_enc,
             # Prefer the full profile's ciphertext; fall back to the low-res
