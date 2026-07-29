@@ -52,11 +52,14 @@ _DEFAULT_NAMES = {
     TIER_3: "Tier 3",
 }
 
+#: Must match what the Stripe prices actually charge — the label is cosmetic, so
+#: nothing catches a drift here except a customer reading one number and being
+#: billed another. scripts/stripe_catalog.py owns the amounts these mirror.
 _DEFAULT_PRICE_LABELS = {
     FREE: "Free",
-    TIER_1: "€1 / month",
-    TIER_2: "€5 / month",
-    TIER_3: "€10 / month",
+    TIER_1: "€0.99 / month",
+    TIER_2: "€3.99 / month",
+    TIER_3: "€9.99 / month",
 }
 
 #: (max_projects, max_storage_mb, max_trip_days). None = unlimited.

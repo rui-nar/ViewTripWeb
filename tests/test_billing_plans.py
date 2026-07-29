@@ -188,6 +188,21 @@ class TestNamesAndPrices:
         monkeypatch.setenv("TIER_3_PRICE_LABEL", "$12 / month")
         assert price_label(TIER_3) == "$12 / month"
 
+    def test_default_labels_match_what_stripe_charges(self):
+        """The label is cosmetic, so nothing else notices when it drifts from
+        the amount — except a customer reading €1 and being billed €0.99.
+        scripts/stripe_catalog.py holds the amounts; tie the two together."""
+        import importlib.util
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parent.parent / "scripts" / "stripe_catalog.py"
+        spec = importlib.util.spec_from_file_location("stripe_catalog", script)
+        catalog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(catalog)
+
+        for plan, cents in catalog.AMOUNTS_CENTS.items():
+            assert price_label(plan) == f"€{cents / 100:.2f} / month", plan
+
 
 class TestFeatures:
     def test_bullets_are_generated_from_the_limits(self, monkeypatch):
