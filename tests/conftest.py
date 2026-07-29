@@ -1,7 +1,14 @@
 """Shared fixtures for all test modules."""
 
+import os
 from datetime import datetime
 import pytest
+
+# Sign with an explicit key. The app refuses to start without one (issue #156),
+# and the constant it used to fall back to is 23 bytes — under the 32-byte
+# minimum for HS256, which is what produced the InsecureKeyLengthWarning noise
+# across the suite. setdefault so a caller can still pin their own.
+os.environ.setdefault("JWT_SECRET", "0123456789abcdef" * 4)
 
 from prometheus_client import REGISTRY
 

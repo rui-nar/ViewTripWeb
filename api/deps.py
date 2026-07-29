@@ -20,11 +20,36 @@ from sqlmodel import select
 from models.db import get_session
 from models.user import UserInfo
 
-# Secret key — set JWT_SECRET in your environment or config.
-# For local dev a fallback is used; in production always set the env var.
-_JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-in-production")
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRY_HOURS = 24 * 7  # 7 days
+
+#: What this module used to fall back to. Still rejected by name: a deployment
+#: that copied it from an older README is exactly as forgeable as one that never
+#: set the variable at all.
+_PUBLISHED_DEFAULT = "change-me-in-production"
+
+
+def jwt_secret() -> str:
+    """The session signing key. Raises when it is not safely configured.
+
+    There is deliberately no fallback (issue #156). A default that ships in a
+    public repository is a valid signing key on every deployment that never set
+    one, and the payload carries ``is_admin`` — so a forged token is
+    indistinguishable from a real one. The old failure mode was silence: the app
+    worked perfectly and nothing said it was insecure.
+
+    Read per call rather than cached at import, matching the rest of the config
+    (see :func:`src.billing.entitlements.billing_enabled`), so a test can set it
+    and a restart is enough to rotate.
+    """
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if not secret or secret == _PUBLISHED_DEFAULT:
+        raise RuntimeError(
+            "JWT_SECRET is not configured. Generate one with "
+            "`openssl rand -hex 32` and set it as an environment variable "
+            "(see .env.example). Note that changing it signs everyone out."
+        )
+    return secret
 
 
 def create_access_token(
@@ -49,13 +74,13 @@ def create_access_token(
         "exp": datetime.datetime.now(datetime.timezone.utc)
         + datetime.timedelta(hours=_JWT_EXPIRY_HOURS),
     }
-    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+    return jwt.encode(payload, jwt_secret(), algorithm=_JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
     """Decode and verify a JWT. Raises HTTPException on failure."""
     try:
-        return jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        return jwt.decode(token, jwt_secret(), algorithms=[_JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"

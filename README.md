@@ -117,6 +117,7 @@ These are read by the backend at **runtime** (`os.getenv`) — a value passed to
 
 | Variable | Purpose |
 |---|---|
+| `JWT_SECRET` | **Required — the server will not start without it.** Signs every login token. Generate with `openssl rand -hex 32`, never reuse one between deployments, and note that changing it signs all users out |
 | `DATABASE_URL` | SQLAlchemy URL for the DB (defaults to local `viewtripweb.db`) |
 | `GOOGLE_TRANSLATE_API_KEY` | Enables memory translation endpoints (optional) |
 | `GOOGLE_CLIENT_ID` | Google OAuth client id; takes priority over `config.json` (optional) |
