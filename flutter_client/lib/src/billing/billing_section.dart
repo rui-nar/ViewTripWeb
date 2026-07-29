@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'billing_service.dart';
+import 'plan_picker.dart';
 
 class BillingSection extends StatefulWidget {
   /// Injected in tests; defaults to the live service.
@@ -28,6 +29,15 @@ class _BillingSectionState extends State<BillingSection> {
   late final Future<BillingStatus> _future = _billing.status();
   bool _busy = false;
   String? _failure;
+
+  Future<void> _changePlan(BillingStatus status) async {
+    await showPlanPicker(
+      context,
+      currentPlan: status.plan,
+      service: _billing,
+      launcher: widget.launcher,
+    );
+  }
 
   Future<void> _open(Future<String> Function() fetch) async {
     setState(() {
@@ -86,8 +96,7 @@ class _BillingSectionState extends State<BillingSection> {
             const Divider(height: 24),
             Row(
               children: [
-                Text(status.isPaid ? 'Cloud' : 'Free',
-                    style: theme.textTheme.titleMedium),
+                Text(status.planName, style: theme.textTheme.titleMedium),
                 const SizedBox(width: 8),
                 if (status.adminOverride)
                   const _Chip(label: 'Granted')
@@ -120,6 +129,19 @@ class _BillingSectionState extends State<BillingSection> {
                   : formatBytes(status.limits.maxStorageBytes!),
               fraction: status.storageFraction,
             ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Trip length', style: theme.textTheme.bodySmall),
+                Text(
+                  status.limits.maxTripDays == null
+                      ? 'any length'
+                      : 'up to ${status.limits.maxTripDays} days',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ),
             if (_failure != null) ...[
               const SizedBox(height: 12),
               Text(_failure!,
@@ -129,15 +151,13 @@ class _BillingSectionState extends State<BillingSection> {
             const SizedBox(height: 20),
             Row(
               children: [
-                if (!status.isPaid)
-                  ElevatedButton.icon(
-                    onPressed:
-                        _busy ? null : () => _open(() => _billing.checkoutUrl()),
-                    icon: const Icon(Icons.rocket_launch_outlined, size: 18),
-                    label: const Text('Upgrade to Cloud'),
-                  ),
+                ElevatedButton.icon(
+                  onPressed: _busy ? null : () => _changePlan(status),
+                  icon: const Icon(Icons.rocket_launch_outlined, size: 18),
+                  label: Text(status.isPaid ? 'Change plan' : 'Upgrade'),
+                ),
                 if (status.canManage) ...[
-                  if (!status.isPaid) const SizedBox(width: 12),
+                  const SizedBox(width: 12),
                   OutlinedButton.icon(
                     onPressed:
                         _busy ? null : () => _open(() => _billing.portalUrl()),

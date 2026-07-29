@@ -1,6 +1,7 @@
 # Billing and tier plans
 
-Issue #121. Two plans — **Free** and **Cloud** — with payments through Stripe.
+Issue #121. Four plans — **Free** plus three paid tiers — with payments through
+Stripe.
 
 **Self-hosting is not affected.** With no payment provider configured there is
 no billing: the payment endpoints return 404, no paywall exists anywhere in the
@@ -10,21 +11,52 @@ client, and every account has unlimited trips and storage. The landing page's
 
 ## What the plans limit
 
-| | Free | Cloud |
-|---|---|---|
-| Trips | 1 | unlimited |
-| Photo storage | 500 MB | 20 GB |
+| | Free | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|---|
+| Trips | 1 | 2 | 10 | unlimited |
+| Photo storage | 500 MB | 5 GB | 20 GB | 50 GB |
+| Days per trip | 10 | 100 | 365 | unlimited |
 
-Both numbers are environment variables (`FREE_MAX_PROJECTS`,
-`FREE_MAX_STORAGE_MB`, `CLOUD_MAX_PROJECTS`, `CLOUD_MAX_STORAGE_MB`), read per
-request — retuning them is a container restart, not a release.
+Every number is an environment variable (`FREE_MAX_TRIP_DAYS`,
+`TIER_2_MAX_STORAGE_MB`, …), read per request — retuning them is a container
+restart, not a release. So are the plan names and price labels, so the tiers can
+be renamed or repriced without one either.
 
-Nothing else is gated yet. Strava/Polarsteps sync, posters, sharing, companions
-and encounters are on every plan.
+The pricing bullets shown in the app are **generated from these limits**, not
+written alongside them: when both were maintained by hand they drifted apart
+within a day.
 
-Storage is attributed to the **trip owner**: a companion uploading photos to a
-shared trip spends the owner's allowance, because that is whose directory the
-files land in.
+Nothing else is gated. Strava/Polarsteps sync, posters, sharing, companions and
+encounters are on every plan.
+
+### Days per trip
+
+A trip's length is its **calendar span — first day to last, inclusive, counting
+the empty days in between**. A three-week ride with a rest week in the middle is
+21 days, not 14: those days are still days of the trip, and the app shows them
+as such.
+
+The span is derived, not stored (`src/billing/trip_days.py`): it is the range
+covered by the declared `trip_start`/`trip_end` *and* the dates of every
+activity, memory, journal entry and transport segment in the trip. Anything that
+would push the first or last day outwards is checked — creating or re-dating a
+memory or journal entry, importing activities, adding a segment, declaring trip
+dates.
+
+Two rules keep this from being obnoxious:
+
+* Dating something **inside** the existing span is always allowed, however full
+  the plan is.
+* A change is only ever refused if it makes the trip **longer**. A trip that was
+  already over the limit when enforcement was switched on stays fully editable —
+  it just cannot grow — and clearing a date is never refused.
+
+### Whose allowance
+
+Storage and trip length are attributed to the **trip owner**: a companion
+uploading photos to a shared trip, or dating a memory outside its span, spends
+the owner's allowance, because it is the owner's trip and the owner's directory
+the files land in.
 
 ## Turning it on
 
@@ -42,8 +74,15 @@ past 500 MB before the limits existed is locked out the moment you deploy.
 
 ## Stripe setup
 
-1. **Product and price** — create a recurring monthly price for the Cloud plan.
-   Copy its `price_...` id into `STRIPE_PRICE_CLOUD_MONTHLY`.
+1. **Products and prices** — create one recurring monthly price per paid tier
+   and copy each `price_...` id into `STRIPE_PRICE_TIER_1`,
+   `STRIPE_PRICE_TIER_2` and `STRIPE_PRICE_TIER_3`.
+
+   A price id the server does not recognise (rotated in the dashboard, say)
+   grants **Tier 1** and logs a warning. Free would be wrong — the customer is
+   paying for something — and granting the top tier would turn a config typo
+   into an invisible revenue leak. Fix the config, or lift the account with the
+   admin plan override.
 2. **Webhook endpoint** — point it at `https://<host>/api/billing/webhook` and
    subscribe to:
    - `checkout.session.completed`
@@ -65,13 +104,14 @@ All four are **runtime** environment variables. Never pass them to
 
 ```bash
 export BILLING_ENABLED=1 BILLING_ENFORCE_QUOTAS=1
-export STRIPE_SECRET_KEY=sk_test_... STRIPE_PRICE_CLOUD_MONTHLY=price_...
+export STRIPE_SECRET_KEY=sk_test_...
+export STRIPE_PRICE_TIER_1=price_... STRIPE_PRICE_TIER_2=price_... STRIPE_PRICE_TIER_3=price_...
 stripe listen --forward-to localhost:8000/api/billing/webhook
 # copy the whsec_... it prints into STRIPE_WEBHOOK_SECRET, then restart the server
 ```
 
 Check out with card `4242 4242 4242 4242`, then confirm `GET /api/billing/me`
-reports `"plan": "cloud"`.
+reports the tier you bought.
 
 ## Endpoints
 
@@ -79,7 +119,7 @@ reports `"plan": "cloud"`.
 |---|---|---|
 | `GET /api/billing/plans` | none | Plan catalogue for the pricing UI |
 | `GET /api/billing/me` | user | Plan, limits, usage |
-| `POST /api/billing/checkout` | user | → Stripe Checkout URL |
+| `POST /api/billing/checkout` | user | → Stripe Checkout URL; body carries the `plan` to buy |
 | `POST /api/billing/portal` | user | → Stripe Customer Portal URL |
 | `POST /api/billing/webhook` | signature | Provider callbacks |
 | `PUT /api/admin/users/{id}/plan` | admin | Comp an account, or clear a comp |
@@ -87,13 +127,20 @@ reports `"plan": "cloud"`.
 A refused action returns **402** with the numbers the client needs:
 
 ```json
-{"detail": "…", "code": "quota_exceeded", "resource": "projects",
- "plan": "free", "limit": 1, "used": 1}
+{"detail": "…", "code": "quota_exceeded", "resource": "trip_days",
+ "plan": "free", "limit": 10, "used": 10, "needed": 30}
 ```
+
+`resource` is `projects`, `storage` or `trip_days`. `needed` is what the refused
+action would have required — the client uses it to recommend the *cheapest* tier
+that would have allowed it, rather than always pushing the most expensive.
 
 ## How it holds together
 
-- `src/billing/plans.py` — the catalogue and the limits. Pure.
+- `src/billing/plans.py` — the catalogue, the limits, and `cheapest_plan_with`.
+  Pure.
+- `src/billing/trip_days.py` — trip length. The arithmetic is pure; one function
+  reads the database and does nothing else.
 - `src/billing/entitlements.py` — which plan is in force, and the quota checks.
   `plan_from_subscription` is pure; the `ensure_*` helpers raise `QuotaExceeded`,
   which `api/router.py` maps to 402.
@@ -117,7 +164,8 @@ customers who only need to update a card. A cancelled subscription keeps the
 plan until `current_period_end`: they paid for that time.
 
 An admin comp (`admin_override_plan`) is stored *beside* provider state, not on
-top of it, so a webhook can never silently wipe it.
+top of it, so a webhook can never silently wipe it. It accepts any plan id, so
+it doubles as the fix for a mis-mapped price.
 
 ### Deleting an account
 
@@ -129,7 +177,9 @@ through the dashboard or the customer portal first.
 
 - Apple / Google in-app purchase (the App Store requires IAP for digital goods
   sold inside the iOS app, so mobile currently has no purchase flow).
-- Feature gates beyond trip count and storage.
+- Feature gates beyond trip count, storage and trip length.
+- Proration and in-app tier switching: moving between paid tiers goes through
+  the Stripe customer portal, not the app.
 - Dunning and receipt emails (Stripe sends its own for now).
 - VAT: we are the merchant of record. Stripe Tax can be switched on when the
   thresholds start to matter.

@@ -18,7 +18,7 @@ from api.router import app
 from models.billing import Subscription
 from models.user import UserInfo
 from src.billing.gateway import GatewayError, set_gateway
-from src.billing.plans import CLOUD, FREE
+from src.billing.plans import FREE, PLAN_ORDER, TIER_1, TIER_2, TIER_3, TOP_PLAN
 
 
 class FakeGateway:
@@ -96,10 +96,15 @@ def _subscription(engine, **kw) -> None:
 # ── Catalogue ─────────────────────────────────────────────────────────────────
 
 class TestPlans:
-    def test_lists_both_plans(self, client):
+    def test_lists_every_plan(self, client):
         res = client.get("/api/billing/plans")
         assert res.status_code == 200
-        assert [p["id"] for p in res.json()] == [FREE, CLOUD]
+        assert [p["id"] for p in res.json()] == list(PLAN_ORDER)
+
+    def test_entries_carry_what_the_pricing_page_needs(self, client):
+        entry = client.get("/api/billing/plans").json()[1]
+        assert entry["name"] and entry["price_label"] and entry["features"]
+        assert "max_trip_days" in entry["limits"]
 
     def test_is_public(self, engine):
         """The landing page renders pricing before anyone has logged in."""
@@ -112,9 +117,15 @@ class TestBillingMe:
     def test_self_hosted_reports_no_billing_and_no_limits(self, client):
         body = client.get("/api/billing/me").json()
         assert body["billing_enabled"] is False
-        assert body["plan"] == CLOUD
+        assert body["plan"] == TOP_PLAN
         assert body["limits"]["max_projects"] is None
         assert body["limits"]["max_storage_bytes"] is None
+        assert body["limits"]["max_trip_days"] is None
+
+    def test_the_plan_carries_a_display_name(self, client, monkeypatch):
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        monkeypatch.setenv("FREE_NAME", "Starter")
+        assert client.get("/api/billing/me").json()["plan_name"] == "Starter"
 
     def test_hosted_user_without_a_subscription_is_free(self, client, monkeypatch):
         monkeypatch.setenv("BILLING_ENABLED", "1")
@@ -126,18 +137,18 @@ class TestBillingMe:
 
     def test_active_subscription_reports_cloud(self, client, engine, monkeypatch):
         monkeypatch.setenv("BILLING_ENABLED", "1")
-        _subscription(engine, plan=CLOUD, status="active",
+        _subscription(engine, plan=TIER_2, status="active",
                       current_period_end=9e9, provider_customer_id="cus_1")
         body = client.get("/api/billing/me").json()
-        assert body["plan"] == CLOUD
+        assert body["plan"] == TIER_2
         assert body["status"] == "active"
         assert body["current_period_end"] == 9e9
 
     def test_admin_comp_is_reported(self, client, engine, monkeypatch):
         monkeypatch.setenv("BILLING_ENABLED", "1")
-        _subscription(engine, admin_override_plan=CLOUD)
+        _subscription(engine, admin_override_plan=TIER_2)
         body = client.get("/api/billing/me").json()
-        assert body["plan"] == CLOUD
+        assert body["plan"] == TIER_2
         assert body["admin_override"] is True
 
     def test_usage_is_reported(self, client, monkeypatch):
@@ -166,6 +177,26 @@ class TestCheckout:
         call = gateway.checkout_calls[0]
         assert call["user_info_id"] == 1
         assert call["email"] == "a@example.com"
+
+    def test_buys_the_tier_that_was_asked_for(self, client, gateway):
+        client.post("/api/billing/checkout", json={"plan": TIER_3})
+        assert gateway.checkout_calls[0]["plan"] == TIER_3
+
+    def test_defaults_to_the_entry_tier(self, client, gateway):
+        """An older client — or an upgrade prompt with nothing better to
+        suggest — must still buy something valid."""
+        client.post("/api/billing/checkout", json={})
+        assert gateway.checkout_calls[0]["plan"] == TIER_1
+
+    def test_the_free_plan_cannot_be_bought(self, client, gateway):
+        res = client.post("/api/billing/checkout", json={"plan": FREE})
+        assert res.status_code == 422
+        assert gateway.checkout_calls == []
+
+    def test_an_unknown_plan_is_refused(self, client, gateway):
+        res = client.post("/api/billing/checkout", json={"plan": "tier_9"})
+        assert res.status_code == 422
+        assert gateway.checkout_calls == []
 
     def test_remembers_the_customer_id_for_next_time(self, client, engine, gateway):
         client.post("/api/billing/checkout", json={})
@@ -225,12 +256,12 @@ class TestPortal:
 
 # ── Webhook ───────────────────────────────────────────────────────────────────
 
-def _checkout_event(user_info_id=1):
+def _checkout_event(user_info_id=1, plan=TIER_2):
     return {
         "id": "evt_1", "type": "checkout.session.completed", "created": 1000,
         "data": {"object": {
             "mode": "subscription", "customer": "cus_1", "subscription": "sub_1",
-            "metadata": {"user_info_id": str(user_info_id)},
+            "metadata": {"user_info_id": str(user_info_id), "plan": plan},
         }},
     }
 
@@ -248,7 +279,7 @@ class TestWebhook:
         res = client.post("/api/billing/webhook", content=b"{}",
                           headers={"stripe-signature": "good"})
         assert res.json() == {"received": True, "applied": True}
-        assert client.get("/api/billing/me").json()["plan"] == CLOUD
+        assert client.get("/api/billing/me").json()["plan"] == TIER_2
 
     def test_verification_sees_the_raw_body(self, client):
         """Signatures are computed over the bytes; re-serialising would break them."""

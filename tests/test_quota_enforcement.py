@@ -23,7 +23,7 @@ from api.router import app
 from models.billing import Subscription, UserUsage
 from models.project_db import DBMemory, DBProject, DBProjectMember
 from models.user import UserInfo
-from src.billing.plans import CLOUD
+from src.billing.plans import TIER_2
 
 _MB = 1024 * 1024
 
@@ -69,7 +69,7 @@ def _enforcing(monkeypatch):
     monkeypatch.setenv("BILLING_ENFORCE_QUOTAS", "1")
 
 
-def _subscribe(engine, user_id=1, plan=CLOUD, status="active"):
+def _subscribe(engine, user_id=1, plan=TIER_2, status="active"):
     with Session(engine) as sess:
         sess.add(Subscription(user_info_id=user_id, plan=plan, status=status,
                               current_period_end=9e9))
@@ -141,7 +141,7 @@ class TestProjectQuota:
         client, engine = env
         _enforcing(monkeypatch)
         with Session(engine) as sess:
-            sess.add(Subscription(user_info_id=1, admin_override_plan=CLOUD))
+            sess.add(Subscription(user_info_id=1, admin_override_plan=TIER_2))
             sess.commit()
         assert client.post("/api/projects/", json={"name": "Trip 2"}).status_code == 201
 
@@ -156,7 +156,7 @@ class TestProjectQuota:
         client, engine = env
         _enforcing(monkeypatch)
         with Session(engine) as sess:
-            sess.add(Subscription(user_info_id=1, plan=CLOUD, status="canceled",
+            sess.add(Subscription(user_info_id=1, plan=TIER_2, status="canceled",
                                   current_period_end=1.0))  # long past
             sess.commit()
         assert client.post("/api/projects/", json={"name": "Trip 2"}).status_code == 402

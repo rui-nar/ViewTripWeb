@@ -39,7 +39,7 @@ from api.project_shared import _legacy_path, _refresh_stats_background, _repo
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
-from src.billing.entitlements import ensure_project_quota
+from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quota
 from src.models.activity import Activity
 from src.models.project import DEFAULT_SLEEPING_GROUPS
 from src.project.project_io import ProjectIO
@@ -238,6 +238,15 @@ def update_project(
             if new_name != name and _repo.project_exists(sess, owner_id, new_name):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Project '{new_name}' already exists")
             row.name = new_name
+
+        # Plan limit on trip length (issue #121). Checked before the dates are
+        # applied: declaring a range wider than the plan allows is refused, and
+        # clearing a date can only ever shrink the span, so it is always fine.
+        widening = [
+            body.trip_start if 'trip_start' in body.model_fields_set else None,
+            body.trip_end if 'trip_end' in body.model_fields_set else None,
+        ]
+        ensure_trip_days_quota(sess, row.id, owner_id, *widening)
 
         # Update trip_start if key is present in body (None = clear)
         if 'trip_start' in body.model_fields_set:

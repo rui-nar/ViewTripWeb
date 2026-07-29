@@ -60,9 +60,48 @@ void main() {
       expect(status.storageFraction, 1.0);
     });
 
+    test('reads the trip-day limit and the plan name', () {
+      final status = BillingStatus.fromJson({
+        'plan': 'tier_2',
+        'plan_name': 'Tier 2',
+        'limits': {'max_trip_days': 365},
+      });
+      expect(status.planName, 'Tier 2');
+      expect(status.limits.maxTripDays, 365);
+      expect(status.isPaid, isTrue);
+    });
+
+    test('any tier counts as paid, free does not', () {
+      expect(BillingStatus.fromJson({'plan': 'tier_1'}).isPaid, isTrue);
+      expect(BillingStatus.fromJson({'plan': 'free'}).isPaid, isFalse);
+    });
+
     test('canManage is false before the first purchase', () {
       expect(BillingStatus.fromJson({'status': 'none'}).canManage, isFalse);
       expect(BillingStatus.fromJson({'status': 'canceled'}).canManage, isTrue);
+    });
+  });
+
+  group('PlanLimits.covers', () {
+    const limits = PlanLimits(
+        maxProjects: 2, maxStorageBytes: 1000, maxTripDays: 100);
+
+    test('within the limit', () {
+      expect(limits.covers('trip_days', 100), isTrue);
+      expect(limits.covers('projects', 2), isTrue);
+    });
+
+    test('past the limit', () {
+      expect(limits.covers('trip_days', 101), isFalse);
+      expect(limits.covers('storage', 1001), isFalse);
+    });
+
+    test('an unlimited limit covers anything', () {
+      expect(const PlanLimits().covers('trip_days', 99999), isTrue);
+    });
+
+    test('an unknown resource is not a limit', () {
+      expect(limits.covers('bananas', 99999), isTrue);
     });
   });
 
@@ -75,11 +114,13 @@ void main() {
         'plan': 'free',
         'limit': 1,
         'used': 1,
+        'needed': 2,
       })));
       expect(quota, isNotNull);
       expect(quota!.resource, 'projects');
       expect(quota.limit, 1);
       expect(quota.detail, 'Your plan includes 1 trip.');
+      expect(quota.needed, 2);
     });
 
     test('ignores other status codes', () {
@@ -107,6 +148,26 @@ void main() {
       final status = await _service(mock).status();
       expect(path, '/api/billing/me');
       expect(status.plan, 'cloud');
+    });
+
+    test('checkoutUrl() names the tier being bought', () async {
+      late Map<String, dynamic> body;
+      final mock = MockClient((req) async {
+        body = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response(jsonEncode({'url': 'https://pay.test/x'}), 200);
+      });
+      await _service(mock).checkoutUrl(plan: 'tier_2');
+      expect(body['plan'], 'tier_2');
+    });
+
+    test('checkoutUrl() omits the plan when none was chosen', () async {
+      late Map<String, dynamic> body;
+      final mock = MockClient((req) async {
+        body = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response(jsonEncode({'url': 'https://pay.test/x'}), 200);
+      });
+      await _service(mock).checkoutUrl();
+      expect(body.containsKey('plan'), isFalse);
     });
 
     test('checkoutUrl() posts the return path and returns the url', () async {
@@ -145,15 +206,18 @@ void main() {
           utf8.encode(jsonEncode([
             {'id': 'free', 'name': 'Free', 'price_label': 'Free',
              'features': ['One trip']},
-            {'id': 'cloud', 'name': 'Cloud', 'price_label': '€4 / month',
-             'features': ['Unlimited trips']},
+            {'id': 'tier_1', 'name': 'Tier 1', 'price_label': '€4 / month',
+             'features': ['Unlimited trips'],
+             'limits': {'max_trip_days': 100}},
           ])),
           200,
           headers: {'content-type': 'application/json; charset=utf-8'}));
       final plans = await _service(mock).plans();
-      expect(plans.map((p) => p.id), ['free', 'cloud']);
+      expect(plans.map((p) => p.id), ['free', 'tier_1']);
       expect(plans[1].priceLabel, '€4 / month');
+      expect(plans[1].limits.maxTripDays, 100);
       expect(plans[0].features, ['One trip']);
+      expect(plans[0].isFree, isTrue);
     });
   });
 

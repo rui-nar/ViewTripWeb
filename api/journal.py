@@ -39,8 +39,8 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
-from models.project_db import DBJournalEntry, DBProjectItem
-from src.billing.entitlements import ensure_storage_quota
+from models.project_db import DBJournalEntry, DBProject, DBProjectItem
+from src.billing.entitlements import ensure_storage_quota, ensure_trip_days_quota
 from src.billing.usage import record_written, unlink_and_record
 from src.exceptions.errors import QuotaExceeded
 from src.utils.logging import get_logger
@@ -217,6 +217,10 @@ def create_journal(
         project_id = project_row.id
         owner_id = project_row.user_info_id
 
+        # Plan limit on trip length (issue #121) — an entry dated outside the
+        # trip's current span stretches it.
+        ensure_trip_days_quota(sess, project_id, owner_id, body.date)
+
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
             lat, lon = _resolve_geo(sess, project_id, body.date, body.geo_mode)
@@ -274,6 +278,10 @@ def update_journal(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
+        project = sess.get(DBProject, row.project_id)
+        ensure_trip_days_quota(
+            sess, row.project_id, project.user_info_id if project else 0, body.date
+        )
 
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":

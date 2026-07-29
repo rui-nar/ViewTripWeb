@@ -23,7 +23,7 @@ class BillingGateway(Protocol):
     """The three provider operations the app needs."""
 
     def create_checkout_session(
-        self, *, user_info_id: int, email: str, customer_id: str,
+        self, *, user_info_id: int, plan: str, email: str, customer_id: str,
         success_url: str, cancel_url: str,
     ) -> dict:
         """Start a subscription purchase. Returns ``{"url", "customer_id"}``."""

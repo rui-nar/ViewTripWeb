@@ -28,13 +28,14 @@ from src.billing import subscriptions as subs
 from src.billing.entitlements import (
     billing_enabled,
     limits_for_user,
+    plan_display_name,
     plan_for,
     project_count,
     quotas_enforced,
     storage_used,
 )
 from src.billing.gateway import GatewayError, get_gateway
-from src.billing.plans import catalogue
+from src.billing.plans import PAID_PLANS, catalogue
 from src.billing.webhook_events import subscription_update_from_event
 from src.utils.logging import get_logger
 
@@ -50,10 +51,13 @@ _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5500")
 # ── Response schemas ──────────────────────────────────────────────────────────
 
 class PlanOut(BaseModel):
-    id: str = Field(description='Plan id — "free" or "cloud"')
+    id: str = Field(description='Plan id — "free", "tier_1", "tier_2", "tier_3"')
     name: str
-    price_label: str = Field(description="Human-readable price, e.g. '€4 / month'")
-    limits: dict = Field(description="max_projects / max_storage_bytes; null = unlimited")
+    price_label: str = Field(description="Human-readable price, e.g. '€5 / month'")
+    limits: dict = Field(
+        description="max_projects / max_storage_bytes / max_trip_days; "
+                    "null = unlimited"
+    )
     features: list[str]
 
 
@@ -71,6 +75,7 @@ class BillingMeOut(BaseModel):
         description="False while limits are measured but not enforced"
     )
     plan: str
+    plan_name: str = Field(description="Display name of the plan in force")
     status: str = Field(description="Provider status, or 'none'")
     cancel_at_period_end: bool
     current_period_end: float = Field(description="Unix seconds; 0 when not subscribed")
@@ -124,6 +129,7 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
         billing_enabled=billing_enabled(),
         quotas_enforced=quotas_enforced(),
         plan=plan,
+        plan_name=plan_display_name(plan),
         status=(row.status if row else "none"),
         cancel_at_period_end=bool(row.cancel_at_period_end) if row else False,
         current_period_end=(row.current_period_end if row else 0.0),
@@ -134,6 +140,19 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
 
 
 class CheckoutBody(BaseModel):
+    plan: Optional[str] = Field(
+        default=None,
+        description="Paid plan to buy — 'tier_1', 'tier_2' or 'tier_3'. "
+                    "Defaults to the entry tier.",
+    )
+    return_path: Optional[str] = Field(
+        default=None,
+        description="Client route to come back to, e.g. '/settings'. Relative "
+                    "paths only — anything else falls back to the default.",
+    )
+
+
+class PortalBody(BaseModel):
     return_path: Optional[str] = Field(
         default=None,
         description="Client route to come back to, e.g. '/settings'. Relative "
@@ -160,6 +179,14 @@ def create_checkout(
 ):
     gateway = _require_gateway()
     user_info_id = int(current_user["sub"])
+    # Default to the entry tier so a client that predates multiple plans (or an
+    # upgrade prompt with nothing better to suggest) still buys something valid.
+    plan = (body.plan or PAID_PLANS[0]).strip()
+    if plan not in PAID_PLANS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"'{plan}' is not a plan that can be bought",
+        )
     with get_session() as sess:
         user = sess.get(UserInfo, user_info_id)
         if user is None:
@@ -171,6 +198,7 @@ def create_checkout(
     try:
         result = gateway.create_checkout_session(
             user_info_id=user_info_id,
+            plan=plan,
             email=email,
             customer_id=customer_id,
             success_url=_return_url(body.return_path, "?checkout=success"),
@@ -195,7 +223,7 @@ def create_checkout(
 
 @router.post("/portal", response_model=CheckoutOut, summary="Open the billing portal")
 def create_portal(
-    body: CheckoutBody,
+    body: PortalBody,
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     gateway = _require_gateway()

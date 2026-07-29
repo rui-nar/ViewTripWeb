@@ -16,18 +16,35 @@ class PlanLimits {
   final int? maxProjects;
   final int? maxStorageBytes;
 
-  const PlanLimits({this.maxProjects, this.maxStorageBytes});
+  /// Calendar length of one trip, first day to last inclusive — empty days in
+  /// the middle count.
+  final int? maxTripDays;
+
+  const PlanLimits({this.maxProjects, this.maxStorageBytes, this.maxTripDays});
 
   factory PlanLimits.fromJson(Map<String, dynamic>? json) => PlanLimits(
         maxProjects: (json?['max_projects'] as num?)?.toInt(),
         maxStorageBytes: (json?['max_storage_bytes'] as num?)?.toInt(),
+        maxTripDays: (json?['max_trip_days'] as num?)?.toInt(),
       );
+
+  /// Does this plan cover [needed] of [resource]? An unlimited plan always does.
+  bool covers(String resource, int needed) {
+    final limit = switch (resource) {
+      'projects' => maxProjects,
+      'storage' => maxStorageBytes,
+      'trip_days' => maxTripDays,
+      _ => null,
+    };
+    return limit == null || needed <= limit;
+  }
 }
 
 class BillingStatus {
   final bool billingEnabled;
   final bool quotasEnforced;
   final String plan;
+  final String planName;
   final String status;
   final bool cancelAtPeriodEnd;
   final double currentPeriodEnd;
@@ -40,6 +57,7 @@ class BillingStatus {
     required this.billingEnabled,
     required this.quotasEnforced,
     required this.plan,
+    required this.planName,
     required this.status,
     required this.cancelAtPeriodEnd,
     required this.currentPeriodEnd,
@@ -55,6 +73,7 @@ class BillingStatus {
       billingEnabled: json['billing_enabled'] == true,
       quotasEnforced: json['quotas_enforced'] == true,
       plan: json['plan'] as String? ?? 'free',
+      planName: json['plan_name'] as String? ?? 'Free',
       status: json['status'] as String? ?? 'none',
       cancelAtPeriodEnd: json['cancel_at_period_end'] == true,
       currentPeriodEnd: (json['current_period_end'] as num?)?.toDouble() ?? 0,
@@ -65,7 +84,7 @@ class BillingStatus {
     );
   }
 
-  bool get isPaid => plan == 'cloud';
+  bool get isPaid => plan != 'free';
 
   /// True once the user has a provider account, i.e. the portal can be opened.
   bool get canManage => status != 'none';
@@ -83,12 +102,14 @@ class PlanInfo {
   final String name;
   final String priceLabel;
   final List<String> features;
+  final PlanLimits limits;
 
   const PlanInfo({
     required this.id,
     required this.name,
     required this.priceLabel,
     required this.features,
+    this.limits = const PlanLimits(),
   });
 
   factory PlanInfo.fromJson(Map<String, dynamic> json) => PlanInfo(
@@ -97,17 +118,26 @@ class PlanInfo {
         priceLabel: json['price_label'] as String? ?? '',
         features:
             (json['features'] as List?)?.map((e) => e.toString()).toList() ?? const [],
+        limits: PlanLimits.fromJson(
+            (json['limits'] as Map?)?.cast<String, dynamic>()),
       );
+
+  bool get isFree => id == 'free';
 }
 
 /// A 402 from the server: the action is allowed in principle, on a bigger plan.
 class QuotaError {
   /// "projects" | "storage"
+  /// "projects" | "storage" | "trip_days"
   final String resource;
   final String plan;
   final String detail;
   final int? limit;
   final int used;
+
+  /// What the refused action would have needed — the number a plan has to cover
+  /// for the upgrade to actually solve the problem.
+  final int needed;
 
   const QuotaError({
     required this.resource,
@@ -115,6 +145,7 @@ class QuotaError {
     required this.detail,
     required this.limit,
     required this.used,
+    this.needed = 0,
   });
 
   /// Parse a 402 quota response, or null if [e] is any other failure.
@@ -132,6 +163,8 @@ class QuotaError {
         detail: body['detail'] as String? ?? 'Your plan is full.',
         limit: (body['limit'] as num?)?.toInt(),
         used: (body['used'] as num?)?.toInt() ?? 0,
+        needed: (body['needed'] as num?)?.toInt() ??
+            (body['used'] as num?)?.toInt() ?? 0,
       );
     } catch (_) {
       return null;
@@ -156,9 +189,13 @@ class BillingService {
         .toList();
   }
 
-  /// URL of the provider-hosted checkout page.
-  Future<String> checkoutUrl({String returnPath = '/settings'}) async {
+  /// URL of the provider-hosted checkout page for [plan].
+  Future<String> checkoutUrl({
+    String? plan,
+    String returnPath = '/settings',
+  }) async {
     final data = await _api.post('/api/billing/checkout', {
+      if (plan != null) 'plan': plan,
       'return_path': returnPath,
     }) as Map<String, dynamic>;
     return data['url'] as String? ?? '';

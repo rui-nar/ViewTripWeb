@@ -31,6 +31,7 @@ from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stat
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
+from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.exceptions.errors import RateLimitError
 from src.models.activity import Activity
@@ -232,6 +233,12 @@ def add_activities(
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        # Plan limit on trip length (issue #121) — an import that reaches
+        # outside the trip's current span stretches it.
+        ensure_trip_days_quota(
+            sess, row.id, owner_id,
+            *[a.start_date_local for a in activities],
+        )
         added = project.add_activities(activities)
         # New activity rows record the IMPORTER (the caller), not the project
         # owner — a companion's imports must stay tied to their Strava account.

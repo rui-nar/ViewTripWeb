@@ -46,7 +46,7 @@ from api.project_access import (
 from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
-from src.billing.entitlements import ensure_storage_quota
+from src.billing.entitlements import ensure_storage_quota, ensure_trip_days_quota
 from src.billing.usage import record_written, unlink_and_record
 from src.exceptions.errors import QuotaExceeded
 from src.models.memory import Memory
@@ -107,6 +107,12 @@ def _photo_dir(user_id: str, memory_id: int) -> Path:
     p = Path(_DATA_DIR) / "users" / user_id / "memories" / str(memory_id)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _owner_id_of(sess, project_id: int) -> int:
+    """The trip owner's user id — whose plan the trip's limits come from."""
+    project = sess.get(DBProject, project_id)
+    return project.user_info_id if project else 0
 
 
 def _owner_dir_id(sess, mem_row: DBMemory) -> str:
@@ -294,6 +300,10 @@ def create_memory(
             if adopt is not None:
                 return {"id": _adopt_and_refresh(sess, str(owner_id), adopt, body)}
 
+        # Plan limit on trip length (issue #121) — a memory dated outside the
+        # trip's current span stretches it.
+        ensure_trip_days_quota(sess, project_id, owner_id, body.date)
+
         lat, lon = _resolve_body_geo(sess, project_id, body)
 
         mem_row = DBMemory(
@@ -360,6 +370,9 @@ def update_memory(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
+        ensure_trip_days_quota(
+            sess, mem_row.project_id, _owner_id_of(sess, mem_row.project_id), body.date
+        )
 
         lat, lon = body.lat, body.lon
         if body.geo_mode != "custom":
