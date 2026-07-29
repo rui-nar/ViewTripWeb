@@ -17,6 +17,7 @@ from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.backup import router as backup_router
 from api.billing import router as billing_router
+from api.deps import jwt_secret
 from api.encounters import router as encounters_router
 from api.encryption import router as encryption_router
 from api.geo import router as geo_router
@@ -67,6 +68,11 @@ _APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Before anything else, and before the database is touched: an instance with
+    # no JWT_SECRET signs sessions with a key anyone can read, and the old
+    # failure mode was silence (issue #156). Fail at boot rather than on the
+    # first login, so a bad deploy is obvious immediately.
+    jwt_secret()
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
