@@ -4,7 +4,7 @@
     "description": "Merge Strava rides, segments and memories into one continuous journey.",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0D1B2A",
+    "background_color": "#0B1420",
     "theme_color": "#1D6CF6",
     "orientation": "natural",
     "prefer_related_applications": false,
