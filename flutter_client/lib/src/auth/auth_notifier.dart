@@ -58,18 +58,27 @@ class AuthNotifier extends ChangeNotifier {
 
   User? _user;
   bool _isLoading = false;
+  bool _isRestoring = false;
   String? _error;
 
   AuthNotifier(this._service);
 
   User? get user => _user;
   bool get isLoading => _isLoading;
+
+  /// True only while [init] restores a persisted session at app start.
+  ///
+  /// [isLoading] cannot stand in for this: it is also raised by an interactive
+  /// sign-in, and SplashGate keys the brand splash off this flag — it must not
+  /// come back over the login form once the app is up.
+  bool get isRestoring => _isRestoring;
   String? get error => _error;
 
   /// Restores a persisted session on app start.
   /// Call via `..init()` cascade in Provider `create`.
   Future<void> init() async {
     _isLoading = true;
+    _isRestoring = true;
     notifyListeners();
     try {
       final restored = await _service.restoreSession();
@@ -99,6 +108,7 @@ class AuthNotifier extends ChangeNotifier {
       _user = null;
     } finally {
       _isLoading = false;
+      _isRestoring = false;
       notifyListeners();
     }
   }

@@ -14,6 +14,7 @@ import 'src/projects/project_notifier.dart';
 import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
 import 'src/core/perf_timing.dart';
+import 'src/core/splash_screen.dart';
 import 'src/core/theme.dart';
 import 'src/core/version_gate.dart';
 
@@ -82,10 +83,13 @@ class _ViewTripAppState extends State<ViewTripApp> {
       darkTheme: darkTheme,
       themeMode: themeMode,
       routerConfig: _router!,
-      // Wraps every page: detects a stale cached web bundle (client APP_VERSION
-      // != deployed /api/version) and surfaces a Reload prompt.
-      builder: (context, child) =>
-          VersionGate(child: child ?? const SizedBox.shrink()),
+      // Wraps every page: SplashGate holds the brand splash over the app until
+      // the persisted session has been restored; VersionGate detects a stale
+      // cached web bundle (client APP_VERSION != deployed /api/version) and
+      // surfaces a Reload prompt.
+      builder: (context, child) => SplashGate(
+        child: VersionGate(child: child ?? const SizedBox.shrink()),
+      ),
       // Visual UI/raster bars alongside the console percentiles — dev only.
       showPerformanceOverlay: kPerfTiming,
       debugShowCheckedModeBanner: false,

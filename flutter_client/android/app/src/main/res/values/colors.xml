@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Cold-start window background. Matches lightTheme's scaffoldBackgroundColor
-         (_lightBg in lib/src/core/theme.dart) so the launch window blends into the
-         first Flutter frame instead of flashing plain white. -->
-    <color name="launch_background">#F1F5F9</color>
-    <!-- Adaptive launcher-icon background layer; written by flutter_launcher_icons. -->
-    <color name="ic_launcher_background">#FC4C02</color>
+    <!-- Cold-start window background. The brand splash is always dark, whatever
+         the system theme, so this matches the splash's field (kSplashBackground
+         in lib/src/core/splash_screen.dart) rather than either theme's scaffold:
+         the launch window then blends straight into the splash's first frame. -->
+    <color name="launch_background">#0B1420</color>
+    <!-- The adaptive launcher icon's background layer is a drawable now
+         (@drawable/ic_launcher_background), so no colour is needed for it. -->
 </resources>
