@@ -27,6 +27,7 @@ from api.project_access import (
     translate_insert_after,
 )
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from src.billing.entitlements import ensure_trip_days_quota
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_repo import StaleWriteError
 from src.utils.logging import get_logger
@@ -269,6 +270,9 @@ def create_segment(
         )
         if project is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        # Plan limit on trip length (issue #121) — a segment dated outside the
+        # trip's current span stretches it.
+        ensure_trip_days_quota(sess, row.id, owner_id, body.date)
         # insert_after_index is an index into the caller's *visible* item list
         # (other users' journal items are hidden) — translate it (issue #106).
         visible = journal_visible_positions(project.items, user_info_id, owner_id)
@@ -303,6 +307,7 @@ def update_segment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         for item in project.items:
             if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
+                ensure_trip_days_quota(sess, row.id, owner_id, body.date)
                 seg = item.segment
                 coords_changed = (
                     seg.start.lat != body.start_lat or seg.start.lon != body.start_lon or

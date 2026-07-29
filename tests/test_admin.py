@@ -562,14 +562,14 @@ class TestSetPlan:
 
     def test_comp_an_account(self, ctx):
         client, engine, pid = ctx
-        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "tier_2"})
         assert resp.status_code == 200
         with Session(engine) as sess:
-            assert get_subscription(sess, pid).admin_override_plan == "cloud"
+            assert get_subscription(sess, pid).admin_override_plan == "tier_2"
 
     def test_clear_the_comp(self, ctx):
         client, engine, pid = ctx
-        client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        client.put(f"/api/admin/users/{pid}/plan", json={"plan": "tier_2"})
         client.put(f"/api/admin/users/{pid}/plan", json={"plan": ""})
         with Session(engine) as sess:
             assert get_subscription(sess, pid).admin_override_plan == ""
@@ -581,7 +581,7 @@ class TestSetPlan:
 
     def test_unknown_user_404(self, ctx):
         client, *_ = ctx
-        resp = client.put("/api/admin/users/999999/plan", json={"plan": "cloud"})
+        resp = client.put("/api/admin/users/999999/plan", json={"plan": "tier_1"})
         assert resp.status_code == 404
 
     def test_requires_admin(self, engine):
@@ -590,5 +590,5 @@ class TestSetPlan:
             pid = plain.id
         payload = {"sub": str(pid), "email": "plain@x.io", "auth_provider": "local"}
         client = TestClient(_admin_app(engine, payload))
-        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "cloud"})
+        resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "tier_1"})
         assert resp.status_code == 403

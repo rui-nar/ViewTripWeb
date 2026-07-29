@@ -101,9 +101,9 @@ class OkResponse(BaseModel):
 
 class SetPlanRequest(BaseModel):
     plan: str = Field(
-        description='Plan to grant regardless of payment — "free", "cloud", or '
-                    '"" to clear the override and fall back to what the payment '
-                    'provider says.'
+        description='Plan to grant regardless of payment — "free", "tier_1", '
+                    '"tier_2", "tier_3", or "" to clear the override and fall '
+                    'back to what the payment provider says.'
     )
 
 

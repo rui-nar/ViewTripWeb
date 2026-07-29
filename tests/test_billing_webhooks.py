@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from models.billing import Subscription
 from models.user import UserInfo
-from src.billing.plans import CLOUD, FREE
+from src.billing.plans import FREE, TIER_1, TIER_2, TIER_3
 from src.billing.subscriptions import apply_update, get_subscription, set_admin_override
 from src.billing.webhook_events import (
     SubscriptionUpdate,
@@ -25,11 +25,20 @@ from src.billing.webhook_events import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _configured_prices(monkeypatch):
+    """One Stripe price per paid tier, as a configured deployment has."""
+    monkeypatch.setenv("STRIPE_PRICE_TIER_1", "price_t1")
+    monkeypatch.setenv("STRIPE_PRICE_TIER_2", "price_t2")
+    monkeypatch.setenv("STRIPE_PRICE_TIER_3", "price_t3")
+    yield
+
+
 # ── Payload builders (shaped like real Stripe events) ─────────────────────────
 
 def _subscription_event(etype: str, *, event_id="evt_1", created=1000,
                         status="active", period_end=5000, cancel=False,
-                        customer="cus_1", sub_id="sub_1", price="price_cloud",
+                        customer="cus_1", sub_id="sub_1", price="price_t2",
                         user_info_id=None, items_period=False) -> dict:
     item: dict = {"price": {"id": price}}
     if items_period:
@@ -51,7 +60,11 @@ def _subscription_event(etype: str, *, event_id="evt_1", created=1000,
 
 
 def _checkout_event(*, event_id="evt_co", created=900, customer="cus_1",
-                    sub_id="sub_1", user_info_id=1, mode="subscription") -> dict:
+                    sub_id="sub_1", user_info_id=1, mode="subscription",
+                    plan=TIER_2) -> dict:
+    metadata = {"user_info_id": str(user_info_id)}
+    if plan is not None:
+        metadata["plan"] = plan
     return {
         "id": event_id,
         "type": "checkout.session.completed",
@@ -62,7 +75,7 @@ def _checkout_event(*, event_id="evt_co", created=900, customer="cus_1",
             "customer": customer,
             "subscription": sub_id,
             "client_reference_id": str(user_info_id),
-            "metadata": {"user_info_id": str(user_info_id)},
+            "metadata": metadata,
         }},
     }
 
@@ -70,13 +83,23 @@ def _checkout_event(*, event_id="evt_co", created=900, customer="cus_1",
 # ── Pure mapping ──────────────────────────────────────────────────────────────
 
 class TestEventMapping:
-    def test_checkout_completed_grants_cloud_and_carries_our_user_id(self):
+    def test_checkout_completed_grants_the_tier_that_was_bought(self):
         update = subscription_update_from_event(_checkout_event(user_info_id=42))
-        assert update.plan == CLOUD
+        assert update.plan == TIER_2
         assert update.status == "active"
         assert update.user_info_id == 42
         assert update.customer_id == "cus_1"
         assert update.subscription_id == "sub_1"
+
+    def test_checkout_without_a_recorded_tier_falls_back_to_the_entry_one(self):
+        """A session created before tiers existed, or by an older client: the
+        subscription event that follows carries the real price and corrects it."""
+        update = subscription_update_from_event(_checkout_event(plan=None))
+        assert update.plan == TIER_1
+
+    def test_checkout_with_an_unknown_tier_falls_back_to_the_entry_one(self):
+        update = subscription_update_from_event(_checkout_event(plan="tier_9"))
+        assert update.plan == TIER_1
 
     def test_one_off_payment_is_not_a_subscription(self):
         """A ``payment`` mode session would grant a plan that never renews."""
@@ -87,7 +110,7 @@ class TestEventMapping:
             _subscription_event("customer.subscription.updated",
                                 status="active", period_end=7777)
         )
-        assert update.plan == CLOUD
+        assert update.plan == TIER_2
         assert update.status == "active"
         assert update.current_period_end == 7777
 
@@ -138,17 +161,31 @@ class TestEventMapping:
         assert subscription_update_from_event(event).plan == FREE
 
     def test_legacy_plan_id_counts_as_a_price(self):
+        """Old payloads carry the price under "plan"; it is still a paid line
+        item, so it must not read as free."""
         event = _subscription_event("customer.subscription.updated")
-        event["data"]["object"]["items"] = {"data": [{"plan": {"id": "plan_old"}}]}
-        assert subscription_update_from_event(event).plan == CLOUD
+        event["data"]["object"]["items"] = {"data": [{"plan": {"id": "price_t2"}}]}
+        assert subscription_update_from_event(event).plan == TIER_2
 
 
 class TestPlanForPrice:
-    def test_any_price_grants_cloud(self):
-        assert plan_for_price("price_whatever") == CLOUD
+    def test_each_configured_price_maps_to_its_tier(self):
+        assert plan_for_price("price_t1") == TIER_1
+        assert plan_for_price("price_t2") == TIER_2
+        assert plan_for_price("price_t3") == TIER_3
 
     def test_no_price_is_free(self):
         assert plan_for_price("") == FREE
+
+    def test_an_unrecognised_price_grants_the_entry_tier(self):
+        """They are paying for something, so free is wrong; the top tier would
+        turn a config typo into an invisible revenue leak."""
+        assert plan_for_price("price_rotated_last_week") == TIER_1
+
+    def test_an_unconfigured_deployment_grants_the_entry_tier(self, monkeypatch):
+        for tier in ("TIER_1", "TIER_2", "TIER_3"):
+            monkeypatch.delenv(f"STRIPE_PRICE_{tier}", raising=False)
+        assert plan_for_price("price_t2") == TIER_1
 
 
 # ── Applying updates to stored state ──────────────────────────────────────────
@@ -170,7 +207,7 @@ def sess():
 def _update(**kw) -> SubscriptionUpdate:
     defaults = dict(
         event_id="evt_1", event_at=1000.0, customer_id="cus_1",
-        subscription_id="sub_1", plan=CLOUD, status="active",
+        subscription_id="sub_1", plan=TIER_2, status="active",
         current_period_end=5000.0, cancel_at_period_end=False, user_info_id=1,
     )
     defaults.update(kw)
@@ -181,7 +218,7 @@ class TestApplyUpdate:
     def test_creates_the_row_on_first_event(self, sess):
         assert apply_update(sess, _update()) is True
         row = get_subscription(sess, 1)
-        assert row.plan == CLOUD
+        assert row.plan == TIER_2
         assert row.status == "active"
         assert row.provider_customer_id == "cus_1"
 
@@ -197,7 +234,7 @@ class TestApplyUpdate:
             event_id="evt_old", event_at=1000.0, plan=FREE, status="canceled",
         ))
         assert applied is False
-        assert get_subscription(sess, 1).plan == CLOUD
+        assert get_subscription(sess, 1).plan == TIER_2
 
     def test_a_newer_event_updates_the_row(self, sess):
         apply_update(sess, _update(event_id="evt_1", event_at=1000.0))
@@ -229,21 +266,21 @@ class TestApplyUpdate:
         assert get_subscription(sess, 1).current_period_end == 9999.0
 
     def test_a_webhook_does_not_clear_an_admin_comp(self, sess):
-        set_admin_override(sess, 1, CLOUD)
+        set_admin_override(sess, 1, TIER_2)
         apply_update(sess, _update(plan=FREE, status="canceled"))
         row = get_subscription(sess, 1)
-        assert row.admin_override_plan == CLOUD
+        assert row.admin_override_plan == TIER_2
         assert row.plan == FREE  # provider state is still recorded faithfully
 
 
 class TestAdminOverride:
     def test_set_and_clear(self, sess):
-        set_admin_override(sess, 1, CLOUD)
-        assert get_subscription(sess, 1).admin_override_plan == CLOUD
+        set_admin_override(sess, 1, TIER_2)
+        assert get_subscription(sess, 1).admin_override_plan == TIER_2
         set_admin_override(sess, 1, "")
         assert get_subscription(sess, 1).admin_override_plan == ""
 
     def test_creates_a_row_for_a_user_who_never_paid(self, sess):
         assert get_subscription(sess, 1) is None
-        set_admin_override(sess, 1, CLOUD)
+        set_admin_override(sess, 1, TIER_2)
         assert isinstance(get_subscription(sess, 1), Subscription)

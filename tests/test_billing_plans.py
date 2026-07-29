@@ -13,20 +13,35 @@ from src.billing.entitlements import (
     plan_from_subscription,
     quotas_enforced,
 )
-from src.billing.plans import CLOUD, FREE, limits_for, is_at_least, over_quota
+from src.billing.plans import (
+    FREE,
+    PLAN_ORDER,
+    TIER_1,
+    TIER_2,
+    TIER_3,
+    TOP_PLAN,
+    cheapest_plan_with,
+    features_for,
+    is_at_least,
+    limits_for,
+    over_quota,
+    plan_name,
+    price_label,
+)
 
 _MB = 1024 * 1024
+_GB = 1024 * _MB
 
 
 @pytest.fixture(autouse=True)
 def _clean_billing_env(monkeypatch):
     """Start every test from an unconfigured deployment."""
-    for var in (
-        "BILLING_ENABLED", "BILLING_ENFORCE_QUOTAS", "STRIPE_SECRET_KEY",
-        "FREE_MAX_PROJECTS", "FREE_MAX_STORAGE_MB",
-        "CLOUD_MAX_PROJECTS", "CLOUD_MAX_STORAGE_MB",
-    ):
+    for var in ("BILLING_ENABLED", "BILLING_ENFORCE_QUOTAS", "STRIPE_SECRET_KEY"):
         monkeypatch.delenv(var, raising=False)
+    for prefix in ("FREE", "TIER_1", "TIER_2", "TIER_3"):
+        for suffix in ("MAX_PROJECTS", "MAX_STORAGE_MB", "MAX_TRIP_DAYS",
+                       "NAME", "PRICE_LABEL"):
+            monkeypatch.delenv(f"{prefix}_{suffix}", raising=False)
     yield
 
 
@@ -37,36 +52,67 @@ class TestLimits:
         limits = limits_for(FREE)
         assert limits.max_projects == 1
         assert limits.max_storage_bytes == 500 * _MB
+        assert limits.max_trip_days == 10
 
-    def test_cloud_defaults(self):
-        limits = limits_for(CLOUD)
+    def test_tier_1_defaults(self):
+        limits = limits_for(TIER_1)
+        assert limits.max_projects == 2
+        assert limits.max_storage_bytes == 5 * _GB
+        assert limits.max_trip_days == 100
+
+    def test_tier_2_defaults(self):
+        limits = limits_for(TIER_2)
+        assert limits.max_projects == 10
+        assert limits.max_storage_bytes == 20 * _GB
+        assert limits.max_trip_days == 365
+
+    def test_tier_3_defaults(self):
+        limits = limits_for(TIER_3)
         assert limits.max_projects is None       # unlimited trips
-        assert limits.max_storage_bytes == 20 * 1024 * _MB
+        assert limits.max_storage_bytes == 50 * _GB
+        assert limits.max_trip_days is None      # trips of any length
+
+    def test_every_limit_grows_with_the_tier(self):
+        """A higher tier must never be worse at anything — otherwise the
+        upgrade path is a downgrade for someone."""
+        def rank(value):  # None = unlimited = the largest
+            return float("inf") if value is None else value
+
+        for weaker, stronger in zip(PLAN_ORDER, PLAN_ORDER[1:]):
+            a, b = limits_for(weaker), limits_for(stronger)
+            assert rank(b.max_projects) >= rank(a.max_projects)
+            assert rank(b.max_storage_bytes) >= rank(a.max_storage_bytes)
+            assert rank(b.max_trip_days) >= rank(a.max_trip_days)
 
     def test_unknown_plan_falls_back_to_free(self):
-        """Fail safe: an unrecognised plan must not hand out the paid limits."""
+        """Fail safe: an unrecognised plan must not hand out paid limits."""
         assert limits_for("enterprise") == limits_for(FREE)
 
-    def test_env_overrides_free(self, monkeypatch):
-        monkeypatch.setenv("FREE_MAX_PROJECTS", "3")
-        monkeypatch.setenv("FREE_MAX_STORAGE_MB", "2048")
-        limits = limits_for(FREE)
-        assert limits.max_projects == 3
-        assert limits.max_storage_bytes == 2048 * _MB
+    def test_env_overrides_per_tier(self, monkeypatch):
+        monkeypatch.setenv("TIER_1_MAX_PROJECTS", "3")
+        monkeypatch.setenv("TIER_1_MAX_TRIP_DAYS", "120")
+        monkeypatch.setenv("TIER_1_MAX_STORAGE_MB", "8192")
+        limits = limits_for(TIER_1)
+        assert (limits.max_projects, limits.max_trip_days) == (3, 120)
+        assert limits.max_storage_bytes == 8 * _GB
 
     def test_env_can_make_a_limit_unlimited(self, monkeypatch):
-        monkeypatch.setenv("FREE_MAX_STORAGE_MB", "unlimited")
-        assert limits_for(FREE).max_storage_bytes is None
+        monkeypatch.setenv("FREE_MAX_TRIP_DAYS", "unlimited")
+        assert limits_for(FREE).max_trip_days is None
 
     def test_garbage_env_falls_back_to_the_default(self, monkeypatch):
         """A typo in an env var must not silently remove a limit."""
-        monkeypatch.setenv("FREE_MAX_PROJECTS", "lots")
-        assert limits_for(FREE).max_projects == 1
+        monkeypatch.setenv("FREE_MAX_TRIP_DAYS", "ten")
+        assert limits_for(FREE).max_trip_days == 10
 
     def test_env_read_per_call_not_at_import(self, monkeypatch):
         assert limits_for(FREE).max_projects == 1
         monkeypatch.setenv("FREE_MAX_PROJECTS", "7")
         assert limits_for(FREE).max_projects == 7
+
+    def test_as_dict_carries_all_three_limits(self):
+        keys = set(limits_for(TIER_2).as_dict())
+        assert keys == {"max_projects", "max_storage_bytes", "max_trip_days"}
 
 
 class TestOverQuota:
@@ -76,7 +122,7 @@ class TestOverQuota:
     def test_exactly_on_the_limit_is_allowed(self):
         assert over_quota(used=95, incoming=5, limit=100) is False
 
-    def test_one_byte_past_the_limit(self):
+    def test_one_past_the_limit(self):
         assert over_quota(used=95, incoming=6, limit=100) is True
 
     def test_none_limit_is_never_exceeded(self):
@@ -87,38 +133,107 @@ class TestOverQuota:
 
 
 class TestPlanOrder:
-    def test_cloud_satisfies_free(self):
-        assert is_at_least(CLOUD, FREE) is True
+    def test_stronger_satisfies_weaker(self):
+        assert is_at_least(TIER_2, TIER_1) is True
 
-    def test_free_does_not_satisfy_cloud(self):
-        assert is_at_least(FREE, CLOUD) is False
+    def test_weaker_does_not_satisfy_stronger(self):
+        assert is_at_least(TIER_1, TIER_3) is False
 
     def test_unknown_plan_satisfies_nothing(self):
         assert is_at_least("enterprise", FREE) is False
+
+    def test_top_plan_is_the_strongest(self):
+        assert TOP_PLAN == PLAN_ORDER[-1] == TIER_3
+
+
+class TestCheapestPlanWith:
+    def test_free_covers_a_small_need(self):
+        assert cheapest_plan_with(projects=1, trip_days=10) == FREE
+
+    def test_a_long_trip_needs_tier_1(self):
+        assert cheapest_plan_with(trip_days=30) == TIER_1
+
+    def test_a_very_long_trip_needs_tier_2(self):
+        assert cheapest_plan_with(trip_days=200) == TIER_2
+
+    def test_an_open_ended_trip_needs_tier_3(self):
+        assert cheapest_plan_with(trip_days=500) == TIER_3
+
+    def test_the_strictest_need_wins(self):
+        """Short trip, huge photo library → storage decides the tier."""
+        assert cheapest_plan_with(trip_days=5, storage_bytes=30 * _GB) == TIER_3
+
+    def test_nothing_covers_it(self):
+        assert cheapest_plan_with(storage_bytes=500 * _GB) is None
+
+    def test_no_constraints_is_the_free_plan(self):
+        assert cheapest_plan_with() == FREE
+
+
+# ── Naming and pricing ────────────────────────────────────────────────────────
+
+class TestNamesAndPrices:
+    def test_default_names(self):
+        assert plan_name(FREE) == "Free"
+        assert plan_name(TIER_2) == "Tier 2"
+
+    def test_name_is_overridable(self, monkeypatch):
+        monkeypatch.setenv("TIER_2_NAME", "Voyager")
+        assert plan_name(TIER_2) == "Voyager"
+
+    def test_unknown_plan_reads_as_free(self):
+        assert plan_name("enterprise") == "Free"
+
+    def test_price_labels_are_overridable(self, monkeypatch):
+        monkeypatch.setenv("TIER_3_PRICE_LABEL", "$12 / month")
+        assert price_label(TIER_3) == "$12 / month"
+
+
+class TestFeatures:
+    def test_bullets_are_generated_from_the_limits(self, monkeypatch):
+        """The bullets and the limits drifted apart when both were hand-written;
+        they are one source now, so changing a limit changes the pricing page."""
+        monkeypatch.setenv("FREE_MAX_TRIP_DAYS", "3")
+        monkeypatch.setenv("FREE_MAX_PROJECTS", "4")
+        bullets = features_for(FREE)
+        assert "4 trips" in bullets
+        assert "Up to 3 days per trip" in bullets
+
+    def test_singular_trip(self):
+        assert "1 trip" in features_for(FREE)
+
+    def test_unlimited_reads_as_unlimited(self):
+        bullets = features_for(TIER_3)
+        assert "Unlimited trips" in bullets
+        assert "Trips of any length" in bullets
+
+    def test_storage_is_human_readable(self):
+        assert "500 MB of photos" in features_for(FREE)
+        assert "5 GB of photos" in features_for(TIER_1)
 
 
 # ── Provider state → plan ─────────────────────────────────────────────────────
 
 class TestPlanFromSubscription:
     def test_active_grants_the_plan(self):
-        assert plan_from_subscription(CLOUD, "active", 0, now=1000) == CLOUD
+        assert plan_from_subscription(TIER_2, "active", 0, now=1000) == TIER_2
 
     def test_trialing_grants_the_plan(self):
-        assert plan_from_subscription(CLOUD, "trialing", 0, now=1000) == CLOUD
+        assert plan_from_subscription(TIER_1, "trialing", 0, now=1000) == TIER_1
 
     def test_past_due_still_grants_during_the_retry_window(self):
         """A failed renewal starts a provider retry window; locking the account
         out on day one loses customers who just need to update a card."""
-        assert plan_from_subscription(CLOUD, "past_due", 0, now=1000) == CLOUD
+        assert plan_from_subscription(TIER_3, "past_due", 0, now=1000) == TIER_3
 
     def test_cancelled_keeps_access_until_the_period_ends(self):
-        assert plan_from_subscription(CLOUD, "canceled", 2000, now=1000) == CLOUD
+        assert plan_from_subscription(TIER_2, "canceled", 2000, now=1000) == TIER_2
 
     def test_cancelled_drops_to_free_after_the_period_ends(self):
-        assert plan_from_subscription(CLOUD, "canceled", 2000, now=3000) == FREE
+        assert plan_from_subscription(TIER_2, "canceled", 2000, now=3000) == FREE
 
     def test_incomplete_checkout_grants_nothing(self):
-        assert plan_from_subscription(CLOUD, "incomplete", 0, now=1000) == FREE
+        assert plan_from_subscription(TIER_1, "incomplete", 0, now=1000) == FREE
 
     def test_no_plan_is_free(self):
         assert plan_from_subscription("", "active", 0, now=1000) == FREE
@@ -163,13 +278,16 @@ class TestQuotasEnforced:
 
 
 class TestCatalogue:
-    def test_lists_both_plans_with_their_limits(self, monkeypatch):
+    def test_lists_every_plan_weakest_first(self):
+        assert [e["id"] for e in plans.catalogue()] == list(PLAN_ORDER)
+
+    def test_entries_carry_limits_and_bullets(self, monkeypatch):
         monkeypatch.setenv("FREE_MAX_PROJECTS", "2")
-        entries = plans.catalogue()
-        assert [e["id"] for e in entries] == [FREE, CLOUD]
-        assert entries[0]["limits"]["max_projects"] == 2
+        free = plans.catalogue()[0]
+        assert free["limits"]["max_projects"] == 2
+        assert free["features"][0] == "2 trips"
 
     def test_price_label_is_configurable(self, monkeypatch):
-        monkeypatch.setenv("CLOUD_PRICE_LABEL", "$5 / month")
-        cloud = [e for e in plans.catalogue() if e["id"] == CLOUD][0]
-        assert cloud["price_label"] == "$5 / month"
+        monkeypatch.setenv("TIER_1_PRICE_LABEL", "$2 / month")
+        tier_1 = [e for e in plans.catalogue() if e["id"] == TIER_1][0]
+        assert tier_1["price_label"] == "$2 / month"

@@ -26,7 +26,7 @@ class Subscription(sqlmodel.SQLModel, table=True):
     user_info_id: int = sqlmodel.Field(
         foreign_key="userinfo.id", unique=True, index=True
     )
-    # Plan this subscription grants while ``status`` is live: "free" | "cloud".
+    # Plan this subscription grants while ``status`` is live: a plans.py id.
     plan: str = sqlmodel.Field(default="free")
     # Provider status verbatim ("active", "trialing", "past_due", "canceled", …);
     # "none" when the user has never checked out.

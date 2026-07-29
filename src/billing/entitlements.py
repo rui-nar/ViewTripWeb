@@ -20,7 +20,17 @@ from sqlmodel import func, select
 
 from models.billing import Subscription, UserUsage
 from models.project_db import DBProject
-from src.billing.plans import CLOUD, FREE, Limits, UNLIMITED, limits_for, over_quota
+from src.billing.plans import (
+    FREE,
+    TOP_PLAN,
+    Limits,
+    UNLIMITED,
+    known_plan,
+    limits_for,
+    over_quota,
+    plan_name,
+)
+from src.billing.trip_days import bounds, project_day_bounds, span_days
 from src.exceptions.errors import QuotaExceeded
 
 #: Provider statuses that still grant the paid plan. ``past_due`` is included on
@@ -84,11 +94,11 @@ def plan_from_subscription(
 def plan_for(sess, user_info_id: int, now: float | None = None) -> str:
     """The plan in force for a user: override > subscription > free.
 
-    Returns ``cloud`` for everyone when billing is disabled — a self-hosted
+    Returns the top plan for everyone when billing is disabled — a self-hosted
     instance has no tiers, so nothing downstream needs a special case.
     """
     if not billing_enabled():
-        return CLOUD
+        return TOP_PLAN
     row = _subscription(sess, user_info_id)
     if row is None:
         return FREE
@@ -140,7 +150,8 @@ def ensure_project_quota(sess, user_info_id: int, now: float | None = None) -> N
         raise QuotaExceeded(
             f"Your plan includes {limit} trip{'s' if limit != 1 else ''}. "
             "Upgrade to create more.",
-            plan=plan, limit=limit, used=used, resource="projects",
+            plan=plan, limit=limit, used=used, needed=used + 1,
+            resource="projects",
         )
 
 
@@ -157,5 +168,56 @@ def ensure_storage_quota(
         raise QuotaExceeded(
             "This upload would exceed your plan's storage. "
             "Upgrade for more space, or delete some photos.",
-            plan=plan, limit=limit, used=used, resource="storage",
+            plan=plan, limit=limit, used=used, needed=used + incoming_bytes,
+            resource="storage",
         )
+
+
+def trip_days_used(sess, project_id: int, *extra_dates) -> int:
+    """How many days the trip would span once ``extra_dates`` are part of it."""
+    first, last = project_day_bounds(sess, project_id)
+    return span_days(*bounds([first, last, *extra_dates]))
+
+
+def ensure_trip_days_quota(
+    sess,
+    project_id: int,
+    owner_id: int,
+    *extra_dates,
+    now: float | None = None,
+) -> None:
+    """Raise :class:`QuotaExceeded` if dating something would stretch the trip
+    past the plan's limit.
+
+    ``extra_dates`` are the dates about to join the trip — a memory's date, an
+    imported activity's, a new ``trip_start``. A date that already falls inside
+    the trip's span changes nothing and is always allowed; only the ones that
+    push the first or last day outwards can fail.
+
+    The *owner's* plan applies, like storage: a companion editing a shared trip
+    spends the owner's allowance, not their own.
+    """
+    if not quotas_enforced():
+        return
+    plan = plan_for(sess, owner_id, now)
+    limit = limits_for(plan).max_trip_days
+    if limit is None:
+        return
+    used = trip_days_used(sess, project_id)
+    prospective = trip_days_used(sess, project_id, *extra_dates)
+    # Only a change that makes the trip *longer* can fail. An action that leaves
+    # the span alone — or shortens it — is always allowed, so a trip that was
+    # already too long when the limits arrived stays fully editable instead of
+    # freezing solid, and clearing a date is never refused.
+    if prospective > limit and prospective > used:
+        raise QuotaExceeded(
+            f"That would make this trip {prospective} days long, and your plan "
+            f"covers {limit}. Upgrade for longer trips.",
+            plan=plan, limit=limit, used=used, needed=prospective,
+            resource="trip_days",
+        )
+
+
+def plan_display_name(plan: str) -> str:
+    """Name to show for a plan id — falls back sanely for an unknown one."""
+    return plan_name(plan if known_plan(plan) else FREE)

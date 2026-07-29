@@ -12,9 +12,13 @@ event id and timestamp needed to reject a duplicate or an out-of-date event.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
-from src.billing.plans import CLOUD, FREE
+from src.billing.plans import FREE, PAID_PLANS, TIER_1
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
 
 #: Events we act on. Anything else is acknowledged and ignored — Stripe sends a
 #: lot of them, and a 2xx with no side effect is the correct response.
@@ -44,16 +48,32 @@ class SubscriptionUpdate:
     user_info_id: int | None = None
 
 
-def plan_for_price(price_id: str) -> str:
-    """Map a provider price id to a plan.
+def price_id_for_plan(plan: str) -> str:
+    """Configured provider price id for a paid plan ("" when unconfigured)."""
+    if plan not in PAID_PLANS:
+        return ""
+    return os.environ.get(f"STRIPE_PRICE_{plan.upper()}", "").strip()
 
-    Any priced line item maps to ``cloud``; only a subscription with no price at
-    all maps to ``free``. There is exactly one paid plan, so matching on the
-    configured price id would buy nothing and would break the day someone
-    rotates the price in the dashboard — leaving a paying customer on the free
-    tier, the worse of the two failure modes.
+
+def plan_for_price(price_id: str) -> str:
+    """Map a provider price id to the plan it grants.
+
+    A subscription with no priced line item at all is ``free``. A price we do
+    not recognise grants the entry paid tier and logs loudly: the customer is
+    paying for *something*, so they must not land on free, but silently handing
+    out the top tier would turn a config typo into an invisible revenue leak.
+    An operator can always lift them with the admin plan override.
     """
-    return CLOUD if price_id else FREE
+    if not price_id:
+        return FREE
+    for plan in PAID_PLANS:
+        if price_id and price_id == price_id_for_plan(plan):
+            return plan
+    _log.warning(
+        "Unrecognised price id %s — granting %s. Check STRIPE_PRICE_TIER_*.",
+        price_id, TIER_1,
+    )
+    return TIER_1
 
 
 def _as_float(value) -> float:
@@ -111,6 +131,12 @@ def _subscription_id(obj: dict) -> str:
     return str(sub or "")
 
 
+def _plan_from_metadata(obj: dict) -> str:
+    """Tier recorded on the checkout session, defaulting to the entry tier."""
+    plan = str(((obj.get("metadata") or {}).get("plan") or "")).strip()
+    return plan if plan in PAID_PLANS else TIER_1
+
+
 def _user_info_id(obj: dict) -> int | None:
     """Our own user id, as attached when the checkout session was created."""
     meta = obj.get("metadata") or {}
@@ -137,7 +163,10 @@ def subscription_update_from_event(event: dict) -> SubscriptionUpdate | None:
             event_at=event_at,
             customer_id=_customer_id(obj),
             subscription_id=_subscription_id(obj),
-            plan=CLOUD,
+            # Which tier was bought is in the metadata we attached when the
+            # session was created; the subscription event that follows carries
+            # the authoritative price and corrects this if it ever disagrees.
+            plan=_plan_from_metadata(obj),
             # The subscription object itself arrives in its own event moments
             # later with the authoritative status and period; "active" here just
             # unlocks the account immediately rather than making the user wait.

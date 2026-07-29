@@ -168,6 +168,7 @@ async def _quota_handler(_request, exc: QuotaExceeded):
             "plan": exc.plan,
             "limit": exc.limit,
             "used": exc.used,
+            "needed": exc.needed,
         },
     )
 

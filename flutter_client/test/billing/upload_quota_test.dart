@@ -11,6 +11,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:viewtrip_client/src/billing/billing_service.dart';
 import 'package:viewtrip_client/src/billing/upgrade_sheet.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -25,6 +26,28 @@ final _quotaBody = jsonEncode({
 });
 
 ProjectNotifier _notifier() => ProjectNotifier(ProjectService());
+
+/// The picker fetches the catalogue, so the prompt needs a service to talk to.
+class _FakeBilling implements BillingService {
+  @override
+  Future<List<PlanInfo>> plans() async => const [
+        PlanInfo(id: 'free', name: 'Free', priceLabel: 'Free', features: []),
+        PlanInfo(id: 'tier_1', name: 'Tier 1', priceLabel: '€1 / month',
+            features: [], limits: PlanLimits(maxStorageBytes: 5 * 1024 * 1024 * 1024)),
+      ];
+
+  @override
+  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async =>
+      'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = '/settings'}) async =>
+      'https://pay.test/portal';
+
+  @override
+  Future<BillingStatus> status() async =>
+      BillingStatus.fromJson({'billing_enabled': true});
+}
 
 void main() {
   group('recordQuotaRefusal', () {
@@ -79,13 +102,13 @@ void main() {
   });
 
   group('maybeShowUpgradeSheet', () {
-    testWidgets('opens the sheet for a refusal', (tester) async {
+    testWidgets('opens the upgrade prompt for a refusal', (tester) async {
       final notifier = _notifier()..recordQuotaRefusal(402, _quotaBody);
       await _pumpHost(tester, notifier);
       await tester.tap(find.text('save'));
       await tester.pumpAndSettle();
-      expect(find.text('Storage is full'), findsOneWidget);
-      expect(find.text('Upgrade'), findsOneWidget);
+      expect(find.text('Upgrade to keep going'), findsOneWidget);
+      expect(find.textContaining('exceed your'), findsOneWidget);
     });
 
     testWidgets('stays out of the way when the upload succeeded',
@@ -93,8 +116,7 @@ void main() {
       await _pumpHost(tester, _notifier());
       await tester.tap(find.text('save'));
       await tester.pumpAndSettle();
-      expect(find.text('Storage is full'), findsNothing);
-      expect(find.text('Upgrade'), findsNothing);
+      expect(find.text('Upgrade to keep going'), findsNothing);
     });
 
     testWidgets('the prompt does not reopen on the next save', (tester) async {
@@ -102,12 +124,12 @@ void main() {
       await _pumpHost(tester, notifier);
       await tester.tap(find.text('save'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Not now'));
+      Navigator.of(tester.element(find.text('save'))).pop();
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('save'));
       await tester.pumpAndSettle();
-      expect(find.text('Storage is full'), findsNothing);
+      expect(find.text('Upgrade to keep going'), findsNothing);
     });
   });
 }
@@ -120,7 +142,7 @@ Future<void> _pumpHost(WidgetTester tester, ProjectNotifier notifier) async {
         builder: (context) => ElevatedButton(
           onPressed: () => maybeShowUpgradeSheet(
               context, notifier.takeQuotaError(),
-              launcher: (_) async {}),
+              service: _FakeBilling(), launcher: (_) async {}),
           child: const Text('save'),
         ),
       ),

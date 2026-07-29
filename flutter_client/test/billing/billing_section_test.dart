@@ -11,19 +11,17 @@ import 'package:viewtrip_client/src/billing/billing_service.dart';
 
 class _FakeBilling implements BillingService {
   final Map<String, dynamic> payload;
-  final bool failCheckout;
   int checkoutCalls = 0;
   int portalCalls = 0;
 
-  _FakeBilling(this.payload, {this.failCheckout = false});
+  _FakeBilling(this.payload);
 
   @override
   Future<BillingStatus> status() async => BillingStatus.fromJson(payload);
 
   @override
-  Future<String> checkoutUrl({String returnPath = '/settings'}) async {
+  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async {
     checkoutCalls++;
-    if (failCheckout) throw Exception('nope');
     return 'https://pay.test/checkout';
   }
 
@@ -34,7 +32,11 @@ class _FakeBilling implements BillingService {
   }
 
   @override
-  Future<List<PlanInfo>> plans() async => const [];
+  Future<List<PlanInfo>> plans() async => const [
+        PlanInfo(id: 'free', name: 'Free', priceLabel: 'Free', features: []),
+        PlanInfo(id: 'tier_1', name: 'Tier 1', priceLabel: '€1 / month',
+            features: []),
+      ];
 }
 
 Future<void> _pump(
@@ -66,8 +68,13 @@ void main() {
     final free = {
       'billing_enabled': true,
       'plan': 'free',
+      'plan_name': 'Free',
       'status': 'none',
-      'limits': {'max_projects': 1, 'max_storage_bytes': 500 * 1024 * 1024},
+      'limits': {
+        'max_projects': 1,
+        'max_storage_bytes': 500 * 1024 * 1024,
+        'max_trip_days': 10,
+      },
       'usage': {'projects': 1, 'storage_bytes': 250 * 1024 * 1024},
     };
 
@@ -79,14 +86,18 @@ void main() {
       expect(find.text('250 MB / 500 MB'), findsOneWidget);
     });
 
-    testWidgets('offers an upgrade', (tester) async {
-      final billing = _FakeBilling(free);
-      final opened = <String>[];
-      await _pump(tester, billing, opened: opened);
-      await tester.tap(find.text('Upgrade to Cloud'));
+    testWidgets('states the trip-length limit', (tester) async {
+      await _pump(tester, _FakeBilling(free));
+      expect(find.text('Trip length'), findsOneWidget);
+      expect(find.text('up to 10 days'), findsOneWidget);
+    });
+
+    testWidgets('opens the plan picker to upgrade', (tester) async {
+      await _pump(tester, _FakeBilling(free));
+      await tester.tap(find.text('Upgrade'));
       await tester.pumpAndSettle();
-      expect(billing.checkoutCalls, 1);
-      expect(opened, ['https://pay.test/checkout']);
+      expect(find.text('Choose a plan'), findsOneWidget);
+      expect(find.text('Choose Tier 1'), findsOneWidget);
     });
 
     testWidgets('hides "Manage billing" before the first purchase',
@@ -94,30 +105,33 @@ void main() {
       await _pump(tester, _FakeBilling(free));
       expect(find.text('Manage billing'), findsNothing);
     });
-
-    testWidgets('a failed checkout says so instead of doing nothing',
-        (tester) async {
-      await _pump(tester, _FakeBilling(free, failCheckout: true));
-      await tester.tap(find.text('Upgrade to Cloud'));
-      await tester.pumpAndSettle();
-      expect(find.textContaining('Could not reach'), findsOneWidget);
-    });
   });
 
   group('paid plan', () {
     final cloud = {
       'billing_enabled': true,
-      'plan': 'cloud',
+      'plan': 'tier_3',
+      'plan_name': 'Tier 3',
       'status': 'active',
-      'limits': {'max_projects': null, 'max_storage_bytes': 1024 * 1024 * 1024},
+      'limits': {
+        'max_projects': null,
+        'max_storage_bytes': 1024 * 1024 * 1024,
+        'max_trip_days': null,
+      },
       'usage': {'projects': 7, 'storage_bytes': 1024 * 1024},
     };
 
-    testWidgets('shows unlimited trips and no upgrade button', (tester) async {
+    testWidgets('names the tier and shows what is unlimited', (tester) async {
       await _pump(tester, _FakeBilling(cloud));
-      expect(find.text('Cloud'), findsOneWidget);
+      expect(find.text('Tier 3'), findsOneWidget);
       expect(find.text('7 / unlimited'), findsOneWidget);
-      expect(find.text('Upgrade to Cloud'), findsNothing);
+      expect(find.text('any length'), findsOneWidget);
+    });
+
+    testWidgets('offers a plan change rather than an upgrade', (tester) async {
+      await _pump(tester, _FakeBilling(cloud));
+      expect(find.text('Change plan'), findsOneWidget);
+      expect(find.text('Upgrade'), findsNothing);
     });
 
     testWidgets('opens the billing portal', (tester) async {

@@ -44,12 +44,15 @@ class QuotaExceeded(ViewTripException):
     """
 
     def __init__(self, message: str, *, plan: str, limit: int | None,
-                 used: int, resource: str):
+                 used: int, resource: str, needed: int | None = None):
         super().__init__(message)
         self.plan = plan
         self.limit = limit
         self.used = used
-        self.resource = resource  # "projects" | "storage"
+        self.resource = resource  # "projects" | "storage" | "trip_days"
+        # What the refused action would have needed. Lets the client recommend
+        # the cheapest plan that actually covers it, rather than the priciest.
+        self.needed = needed if needed is not None else used
 
 
 class TokenError(ViewTripException):

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 
 from src.billing.gateway import GatewayError
+from src.billing.webhook_events import price_id_for_plan
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -29,9 +30,9 @@ def _stripe():
     return stripe
 
 
-def cloud_price_id() -> str:
-    """Price id for the Cloud plan, from the environment."""
-    return os.environ.get("STRIPE_PRICE_CLOUD_MONTHLY", "").strip()
+def cloud_price_id(plan: str) -> str:
+    """Price id for a paid plan, from the environment (``STRIPE_PRICE_TIER_1``…)."""
+    return price_id_for_plan(plan)
 
 
 def webhook_secret() -> str:
@@ -43,13 +44,14 @@ class StripeGateway:
     """Checkout, Customer Portal and webhook verification via Stripe."""
 
     def create_checkout_session(
-        self, *, user_info_id: int, email: str, customer_id: str,
+        self, *, user_info_id: int, plan: str, email: str, customer_id: str,
         success_url: str, cancel_url: str,
     ) -> dict:
         stripe = _stripe()
-        price = cloud_price_id()
+        price = cloud_price_id(plan)
         if not price:
-            raise GatewayError("STRIPE_PRICE_CLOUD_MONTHLY is not configured")
+            raise GatewayError(f"STRIPE_PRICE_{plan.upper()} is not configured")
+        metadata = {"user_info_id": str(user_info_id), "plan": plan}
         params: dict = {
             "mode": "subscription",
             "line_items": [{"price": price, "quantity": 1}],
@@ -58,8 +60,8 @@ class StripeGateway:
             # Both, on purpose: metadata rides along to the subscription object,
             # client_reference_id shows up in the dashboard for support.
             "client_reference_id": str(user_info_id),
-            "metadata": {"user_info_id": str(user_info_id)},
-            "subscription_data": {"metadata": {"user_info_id": str(user_info_id)}},
+            "metadata": metadata,
+            "subscription_data": {"metadata": metadata},
             "allow_promotion_codes": True,
         }
         # Reuse the customer across purchases so one person is one customer in
