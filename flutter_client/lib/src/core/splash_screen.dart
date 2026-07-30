@@ -147,12 +147,20 @@ class SplashScreen extends StatelessWidget {
           decoration: BoxDecoration(
             gradient: wide ? _wideField : _stackedField,
           ),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              const CustomPaint(painter: _GridPainter()),
-              wide ? const _WideLayout() : const _StackedLayout(),
-            ],
+          // The splash is mounted from MaterialApp.builder, above the Navigator
+          // and outside any Material — so the DefaultTextStyle in scope is
+          // MaterialApp's deliberate eyesore fallback, which carries a yellow
+          // double underline. The type styles below set colour and metrics but
+          // not decoration, so without this every label inherits it (#177).
+          child: DefaultTextStyle.merge(
+            style: const TextStyle(decoration: TextDecoration.none),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                const CustomPaint(painter: _GridPainter()),
+                wide ? const _WideLayout() : const _StackedLayout(),
+              ],
+            ),
           ),
         );
       },

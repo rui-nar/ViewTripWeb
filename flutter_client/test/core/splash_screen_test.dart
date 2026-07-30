@@ -10,7 +10,10 @@
 // come back over the login form during an interactive sign-in. Both states used
 // to be the single isLoading flag.
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:viewtrip_client/src/auth/auth_notifier.dart';
@@ -44,6 +47,29 @@ Future<void> _pumpSplash(WidgetTester tester, Size size) async {
   await tester.pumpWidget(const MaterialApp(home: SplashScreen()));
   await tester.pump();
 }
+
+/// Mounts the splash the way main.dart does — from `MaterialApp.builder`, above
+/// the Navigator and outside any Material. That placement is what puts the
+/// error DefaultTextStyle in scope, so the decoration test must reproduce it.
+Future<void> _pumpSplashFromAppBuilder(WidgetTester tester, Size size) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+
+  await tester.pumpWidget(
+    MaterialApp(
+      builder: (context, child) => const SplashScreen(),
+      home: const SizedBox.shrink(),
+    ),
+  );
+  await tester.pump();
+}
+
+/// The style a [Text] actually paints with, after merging in the inherited
+/// DefaultTextStyle — which is where the stray decoration came from.
+TextStyle _paintedStyle(WidgetTester tester, Finder text) =>
+    (tester.renderObject(text) as RenderParagraph).text.style!;
 
 Future<void> _pumpGate(WidgetTester tester, _FakeAuth auth) async {
   tester.view.physicalSize = const Size(400, 800);
@@ -115,6 +141,58 @@ void main() {
       await _pumpSplash(tester, const Size(1000, 420));
 
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  // #177: the splash is the one screen with no Material above it, so it
+  // inherited MaterialApp's fallback DefaultTextStyle — red monospace with a
+  // yellow double underline, meant to nag you into adding a Material. The type
+  // styles override colour and metrics but not decoration, so the underline
+  // came through on every label.
+  group('SplashScreen type', () {
+    testWidgets('the stacked board carries no inherited text decoration',
+        (tester) async {
+      await _pumpSplashFromAppBuilder(tester, const Size(390, 844));
+
+      for (final label in [
+        find.text('TraxJourney'),
+        find.text('MERGE · VISUALISE · EXPORT'),
+        find.text('dev'),
+      ]) {
+        expect(_paintedStyle(tester, label).decoration, TextDecoration.none,
+            reason: '${(label.evaluate().single.widget as Text).data} '
+                'inherited a decoration');
+      }
+    });
+
+    testWidgets('the wide board carries no inherited text decoration',
+        (tester) async {
+      await _pumpSplashFromAppBuilder(tester, const Size(1200, 900));
+
+      for (final label in [
+        find.text('TraxJourney'),
+        find.textContaining('one continuous journey'),
+        find.text('Loading'),
+      ]) {
+        expect(_paintedStyle(tester, label).decoration, TextDecoration.none);
+      }
+    });
+  });
+
+  // The pre-Flutter boot chrome and the Dart splash both pick their board off a
+  // 760px breakpoint, so both need the page to report the real device width.
+  // Without the viewport meta a phone lays out at 980px and gets the wide board
+  // painted at twice the screen width before the shrink-to-fit lands (#177).
+  group('web boot chrome', () {
+    test('index.html pins the viewport to the device width', () {
+      // `flutter test` runs from the package root.
+      final html = File('web/index.html').readAsStringSync();
+
+      expect(
+        html,
+        contains('<meta name="viewport" content="width=device-width'),
+        reason: 'web/index.html must declare a device-width viewport',
+      );
     });
   });
 
