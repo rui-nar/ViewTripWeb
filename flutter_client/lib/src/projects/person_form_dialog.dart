@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../core/design_tokens.dart';
 import 'nationality_field.dart';
+import 'note_field_actions.dart';
 import 'project_notifier.dart';
 import 'social_links_field.dart';
 
@@ -161,7 +162,9 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
                 _residenceField(),
                 const SizedBox(height: 12),
                 _text(_notes, 'Notes',
-                    maxLines: 3, capitalization: TextCapitalization.sentences),
+                    maxLines: 3,
+                    capitalization: TextCapitalization.sentences,
+                    clipboardActions: true),
               ],
             ),
           ),
@@ -217,6 +220,7 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
     TextCapitalization capitalization = TextCapitalization.none,
     String? Function(String?)? validator,
     Key? key,
+    bool clipboardActions = false,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
@@ -232,6 +236,7 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
           hintText: hint,
           border: const OutlineInputBorder(),
           isDense: true,
+          suffixIcon: clipboardActions ? NoteFieldActions(controller: c) : null,
         ),
       ),
     );
