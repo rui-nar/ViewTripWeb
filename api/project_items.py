@@ -38,35 +38,43 @@ def delete_item(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_row_id = row.id
+
+    removed: Dict[str, object] = {}
+
+    def _remove(project):
         # The client's index points into its *visible* item list — other users'
-        # journal items are hidden from it (issue #106). Translate to the full list.
+        # journal items are hidden from it (issue #106). Translate to the full
+        # list. Recomputed per attempt: a retry runs against a reloaded project
+        # whose item list may have shifted under us.
         visible = journal_visible_positions(project.items, user_info_id, owner_id)
         if index < 0 or index >= len(visible):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Index out of range")
-        index = visible[index]
-        removed = project.items[index]
-        project.remove_item(index)
-        _repo.save_project(sess, owner_id, project)
-        # A split tail is a LOCAL (negative-id) activity owned solely by its
-        # timeline item. remove_item only unlinks the item, so without this the
-        # row is orphaned in the activity table and its negative id gets reused
-        # by the next split → UNIQUE constraint failure. Delete the row once no
-        # remaining item references it.
-        if (
-            removed.item_type == "activity"
-            and (removed.activity_id or 0) < 0
-            and not any(
-                it.item_type == "activity" and it.activity_id == removed.activity_id
-                for it in project.items
-            )
-        ):
-            _repo.delete_local_activity(sess, row.id, removed.activity_id)
+        real_index = visible[index]
+        removed["item"] = project.items[real_index]
+        project.remove_item(real_index)
+
+    project = _repo.save_project_with_retry(
+        owner_id, name, _remove, legacy_path=_legacy_path(str(owner_id), name))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # A split tail is a LOCAL (negative-id) activity owned solely by its
+    # timeline item. remove_item only unlinks the item, so without this the
+    # row is orphaned in the activity table and its negative id gets reused
+    # by the next split → UNIQUE constraint failure. Delete the row once no
+    # remaining item references it.
+    gone = removed["item"]
+    if (
+        gone.item_type == "activity"
+        and (gone.activity_id or 0) < 0
+        and not any(
+            it.item_type == "activity" and it.activity_id == gone.activity_id
+            for it in project.items
+        )
+    ):
+        with get_session() as sess:
+            _repo.delete_local_activity(sess, project_row_id, gone.activity_id)
     bust_geo_cache(owner_id, name)
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
     background_tasks.add_task(_refresh_share_tiles, owner_id, name)
@@ -89,19 +97,19 @@ def reorder_items(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    def _move(project):
         # from/to are indices into the caller's *visible* item list (issue #106):
         # translate before moving, and answer with the visible list only.
         visible = journal_visible_positions(project.items, user_info_id, owner_id)
         if 0 <= body.from_index < len(visible):
             to_index = max(0, min(len(visible) - 1, body.to_index))
             project.move_item(visible[body.from_index], visible[to_index])
-        _repo.save_project(sess, owner_id, project)
+
+    project = _repo.save_project_with_retry(
+        owner_id, name, _move, legacy_path=_legacy_path(str(owner_id), name))
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
     background_tasks.add_task(_refresh_share_tiles, owner_id, name)
     visible = journal_visible_positions(project.items, user_info_id, owner_id)
@@ -134,13 +142,8 @@ def sort_items(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    def _sort(project):
         # Build a lookup: (lat_4dp, lon_4dp) → activity start_date isoformat
         # for every activity end-point. Segments whose start coordinates match
         # an activity's end coordinates are sorted immediately after that activity,
@@ -203,7 +206,10 @@ def sort_items(
                 zip(keys, project.items), key=lambda t: t[0]
             )
         ]
-        _repo.save_project(sess, owner_id, project)
+
+    if _repo.save_project_with_retry(
+            owner_id, name, _sort, legacy_path=_legacy_path(str(owner_id), name)) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     bust_geo_cache(owner_id, name)
     background_tasks.add_task(_refresh_stats_background, owner_id, name)
     background_tasks.add_task(_refresh_share_tiles, owner_id, name)

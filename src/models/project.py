@@ -176,6 +176,11 @@ class ProjectItem:
     memory: Optional[Memory] = None
     journal: Optional[JournalEntry] = None
     encounter: Optional[Encounter] = None
+    # Durable row identity carried across a load → mutate → save cycle so the
+    # item persistence can diff rather than rebuild (issue #173). Not part of
+    # the .viewtrip file format or the API shape — mirrors Project.lock_version.
+    # None on a freshly constructed item; assigned on first persist.
+    uid: Optional[str] = None
 
 
 @dataclass

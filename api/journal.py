@@ -40,6 +40,7 @@ from api.project_access import (
     translate_insert_after,
 )
 from models.project_db import DBJournalEntry, DBProject, DBProjectItem
+from src.project.project_repo import bump_lock_version
 from src.billing.entitlements import ensure_storage_quota, ensure_trip_days_quota
 from src.billing.usage import record_written, unlink_and_record
 from src.exceptions.errors import QuotaExceeded
@@ -257,10 +258,14 @@ def create_journal(
         db_item = DBProjectItem(
             project_id=project_id,
             position=insert_at,
+            uid=uuid_lib.uuid4().hex,
             item_type="journal",
             journal_id=row.id,
         )
         sess.add(db_item)
+        # Make this insert visible to the optimistic lock, so a structural
+        # rewrite loaded before it cannot erase the row (issue #173).
+        bump_lock_version(sess, project_id)
         sess.commit()
         journal_id = row.id
 

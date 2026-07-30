@@ -471,10 +471,26 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     """One ordered entry in a project — an activity ref, segment, memory, journal, or encounter."""
 
     __tablename__ = "projectitem"
+    __table_args__ = (
+        # Both lookups are always scoped to a project, so the composite is what
+        # gets used — a bare index on uid/segment_id would never be chosen.
+        # The uid index is partial: rows predating the column (issue #173) may
+        # still carry NULL, and several NULLs must not collide under UNIQUE.
+        Index("ix_projectitem_project_uid", "project_id", "uid",
+              unique=True, sqlite_where=text("uid IS NOT NULL")),
+        Index("ix_projectitem_project_segment", "project_id", "segment_id"),
+    )
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     position: int   # 0-based display order; renumbered on every reorder
+
+    # Durable per-item identity, unique within a project (issue #173). The
+    # primary key is not usable for this: item rows used to be deleted and
+    # bulk-reinserted on every save, so `id` churned. Persistence diffs on uid.
+    # Indexed with project_id — see __table_args__; never on its own, since
+    # every lookup is scoped to a project.
+    uid: Optional[str] = sqlmodel.Field(default=None)
 
     item_type: str  # "activity" | "segment" | "memory" | "journal" | "encounter"
 
@@ -486,6 +502,10 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     # Populated when item_type == "segment"; stores the full ConnectingSegment as JSON
     # (avoids a separate table for a simple object with no independent FK needs)
     segment_json: Optional[str] = sqlmodel.Field(default=None)
+    # The segment's logical id, mirrored out of segment_json so it can be
+    # indexed — lets the route resolver update one segment's geometry with a
+    # targeted UPDATE instead of a whole-project save (issue #173).
+    segment_id: Optional[str] = sqlmodel.Field(default=None)
 
     # Populated when item_type == "memory"
     memory_id: Optional[int] = sqlmodel.Field(

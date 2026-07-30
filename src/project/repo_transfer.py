@@ -160,11 +160,16 @@ class ImportExportMixin:
             db_item = DBProjectItem(
                 project_id=row.id,
                 position=pos,
+                uid=uuid.uuid4().hex,
                 item_type=item.item_type,
                 activity_id=item.activity_id if item.item_type == "activity" else None,
                 segment_json=(
                     json.dumps(ProjectIO._serialise_item(item)["segment"])
                     if item.item_type == "segment" else None
+                ),
+                segment_id=(
+                    item.segment.id or None
+                    if item.item_type == "segment" and item.segment is not None else None
                 ),
                 memory_id=memory_id,
                 encounter_id=encounter_id,

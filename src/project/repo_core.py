@@ -39,6 +39,34 @@ class StaleWriteError(Exception):
     surface a 409 to the client."""
 
 
+def bump_lock_version(sess: Session, project_id: int) -> None:
+    """Advance a project's optimistic-lock counter without a full save.
+
+    Every write that touches item rows *without* going through ``save_project``
+    must call this, in the same transaction, before committing (issue #173):
+
+    * the direct item inserts in ``api/memories.py``, ``api/journal.py`` and
+      ``api/encounters.py``;
+    * the segment payload write, ``ItemOrderingMixin.update_segment_fields``.
+
+    ``save_project`` rewrites every item row from the caller's in-memory
+    snapshot. A write invisible to the CAS is therefore not merely missed — it
+    is actively undone by the next structural mutation that loaded before it. A
+    new memory vanishes from the timeline; a resolved route reverts to
+    "pending". Advancing the counter turns that silent loss into a
+    ``StaleWriteError`` the caller retries against reloaded state.
+
+    Note this *advances* the lock without *taking* it, which is what lets two
+    payload writes proceed concurrently while still being seen by structural
+    ones.
+    """
+    sess.execute(
+        update(DBProject)
+        .where(DBProject.id == project_id)
+        .values(lock_version=DBProject.lock_version + 1)
+    )
+
+
 class ProjectCoreMixin:
     """Project CRUD, stats caching, and row-to-domain reconstruction."""
 
@@ -72,6 +100,15 @@ class ProjectCoreMixin:
                 DBProject.name == name,
             )
         ).first()
+
+    def project_id_for(self, sess: Session, user_info_id: int, name: str) -> Optional[int]:
+        """The project's primary key, for callers that address rows directly.
+
+        Used by the payload-write path (issue #173), which updates one item row
+        by ``project_id`` rather than loading and re-saving the whole project.
+        """
+        row = self._get_project_row(sess, user_info_id, name)
+        return row.id if row is not None else None
 
     def get_project(
         self,
@@ -464,7 +501,8 @@ class ProjectCoreMixin:
 
         for ir in item_rows:
             if ir.item_type == "activity" and ir.activity_id is not None:
-                items.append(ProjectItem(item_type="activity", activity_id=ir.activity_id))
+                items.append(ProjectItem(item_type="activity", activity_id=ir.activity_id,
+                                         uid=ir.uid))
                 if ir.activity_id not in seen_ids:
                     act = act_by_id.get(ir.activity_id)
                     if act:
@@ -475,7 +513,7 @@ class ProjectCoreMixin:
                     continue  # deduplicate stale duplicate rows
                 mem = memory_by_id.get(ir.memory_id)
                 if mem:
-                    items.append(ProjectItem(item_type="memory", memory=mem))
+                    items.append(ProjectItem(item_type="memory", memory=mem, uid=ir.uid))
                     memories.append(mem)
                     seen_memory_ids.add(ir.memory_id)
             elif ir.item_type == "journal" and ir.journal_id is not None:
@@ -483,7 +521,7 @@ class ProjectCoreMixin:
                     continue  # deduplicate stale duplicate rows
                 jentry = journal_by_id.get(ir.journal_id)
                 if jentry:
-                    items.append(ProjectItem(item_type="journal", journal=jentry))
+                    items.append(ProjectItem(item_type="journal", journal=jentry, uid=ir.uid))
                     journal_entries.append(jentry)
                     seen_journal_ids.add(ir.journal_id)
             elif ir.item_type == "encounter" and ir.encounter_id is not None:
@@ -491,11 +529,11 @@ class ProjectCoreMixin:
                     continue  # deduplicate stale duplicate rows
                 enc = encounter_by_id.get(ir.encounter_id)
                 if enc:
-                    items.append(ProjectItem(item_type="encounter", encounter=enc))
+                    items.append(ProjectItem(item_type="encounter", encounter=enc, uid=ir.uid))
                     seen_encounter_ids.add(ir.encounter_id)
             else:
                 seg = self._json_to_segment(ir.segment_json or "{}")
-                items.append(ProjectItem(item_type="segment", segment=seg))
+                items.append(ProjectItem(item_type="segment", segment=seg, uid=ir.uid))
 
         raw_dm = json.loads(getattr(row, 'day_meta_json', None) or "{}")
         day_meta = {
