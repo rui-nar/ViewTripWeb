@@ -28,6 +28,7 @@ from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from models.project_db import DBPosterJob
 from src.poster.poster_job_runner import run_poster_job
+from src.jobs.queue import QUEUE_POSTER, enqueue
 from src.poster.poster_renderer import render_poster_preview
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
@@ -125,7 +126,8 @@ def create_poster_job(
         sess.commit()
         job_id = job.id
 
-    background_tasks.add_task(run_poster_job, job_id)
+    enqueue(QUEUE_POSTER, run_poster_job, job_id,
+            background_tasks=background_tasks)
     return {"job_id": job_id}
 
 

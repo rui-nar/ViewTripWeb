@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
 from api.project_access import OwnerParam, resolve_project
-from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
@@ -255,8 +255,8 @@ def add_activities(
             _enrich_activities_background, activity_ids, user_info_id, owner_id, name
         )
 
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
 
     return {
         "added": added,
@@ -559,8 +559,8 @@ def edit_activity_track(
     t1 = time.time()
 
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
     result = _repo.to_dict(project)
     t2 = time.time()
     _log.info(
@@ -615,8 +615,8 @@ def reset_activity_track(
         )
 
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
     return _repo.to_dict(project)
 
 
@@ -707,8 +707,8 @@ def split_activity(
     t3 = time.time()
 
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
     result = _repo.to_dict(project)
     t4 = time.time()
     _log.info(
@@ -744,8 +744,8 @@ def delete_local_activity(
                 detail="Local activity not found",
             )
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
 
 
 # ── Activity field update (issue #29 — client-side E2EE migration) ────────────
@@ -817,6 +817,6 @@ def update_activity_fields(
 
     for pname in project_names:
         bust_geo_cache(user_info_id, pname)
-        background_tasks.add_task(_refresh_stats_background, user_info_id, pname)
+        queue_stats_refresh(background_tasks, user_info_id, pname)
 
     return {"id": activity_id}

@@ -20,9 +20,10 @@ from __future__ import annotations
 # before any FK resolution happens at query time.
 from models.user import UserInfo, StravaToken  # noqa: F401
 
-from src.project.repo_core import ProjectCoreMixin, StaleWriteError, _compute_stats, _compute_counter_stats, _compute_low_res_geo
+from src.project.repo_core import ProjectCoreMixin, StaleWriteError, bump_lock_version, _compute_stats, _compute_counter_stats, _compute_low_res_geo
 from src.project.repo_activities import ActivityMixin, _low_res_ep_json
 from src.project.repo_items import ItemOrderingMixin
+from src.project.repo_retry import SaveRetryMixin
 from src.project.repo_transfer import ImportExportMixin
 from src.project.repo_row_mappers import RowMappersMixin
 
@@ -36,5 +37,5 @@ __all__ = [
 ]
 
 
-class ProjectRepo(ProjectCoreMixin, ActivityMixin, ItemOrderingMixin, ImportExportMixin, RowMappersMixin):
+class ProjectRepo(ProjectCoreMixin, ActivityMixin, ItemOrderingMixin, SaveRetryMixin, ImportExportMixin, RowMappersMixin):
     """All DB operations for projects and activities."""

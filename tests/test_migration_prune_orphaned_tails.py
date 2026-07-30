@@ -11,7 +11,6 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, insert, MetaData, Table, text
-from sqlmodel import Session
 
 from models.project_db import DBActivity, DBProjectItem
 
@@ -38,25 +37,27 @@ def _activity_ids(engine) -> set[int]:
         return {r[0] for r in conn.execute(text("SELECT id FROM activity"))}
 
 
-def _seed_activity_row(engine, **kwargs) -> None:
-    """Insert an activity row using only the columns that actually exist in the
-    table AT _PREV_REV, filtered from the ORM class's defaults.
+def _seed_row(engine, table_name: str, obj) -> None:
+    """Insert *obj* using only the columns that exist in the table AT _PREV_REV.
 
-    Building the values via DBActivity(**kwargs) is what gets every NOT NULL
-    column (there are ~20, e.g. distance/moving_time/trainer/...) its correct
-    model default for free. But DBActivity always reflects the CURRENT model —
-    inserting all of its columns directly would include any added since
-    _PREV_REV (e.g. #45's split_root_id/split_base_name) that don't exist yet
-    in this deliberately-frozen historical schema. Reflecting the real table
-    and filtering to its actual columns keeps this test immune to that drift.
+    Building the values from the ORM instance is what gets every NOT NULL
+    column (activity has ~20: distance/moving_time/trainer/...) its correct
+    model default for free. But the ORM classes always reflect the CURRENT
+    model — inserting all of their columns directly would include any added
+    since _PREV_REV (#45's split_root_id/split_base_name, #173's
+    projectitem.uid/segment_id) that don't exist yet in this deliberately
+    frozen historical schema. Reflecting the real table and filtering to its
+    actual columns keeps this test immune to that drift.
     """
-    obj = DBActivity(**kwargs)
     data = {k: v for k, v in obj.__dict__.items() if not k.startswith("_sa_")}
-    md = MetaData()
-    tbl = Table("activity", md, autoload_with=engine)
+    tbl = Table(table_name, MetaData(), autoload_with=engine)
     data = {k: v for k, v in data.items() if k in tbl.columns}
     with engine.begin() as conn:
         conn.execute(insert(tbl), data)
+
+
+def _seed_activity_row(engine, **kwargs) -> None:
+    _seed_row(engine, "activity", DBActivity(**kwargs))
 
 
 def test_prune_removes_only_orphaned_local_rows(db):
@@ -70,12 +71,11 @@ def test_prune_removes_only_orphaned_local_rows(db):
     # Four activities: only the orphaned LOCAL one (-1) must be pruned.
     for aid in (-1, -2, 100, 200):
         _seed_activity_row(engine, id=aid, user_info_id=1, name="x", type="Ride")
-    with Session(engine) as s:
-        # -2 (local) and 100 (Strava) are referenced by a timeline item; -1 and
-        # 200 are orphaned. The prune is scoped to id < 0, so 200 survives too.
-        s.add(DBProjectItem(project_id=1, position=0, item_type="activity", activity_id=-2))
-        s.add(DBProjectItem(project_id=1, position=1, item_type="activity", activity_id=100))
-        s.commit()
+    # -2 (local) and 100 (Strava) are referenced by a timeline item; -1 and
+    # 200 are orphaned. The prune is scoped to id < 0, so 200 survives too.
+    for pos, aid in enumerate((-2, 100)):
+        _seed_row(engine, "projectitem", DBProjectItem(
+            project_id=1, position=pos, item_type="activity", activity_id=aid))
 
     command.upgrade(cfg, _PRUNE_REV)
 

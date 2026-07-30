@@ -16,5 +16,8 @@ EXPOSE 8000
 
 # Run migrations then start the server
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# One image, two roles (issue #173): the default CMD serves the API; the worker
+# service overrides it with /worker-entrypoint.sh. Same code, same deploy.
+COPY worker-entrypoint.sh /worker-entrypoint.sh
+RUN chmod +x /entrypoint.sh /worker-entrypoint.sh
 CMD ["/entrypoint.sh"]

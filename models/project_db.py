@@ -471,10 +471,26 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     """One ordered entry in a project — an activity ref, segment, memory, journal, or encounter."""
 
     __tablename__ = "projectitem"
+    __table_args__ = (
+        # Both lookups are always scoped to a project, so the composite is what
+        # gets used — a bare index on uid/segment_id would never be chosen.
+        # The uid index is partial: rows predating the column (issue #173) may
+        # still carry NULL, and several NULLs must not collide under UNIQUE.
+        Index("ix_projectitem_project_uid", "project_id", "uid",
+              unique=True, sqlite_where=text("uid IS NOT NULL")),
+        Index("ix_projectitem_project_segment", "project_id", "segment_id"),
+    )
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
     position: int   # 0-based display order; renumbered on every reorder
+
+    # Durable per-item identity, unique within a project (issue #173). The
+    # primary key is not usable for this: item rows used to be deleted and
+    # bulk-reinserted on every save, so `id` churned. Persistence diffs on uid.
+    # Indexed with project_id — see __table_args__; never on its own, since
+    # every lookup is scoped to a project.
+    uid: Optional[str] = sqlmodel.Field(default=None)
 
     item_type: str  # "activity" | "segment" | "memory" | "journal" | "encounter"
 
@@ -486,6 +502,10 @@ class DBProjectItem(sqlmodel.SQLModel, table=True):
     # Populated when item_type == "segment"; stores the full ConnectingSegment as JSON
     # (avoids a separate table for a simple object with no independent FK needs)
     segment_json: Optional[str] = sqlmodel.Field(default=None)
+    # The segment's logical id, mirrored out of segment_json so it can be
+    # indexed — lets the route resolver update one segment's geometry with a
+    # targeted UPDATE instead of a whole-project save (issue #173).
+    segment_id: Optional[str] = sqlmodel.Field(default=None)
 
     # Populated when item_type == "memory"
     memory_id: Optional[int] = sqlmodel.Field(
@@ -527,6 +547,45 @@ class DBPosterJob(sqlmodel.SQLModel, table=True):
     completed_at: Optional[float] = sqlmodel.Field(default=None)
     result_png_path: Optional[str] = sqlmodel.Field(default=None)
     result_pdf_path: Optional[str] = sqlmodel.Field(default=None)
+
+
+class DBRouteJob(sqlmodel.SQLModel, table=True):
+    """A queued segment route-resolution job (issue #173, phase D).
+
+    Mirrors :class:`DBPosterJob`. The row is the durable record of intent: the
+    queue can lose a job (broker restart, worker killed mid-run, an enqueue that
+    fell back in-process and then died with the API) but the row survives, so a
+    startup sweep can re-queue anything left non-terminal.
+
+    Before this, the only record that a resolve was owed was
+    ``route_status="pending"`` on the segment itself, and the only thing that
+    ever noticed a job had been lost was the *Flutter client* — five minutes
+    after the fact, and only if someone happened to reopen the project. Recovery
+    from a server-side crash now belongs to the server.
+
+    ``started_at`` is the same token written to the segment's
+    ``route_started_at``: it is what lets a superseded job's verdict be
+    discarded rather than overwriting a newer attempt.
+    """
+
+    __tablename__ = "routejob"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    project_name: str                        # the job runs by (owner, name)
+    segment_id: str = sqlmodel.Field(index=True)
+    status: str = sqlmodel.Field(default="pending", index=True)  # pending|running|done|failed
+    # ISO-8601 UTC; matches the segment's route_started_at for this attempt.
+    started_at: Optional[str] = sqlmodel.Field(default=None)
+    params_json: str = sqlmodel.Field(default="{}")   # hafas_provider/train_number/date
+    error_message: Optional[str] = sqlmodel.Field(default=None)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+    completed_at: Optional[float] = sqlmodel.Field(default=None)
+    # Bumped each time the startup sweep re-queues this job. A job that keeps
+    # dying takes the whole worker with it on every boot, so the sweep gives up
+    # after a few attempts and fails it loudly instead of looping forever.
+    attempts: int = sqlmodel.Field(default=0)
 
 
 class DBShareVisit(sqlmodel.SQLModel, table=True):

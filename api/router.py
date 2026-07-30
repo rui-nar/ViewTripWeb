@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
+from src.jobs.route_jobs import sweep_orphaned_jobs
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
@@ -60,6 +61,17 @@ configure_logging()
 _log = get_logger(__name__)
 _scheduler = AsyncIOScheduler()
 
+# Which role this process plays (issue #173). Only the API process may run
+# migrations and the scheduler: a worker container that also ran them would
+# checkpoint the WAL twice a minute, take two daily backups, and race
+# `alembic upgrade head` against the API container at boot.
+#
+# Today a worker never imports this module, so the guard is belt-and-braces —
+# but the failure it prevents is silent and periodic, which is exactly the kind
+# that survives a code review. Set VIEWTRIP_ROLE=worker in the worker image.
+_ROLE = os.environ.get("VIEWTRIP_ROLE", "api").strip().lower()
+_IS_API_PROCESS = _ROLE != "worker"
+
 # Single source of truth for the running version: the git tag baked in at build
 # time (Dockerfile ARG/ENV APP_VERSION, set from the tag by CI). Defaults to
 # "dev" locally. Used for both the OpenAPI `version` and the /api/version probe.
@@ -78,10 +90,21 @@ async def lifespan(_app: FastAPI):
     # failure mode was silence (issue #156). Fail at boot rather than on the
     # first login, so a bad deploy is obvious immediately.
     jwt_secret()
+    if not _IS_API_PROCESS:
+        # A worker shares this codebase but must not own schema or schedules.
+        _log.info("VIEWTRIP_ROLE=%s — skipping migrations, admin seed and scheduler", _ROLE)
+        yield
+        return
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
     seed_admin()
+    # Anything left non-terminal is orphaned by definition: nothing was
+    # executing it a moment ago, because nothing was running at all (issue
+    # #173). This is what replaces the Flutter client's stale-pending recovery —
+    # a server-side crash is now recovered by the server, whether or not anyone
+    # reopens the project.
+    sweep_orphaned_jobs()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
     # Correct any drift between the per-user storage counters used for quota

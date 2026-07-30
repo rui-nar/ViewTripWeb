@@ -4,9 +4,15 @@ Business code imports the counters/histograms it needs (or one of the helpers
 below); nothing outside this module touches ``prometheus_client`` directly.
 
 Everything lives on ``prometheus_client``'s default registry, which is process
-local. The container runs a single uvicorn worker (``entrypoint.sh``), so that
-registry sees every request — moving to multiple gunicorn workers would require
-``PROMETHEUS_MULTIPROC_DIR`` and a multiprocess collector. See docs/METRICS.md.
+local. The API container runs a single uvicorn worker (``entrypoint.sh``), so
+that registry sees every request it serves.
+
+It does not, however, see another *process*. With a job worker running (issue
+#173) the DB-session timings and stale-write counters recorded while executing a
+queued job live in the worker's registry. Set ``PROMETHEUS_MULTIPROC_DIR`` to a
+directory both containers mount and every process writes its samples there for
+``/metrics`` to aggregate — the same switch multiple gunicorn workers would
+need. See docs/METRICS.md.
 
 Label values are always drawn from closed sets (a status class, a normalised
 endpoint, a SQL keyword). A metric label whose values come from user data —

@@ -624,9 +624,6 @@ class ProjectNotifier extends ChangeNotifier
     // Phase 2: full-res GeoJSON + elevation data in background.
     _loadFullGeoProgressively(ref);
     _loadElevationData(ref);
-    // Recover any segment left "pending" by a resolve job that never finished
-    // (e.g. the server restarted mid-resolve). Owner-editable loads only.
-    if (loadOwnerExtras) recoverStalePendingSegments(ref);
     // Background sync check — fires only for active trips with auto-sync on.
     // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {

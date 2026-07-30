@@ -30,7 +30,7 @@ from models.project_db import DBProject, DBProjectItem
 from models.user import UserInfo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
-from src.project.project_repo import StaleWriteError
+from src.project.project_repo import StaleWriteError, bump_lock_version
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -324,3 +324,200 @@ def test_blind_save_does_not_raise(env):
     p.lock_version = 0
     with Session(engine) as s:
         repo.save_project(s, user_id, p)  # no check → no raise
+
+
+# ── 5. Concurrent resolves (issues #172, #173) ─────────────────────────────────
+
+def _add_segments(engine, project_id: int, segs) -> None:
+    """Seed several segment items in one project, at successive positions."""
+    import uuid as _uuid
+    with Session(engine) as sess:
+        for pos, seg in enumerate(segs):
+            sess.add(DBProjectItem(
+                project_id=project_id, position=pos, item_type="segment",
+                uid=_uuid.uuid4().hex, segment_id=seg.id,
+                segment_json=_segment_json(seg),
+            ))
+        sess.commit()
+
+
+def _ferry_segment(seg_id: str) -> ConnectingSegment:
+    return ConnectingSegment(
+        id=seg_id, segment_type="boat", label="Helsinki → Tallinn",
+        start=SegmentEndpoint(60.1719, 24.9414),
+        end=SegmentEndpoint(59.4370, 24.7536),
+    )
+
+
+def test_three_concurrent_resolves_all_reach_a_terminal_status(env, monkeypatch):
+    """The headline case from #172: three ferries resolving at once.
+
+    Each used to be a whole-project save under the optimistic lock, with a
+    retry budget of one — so a third writer could exhaust both attempts, write
+    no verdict, and leave the tile spinning on "pending" for five minutes. As
+    single-row payload writes they no longer contend at all.
+    """
+    client, user_id, project_id, engine = env
+    seg_ids = ["ferry-1", "ferry-2", "ferry-3"]
+    _add_segments(engine, project_id, [_ferry_segment(s) for s in seg_ids])
+
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        segments_mod, "_compute_segment_geometry",
+        lambda seg, params: ([[24.9, 60.1], [24.7, 59.4]], 2, False, "ferry"),
+    )
+
+    # Run sequentially: this asserts each job reaches a verdict, which is the
+    # user-visible symptom. That three of them no longer *contend* is what
+    # test_concurrent_resolves_do_not_touch_the_optimistic_lock proves — the
+    # lock is the shared resource they used to fight over.
+    for seg_id in seg_ids:
+        _resolve_route_job(user_id, "My Trip", seg_id, {})
+
+    for seg_id in seg_ids:
+        seg = _load_segment(engine, user_id, "My Trip", seg_id)
+        assert seg.route_status == "resolved", f"{seg_id} did not reach a verdict"
+        assert seg.route_started_at is None
+        assert json.loads(seg.route_polyline) == [[24.9, 60.1], [24.7, 59.4]]
+
+
+def test_a_resolve_never_takes_the_optimistic_lock(env, monkeypatch):
+    """A resolve must not *take* the CAS — that is what made resolves collide.
+
+    It does still *advance* the lock version; see
+    test_a_structural_save_cannot_clobber_a_landed_resolve for why. The property
+    that matters here is that a resolve can never itself fail or retry because
+    of another writer, so it always reaches a verdict.
+    """
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1"), _ferry_segment("ferry-2")])
+
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        segments_mod, "_compute_segment_geometry",
+        lambda seg, params: ([[24.9, 60.1], [24.7, 59.4]], 2, False, "ferry"),
+    )
+
+    # Move the lock out from under the second job before it writes. A writer
+    # that took the CAS would fail here; a payload write must not notice.
+    _resolve_route_job(user_id, "My Trip", "ferry-1", {})
+    with Session(engine) as sess:
+        bump_lock_version(sess, project_id)
+        sess.commit()
+    _resolve_route_job(user_id, "My Trip", "ferry-2", {})
+
+    for seg_id in ("ferry-1", "ferry-2"):
+        assert _load_segment(engine, user_id, "My Trip", seg_id).route_status == "resolved"
+
+
+def test_a_structural_save_cannot_clobber_a_landed_resolve(env, monkeypatch):
+    """A reorder loaded before a resolve lands must not revert it.
+
+    ``save_project`` rewrites every item's payload from the caller's snapshot,
+    so a payload write invisible to the CAS would be silently reinstated as
+    "pending". The narrow write advances lock_version precisely to be seen here.
+    """
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1"), _ferry_segment("ferry-2")])
+
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        segments_mod, "_compute_segment_geometry",
+        lambda seg, params: ([[24.9, 60.1], [24.7, 59.4]], 2, False, "ferry"),
+    )
+
+    # A structural mutation loads its snapshot while both segments are pending.
+    with Session(engine) as sess:
+        snapshot = segments_mod._repo.get_project(sess, user_id, "My Trip")
+
+    _resolve_route_job(user_id, "My Trip", "ferry-1", {})
+    assert _load_segment(engine, user_id, "My Trip", "ferry-1").route_status == "resolved"
+
+    # Saving the stale snapshot must be refused, not silently applied.
+    snapshot.items.reverse()
+    with Session(engine) as sess:
+        with pytest.raises(StaleWriteError):
+            segments_mod._repo.save_project(sess, user_id, snapshot, check_version=True)
+
+    assert _load_segment(engine, user_id, "My Trip", "ferry-1").route_status == "resolved"
+
+
+def test_a_superseded_job_cannot_overwrite_a_newer_verdict(env, monkeypatch):
+    """A job whose trigger was superseded must discard its result.
+
+    Without the token guard the slow first job would land on top of the second
+    trigger's fresh state, reporting geometry the user already re-requested.
+    """
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1")])
+
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+    monkeypatch.setattr(
+        segments_mod, "_compute_segment_geometry",
+        lambda seg, params: ([[1.0, 1.0], [2.0, 2.0]], 2, False, "ferry"),
+    )
+
+    # The segment currently belongs to a *newer* trigger.
+    with Session(engine) as sess:
+        segments_mod._repo.update_segment_fields(
+            sess, project_id, "ferry-1",
+            {"route_status": "pending", "route_started_at": "2026-07-30T10:00:00Z"},
+        )
+        sess.commit()
+
+    # An older job finishes and tries to write with its own stale token.
+    _resolve_route_job(user_id, "My Trip", "ferry-1", {},
+                       "2026-07-30T09:00:00Z")
+
+    seg = _load_segment(engine, user_id, "My Trip", "ferry-1")
+    assert seg.route_status == "pending", "stale verdict overwrote the newer trigger"
+    assert seg.route_started_at == "2026-07-30T10:00:00Z"
+
+
+def test_two_triggers_in_flight_both_succeed(env, monkeypatch):
+    """Neither trigger 409s — the second used to lose the CAS and never start."""
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1"), _ferry_segment("ferry-2")])
+    monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a: None)
+
+    for seg_id in ("ferry-1", "ferry-2"):
+        resp = client.post(
+            f"/api/projects/My Trip/segments/{seg_id}/resolve-route", json={})
+        assert resp.status_code == 202, resp.text
+
+    for seg_id in ("ferry-1", "ferry-2"):
+        assert _load_segment(engine, user_id, "My Trip", seg_id).route_status == "pending"
+
+
+# ── 6. Dispatch goes through the job queue (issue #173, phase C) ───────────────
+
+def test_the_trigger_enqueues_onto_the_resolve_queue(env, monkeypatch):
+    """The resolve must be queued, not handed to BackgroundTasks.
+
+    A BackgroundTask dies with the process; a queued job survives a restart and
+    is bounded by the resolve worker count (the Overpass politeness bound).
+    """
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1")])
+
+    seen: dict = {}
+
+    def _spy_enqueue(queue_name, func, *args, **kwargs):
+        seen["queue"] = queue_name
+        seen["func"] = func
+        seen["args"] = args
+        return True
+
+    monkeypatch.setattr(segments_mod, "enqueue", _spy_enqueue)
+
+    resp = client.post(
+        "/api/projects/My Trip/segments/ferry-1/resolve-route", json={})
+    assert resp.status_code == 202
+
+    assert seen["queue"] == segments_mod.QUEUE_RESOLVE
+    assert seen["func"] is segments_mod._resolve_route_job
+    assert seen["args"][:3] == (user_id, "My Trip", "ferry-1")
+    # The started_at token is carried to the job so a superseded verdict is
+    # discarded — see test_a_superseded_job_cannot_overwrite_a_newer_verdict.
+    assert seen["args"][4] == _load_segment(
+        engine, user_id, "My Trip", "ferry-1").route_started_at

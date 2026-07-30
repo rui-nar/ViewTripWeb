@@ -152,10 +152,17 @@ between scrapes.
 
 ## Constraints
 
-- **Single process.** Metrics live in the process' memory and `entrypoint.sh`
-  runs one uvicorn worker, so a scrape sees everything. Switching to multiple
-  gunicorn workers would need `PROMETHEUS_MULTIPROC_DIR` and a multiprocess
-  collector, otherwise each scrape hits a random worker's partial view.
+- **Per-process registries.** Metrics live in the process' memory and
+  `entrypoint.sh` runs one uvicorn worker, so a scrape sees everything that
+  process served.
+  It does **not** see another process. Two things put work outside the API
+  process: a job `worker` container (`REDIS_URL` set — see issue #173), whose
+  queued jobs record DB-session timings and `viewtrip_stale_writes_total` in
+  their own registry; and multiple gunicorn workers, were that ever adopted.
+  Both need `PROMETHEUS_MULTIPROC_DIR` pointing at a directory every process
+  mounts — `/metrics` then aggregates the samples written there instead of
+  reading its own registry. Unset, a scrape silently under-reports rather than
+  failing, which is the trap worth knowing about.
 - **Restarts reset counters.** That is normal — PromQL's `rate()`/`increase()`
   handle counter resets; only ever alert on rates, not absolute totals.
 - **No label may carry user data.** Paths go through `normalise_path` and SQL

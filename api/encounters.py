@@ -13,6 +13,7 @@ Routes:
 from __future__ import annotations
 
 import json
+import uuid as uuid_lib
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,6 +30,7 @@ from api.project_access import (
     translate_insert_after,
 )
 from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
+from src.project.project_repo import bump_lock_version
 
 router = APIRouter(prefix="/api/encounters", tags=["encounters"])
 
@@ -181,9 +183,13 @@ def create_encounter(
         sess.add(DBProjectItem(
             project_id=project_id,
             position=insert_at,
+            uid=uuid_lib.uuid4().hex,
             item_type="encounter",
             encounter_id=row.id,
         ))
+        # Make this insert visible to the optimistic lock, so a structural
+        # rewrite loaded before it cannot erase the row (issue #173).
+        bump_lock_version(sess, project_id)
         sess.commit()
         encounter_id = row.id
 

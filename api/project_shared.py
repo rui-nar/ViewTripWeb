@@ -134,3 +134,24 @@ def _refresh_stats_once(user_info_id: int, project_name: str) -> None:
     """One stats recompute pass — see :func:`_refresh_stats_background`."""
     with get_session() as sess:
         _repo.compute_and_cache_stats(sess, user_info_id, project_name)
+
+
+def queue_stats_refresh(background_tasks, user_info_id: int, project_name: str) -> None:
+    """Recompute a project's cached stats off the request path (issue #173).
+
+    Queued when a broker is configured, so the refresh survives an API restart
+    instead of leaving the cached stats stale until the next mutation happens to
+    trigger another one. Falls back to a BackgroundTask otherwise.
+    """
+    from src.jobs.queue import QUEUE_DEFAULT, enqueue
+
+    enqueue(QUEUE_DEFAULT, _refresh_stats_background, user_info_id, project_name,
+            background_tasks=background_tasks)
+
+
+def queue_share_tiles_refresh(background_tasks, user_info_id: int, project_name: str) -> None:
+    """Re-render a shared project's map tiles off the request path (issue #173)."""
+    from src.jobs.queue import QUEUE_DEFAULT, enqueue
+
+    enqueue(QUEUE_DEFAULT, _refresh_share_tiles, user_info_id, project_name,
+            background_tasks=background_tasks)

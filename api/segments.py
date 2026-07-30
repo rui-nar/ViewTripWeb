@@ -26,10 +26,11 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
-from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
 from src.billing.entitlements import ensure_trip_days_quota
+from src.jobs.queue import QUEUE_RESOLVE, enqueue
+from src.jobs.route_jobs import create_job, mark_done, mark_failed, mark_running
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
-from src.project.project_repo import StaleWriteError
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -115,72 +116,89 @@ def _find_segment(project, seg_id: str):
     )
 
 
+def _token_guard(started_at: Optional[str]) -> Dict[str, Any]:
+    """Compare-and-set kwargs for a verdict write, when a token is available.
+
+    A caller with no ``route_started_at`` to match on (an older enqueued job, or
+    a direct call in a test) writes unconditionally — the same behaviour as
+    before the token existed. Passing ``expect_started_at=None`` would instead
+    mean "only write if the segment has no timestamp", which silently drops
+    every verdict for a segment the trigger just stamped.
+    """
+    return {"expect_started_at": started_at} if started_at else {}
+
+
 def _resolve_route_job(
-    user_info_id: int, name: str, seg_id: str, params: Dict[str, Any]
+    user_info_id: int, name: str, seg_id: str, params: Dict[str, Any],
+    started_at: Optional[str] = None, job_id: Optional[int] = None,
 ) -> None:
     """Background task: resolve a segment's real-world route geometry.
 
     Runs the long HAFAS + Overpass lookups off the request path (holding no DB
-    session during the slow work), then persists the result with an
-    optimistic-lock retry so a concurrent user edit can't be silently clobbered.
+    session during the slow work), then persists the verdict as a *payload*
+    write — one row, no optimistic lock (issue #173). Two segments resolving at
+    once therefore do not contend with each other, and neither blocks an
+    unrelated edit; the old whole-project save collided on both counts and gave
+    up after two attempts, leaving a segment stuck "pending".
+
+    ``started_at`` is the ``route_started_at`` stamped by the trigger. It is
+    carried through and compared before writing, so a job superseded by a newer
+    trigger cannot overwrite the fresh attempt's result.
     Mirrors the fire-and-forget pattern of :func:`api.project_shared._refresh_share_tiles`.
     """
     _mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
+    mark_running(job_id)
     try:
         # 1. Load the segment (cheap) and compute geometry with no session held.
         with get_session() as sess:
             project = _repo.get_project(sess, user_info_id, name)
-        if project is None:
+            project_id = _repo.project_id_for(sess, user_info_id, name)
+        if project is None or project_id is None:
+            mark_done(job_id)  # nothing to resolve — not a failure to retry
             return
         seg = _find_segment(project, seg_id)
         if seg is None:
+            mark_done(job_id)  # deleted before we got to it
             return
         try:
             polyline, _stops, degraded, strategy = _compute_segment_geometry(seg, params)
-            outcome = ("resolved", json.dumps(polyline),
-                       _mode_for_type.get(seg.segment_type, "great_circle"), None, degraded)
+            fields = {
+                "route_status": "resolved",
+                "route_polyline": json.dumps(polyline),
+                "route_mode": _mode_for_type.get(seg.segment_type, "great_circle"),
+                "route_error": None,
+                "route_degraded": degraded,
+            }
+            if params.get("train_number"):
+                fields["train_number"] = params["train_number"]
+            if params.get("hafas_provider"):
+                fields["hafas_provider"] = params["hafas_provider"]
             _log.info(
                 "resolve seg=%s type=%s strategy=%s points=%d degraded=%s status=resolved",
                 seg_id, seg.segment_type, strategy, len(polyline), degraded)
         except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
-            outcome = ("failed", None, None, str(exc)[:200] or "Route resolution failed", False)
+            # Leave route_mode/route_polyline so geo still renders the
+            # great-circle arc; surface a short error for the UI.
+            fields = {
+                "route_status": "failed",
+                "route_error": str(exc)[:200] or "Route resolution failed",
+                "route_degraded": False,
+            }
             _log.warning("resolve seg=%s type=%s status=failed: %s",
                          seg_id, seg.segment_type, exc)
 
-        # 2. Persist, retrying once if a concurrent write bumped the lock_version.
-        for attempt in range(2):
-            try:
-                with get_session() as sess:
-                    project = _repo.get_project(sess, user_info_id, name)
-                    if project is None:
-                        return
-                    seg = _find_segment(project, seg_id)
-                    if seg is None:
-                        return  # deleted mid-resolve — nothing to write
-                    status, poly_json, rmode, err, degraded = outcome
-                    if status == "resolved":
-                        seg.route_mode = rmode
-                        seg.route_polyline = poly_json
-                        seg.route_status = "resolved"
-                        seg.route_error = None
-                        seg.route_degraded = degraded
-                        if params.get("train_number"):
-                            seg.train_number = params["train_number"]
-                        if params.get("hafas_provider"):
-                            seg.hafas_provider = params["hafas_provider"]
-                    else:
-                        # Leave route_mode/route_polyline so geo still renders the
-                        # great-circle arc; surface a short error for the UI.
-                        seg.route_status = "failed"
-                        seg.route_error = err
-                        seg.route_degraded = False
-                    seg.route_started_at = None
-                    _repo.save_project(sess, user_info_id, project, check_version=True)
-                break
-            except StaleWriteError:
-                if attempt == 1:
-                    break  # give up — a later edit/poll will reflect reality
-                continue
+        # 2. Persist. A single-row update under no lock — nothing to retry, and
+        #    nothing another writer can make us lose.
+        fields["route_started_at"] = None
+        with get_session() as sess:
+            written = _repo.update_segment_fields(
+                sess, project_id, seg_id, fields, **_token_guard(started_at))
+            sess.commit()
+        if not written:
+            _log.info("resolve seg=%s verdict discarded — segment gone or superseded", seg_id)
+        # Terminal either way: the job ran to completion. A discarded verdict
+        # means someone else owns the outcome, not that this job must be retried.
+        mark_done(job_id)
     except Exception as exc:  # noqa: BLE001
         # The segment was marked "pending" synchronously by the trigger. If the
         # job crashes anywhere above (a load/save error, an unexpected raise),
@@ -189,7 +207,8 @@ def _resolve_route_job(
         # into the same crash. Best-effort flip it to "failed" so the user sees an
         # error they can retry, and log the cause (the prod 500/stuck-pending bug).
         _log.exception("resolve seg=%s crashed before persisting a verdict", seg_id)
-        _mark_segment_failed(user_info_id, name, seg_id, str(exc)[:200])
+        _mark_segment_failed(user_info_id, name, seg_id, str(exc)[:200], started_at)
+        mark_failed(job_id, str(exc)[:200])
     finally:
         bust_geo_cache(user_info_id, name)
         # Warm the cache while still off the request path so returning to the
@@ -198,27 +217,40 @@ def _resolve_route_job(
         warm_geo_cache(user_info_id, name)
 
 
-def _mark_segment_failed(user_info_id: int, name: str, seg_id: str, err: str) -> None:
+def _mark_segment_failed(
+    user_info_id: int, name: str, seg_id: str, err: str,
+    started_at: Optional[str] = None,
+) -> None:
     """Best-effort: flip a still-``pending`` segment to ``failed`` after a crash.
 
     Wrapped so it can never raise out of the job's except handler. If the segment
-    is gone or already terminal, it's a no-op; if the save itself fails (e.g. the
-    very DB error that crashed the job), we log and give up — the client's
-    stale-pending recovery remains the last line of defence.
+    is gone or superseded by a newer trigger, it's a no-op; if the write itself
+    fails (e.g. the very DB error that crashed the job), we log and give up —
+    the client's stale-pending recovery remains the last line of defence.
+
+    This used to take the project CAS with no retry, so the crash safety net
+    could itself lose a race and leave the segment pending (issue #173). It is
+    now the same single-row payload write as the success path.
     """
     try:
         with get_session() as sess:
-            project = _repo.get_project(sess, user_info_id, name)
-            if project is None:
+            project_id = _repo.project_id_for(sess, user_info_id, name)
+            if project_id is None:
                 return
-            seg = _find_segment(project, seg_id)
-            if seg is None or seg.route_status != "pending":
-                return
-            seg.route_status = "failed"
-            seg.route_error = err or "Route resolution failed"
-            seg.route_started_at = None
-            seg.route_degraded = False
-            _repo.save_project(sess, user_info_id, project, check_version=True)
+            _repo.update_segment_fields(
+                sess, project_id, seg_id,
+                {
+                    "route_status": "failed",
+                    "route_error": err or "Route resolution failed",
+                    "route_started_at": None,
+                    "route_degraded": False,
+                },
+                # Only a still-pending segment may be failed: a late crash after
+                # a successful persist must not clobber the resolved result.
+                expect_status="pending",
+                **_token_guard(started_at),
+            )
+            sess.commit()
     except Exception:  # noqa: BLE001
         _log.exception("could not mark seg=%s failed after a crashed resolve", seg_id)
 
@@ -280,8 +312,8 @@ def create_segment(
         project.items.insert(insert_at, item)
         _repo.save_project(sess, owner_id, project, check_version=True)
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
     return {"id": seg.id}
 
 
@@ -327,8 +359,8 @@ def update_segment(
                     seg.route_mode = "rail"
                 _repo.save_project(sess, owner_id, project, check_version=True)
                 bust_geo_cache(owner_id, name)
-                background_tasks.add_task(_refresh_stats_background, owner_id, name)
-                background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+                queue_stats_refresh(background_tasks, owner_id, name)
+                queue_share_tiles_refresh(background_tasks, owner_id, name)
                 return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
@@ -361,8 +393,8 @@ def delete_segment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, owner_id, project, check_version=True)
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
 
 
 class ResolveRouteRequest(BaseModel):
@@ -392,8 +424,14 @@ def resolve_segment_route(
     The segment is marked ``route_status="pending"`` synchronously and a 202 is
     returned immediately.  The client polls ``/meta`` until the segment flips to
     ``resolved`` or ``failed``.  See :func:`_resolve_route_job`.
+
+    Marking pending is a payload write on one row, not a whole-project save
+    (issue #173): triggering two resolves at once — or triggering one while
+    another finishes — used to lose the optimistic lock and return a 409 the
+    client never retried, so the second segment simply never resolved.
     """
     user_info_id = int(current_user["sub"])
+    started_at = datetime.now(timezone.utc).isoformat()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
@@ -417,18 +455,27 @@ def resolve_segment_route(
                 detail="Route resolution only supported for train, boat, and bus segments",
             )
 
-        seg.route_status = "pending"
-        seg.route_error = None
-        seg.route_degraded = False
-        seg.route_started_at = datetime.now(timezone.utc).isoformat()
+        fields: Dict[str, Any] = {
+            "route_status": "pending",
+            "route_error": None,
+            "route_degraded": False,
+            "route_started_at": started_at,
+        }
         if body.train_number:
-            seg.train_number = body.train_number
+            fields["train_number"] = body.train_number
         if body.hafas_provider:
-            seg.hafas_provider = body.hafas_provider
-        _repo.save_project(sess, owner_id, project, check_version=True)
+            fields["hafas_provider"] = body.hafas_provider
+        _repo.update_segment_fields(sess, row.id, seg_id, fields)
+        sess.commit()
+        project_id = row.id
     bust_geo_cache(owner_id, name)
 
-    background_tasks.add_task(
-        _resolve_route_job, owner_id, name, seg_id, body.model_dump()
+    # Record the job before queueing it: a row with no queue entry is recoverable
+    # (the startup sweep re-queues it); a queue entry with no row is not.
+    job_id = create_job(owner_id, project_id, name, seg_id, started_at, body.model_dump())
+    enqueue(
+        QUEUE_RESOLVE, _resolve_route_job,
+        owner_id, name, seg_id, body.model_dump(), started_at, job_id,
+        background_tasks=background_tasks,
     )
     return {"status": "pending", "route_status": "pending"}
