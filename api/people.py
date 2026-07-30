@@ -207,9 +207,11 @@ def _encounter_out(e: DBEncounter, group_name: str | None = None) -> dict:
         "date": e.date,
         "time": e.time,
         "description": e.description,
+        "geo_mode": e.geo_mode,
         "lat": e.lat,
         "lon": e.lon,
         "source": "group" if e.group_id is not None else "person",
+        "person_id": e.person_id,
         "group_id": e.group_id,
         "group_name": group_name,
     }

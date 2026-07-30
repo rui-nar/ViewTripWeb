@@ -181,6 +181,28 @@ def test_person_inherits_group_encounters(env):
     assert client.get(f"/api/people/{bob}").json()["encounters"] == []
 
 
+def test_person_encounters_carry_the_fields_the_edit_dialog_needs(env):
+    """The person sheet edits encounters in place (issue #175), so each row has
+    to round-trip into the encounter dialog: it needs the person/group the
+    encounter points at, and its geo mode."""
+    client, _, alice, _, _ = env
+    gid = _create_group(client, name="Hostel crew")
+    client.put(f"/api/groups/{gid}/members", json={"person_ids": [alice]})
+    _create_encounter(client, person_id=alice, date="2026-01-03")
+    _create_encounter(client, group_id=gid, date="2026-01-02")
+
+    inherited, own = client.get(f"/api/people/{alice}").json()["encounters"]
+
+    assert own["person_id"] == alice
+    assert own["group_id"] is None
+    assert own["geo_mode"] == "start_of_day"
+
+    # Exactly one of person_id/group_id is set — the dialog picks on that.
+    assert inherited["person_id"] is None
+    assert inherited["group_id"] == gid
+    assert inherited["geo_mode"] == "start_of_day"
+
+
 def test_person_stops_inheriting_once_ungrouped(env):
     client, _, alice, _, _ = env
     gid = _create_group(client, name="Crew")
