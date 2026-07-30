@@ -46,6 +46,10 @@ services:
   # is a deliberate decision about load on someone else's infrastructure, not a
   # throughput dial. Two is a sensible ceiling.
   worker:
+    # MUST be the same tag as the API service above. They share one image, and
+    # only the API runs migrations — a worker left on an older tag would execute
+    # stale job code against a schema it does not know about. `docker compose
+    # pull && up -d` keeps them in step; pinning one and not the other does not.
     image: ghcr.io/rui-nar/viewtripweb:latest
     restart: unless-stopped
     command: ["/worker-entrypoint.sh"]

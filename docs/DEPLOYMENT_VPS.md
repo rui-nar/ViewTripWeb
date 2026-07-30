@@ -117,6 +117,15 @@ admin seed, and the scheduled jobs. Only the API container owns those: two
 containers racing `alembic upgrade head` at boot, or each taking its own nightly
 backup and 60 s WAL checkpoint, is the failure that guards against.
 
+Keep the `worker` service on the **same image tag** as the API. They share one
+image and only the API runs migrations, so a worker left on an older tag would
+run stale job code against a schema it does not know about.
+
+`deploy.ps1` needs no changes for any of this: it builds/pushes the image and
+then runs `docker compose down && pull && up -d`, which is service-agnostic.
+Adding the services to each host's compose file and the keys to its `.env` is
+the whole deployment change.
+
 **Rollback** is unsetting `REDIS_URL` and removing the worker service. No image
 rebuild — jobs simply run in-process again.
 
