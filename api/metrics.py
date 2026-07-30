@@ -12,7 +12,7 @@ import hmac
 import os
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 
 router = APIRouter(tags=["metrics"])
 
@@ -43,4 +43,27 @@ async def metrics(request: Request) -> Response:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid metrics token"
         )
 
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(content=generate_latest(_registry()), media_type=CONTENT_TYPE_LATEST)
+
+
+def _registry():
+    """The registry to scrape: multiprocess when configured, else the default.
+
+    With a worker container (issue #173) the API process' default registry no
+    longer sees everything — DB-session timings and stale-write counters from
+    queued jobs are recorded in the worker and would simply never be scraped.
+    Setting ``PROMETHEUS_MULTIPROC_DIR`` to a directory both containers mount
+    makes every process write its samples there and this endpoint aggregate
+    them.
+
+    Unset (the default, and correct for a single-container deployment) this is
+    the plain default registry and nothing changes.
+    """
+    if not os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        return REGISTRY
+
+    from prometheus_client import CollectorRegistry, multiprocess
+
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    return registry

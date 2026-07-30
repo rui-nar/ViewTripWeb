@@ -33,3 +33,11 @@ stripe>=11.0.0
 # Prometheus metrics (issue #125): client library + FastAPI request middleware.
 prometheus-client>=0.21.0
 prometheus-fastapi-instrumentator>=7.0.0
+# Background job queue (issue #173): Redis broker + RQ workers. Both are
+# OPTIONAL at runtime — with REDIS_URL unset the app runs every job in-process
+# via FastAPI BackgroundTasks, which is the supported self-hosted setup and the
+# rollback path for the deployment. fakeredis backs the tests so CI needs no
+# broker container.
+redis>=5.0.0
+rq>=1.16.0
+fakeredis>=2.21.0

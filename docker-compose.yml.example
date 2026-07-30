@@ -1,0 +1,98 @@
+# ViewTripWeb — example Docker Compose deployment.
+#
+# The real `docker-compose.yml` is gitignored because it has historically held
+# secrets inline. This example keeps them in `.env` instead (copy `.env.example`
+# and fill it in), so the file itself is safe to read, diff and version.
+#
+#   cp docker-compose.yml.example docker-compose.yml
+#   cp .env.example .env      # then fill in the blanks
+#   docker compose up -d
+#
+# Note `docker compose restart` does NOT pick up `.env` changes — the container
+# has to be recreated (`up -d`) for new environment values to apply.
+
+services:
+  # ── API ─────────────────────────────────────────────────────────────────────
+  viewtripweb:
+    image: ghcr.io/rui-nar/viewtripweb:latest
+    container_name: viewtripweb
+    restart: unless-stopped
+    ports:
+      - "7777:8000"
+    env_file: .env
+    volumes:
+      - ./db:/app/db
+      - ./config:/app/config
+      - ./data:/app/data
+      # Only needed when PROMETHEUS_MULTIPROC_DIR is set — see below.
+      - ./metrics:/app/metrics
+    # This container owns the schema: its lifespan runs `alembic upgrade head`.
+    # The worker deliberately does not (issue #173).
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Background job worker ───────────────────────────────────────────────────
+  # OPTIONAL. Delete this service (and REDIS_URL from .env) and every background
+  # job runs inside the API process via FastAPI BackgroundTasks — the original
+  # behaviour, and a perfectly reasonable setup for a small instance.
+  #
+  # Running it buys durability (a job survives an API restart instead of leaving
+  # e.g. a segment stuck on "calculating route") and a real concurrency bound.
+  #
+  # SCALING: an RQ worker runs ONE job at a time, so the replica count IS the
+  # parallelism. For the `resolve` queue that is the Overpass politeness bound —
+  # Overpass rate-limits per IP and it is a free public service, so raising this
+  # is a deliberate decision about load on someone else's infrastructure, not a
+  # throughput dial. Two is a sensible ceiling.
+  worker:
+    image: ghcr.io/rui-nar/viewtripweb:latest
+    restart: unless-stopped
+    command: ["/worker-entrypoint.sh"]
+    env_file: .env
+    environment:
+      VIEWTRIP_ROLE: worker
+    volumes:
+      # MUST be the same host paths as the API container: the database is a
+      # SQLite file, so "sharing" it means sharing the volume, on one host.
+      - ./db:/app/db
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./metrics:/app/metrics
+    deploy:
+      replicas: 2
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Broker ──────────────────────────────────────────────────────────────────
+  # Not published to the host: only the other services on this network need it,
+  # and an exposed Redis with no auth is a well-known way to lose a server.
+  # Note Docker publishes ports by punching through ufw, so "the firewall blocks
+  # it" is not a substitute for simply not publishing it.
+  redis:
+    image: redis:7-alpine
+    container_name: viewtrip-redis
+    restart: unless-stopped
+    # appendonly: queued jobs survive a Redis restart. Without it a broker
+    # bounce silently drops every in-flight job — the exact failure the queue
+    # was introduced to fix.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+# Relevant .env keys for the above (see .env.example for the full list):
+#
+#   REDIS_URL=redis://redis:6379/0
+#     Enables the queue. Unset it (and drop the worker service) to run every
+#     job in-process. This is the rollback path — no image rebuild needed.
+#
+#   PROMETHEUS_MULTIPROC_DIR=/app/metrics
+#     Only if you scrape /metrics AND run the worker. Without it a scrape sees
+#     the API process only, so job-side DB metrics silently go missing. Leave
+#     unset when there is no worker.

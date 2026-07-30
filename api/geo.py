@@ -24,20 +24,26 @@ from src.models.great_circle import great_circle_points
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
+from src.jobs.redis_client import get_redis
 from src.utils.encryption_check import is_encrypted_envelope
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/geo", tags=["geo"])
+
+_log = get_logger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _repo = ProjectRepo()
 
 # In-memory full-res GeoJSON cache:
-#   (user_info_id, project_name, encoded) → (gzip-compressed JSON bytes, expiry)
+#   (user_info_id, project_name, encoded) → (gzip JSON bytes, expiry, generation)
 # where expiry is a ``monotonic()`` deadline. Entries older than that are treated
 # as a MISS: the generation guard below is what actually prevents a stale entry,
 # but a TTL bounds *any* future bug of that class to minutes rather than forever,
 # and a recompute is already the fallback so expiring early is cheap.
-_geo_cache: dict[tuple, tuple[bytes, float]] = {}
+# The stored generation is what the entry was computed against — compared on
+# read so an invalidation from another process is honoured (issue #173).
+_geo_cache: dict[tuple, tuple[bytes, float, int]] = {}
 _geo_cache_lock = Lock()
 _GEO_CACHE_TTL_S = 300.0
 
@@ -46,7 +52,32 @@ _GEO_CACHE_TTL_S = 300.0
 # counter moved meanwhile — otherwise a read that started before a mutation can
 # refill the cache with the pre-mutation snapshot that mutation just evicted,
 # wedging it there until the next bust.
+# This dict is the fallback authority. When Redis is configured the counter is
+# shared across processes instead — see _shared_generation (issue #173).
 _geo_gen: dict[tuple, int] = {}
+
+
+def _gen_redis_key(user_info_id: int, project_name: str) -> str:
+    """Redis key holding a project's shared invalidation generation."""
+    return f"viewtrip:geo:gen:{user_info_id}:{project_name}"
+
+
+def _shared_generation(user_info_id: int, project_name: str) -> int | None:
+    """The generation counter as Redis sees it, or None when it cannot answer.
+
+    None means "no cross-process authority available" — the caller falls back to
+    the process-local counter, which is exactly right in that situation: without
+    a reachable broker no worker can be dispatched to, so this process is the
+    only one mutating anything.
+    """
+    client = get_redis()
+    if client is None:
+        return None
+    try:
+        raw = client.get(_gen_redis_key(user_info_id, project_name))
+        return int(raw) if raw is not None else 0
+    except Exception:  # noqa: BLE001 — broker hiccup → local counter
+        return None
 
 
 def bust_geo_cache(user_info_id: int, project_name: str) -> None:
@@ -55,7 +86,20 @@ def bust_geo_cache(user_info_id: int, project_name: str) -> None:
     The cache keys on (user_info_id, name, encoded) so both the expanded and
     encoded payload variants are dropped. Also bumps the project's generation
     counter so any read already in flight refuses to write its now-stale result.
+
+    The counter lives in Redis when one is configured (issue #173). Dropping the
+    local dict only invalidates *this* process's copy, so once route resolution
+    runs in a worker the API process would otherwise keep serving pre-resolve
+    geometry until the TTL expired — a silent staleness worse than the recompute
+    it avoids. Every process compares against the shared counter on read.
     """
+    client = get_redis()
+    if client is not None:
+        try:
+            client.incr(_gen_redis_key(user_info_id, project_name))
+        except Exception:  # noqa: BLE001 — local bust below still covers this process
+            _log.warning("could not bump the shared geo generation for %r", project_name)
+
     with _geo_cache_lock:
         for key in [k for k in _geo_cache if k[0] == user_info_id and k[1] == project_name]:
             _geo_cache.pop(key, None)
@@ -65,21 +109,35 @@ def bust_geo_cache(user_info_id: int, project_name: str) -> None:
 
 def _geo_generation(user_info_id: int, project_name: str) -> int:
     """Current invalidation generation for a project. Read before the DB load."""
+    shared = _shared_generation(user_info_id, project_name)
+    if shared is not None:
+        return shared
     with _geo_cache_lock:
         return _geo_gen.get((user_info_id, project_name), 0)
 
 
 def _geo_cache_get(cache_key: tuple) -> bytes | None:
-    """Cached bytes for *cache_key*, or None when absent or expired."""
+    """Cached bytes for *cache_key*, or None when absent, expired or superseded.
+
+    The generation check is what makes a *remote* bust visible: an entry this
+    process cached is dropped when another process has since invalidated the
+    project. It happens outside the lock — it may hit Redis, and holding the
+    lock across a network call would serialise every cache read behind it.
+    """
     with _geo_cache_lock:
         entry = _geo_cache.get(cache_key)
         if entry is None:
             return None
-        gz_bytes, deadline = entry
+        gz_bytes, deadline, gen = entry
         if monotonic() >= deadline:
             _geo_cache.pop(cache_key, None)
             return None
-        return gz_bytes
+
+    if gen != _geo_generation(cache_key[0], cache_key[1]):
+        with _geo_cache_lock:
+            _geo_cache.pop(cache_key, None)
+        return None
+    return gz_bytes
 
 
 def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
@@ -89,10 +147,10 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
     read that produced it. We only decline to *persist* an entry that may already
     be superseded; the cost is at most a redundant recompute on the next request.
     """
+    if _geo_generation(cache_key[0], cache_key[1]) != gen:
+        return
     with _geo_cache_lock:
-        if _geo_gen.get((cache_key[0], cache_key[1]), 0) != gen:
-            return
-        _geo_cache[cache_key] = (gz_bytes, monotonic() + _GEO_CACHE_TTL_S)
+        _geo_cache[cache_key] = (gz_bytes, monotonic() + _GEO_CACHE_TTL_S, gen)
 
 
 def _legacy_path(user_id: str, name: str) -> str:

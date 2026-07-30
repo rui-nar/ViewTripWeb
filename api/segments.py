@@ -28,6 +28,7 @@ from api.project_access import (
 )
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
 from src.billing.entitlements import ensure_trip_days_quota
+from src.jobs.queue import QUEUE_RESOLVE, enqueue
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.utils.logging import get_logger
 
@@ -460,7 +461,9 @@ def resolve_segment_route(
         sess.commit()
     bust_geo_cache(owner_id, name)
 
-    background_tasks.add_task(
-        _resolve_route_job, owner_id, name, seg_id, body.model_dump(), started_at
+    enqueue(
+        QUEUE_RESOLVE, _resolve_route_job,
+        owner_id, name, seg_id, body.model_dump(), started_at,
+        background_tasks=background_tasks,
     )
     return {"status": "pending", "route_status": "pending"}

@@ -487,3 +487,37 @@ def test_two_triggers_in_flight_both_succeed(env, monkeypatch):
 
     for seg_id in ("ferry-1", "ferry-2"):
         assert _load_segment(engine, user_id, "My Trip", seg_id).route_status == "pending"
+
+
+# ── 6. Dispatch goes through the job queue (issue #173, phase C) ───────────────
+
+def test_the_trigger_enqueues_onto_the_resolve_queue(env, monkeypatch):
+    """The resolve must be queued, not handed to BackgroundTasks.
+
+    A BackgroundTask dies with the process; a queued job survives a restart and
+    is bounded by the resolve worker count (the Overpass politeness bound).
+    """
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [_ferry_segment("ferry-1")])
+
+    seen: dict = {}
+
+    def _spy_enqueue(queue_name, func, *args, **kwargs):
+        seen["queue"] = queue_name
+        seen["func"] = func
+        seen["args"] = args
+        return True
+
+    monkeypatch.setattr(segments_mod, "enqueue", _spy_enqueue)
+
+    resp = client.post(
+        "/api/projects/My Trip/segments/ferry-1/resolve-route", json={})
+    assert resp.status_code == 202
+
+    assert seen["queue"] == segments_mod.QUEUE_RESOLVE
+    assert seen["func"] is segments_mod._resolve_route_job
+    assert seen["args"][:3] == (user_id, "My Trip", "ferry-1")
+    # The started_at token is carried to the job so a superseded verdict is
+    # discarded — see test_a_superseded_job_cannot_overwrite_a_newer_verdict.
+    assert seen["args"][4] == _load_segment(
+        engine, user_id, "My Trip", "ferry-1").route_started_at

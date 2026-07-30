@@ -60,6 +60,17 @@ configure_logging()
 _log = get_logger(__name__)
 _scheduler = AsyncIOScheduler()
 
+# Which role this process plays (issue #173). Only the API process may run
+# migrations and the scheduler: a worker container that also ran them would
+# checkpoint the WAL twice a minute, take two daily backups, and race
+# `alembic upgrade head` against the API container at boot.
+#
+# Today a worker never imports this module, so the guard is belt-and-braces —
+# but the failure it prevents is silent and periodic, which is exactly the kind
+# that survives a code review. Set VIEWTRIP_ROLE=worker in the worker image.
+_ROLE = os.environ.get("VIEWTRIP_ROLE", "api").strip().lower()
+_IS_API_PROCESS = _ROLE != "worker"
+
 # Single source of truth for the running version: the git tag baked in at build
 # time (Dockerfile ARG/ENV APP_VERSION, set from the tag by CI). Defaults to
 # "dev" locally. Used for both the OpenAPI `version` and the /api/version probe.
@@ -73,6 +84,11 @@ async def lifespan(_app: FastAPI):
     # failure mode was silence (issue #156). Fail at boot rather than on the
     # first login, so a bad deploy is obvious immediately.
     jwt_secret()
+    if not _IS_API_PROCESS:
+        # A worker shares this codebase but must not own schema or schedules.
+        _log.info("VIEWTRIP_ROLE=%s — skipping migrations, admin seed and scheduler", _ROLE)
+        yield
+        return
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()

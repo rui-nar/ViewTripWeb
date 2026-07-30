@@ -81,6 +81,49 @@ Google OAuth console's authorized redirect URIs and Strava's app
 `narciso.synology.me` domain, and login/Strava sync will fail on the new
 domain until updated.
 
+### Background job worker (optional, issue #173)
+
+The API serves fine on its own: with `REDIS_URL` unset, every background job
+(route resolution, poster rendering, share tiles, stats) runs inside the API
+process via FastAPI `BackgroundTasks`. That is the original behaviour and a
+reasonable setup for this instance's load.
+
+Adding the `redis` + `worker` services buys two things:
+
+- **Durability.** A job survives an API restart. Previously a restart mid-resolve
+  left a segment on `route_status="pending"` forever, and the only recovery was
+  client-side — it ran when someone happened to reopen the project.
+- **A real concurrency bound.** Overpass rate-limits per IP. An RQ worker runs
+  one job at a time, so the `resolve` queue's replica count *is* the parallelism.
+  Raising it is a decision about load on a free public service, not a throughput
+  dial; 2 is a sensible ceiling.
+
+See `docker-compose.yml.example` for the service definitions. Three things about
+it are easy to get wrong:
+
+- The worker **must mount the same host paths** as the API container. The
+  database is a SQLite file, so "sharing" it means sharing the volume, on one
+  host. Two engines writing one file is fine — WAL and a 30 s `busy_timeout` are
+  set on every connection (`models/db.py`) — but only on the same machine.
+- Redis needs `--appendonly yes`. Without it, a broker restart silently drops
+  every queued job, which is the exact failure the queue was added to fix.
+- Do **not** publish Redis' port. Docker publishes ports by writing DNAT rules
+  that bypass `ufw`, so "the firewall blocks it" is not true of a published
+  port — and an unauthenticated Redis reachable from the internet is a
+  well-known way to lose a host.
+
+The worker sets `VIEWTRIP_ROLE=worker`, which stops it running migrations, the
+admin seed, and the scheduled jobs. Only the API container owns those: two
+containers racing `alembic upgrade head` at boot, or each taking its own nightly
+backup and 60 s WAL checkpoint, is the failure that guards against.
+
+**Rollback** is unsetting `REDIS_URL` and removing the worker service. No image
+rebuild — jobs simply run in-process again.
+
+If you scrape `/metrics`, also set `PROMETHEUS_MULTIPROC_DIR` to a directory
+both containers mount. Without it the scrape only sees the API process and
+job-side DB metrics silently go missing (see docs/METRICS.md).
+
 ## 4. Data migration (NAS -> VPS)
 
 1. **Consistent DB snapshot on the NAS**, via SQLite's online backup API in a
