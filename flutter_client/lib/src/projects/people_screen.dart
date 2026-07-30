@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import '../billing/upgrade_sheet.dart';
 import '../core/countries.dart';
 import '../core/design_tokens.dart';
+import 'encounter_dialog.dart';
 import 'group_form_dialog.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
@@ -293,6 +294,81 @@ Widget _encounterPlaceIcon(
     borderRadius: BorderRadius.circular(14),
     onTap: () => onLocationTap(lat, lon),
     child: const Icon(Icons.place_outlined, size: 18),
+  );
+}
+
+/// Trailing edit + delete buttons for an encounter row (issue #175), shared by
+/// the person and group detail sheets so an encounter can be changed where it
+/// is listed, not only from the trip timeline.
+///
+/// Deliberately buttons rather than the timeline's swipe: a [Dismissible] inside
+/// a scrollable modal sheet fights the sheet's own drag. Delete confirms instead
+/// of offering undo, mirroring the sheets' existing person/group delete — an
+/// undo snackbar is easy to miss when the sheet itself can be dismissed.
+///
+/// [onChanged] runs after a successful edit or delete so the host can refresh.
+Widget _encounterActions(
+  BuildContext context,
+  ProjectNotifier notifier,
+  Map<String, dynamic> encounter,
+  VoidCallback onChanged,
+) {
+  final id = encounter['id']?.toString();
+  if (id == null || id.isEmpty) return const SizedBox.shrink();
+
+  Future<void> edit() async {
+    await showDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => EncounterDialog(notifier: notifier, editEntry: encounter),
+    );
+    onChanged();
+  }
+
+  Future<void> delete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete encounter?'),
+        content: const Text(
+            'The encounter is removed from the trip. The person or group is '
+            'kept. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: kAccent),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await notifier.deleteEncounter(id);
+    onChanged();
+  }
+
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      IconButton(
+        key: Key('encounter-edit-$id'),
+        tooltip: 'Edit encounter',
+        icon: const Icon(Icons.edit_outlined, size: 18),
+        visualDensity: VisualDensity.compact,
+        onPressed: edit,
+      ),
+      IconButton(
+        key: Key('encounter-delete-$id'),
+        tooltip: 'Delete encounter',
+        icon: Icon(Icons.delete_outline, size: 18, color: kAccent),
+        visualDensity: VisualDensity.compact,
+        onPressed: delete,
+      ),
+    ],
   );
 }
 
@@ -591,6 +667,11 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
                       leading: _encounterPlaceIcon(e, widget.onLocationTap),
                       title: Text(e['date']?.toString() ?? ''),
                       subtitle: _encounterSubtitle(theme, e),
+                      // Inherited group encounters are editable too — they are
+                      // real encounters, and the "With <group>" subtitle above
+                      // already flags that a change applies to the whole group.
+                      trailing:
+                          _encounterActions(context, widget.notifier, e, _load),
                     ),
                 ],
               ),
@@ -888,32 +969,41 @@ class _GroupDetailSheet extends StatelessWidget {
           const SizedBox(height: 12),
           Text('Encounters', style: theme.textTheme.titleSmall),
           const SizedBox(height: 4),
-          Builder(builder: (context) {
-            final encounters = encountersForGroup(notifier.items, _groupId);
-            if (encounters.isEmpty) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text('No encounters logged yet.',
-                    style: theme.textTheme.bodySmall),
+          // Listens, unlike the rest of this sheet: editing or deleting an
+          // encounter in place (issue #175) has to repaint this list, and the
+          // rows come straight off notifier.items.
+          ListenableBuilder(
+            listenable: notifier,
+            builder: (context, _) {
+              final encounters = encountersForGroup(notifier.items, _groupId);
+              if (encounters.isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text('No encounters logged yet.',
+                      style: theme.textTheme.bodySmall),
+                );
+              }
+              return Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final e in encounters)
+                      ListTile(
+                        dense: true,
+                        leading: _encounterPlaceIcon(e, onLocationTap),
+                        title: Text(e['date']?.toString() ?? ''),
+                        subtitle: (e['description'] as String?)?.isNotEmpty ?? false
+                            ? _EncounterDescription(text: e['description'] as String)
+                            : null,
+                        // The ListenableBuilder above handles the refresh.
+                        trailing:
+                            _encounterActions(context, notifier, e, () {}),
+                      ),
+                  ],
+                ),
               );
-            }
-            return Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final e in encounters)
-                    ListTile(
-                      dense: true,
-                      leading: _encounterPlaceIcon(e, onLocationTap),
-                      title: Text(e['date']?.toString() ?? ''),
-                      subtitle: (e['description'] as String?)?.isNotEmpty ?? false
-                          ? _EncounterDescription(text: e['description'] as String)
-                          : null,
-                    ),
-                ],
-              ),
-            );
-          }),
+            },
+          ),
         ],
       ),
     );

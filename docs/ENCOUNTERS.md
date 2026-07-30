@@ -58,6 +58,21 @@ shares).
   the dialog's combined picker lists groups and people in labeled sections
   (issue #56), and a "+" menu creates a new person or group inline.
 - Encounters appear inline on their day and as owner-only pins on the manage map.
+- **Edit / delete from anywhere they're listed** (issue #175): the trip timeline
+  (swipe or the pencil) and the person and group detail sheets (trailing pencil +
+  bin). An encounter inherited from a group is editable from a member's sheet too
+  — the "With &lt;group&gt;" label marks it as group-wide, and the change applies
+  to the group.
+
+## Known limitations
+On **mobile web**, the browser's cut/copy/paste for the note fields is
+unreliable: Flutter's web build paints text into a canvas, so selection is the
+engine's own rather than the browser's, and `Clipboard.getData` maps to
+`navigator.clipboard.readText()`, which iOS Safari does not grant to a page. The
+person-notes and encounter-note fields therefore carry their own copy/paste
+buttons (`note_field_actions.dart`), which don't depend on the selection toolbar.
+Paste can still be refused by the browser — the field says so rather than failing
+silently. The Android and iOS apps are unaffected.
 
 ## Groups (#50)
 Bundle several people into a named **group** (e.g. a family or a travel crew).
