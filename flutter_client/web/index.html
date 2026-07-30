@@ -18,6 +18,13 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <!--
+    Required, not optional. Without it mobile browsers lay the page out in a
+    980 px viewport and then shrink it to fit, which puts both splashes on the
+    wrong side of the 760px breakpoint below and paints the wide board — twice
+    the width of the screen — before the shrink lands. See issue #177.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="ViewTrip — Merge · Visualise · Export">
 
   <!-- Google Sign-In (required by google_sign_in_web) -->

@@ -82,6 +82,7 @@ AREAS: dict[str, tuple[str, str]] = {
     "project_io": ("Trips", APP),
     "project-notifier": ("Trips", APP),
     "manage": ("Trips", APP),
+    "splash": ("Splash screen", APP),
     "web": ("Web app", APP),
     "client": ("Web app", APP),
     "android": ("Android app", APP),
