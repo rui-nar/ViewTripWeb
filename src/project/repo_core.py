@@ -218,7 +218,19 @@ class ProjectCoreMixin:
         ``StaleWriteError`` is raised. The default (``False``) is a blind
         overwrite that simply advances the counter — used by importers and other
         callers that intentionally replace the whole project.
+
+        Refuses a project loaded as a filtered view (``partial_items``): the
+        item list is rewritten from ``project.items``, so saving one would
+        delete the rows it was never given — every other user's journal items
+        (issue #173). All such loads are read-only today; this keeps a future
+        caller from turning one into silent data loss.
         """
+        if project.partial_items:
+            raise ValueError(
+                f"Refusing to save project '{project.name}': it was loaded as a "
+                "filtered view (journal_user_id) and its item list is incomplete. "
+                "Reload it without journal_user_id to mutate it."
+            )
         row = self._get_project_row(sess, user_info_id, project.name)
         if row is None:
             row = DBProject(user_info_id=user_info_id, name=project.name)
@@ -569,6 +581,10 @@ class ProjectCoreMixin:
             name=row.name,
             version=row.version,
             lock_version=getattr(row, 'lock_version', 0) or 0,
+            # A per-user journal load hides other users' entries *and* their
+            # timeline items, so `items` is not the whole list — mark it
+            # unsaveable rather than trust every caller to know (issue #173).
+            partial_items=journal_user_id is not None,
             trip_start=getattr(row, 'trip_start', None),
             trip_end=getattr(row, 'trip_end', None),
             items=items,

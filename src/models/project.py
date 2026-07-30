@@ -199,6 +199,13 @@ class Project:
     # Optimistic-lock value captured at load time (DBProject.lock_version); not
     # part of the .viewtrip file format — used only to detect concurrent writes.
     lock_version: int = 0
+    # True when `items` is a filtered view rather than the whole timeline —
+    # set by a per-user journal load (issue #106), where other users' journal
+    # entries and their timeline items are deliberately absent. Such a project
+    # is read-only: save_project rewrites the item list from `items`, so
+    # persisting one would delete the filtered-out rows. Not part of the
+    # .viewtrip file format. See ProjectRepo.save_project.
+    partial_items: bool = False
     items: List[ProjectItem] = field(default_factory=list)
     filter_state: ProjectFilterState = field(default_factory=ProjectFilterState)
     trip_start: Optional[str] = None  # ISO "YYYY-MM-DD" — overrides inferred day-1 date

@@ -195,3 +195,38 @@ class TestDirectInsertVsRewrite:
         assert calls["n"] == 2, "expected exactly one retry"
         assert len(loads) == 2, "each attempt must load its own project"
         assert loads[0] != loads[1], "the retry re-used the stale object"
+
+
+class TestFilteredViewIsNotSaveable:
+    """A per-user journal load hides other users' timeline items (issue #106).
+
+    ``save_project`` rewrites the item list from ``project.items``, so saving
+    such a view would delete the rows it was never given. Every caller is
+    read-only today; the guard keeps a future one from silently losing data.
+    """
+
+    def test_a_filtered_load_is_marked_partial(self, engine, seeded):
+        user_id, _project_id = seeded
+        with Session(engine) as sess:
+            whole = _repo.get_project(sess, user_id, "Trip")
+            view = _repo.get_project(sess, user_id, "Trip", journal_user_id=user_id)
+        assert whole.partial_items is False
+        assert view.partial_items is True
+
+    def test_saving_a_filtered_view_is_refused(self, engine, seeded):
+        user_id, project_id = seeded
+        with Session(engine) as sess:
+            view = _repo.get_project(sess, user_id, "Trip", journal_user_id=user_id)
+
+        with Session(engine) as sess:
+            with pytest.raises(ValueError, match="filtered view"):
+                _repo.save_project(sess, user_id, view)
+
+        # Refused before any write — the timeline is untouched.
+        assert _item_types(engine, project_id) == ["activity", "activity"]
+
+    def test_the_retry_helper_refuses_it_too(self, engine, seeded):
+        """save_project_with_retry loads unfiltered, so it stays usable."""
+        user_id, _project_id = seeded
+        saved = _repo.save_project_with_retry(user_id, "Trip", lambda p: None)
+        assert saved is not None and saved.partial_items is False
