@@ -10,6 +10,7 @@ import '../core/current_location.dart';
 import '../core/design_tokens.dart';
 import 'group_form_dialog.dart';
 import 'location_picker_dialog.dart';
+import 'note_field_actions.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
 import 'project_notifier.dart';
@@ -479,9 +480,10 @@ class _EncounterDialogState extends State<EncounterDialog> {
               const SizedBox(height: 12),
               TextField(
                 controller: _descCtrl,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Note',
                   hintText: 'How you met, what you talked about…',
+                  suffixIcon: NoteFieldActions(controller: _descCtrl),
                 ),
                 minLines: 2,
                 maxLines: 6,
