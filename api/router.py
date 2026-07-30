@@ -65,6 +65,11 @@ _scheduler = AsyncIOScheduler()
 # "dev" locally. Used for both the OpenAPI `version` and the /api/version probe.
 _APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
+# Logged at import — this module IS the process entry point, so the line lands at
+# the top of every log, before migrations or any request. Without it there is no
+# way to tell from a log file which build produced it (issue #179).
+_log.info("ViewTrip API starting — version %s", _APP_VERSION)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
