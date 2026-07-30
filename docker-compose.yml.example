@@ -46,6 +46,16 @@ services:
   # is a deliberate decision about load on someone else's infrastructure, not a
   # throughput dial. Two is a sensible ceiling.
   worker:
+    # No `container_name` here, unlike the other two services — that is
+    # required, not an oversight. A fixed name and `deploy.replicas` are
+    # mutually exclusive (compose has to generate a distinct name per replica),
+    # and adding one makes the whole file invalid:
+    #   services.deploy.replicas: can't set container_name and worker as
+    #   container name must be unique
+    # The replicas come up as <project>-worker-1 / -2. Address them by service
+    # rather than by name — `docker compose logs -f worker`,
+    # `docker compose restart worker` — which works for every service anyway.
+    #
     # MUST be the same tag as the API service above. They share one image, and
     # only the API runs migrations — a worker left on an older tag would execute
     # stale job code against a schema it does not know about. `docker compose
