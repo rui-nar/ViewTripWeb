@@ -318,67 +318,6 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     return {'route_status': 'pending'}; // timed out — tile keeps its spinner
   }
 
-  /// Segment route-mode implied by each transport type.
-  static const _routeModeForType = {
-    'train': 'rail', 'boat': 'ferry', 'bus': 'bus',
-  };
-
-  /// A segment is treated as orphaned (its background resolve job never
-  /// finished — e.g. the server restarted mid-resolve) once it has been
-  /// `pending` for longer than this. Comfortably beyond the worst-case job
-  /// time so an in-flight job is never re-triggered.
-  static const _pendingStaleAfter = Duration(minutes: 5);
-
-  /// Whether a `pending` segment's resolve job looks orphaned and should be
-  /// re-triggered: true when its status is `pending` and [routeStartedAt] is
-  /// null/garbage or older than [_pendingStaleAfter] relative to [nowUtc].
-  static bool isPendingSegmentStale(
-      String? routeStatus, String? routeStartedAt, DateTime nowUtc) {
-    if (routeStatus != 'pending') return false;
-    if (routeStartedAt == null) return true;
-    final started = DateTime.tryParse(routeStartedAt)?.toUtc();
-    if (started == null) return true;
-    return nowUtc.difference(started) > _pendingStaleAfter;
-  }
-
-  /// Re-trigger resolution for any segment stuck in `pending` past
-  /// [_pendingStaleAfter]. Called once per load so a job lost to a server
-  /// restart is recovered when the user reopens the project. Fire-and-forget.
-  void recoverStalePendingSegments(ProjectRef ref) {
-    final now = DateTime.now().toUtc();
-    for (final item in List<Map<String, dynamic>>.from(items)) {
-      if (item['item_type'] != 'segment') continue;
-      final seg = item['segment'] as Map?;
-      if (seg == null) continue;
-      if (!isPendingSegmentStale(seg['route_status'] as String?,
-          seg['route_started_at'] as String?, now)) {
-        continue; // not pending, or a job is plausibly still running
-      }
-      final segId = seg['id']?.toString();
-      if (segId == null) continue;
-      final segType = seg['segment_type'] as String?;
-      final routeMode =
-          _routeModeForType[segType] ?? (seg['route_mode'] as String? ?? 'rail');
-      final hafasProvider = seg['hafas_provider'] as String?;
-      final trainNumber = seg['train_number'] as String?;
-      final date = seg['date'] as String?;
-      () async {
-        if (projectRef != ref) return; // navigated away before we started
-        try {
-          await resolveTrainRoute(
-            segId,
-            routeMode: routeMode,
-            hafasProvider: routeMode == 'rail' ? hafasProvider : null,
-            trainNumber: routeMode == 'rail' ? trainNumber : null,
-            date: date,
-          );
-        } catch (_) {
-          // Failure is reflected on the tile via route_status; no toast here.
-        }
-      }();
-    }
-  }
-
   /// Merge [fields] into the matching segment in [items], assigning a new list
   /// reference so identity-based rebuilds fire.
   void _patchSegmentFields(String segId, Map<String, dynamic> fields) {

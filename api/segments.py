@@ -26,9 +26,10 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
-from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
 from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
+from src.jobs.route_jobs import create_job, mark_done, mark_failed, mark_running
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.utils.logging import get_logger
 
@@ -129,7 +130,7 @@ def _token_guard(started_at: Optional[str]) -> Dict[str, Any]:
 
 def _resolve_route_job(
     user_info_id: int, name: str, seg_id: str, params: Dict[str, Any],
-    started_at: Optional[str] = None,
+    started_at: Optional[str] = None, job_id: Optional[int] = None,
 ) -> None:
     """Background task: resolve a segment's real-world route geometry.
 
@@ -146,15 +147,18 @@ def _resolve_route_job(
     Mirrors the fire-and-forget pattern of :func:`api.project_shared._refresh_share_tiles`.
     """
     _mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
+    mark_running(job_id)
     try:
         # 1. Load the segment (cheap) and compute geometry with no session held.
         with get_session() as sess:
             project = _repo.get_project(sess, user_info_id, name)
             project_id = _repo.project_id_for(sess, user_info_id, name)
         if project is None or project_id is None:
+            mark_done(job_id)  # nothing to resolve — not a failure to retry
             return
         seg = _find_segment(project, seg_id)
         if seg is None:
+            mark_done(job_id)  # deleted before we got to it
             return
         try:
             polyline, _stops, degraded, strategy = _compute_segment_geometry(seg, params)
@@ -192,6 +196,9 @@ def _resolve_route_job(
             sess.commit()
         if not written:
             _log.info("resolve seg=%s verdict discarded — segment gone or superseded", seg_id)
+        # Terminal either way: the job ran to completion. A discarded verdict
+        # means someone else owns the outcome, not that this job must be retried.
+        mark_done(job_id)
     except Exception as exc:  # noqa: BLE001
         # The segment was marked "pending" synchronously by the trigger. If the
         # job crashes anywhere above (a load/save error, an unexpected raise),
@@ -201,6 +208,7 @@ def _resolve_route_job(
         # error they can retry, and log the cause (the prod 500/stuck-pending bug).
         _log.exception("resolve seg=%s crashed before persisting a verdict", seg_id)
         _mark_segment_failed(user_info_id, name, seg_id, str(exc)[:200], started_at)
+        mark_failed(job_id, str(exc)[:200])
     finally:
         bust_geo_cache(user_info_id, name)
         # Warm the cache while still off the request path so returning to the
@@ -304,8 +312,8 @@ def create_segment(
         project.items.insert(insert_at, item)
         _repo.save_project(sess, owner_id, project, check_version=True)
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
     return {"id": seg.id}
 
 
@@ -351,8 +359,8 @@ def update_segment(
                     seg.route_mode = "rail"
                 _repo.save_project(sess, owner_id, project, check_version=True)
                 bust_geo_cache(owner_id, name)
-                background_tasks.add_task(_refresh_stats_background, owner_id, name)
-                background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+                queue_stats_refresh(background_tasks, owner_id, name)
+                queue_share_tiles_refresh(background_tasks, owner_id, name)
                 return
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
@@ -385,8 +393,8 @@ def delete_segment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
         _repo.save_project(sess, owner_id, project, check_version=True)
     bust_geo_cache(owner_id, name)
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
-    background_tasks.add_task(_refresh_share_tiles, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
 
 
 class ResolveRouteRequest(BaseModel):
@@ -459,11 +467,15 @@ def resolve_segment_route(
             fields["hafas_provider"] = body.hafas_provider
         _repo.update_segment_fields(sess, row.id, seg_id, fields)
         sess.commit()
+        project_id = row.id
     bust_geo_cache(owner_id, name)
 
+    # Record the job before queueing it: a row with no queue entry is recoverable
+    # (the startup sweep re-queues it); a queue entry with no row is not.
+    job_id = create_job(owner_id, project_id, name, seg_id, started_at, body.model_dump())
     enqueue(
         QUEUE_RESOLVE, _resolve_route_job,
-        owner_id, name, seg_id, body.model_dump(), started_at,
+        owner_id, name, seg_id, body.model_dump(), started_at, job_id,
         background_tasks=background_tasks,
     )
     return {"status": "pending", "route_status": "pending"}

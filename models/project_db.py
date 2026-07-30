@@ -549,6 +549,45 @@ class DBPosterJob(sqlmodel.SQLModel, table=True):
     result_pdf_path: Optional[str] = sqlmodel.Field(default=None)
 
 
+class DBRouteJob(sqlmodel.SQLModel, table=True):
+    """A queued segment route-resolution job (issue #173, phase D).
+
+    Mirrors :class:`DBPosterJob`. The row is the durable record of intent: the
+    queue can lose a job (broker restart, worker killed mid-run, an enqueue that
+    fell back in-process and then died with the API) but the row survives, so a
+    startup sweep can re-queue anything left non-terminal.
+
+    Before this, the only record that a resolve was owed was
+    ``route_status="pending"`` on the segment itself, and the only thing that
+    ever noticed a job had been lost was the *Flutter client* — five minutes
+    after the fact, and only if someone happened to reopen the project. Recovery
+    from a server-side crash now belongs to the server.
+
+    ``started_at`` is the same token written to the segment's
+    ``route_started_at``: it is what lets a superseded job's verdict be
+    discarded rather than overwriting a newer attempt.
+    """
+
+    __tablename__ = "routejob"
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
+    user_info_id: int = sqlmodel.Field(foreign_key="userinfo.id", index=True)
+    project_name: str                        # the job runs by (owner, name)
+    segment_id: str = sqlmodel.Field(index=True)
+    status: str = sqlmodel.Field(default="pending", index=True)  # pending|running|done|failed
+    # ISO-8601 UTC; matches the segment's route_started_at for this attempt.
+    started_at: Optional[str] = sqlmodel.Field(default=None)
+    params_json: str = sqlmodel.Field(default="{}")   # hafas_provider/train_number/date
+    error_message: Optional[str] = sqlmodel.Field(default=None)
+    created_at: float = sqlmodel.Field(default_factory=time.time)
+    completed_at: Optional[float] = sqlmodel.Field(default=None)
+    # Bumped each time the startup sweep re-queues this job. A job that keeps
+    # dying takes the whole worker with it on every boot, so the sweep gives up
+    # after a few attempts and fails it loudly instead of looping forever.
+    attempts: int = sqlmodel.Field(default=0)
+
+
 class DBShareVisit(sqlmodel.SQLModel, table=True):
     """One visitor record for a shared-project link.
 

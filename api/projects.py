@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
 from api.project_access import OwnerParam, effective_role, require_role, resolve_project
-from api.project_shared import _legacy_path, _refresh_stats_background, _repo
+from api.project_shared import _legacy_path, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
@@ -322,7 +322,7 @@ def update_day_meta(
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()
-    background_tasks.add_task(_refresh_stats_background, owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
 
 
 # ── Sync-meta (auto-sync config per project) ─────────────────────────────────

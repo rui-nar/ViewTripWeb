@@ -156,47 +156,4 @@ void main() {
       expect((feature['properties'] as Map)['route_degraded'], isFalse);
     });
   });
-
-  group('stale pending-segment recovery', () {
-    final now = DateTime.parse('2026-06-10T12:00:00Z');
-
-    test('non-pending statuses are never stale', () {
-      for (final status in ['idle', 'resolved', 'failed', null]) {
-        expect(
-          ProjectSegmentCrudMixin.isPendingSegmentStale(
-              status, now.toIso8601String(), now),
-          isFalse,
-        );
-      }
-    });
-
-    test('recently-started pending job is left alone', () {
-      final oneMinAgo = now.subtract(const Duration(minutes: 1));
-      expect(
-        ProjectSegmentCrudMixin.isPendingSegmentStale(
-            'pending', oneMinAgo.toIso8601String(), now),
-        isFalse,
-      );
-    });
-
-    test('long-pending job is considered orphaned', () {
-      final tenMinAgo = now.subtract(const Duration(minutes: 10));
-      expect(
-        ProjectSegmentCrudMixin.isPendingSegmentStale(
-            'pending', tenMinAgo.toIso8601String(), now),
-        isTrue,
-      );
-    });
-
-    test('missing or unparseable timestamp counts as stale', () {
-      expect(
-        ProjectSegmentCrudMixin.isPendingSegmentStale('pending', null, now),
-        isTrue,
-      );
-      expect(
-        ProjectSegmentCrudMixin.isPendingSegmentStale('pending', 'not-a-date', now),
-        isTrue,
-      );
-    });
-  });
 }

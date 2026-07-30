@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
+from src.jobs.route_jobs import sweep_orphaned_jobs
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
@@ -93,6 +94,12 @@ async def lifespan(_app: FastAPI):
     alembic_command.upgrade(cfg, "head")
     _check_schema_contract()
     seed_admin()
+    # Anything left non-terminal is orphaned by definition: nothing was
+    # executing it a moment ago, because nothing was running at all (issue
+    # #173). This is what replaces the Flutter client's stale-pending recovery —
+    # a server-side crash is now recovered by the server, whether or not anyone
+    # reopens the project.
+    sweep_orphaned_jobs()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
     # Correct any drift between the per-user storage counters used for quota
