@@ -180,22 +180,31 @@ class _BillingSectionState extends State<BillingSection> {
                       ?.copyWith(color: theme.colorScheme.error)),
             ],
             const SizedBox(height: 20),
-            Row(
+            // Wrap, not Row: on a narrow phone the two actions stack instead of
+            // overflowing. The explicit minimumSize is required — the app theme
+            // sets ElevatedButton's to Size.fromHeight(44), i.e. *infinite*
+            // width, which a Row's unbounded main axis turns into a layout
+            // failure and an invisible button (issue #153).
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
               children: [
                 ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(0, 40)),
                   onPressed: _busy ? null : () => _changePlan(status),
                   icon: const Icon(Icons.rocket_launch_outlined, size: 18),
                   label: Text(status.isPaid ? 'Change plan' : 'Upgrade'),
                 ),
-                if (status.canManage) ...[
-                  const SizedBox(width: 12),
+                if (status.canManage)
                   OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 40)),
                     onPressed:
                         _busy ? null : () => _open(() => _billing.portalUrl()),
                     icon: const Icon(Icons.receipt_long_outlined, size: 18),
                     label: const Text('Manage billing'),
                   ),
-                ],
               ],
             ),
           ],

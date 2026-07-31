@@ -179,11 +179,22 @@ class _PlanTile extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(plan.name, style: theme.textTheme.titleMedium),
+              // Name and price wrap onto a second line rather than pushing the
+              // badge off the edge — the three together overflow a 360 px phone
+              // once the tier names get any longer (issue #153).
+              Expanded(
+                child: Wrap(
+                  spacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(plan.name, style: theme.textTheme.titleMedium),
+                    Text(plan.priceLabel, style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              ),
               const SizedBox(width: 8),
-              Text(plan.priceLabel, style: theme.textTheme.bodySmall),
-              const Spacer(),
               if (isCurrent)
                 Text('Current plan', style: theme.textTheme.labelSmall)
               else if (isRecommended)

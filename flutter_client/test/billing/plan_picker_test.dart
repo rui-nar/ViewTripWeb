@@ -1,4 +1,7 @@
 /// Choosing a plan, and the recommendation after a refusal (issue #121).
+///
+/// Pumped under the real app theme, whose button sizing is what broke the
+/// Settings plan actions while a themeless test suite stayed green (#153).
 library;
 
 import 'package:flutter/material.dart';
@@ -6,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/billing/billing_service.dart';
 import 'package:viewtrip_client/src/billing/plan_picker.dart';
 import 'package:viewtrip_client/src/billing/upgrade_sheet.dart';
+import 'package:viewtrip_client/src/core/theme.dart';
 
 const _mb = 1024 * 1024;
 const _gb = 1024 * _mb;
@@ -75,8 +79,15 @@ Future<void> _pump(
   QuotaError? because,
   String currentPlan = 'free',
   List<String>? opened,
+  Size? surface,
 }) async {
+  if (surface != null) {
+    tester.view.physicalSize = surface;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+  }
   await tester.pumpWidget(MaterialApp(
+    theme: lightTheme,
     home: Scaffold(
       body: PlanPicker(
         currentPlan: currentPlan,
@@ -166,6 +177,13 @@ void main() {
         (tester) async {
       await _pump(tester, billing: _FakeBilling(catalogue: []));
       expect(find.textContaining('unavailable'), findsOneWidget);
+    });
+
+    testWidgets('lays out on a phone under the app theme', (tester) async {
+      await _pump(tester,
+          billing: _FakeBilling(), surface: const Size(360, 800));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Choose Tier 1'), findsOneWidget);
     });
   });
 

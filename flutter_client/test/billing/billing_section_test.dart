@@ -2,12 +2,19 @@
 ///
 /// The load-bearing case is the self-hosted one: a deployment that sells
 /// nothing must render no billing UI at all.
+///
+/// Everything here pumps under the **real** app theme. The first version of this
+/// file used a bare `MaterialApp`, and so never saw that the theme sets
+/// `ElevatedButton.minimumSize` to `Size.fromHeight(44)` — infinite width — which
+/// broke the "Change plan" button inside a `Row` in the actual app while every
+/// test here passed (issue #153).
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/billing/billing_section.dart';
 import 'package:viewtrip_client/src/billing/billing_service.dart';
+import 'package:viewtrip_client/src/core/theme.dart';
 
 class _FakeBilling implements BillingService {
   final Map<String, dynamic> payload;
@@ -44,8 +51,16 @@ Future<void> _pump(
   BillingService billing, {
   List<String>? opened,
   Uri? currentUri,
+  Size? surface,
 }) async {
+  if (surface != null) {
+    tester.view.physicalSize = surface;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+  }
   await tester.pumpWidget(MaterialApp(
+    // The real theme, not the default one — see the library docstring.
+    theme: lightTheme,
     home: Scaffold(
       body: BillingSection(
         service: billing,
@@ -187,6 +202,18 @@ void main() {
     testWidgets('flags a comped account', (tester) async {
       await _pump(tester, _FakeBilling({...cloud, 'admin_override': true}));
       expect(find.text('Granted'), findsOneWidget);
+    });
+
+    // Issue #153: the actions laid out under the app theme, which forces every
+    // ElevatedButton to infinite width unless the button overrides it. Both
+    // buttons are present here, so this is the narrowest the section ever gets.
+    testWidgets('lays the actions out without overflowing a phone',
+        (tester) async {
+      await _pump(tester, _FakeBilling(cloud), surface: const Size(360, 800));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Change plan'), findsOneWidget);
+      expect(find.text('Manage billing'), findsOneWidget);
+      expect(tester.getSize(find.text('Change plan')).width, lessThan(360));
     });
   });
 
