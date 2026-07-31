@@ -51,9 +51,10 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('last_opened_project_user-1'), isNull);
 
-    // Flush the background geo-fetch retry backoff and the one-shot
-    // background-sync-check timer so none remain pending at teardown
-    // (mirrors view_screen_test.dart).
-    await tester.pump(const Duration(seconds: 6));
+    // Flush every retry/one-shot timer the failed load schedules, so none
+    // remain pending at teardown: the initial fetch pair now backs off 2 s then
+    // 6 s before giving up (issue #178), and only then does the background geo
+    // fetch start its own 2 s retry, ahead of the 5 s background-sync check.
+    await tester.pump(const Duration(seconds: 20));
   });
 }

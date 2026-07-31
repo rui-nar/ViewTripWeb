@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from api.deps import get_current_user
+from api.geo import bust_project_cache
 from api.project_access import require_role, resolve_project
 from models.project_db import (
     DBProject,
@@ -440,8 +441,13 @@ def remove_member(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
         if not is_self and member.role == "co-owner":
             require_role(sess, row, user_info_id, "owner")
+        owner_id = row.user_info_id  # read before the commit expires the row
         sess.delete(member)
         sess.commit()
+    # /meta is cached per caller and carries their caller_role (issue #178), so
+    # a membership change has to invalidate the project's payloads even though
+    # no project data moved.
+    bust_project_cache(owner_id, name)
 
 
 # ── Invite preview / accept (any authenticated user) ──────────────────────────
@@ -575,5 +581,8 @@ def accept_invite(
             # was taken up, and so re-accepting is idempotent instead of a 404.
             invite.accepted_at = time.time()
             sess.add(invite)
+        project_name, project_owner = project.name, project.user_info_id
         sess.commit()
-        return {"name": project.name, "owner_id": project.user_info_id}
+    # See remove_member: the new member's caller_role has to be built fresh.
+    bust_project_cache(project_owner, project_name)
+    return {"name": project_name, "owner_id": project_owner}

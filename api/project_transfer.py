@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
+from api.geo import bust_geo_cache
 from api.project_access import OwnerParam, resolve_project
 from api.project_shared import _DATA_DIR, _legacy_path, _projects_dir, _repo
 from src.billing.entitlements import ensure_project_quota, ensure_storage_quota
@@ -79,6 +80,9 @@ async def import_project(
     name = fname[: -len(ProjectIO.EXTENSION)]
     with get_session() as sess:
         _repo.ingest_project(sess, user_info_id, tmp_path)
+    # Re-importing over an existing name replaces its content, so anything
+    # cached under that name is now wrong (issue #178).
+    bust_geo_cache(user_info_id, name)
 
     # An archive expands into project files and photos; rather than trying to
     # account for each write inside the ingest, re-measure the tree once.

@@ -39,6 +39,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
+from api.project_shared import bust_project_payloads, project_cache_ref
 from models.project_db import DBJournalEntry, DBProject, DBProjectItem
 from src.project.project_repo import bump_lock_version
 from src.billing.entitlements import ensure_storage_quota, ensure_trip_days_quota
@@ -154,7 +155,9 @@ def _append_photo(journal_id: int, uuid_str: str) -> None:
         photos.append(uuid_str)
         row.photos_json = json.dumps(photos)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 def _download_photo_from_url(journal_id: int, url: str, user_id: str) -> None:
@@ -266,8 +269,10 @@ def create_journal(
         # Make this insert visible to the optimistic lock, so a structural
         # rewrite loaded before it cannot erase the row (issue #173).
         bump_lock_version(sess, project_id)
+        cache_ref = project_cache_ref(sess, project_id)
         sess.commit()
         journal_id = row.id
+        bust_project_payloads(cache_ref)
 
     return {"id": journal_id}
 
@@ -299,7 +304,9 @@ def update_journal(
         row.lat = lat
         row.lon = lon
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{journal_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -332,8 +339,10 @@ def delete_journal(
         if item_row:
             sess.delete(item_row)
 
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.delete(row)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 # ── Photos ────────────────────────────────────────────────────────────────────
@@ -397,7 +406,9 @@ def delete_photo(
         photos.remove(photo_uuid)
         row.photos_json = json.dumps(photos)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.put("/{journal_id}/photos/{old_uuid}/replace", status_code=status.HTTP_200_OK,
@@ -429,7 +440,9 @@ async def replace_photo(
         photos[photos.index(old_uuid)] = new_uuid
         row.photos_json = json.dumps(photos)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
     photo_path = _photo_dir(current_user["sub"], journal_id)
     unlink_and_record(current_user["sub"], [

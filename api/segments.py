@@ -26,7 +26,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
-from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh, warm_meta_cache
 from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
 from src.jobs.route_jobs import create_job, mark_done, mark_failed, mark_running
@@ -213,8 +213,11 @@ def _resolve_route_job(
         bust_geo_cache(user_info_id, name)
         # Warm the cache while still off the request path so returning to the
         # project after a resolve is a fast HIT, not a cold recompute that can
-        # time out and leave activities as low-res straight lines.
+        # time out and leave activities as low-res straight lines. The /meta
+        # payload matters just as much here: it is what the client polls while
+        # the resolve runs, and what the activity panel blocks on (issue #178).
         warm_geo_cache(user_info_id, name)
+        warm_meta_cache(user_info_id, name)
 
 
 def _mark_segment_failed(

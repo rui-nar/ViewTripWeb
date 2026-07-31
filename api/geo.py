@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip as gzip_lib
 import json
 import os
+import time
 from threading import Lock
 from time import monotonic
 from typing import Annotated, Any, Dict, List
@@ -35,14 +36,19 @@ _log = get_logger(__name__)
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _repo = ProjectRepo()
 
-# In-memory full-res GeoJSON cache:
-#   (user_info_id, project_name, encoded) → (gzip JSON bytes, expiry, generation)
+# In-memory cache of gzipped per-project payloads:
+#   (user_info_id, project_name, variant) → (gzip JSON bytes, expiry, generation)
 # where expiry is a ``monotonic()`` deadline. Entries older than that are treated
 # as a MISS: the generation guard below is what actually prevents a stale entry,
 # but a TTL bounds *any* future bug of that class to minutes rather than forever,
 # and a recompute is already the fallback so expiring early is cheap.
 # The stored generation is what the entry was computed against — compared on
 # read so an invalidation from another process is honoured (issue #173).
+# The variant slot distinguishes payloads of the same project: the full-res geo
+# endpoint keys on its ``encoded`` flag, /meta on ("meta", caller_id) — see
+# api.project_shared.meta_cache_key. Every variant of a project shares one
+# generation counter, so a single bust drops them all, which is what keeps
+# "one bust per mutation" sufficient as payload kinds are added (issue #178).
 _geo_cache: dict[tuple, tuple[bytes, float, int]] = {}
 _geo_cache_lock = Lock()
 _GEO_CACHE_TTL_S = 300.0
@@ -153,6 +159,17 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
         _geo_cache[cache_key] = (gz_bytes, monotonic() + _GEO_CACHE_TTL_S, gen)
 
 
+# Public names for the three primitives above, used by the other per-project
+# payload caches (currently /meta, see api.project_shared). They deliberately
+# share this module's state: one generation counter and one bust per project
+# covers every payload kind, and the TTL + generation guards (issues #132, #173)
+# exist once rather than being re-derived per endpoint.
+project_cache_get = _geo_cache_get
+project_cache_store = _geo_cache_store
+project_cache_generation = _geo_generation
+bust_project_cache = bust_geo_cache
+
+
 def _legacy_path(user_id: str, name: str) -> str:
     path = os.path.join(_DATA_DIR, "users", user_id, "projects")
     os.makedirs(path, exist_ok=True)
@@ -244,17 +261,29 @@ def project_geo_low_res(
     was last saved.  No GPS polyline decoding occurs here — activities use
     two-point straight lines — so this is fast enough to compute on every
     request.
+
+    include_heavy=False because ``_compute_low_res_geo`` reads only
+    start_latlng/end_latlng and segment geometry: loading every activity's
+    summary_polyline and elevation_profile_json meant paying for their overflow
+    pages to build a payload that never looks at them, which on a cold cache put
+    this endpoint (issue #178) at 13 s — over the client's whole load budget.
     """
     user_info_id = int(current_user["sub"])
+    t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
         project = _repo.get_project(
             sess, row.user_info_id, name,
             legacy_path=_legacy_path(str(row.user_info_id), name),
+            include_heavy=False,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    return json.loads(_compute_low_res_geo(project))
+    t1 = time.time()
+    payload = json.loads(_compute_low_res_geo(project))
+    _log.info("geo_low_res name=%s load=%.3fs build=%.3fs",
+              name, t1 - t0, time.time() - t1)
+    return payload
 
 
 def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Dict[str, Any]]:

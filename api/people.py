@@ -38,6 +38,7 @@ from api.polarsteps import (
     _require_client,
 )
 from api.project_access import OwnerParam, assert_project_access, resolve_project
+from api.project_shared import bust_project_payloads, project_cache_ref
 from models.project_db import (
     DBEncounter,
     DBPerson,
@@ -191,8 +192,10 @@ def create_person(
         row = DBPerson(project_id=project_id)
         _apply_person_fields(row, body)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, project_id)
         sess.commit()
         person_id = row.id
+        bust_project_payloads(cache_ref)
     return {"id": person_id}
 
 
@@ -264,7 +267,9 @@ def update_person(
         row = _get_owned_person(sess, person_id, user_info_id)
         _apply_person_fields(row, body)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -293,8 +298,10 @@ def delete_person(
         if row.avatar_photo:
             _delete_avatar_files(current_user["sub"], person_id, row.avatar_photo)
 
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.delete(row)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 # ── Avatar ────────────────────────────────────────────────────────────────────
@@ -326,7 +333,9 @@ async def upload_avatar(
         old = row.avatar_photo
         row.avatar_photo = new_uuid
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
     if old:
         _delete_avatar_files(current_user["sub"], person_id, old)
     return {"id": person_id}
@@ -346,7 +355,9 @@ def delete_avatar(
             _delete_avatar_files(current_user["sub"], person_id, row.avatar_photo)
             row.avatar_photo = None
             sess.add(row)
+            cache_ref = project_cache_ref(sess, row.project_id)
             sess.commit()
+            bust_project_payloads(cache_ref)
 
 
 @router.get("/{person_id}/avatar", summary="Serve full-resolution avatar")
