@@ -41,3 +41,7 @@ prometheus-fastapi-instrumentator>=7.0.0
 redis>=5.0.0
 rq>=1.16.0
 fakeredis>=2.21.0
+# Test-only: tests/test_worker_topology.py parses docker-compose.yml.example to
+# check the worker topology against the queue bounds in src/jobs/queue.py (#188).
+# Nothing at runtime imports it.
+PyYAML>=6.0

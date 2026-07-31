@@ -32,37 +32,49 @@ services:
       redis:
         condition: service_healthy
 
-  # ── Background job worker ───────────────────────────────────────────────────
-  # OPTIONAL. Delete this service (and REDIS_URL from .env) and every background
-  # job runs inside the API process via FastAPI BackgroundTasks — the original
-  # behaviour, and a perfectly reasonable setup for a small instance.
+  # ── Background job workers ──────────────────────────────────────────────────
+  # OPTIONAL. Delete both worker services (and REDIS_URL from .env) and every
+  # background job runs inside the API process via FastAPI BackgroundTasks — the
+  # original behaviour, and a perfectly reasonable setup for a small instance.
   #
-  # Running it buys durability (a job survives an API restart instead of leaving
-  # e.g. a segment stuck on "calculating route") and a real concurrency bound.
+  # Running them buys durability (a job survives an API restart instead of
+  # leaving e.g. a segment stuck on "calculating route") and a real concurrency
+  # bound.
   #
-  # SCALING: an RQ worker runs ONE job at a time, so the replica count IS the
-  # parallelism. For the `resolve` queue that is the Overpass politeness bound —
-  # Overpass rate-limits per IP and it is a free public service, so raising this
-  # is a deliberate decision about load on someone else's infrastructure, not a
-  # throughput dial. Two is a sensible ceiling.
+  # WHY TWO SERVICES RATHER THAN ONE WITH `deploy.replicas: 2`
+  # An RQ worker runs ONE job at a time, so the number of processes listening on
+  # a queue IS that queue's parallelism. Identical replicas can only ever give
+  # every queue the same bound, and the bounds are not the same (issue #188):
+  #
+  #   resolve  2  Overpass rate-limits per IP, and it is a free public service.
+  #               Raising this is a decision about load on someone else's
+  #               infrastructure, not a throughput dial.
+  #   poster   1  An A0 render is memory-heavy. Two at once is the OOM case that
+  #               running workers outside the API container exists to contain.
+  #   default  2  Share tiles and stats — short and cheap.
+  #
+  # These numbers are mirrored in QUEUE_MAX_CONCURRENCY in src/jobs/queue.py,
+  # and tests/test_worker_topology.py fails if this file stops matching it.
+  #
+  # QUEUE ORDER IN `command` MATTERS: RQ checks the queues in the order given and
+  # takes the first job it finds. Two rules, in this order:
+  #   1. A service's dedicated queue comes first, so it cannot starve. Only
+  #      worker-poster consumes `poster`; if `poster` came last there, a busy
+  #      `resolve` queue would leave a user waiting on a render indefinitely.
+  #   2. Otherwise cheapest first, so a 1 s share tile is not stuck behind a
+  #      resolve, which can hold a worker for the full 600 s job timeout.
+  #
+  # Both services MUST stay on the same image tag as the API. They share one
+  # image and only the API runs migrations, so a worker left on an older tag
+  # would execute stale job code against a schema it does not know about.
+  # `docker compose pull && up -d` keeps them in step; pinning one does not.
+
+  # Cheap queues only. Never renders a poster.
   worker:
-    # No `container_name` here, unlike the other two services — that is
-    # required, not an oversight. A fixed name and `deploy.replicas` are
-    # mutually exclusive (compose has to generate a distinct name per replica),
-    # and adding one makes the whole file invalid:
-    #   services.deploy.replicas: can't set container_name and worker as
-    #   container name must be unique
-    # The replicas come up as <project>-worker-1 / -2. Address them by service
-    # rather than by name — `docker compose logs -f worker`,
-    # `docker compose restart worker` — which works for every service anyway.
-    #
-    # MUST be the same tag as the API service above. They share one image, and
-    # only the API runs migrations — a worker left on an older tag would execute
-    # stale job code against a schema it does not know about. `docker compose
-    # pull && up -d` keeps them in step; pinning one and not the other does not.
     image: ghcr.io/rui-nar/viewtripweb:latest
+    container_name: viewtrip-worker
     restart: unless-stopped
-    command: ["/worker-entrypoint.sh"]
+    command: ["/worker-entrypoint.sh", "default", "resolve"]
     env_file: .env
     environment:
       VIEWTRIP_ROLE: worker
@@ -73,8 +85,27 @@ services:
       - ./config:/app/config
       - ./data:/app/data
       - ./metrics:/app/metrics
-    deploy:
-      replicas: 2
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # The ONLY consumer of `poster`, which is what keeps A0 renders serial. Do not
+  # add a second instance of this service and do not add `poster` to the service
+  # above. It also drains the cheap queues when no poster is pending, so it is
+  # the second `resolve`/`default` consumer rather than a mostly-idle container.
+  worker-poster:
+    image: ghcr.io/rui-nar/viewtripweb:latest
+    container_name: viewtrip-worker-poster
+    restart: unless-stopped
+    command: ["/worker-entrypoint.sh", "poster", "default", "resolve"]
+    env_file: .env
+    environment:
+      VIEWTRIP_ROLE: worker
+    volumes:
+      - ./db:/app/db
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./metrics:/app/metrics
     depends_on:
       redis:
         condition: service_healthy
@@ -103,10 +134,10 @@ services:
 # Relevant .env keys for the above (see .env.example for the full list):
 #
 #   REDIS_URL=redis://redis:6379/0
-#     Enables the queue. Unset it (and drop the worker service) to run every
+#     Enables the queue. Unset it (and drop the worker services) to run every
 #     job in-process. This is the rollback path — no image rebuild needed.
 #
 #   PROMETHEUS_MULTIPROC_DIR=/app/metrics
-#     Only if you scrape /metrics AND run the worker. Without it a scrape sees
+#     Only if you scrape /metrics AND run the workers. Without it a scrape sees
 #     the API process only, so job-side DB metrics silently go missing. Leave
-#     unset when there is no worker.
+#     unset when there are no workers.
