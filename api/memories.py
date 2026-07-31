@@ -43,6 +43,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
+from api.project_shared import bust_project_payloads, project_cache_ref
 from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
 from models.user import UserInfo
@@ -257,7 +258,9 @@ def _adopt_and_refresh(sess, user_id: str, mem_row: DBMemory, body: "MemoryBody"
     mem_row.polarsteps_step_id = body.polarsteps_step_id
     _clear_memory_photos(sess, user_id, mem_row)
     sess.add(mem_row)
+    cache_ref = project_cache_ref(sess, mem_row.project_id)
     sess.commit()
+    bust_project_payloads(cache_ref)
     return mem_row.id
 
 
@@ -348,8 +351,10 @@ def create_memory(
         # Make this insert visible to the optimistic lock, so a structural
         # rewrite loaded before it cannot erase the row (issue #173).
         bump_lock_version(sess, project_id)
+        cache_ref = project_cache_ref(sess, project_id)
         sess.commit()
         memory_id = mem_row.id
+        bust_project_payloads(cache_ref)
 
     return {"id": memory_id}
 
@@ -401,7 +406,9 @@ def update_memory(
             ).all():
                 sess.delete(row)
 
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -437,8 +444,10 @@ def delete_memory(
         for item_row in item_rows:
             sess.delete(item_row)
 
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.delete(mem_row)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 # ── Photos ────────────────────────────────────────────────────────────────────
@@ -490,7 +499,9 @@ def _append_photo_to_memory(memory_id: int, uuid_str: str) -> None:
         photos.append(uuid_str)
         mem_row.photos_json = json.dumps(photos)
         sess.add(mem_row)
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 def _download_photo_from_url(memory_id: int, url: str, user_id: str) -> None:
@@ -577,7 +588,9 @@ def delete_photo(
         photos.remove(photo_uuid)
         mem_row.photos_json = json.dumps(photos)
         sess.add(mem_row)
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.put("/{memory_id}/photos/{old_uuid}/replace", status_code=status.HTTP_200_OK,
@@ -610,7 +623,9 @@ async def replace_photo(
         photos[photos.index(old_uuid)] = new_uuid
         mem_row.photos_json = json.dumps(photos)
         sess.add(mem_row)
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
     _delete_photo_files(owner_dir, memory_id, [old_uuid])
     return {"uuid": new_uuid}
@@ -724,7 +739,7 @@ def add_comment(
     """Add a top-level comment or a threaded reply to an existing comment."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         user_row = sess.get(UserInfo, user_info_id)
         commenter_name = user_row.display_name if user_row else ""
 
@@ -742,7 +757,10 @@ def add_comment(
             created_at=_utc_now(),
         )
         sess.add(row)
+        # The project payload carries each memory's comment_count (issue #178).
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
         return {"id": row.id}
 
 
@@ -768,7 +786,9 @@ def delete_comment(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
         _delete_comment_subtree(sess, comment_id)
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 def _delete_comment_subtree(sess, comment_id: int) -> None:
@@ -818,7 +838,7 @@ def like_memory(
     """Like a memory. Idempotent — calling this twice has no effect."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         existing = sess.exec(
             select(DBMemoryLike).where(
                 DBMemoryLike.memory_id == memory_id,
@@ -835,7 +855,10 @@ def like_memory(
             liker_name=liker_name,
             created_at=_utc_now(),
         ))
+        # The project payload carries each memory's like_count (issue #178).
+        cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{memory_id}/like", status_code=status.HTTP_204_NO_CONTENT,
@@ -847,7 +870,7 @@ def unlike_memory(
     """Remove the caller's like from a memory. No-op if not liked."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_memory(sess, memory_id, user_info_id)
+        mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         existing = sess.exec(
             select(DBMemoryLike).where(
                 DBMemoryLike.memory_id == memory_id,
@@ -855,8 +878,10 @@ def unlike_memory(
             )
         ).first()
         if existing:
+            cache_ref = project_cache_ref(sess, mem_row.project_id)
             sess.delete(existing)
             sess.commit()
+            bust_project_payloads(cache_ref)
 
 
 # ── Translations ──────────────────────────────────────────────────────────────

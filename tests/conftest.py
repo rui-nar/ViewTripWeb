@@ -30,6 +30,25 @@ def _reset_strava_rate_limiters():
     reset_rate_limiters()
 
 
+@pytest.fixture(autouse=True)
+def _reset_project_payload_cache():
+    """Empty the per-project payload cache around every test.
+
+    ``/meta`` and the geo endpoints are served from a process-wide dict keyed by
+    (user id, project name, variant) — see api.geo. Every test builds a fresh
+    in-memory database whose ids restart at 1, and most of them call their
+    project "Trip", so without this one test's cached payload is a HIT in the
+    next one and the assertion reads the previous test's data (issue #178).
+    """
+    from api.geo import _geo_cache, _geo_gen
+
+    _geo_cache.clear()
+    _geo_gen.clear()
+    yield
+    _geo_cache.clear()
+    _geo_gen.clear()
+
+
 @pytest.fixture
 def metric():
     """Read a Prometheus sample by name + labels, 0.0 if the series is absent.

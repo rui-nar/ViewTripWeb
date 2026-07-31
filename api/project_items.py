@@ -110,6 +110,7 @@ def reorder_items(
         owner_id, name, _move, legacy_path=_legacy_path(str(owner_id), name))
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
     queue_share_tiles_refresh(background_tasks, owner_id, name)
     visible = journal_visible_positions(project.items, user_info_id, owner_id)

@@ -29,6 +29,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
+from api.project_shared import bust_project_payloads, project_cache_ref
 from models.project_db import DBActivity, DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from src.project.project_repo import bump_lock_version
 
@@ -190,8 +191,10 @@ def create_encounter(
         # Make this insert visible to the optimistic lock, so a structural
         # rewrite loaded before it cannot erase the row (issue #173).
         bump_lock_version(sess, project_id)
+        cache_ref = project_cache_ref(sess, project_id)
         sess.commit()
         encounter_id = row.id
+        bust_project_payloads(cache_ref)
 
     return {"id": encounter_id}
 
@@ -226,7 +229,9 @@ def update_encounter(
         row.lat = lat
         row.lon = lon
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{encounter_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -244,5 +249,7 @@ def delete_encounter(
         ).first()
         if item_row:
             sess.delete(item_row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.delete(row)
         sess.commit()
+        bust_project_payloads(cache_ref)

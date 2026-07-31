@@ -31,11 +31,27 @@ from models.db import get_session
 from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
+from api.geo import (
+    bust_project_cache,
+    project_cache_generation,
+    project_cache_get,
+    project_cache_store,
+)
 from api.project_access import OwnerParam, effective_role, require_role, resolve_project
-from api.project_shared import _legacy_path, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
+from api.project_shared import (
+    _legacy_path,
+    _refresh_stats_background,
+    _repo,
+    build_meta_payload,
+    gzip_json,
+    meta_cache_key,
+    queue_share_tiles_refresh,
+    queue_stats_refresh,
+)
 from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
@@ -44,8 +60,20 @@ from src.models.activity import Activity
 from src.models.project import DEFAULT_SLEEPING_GROUPS
 from src.project.project_io import ProjectIO
 from src.project.project_repo import _compute_stats
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+_log = get_logger(__name__)
+
+
+def _gzip_response(gz_bytes: bytes, cache_status: str) -> Response:
+    """Serve pre-gzipped JSON bytes straight from the payload cache."""
+    return Response(
+        content=gz_bytes,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "X-Cache": cache_status},
+    )
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
@@ -155,24 +183,36 @@ def get_project_meta(
     owner: OwnerParam = None,
 ):
     """Same shape as GET /{name} but with elevation_profile and map.summary_polyline
-    absent from each activity.  Uses lightweight loading (deferred heavy columns) so
-    cold-cache response time is under 1 s even on spinning-disk NAS storage.
+    absent from each activity.  Uses lightweight loading (deferred heavy columns).
+
+    Served from the per-project payload cache when warm (issue #178): the client
+    blocks its whole activity panel on this call and polls it every few seconds
+    during a re-fetch or route resolve, while a cold load on a large project ran
+    to 11-13 s. Cached bytes are pre-gzipped, so this returns a Response rather
+    than a dict — same shape as the geo endpoints, and GZipMiddleware leaves an
+    already-encoded body alone.
     """
     user_info_id = int(current_user["sub"])
+    t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
-        role = effective_role(sess, row, user_info_id)
-        project = _repo.get_project(
-            sess, row.user_info_id, name,
-            legacy_path=_legacy_path(str(row.user_info_id), name),
-            include_heavy=False,
-            journal_user_id=user_info_id,
-        )
-    if project is None:
+        owner_id = row.user_info_id
+        cache_key = meta_cache_key(owner_id, name, user_info_id)
+        cached = project_cache_get(cache_key)
+        if cached is not None:
+            return _gzip_response(cached, "HIT")
+
+        gen = project_cache_generation(owner_id, name)  # before the read, so a bust wins
+        data = build_meta_payload(sess, row, name, user_info_id)
+    if data is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    data = _repo.to_dict(project)
-    data["caller_role"] = role
-    return data
+    t1 = time.time()
+
+    gz_bytes = gzip_json(data)
+    project_cache_store(cache_key, gz_bytes, gen)
+    _log.info("project_meta name=%s load=%.3fs gzip=%.3fs cache=MISS",
+              name, t1 - t0, time.time() - t1)
+    return _gzip_response(gz_bytes, "MISS")
 
 
 @router.get("/{name}/stats", summary="Get project statistics")
@@ -260,6 +300,11 @@ def update_project(
         sess.commit()
         result_name = row.name
         result_trip_start = row.trip_start
+    # Both names: cache entries are keyed by project name, so a rename would
+    # otherwise strand the old name's payload for whoever still asks for it.
+    bust_project_cache(owner_id, name)
+    if result_name != name:
+        bust_project_cache(owner_id, result_name)
     return {"name": result_name, "trip_start": result_trip_start}
 
 
@@ -322,6 +367,7 @@ def update_day_meta(
         row.updated_at = time.time()
         sess.add(row)
         sess.commit()
+    bust_project_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
 
 
@@ -396,7 +442,9 @@ def update_track_style(
             row.type_styles_json = json.dumps(body.type_styles)
         row.updated_at = time.time()
         sess.add(row)
+        owner_id = row.user_info_id
         sess.commit()
+    bust_project_cache(owner_id, name)
 
 
 class LanguagesUpdateRequest(BaseModel):
@@ -417,7 +465,9 @@ def update_languages(
         row.languages_json = json.dumps(body.languages)
         row.updated_at = time.time()
         sess.add(row)
+        owner_id = row.user_info_id
         sess.commit()
+    bust_project_cache(owner_id, name)
 
 
 class SyncMetaUpdateRequest(BaseModel):
@@ -577,6 +627,8 @@ def delete_project(
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="owner")
-        found = _repo.delete_project(sess, row.user_info_id, name)
+        owner_id = row.user_info_id
+        found = _repo.delete_project(sess, owner_id, name)
+    bust_project_cache(owner_id, name)
     if not found:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")

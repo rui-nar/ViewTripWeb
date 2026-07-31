@@ -23,6 +23,7 @@ from sqlmodel import select
 
 from api.deps import get_current_user
 from api.project_access import OwnerParam, assert_project_access, resolve_project
+from api.project_shared import bust_project_payloads, project_cache_ref
 from models.project_db import DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -107,8 +108,10 @@ def create_group(
         row = DBPersonGroup(project_id=project_id)
         _apply_group_fields(row, body)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, project_id)
         sess.commit()
         group_id = row.id
+        bust_project_payloads(cache_ref)
     return {"id": group_id}
 
 
@@ -146,7 +149,9 @@ def update_group(
         row = _get_owned_group(sess, group_id, user_info_id)
         _apply_group_fields(row, body)
         sess.add(row)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT,
@@ -177,8 +182,10 @@ def delete_group(
         for m in sess.exec(select(DBPerson).where(DBPerson.group_id == group_id)).all():
             m.group_id = None
             sess.add(m)
+        cache_ref = project_cache_ref(sess, row.project_id)
         sess.delete(row)
         sess.commit()
+        bust_project_payloads(cache_ref)
 
 
 @router.put("/{group_id}/members", status_code=status.HTTP_204_NO_CONTENT,
@@ -217,4 +224,6 @@ def set_members(
             person.group_id = group_id
             sess.add(person)
 
+        cache_ref = project_cache_ref(sess, group.project_id)
         sess.commit()
+        bust_project_payloads(cache_ref)

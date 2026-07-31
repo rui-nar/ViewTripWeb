@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
 from api.project_access import OwnerParam, resolve_project
-from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh
+from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh, warm_meta_cache
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import StravaToken
 from src.api.strava_client import RateLimiter, StravaAPI
@@ -183,6 +183,7 @@ def _enrich_activities_background(
         # Recompute now (still in the background task) so the user's next geo
         # load is a fast cache HIT rather than a cold recompute.
         warm_geo_cache(owner_id, project_name)
+        warm_meta_cache(owner_id, project_name)
 
 
 def _enrich_pending_background(
@@ -371,6 +372,7 @@ def _refresh_activity_job(
         # Warm while still off the request path so reopening the project is a
         # fast cache HIT rather than a cold recompute.
         warm_geo_cache(owner_id, name)
+        warm_meta_cache(owner_id, name)
 
 
 @router.post("/{name}/activities/{activity_id}/refresh",
@@ -438,6 +440,9 @@ def refresh_activity(
         activity_id, "pending",
         started_at=datetime.now(timezone.utc).isoformat(),
     )
+    # The client polls /meta for this very flag, so the cached payload — which
+    # still says "not pending" — has to go before the first poll lands (#178).
+    bust_geo_cache(owner_id, name)
     background_tasks.add_task(
         _refresh_activity_job, user_info_id, owner_id, name, activity_id
     )
