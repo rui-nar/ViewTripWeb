@@ -20,7 +20,7 @@ class GatewayError(Exception):
 
 
 class BillingGateway(Protocol):
-    """The three provider operations the app needs."""
+    """The four provider operations the app needs."""
 
     def create_checkout_session(
         self, *, user_info_id: int, plan: str, email: str, customer_id: str,
@@ -30,6 +30,16 @@ class BillingGateway(Protocol):
 
     def create_portal_session(self, *, customer_id: str, return_url: str) -> dict:
         """Open the provider's billing portal. Returns ``{"url"}``."""
+
+    def create_plan_change_session(
+        self, *, customer_id: str, subscription_id: str, plan: str,
+        return_url: str,
+    ) -> dict:
+        """Move an existing subscription to another plan. Returns ``{"url"}``.
+
+        ``plan`` of ``"free"`` means cancel: there is nothing to move to, and the
+        subscription ending *is* the downgrade.
+        """
 
     def parse_webhook(self, payload: bytes, signature: str) -> dict:
         """Verify the signature and return the event dict. Raises on mismatch."""

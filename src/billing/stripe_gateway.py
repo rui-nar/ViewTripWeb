@@ -15,7 +15,7 @@ import os
 import time
 
 from src.billing.gateway import GatewayError
-from src.billing.plans import PAID_PLANS, price_lookup_key
+from src.billing.plans import FREE, PAID_PLANS, price_lookup_key
 from src.billing.webhook_events import price_id_for_plan
 from src.utils.logging import get_logger
 
@@ -160,6 +160,89 @@ class StripeGateway:
             "url": _field(session, "url") or "",
             "customer_id": str(_field(session, "customer") or customer_id or ""),
         }
+
+    def create_plan_change_session(
+        self, *, customer_id: str, subscription_id: str, plan: str,
+        return_url: str,
+    ) -> dict:
+        """Portal session opened straight on the confirm-change screen (#153).
+
+        Checkout cannot do this: in subscription mode it always *creates* a
+        subscription, which is why buying a second tier is refused (issue #163).
+        A ``subscription_update_confirm`` flow moves the existing one instead,
+        and Stripe owns everything that makes tier changes hard — the prorated
+        amount, tax, 3DS re-authentication on an upgrade, and the receipt.
+
+        Moving to ``free`` is a cancellation, not a price change: there is no
+        price to move to, so it opens the cancel flow instead. Both honour the
+        deployment's portal configuration, which
+        ``scripts/stripe_catalog.py`` provisions — including the rule that a
+        downgrade takes effect at the end of the paid period.
+        """
+        stripe = _stripe()
+        if not customer_id:
+            raise GatewayError("No billing account for this user")
+        if not subscription_id:
+            raise GatewayError("No subscription to change")
+
+        after = {"type": "redirect", "redirect": {"return_url": return_url}}
+        if plan == FREE:
+            flow_data: dict = {
+                "type": "subscription_cancel",
+                "subscription_cancel": {"subscription": subscription_id},
+                "after_completion": after,
+            }
+        else:
+            price = cloud_price_id(plan)
+            if not price:
+                raise GatewayError(f"'{plan}' is not a plan that can be bought")
+            flow_data = {
+                "type": "subscription_update_confirm",
+                "subscription_update_confirm": {
+                    "subscription": subscription_id,
+                    # The flow updates a subscription *item*, so the item id has
+                    # to be read off the subscription first — the subscription id
+                    # alone is not enough.
+                    "items": [
+                        {
+                            "id": self._first_item_id(stripe, subscription_id),
+                            "price": price,
+                            "quantity": 1,
+                        }
+                    ],
+                },
+                "after_completion": after,
+            }
+
+        try:
+            session = stripe.billing_portal.Session.create(
+                customer=customer_id, return_url=return_url, flow_data=flow_data
+            )
+        except Exception as exc:
+            _log.warning("Stripe plan-change session failed: %s", exc)
+            raise GatewayError(str(exc)) from exc
+        return {"url": _field(session, "url") or ""}
+
+    @staticmethod
+    def _first_item_id(stripe, subscription_id: str) -> str:
+        """Id of the subscription's single priced item.
+
+        Our subscriptions carry exactly one item — one tier, quantity one — and
+        the update flow refuses subscriptions with several anyway, so the first
+        is the right one.
+        """
+        try:
+            sub = stripe.Subscription.retrieve(subscription_id)
+        except Exception as exc:
+            _log.warning("Stripe subscription retrieve failed: %s", exc)
+            raise GatewayError(str(exc)) from exc
+        items = (_field(sub, "items") or {})
+        data = (_field(items, "data") or []) if items else []
+        for item in data:
+            item_id = _field(item, "id")
+            if item_id:
+                return str(item_id)
+        raise GatewayError(f"Subscription {subscription_id} has no items")
 
     def create_portal_session(self, *, customer_id: str, return_url: str) -> dict:
         stripe = _stripe()

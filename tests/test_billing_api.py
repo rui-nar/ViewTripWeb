@@ -31,6 +31,7 @@ class FakeGateway:
         self.fail = fail
         self.checkout_calls: list[dict] = []
         self.portal_calls: list[dict] = []
+        self.change_calls: list[dict] = []
         self.webhook_calls: list[tuple[bytes, str]] = []
 
     def create_checkout_session(self, **kwargs):
@@ -44,6 +45,12 @@ class FakeGateway:
         if self.fail:
             raise GatewayError("provider down")
         return {"url": "https://pay.test/portal"}
+
+    def create_plan_change_session(self, **kwargs):
+        self.change_calls.append(kwargs)
+        if self.fail:
+            raise GatewayError("provider down")
+        return {"url": "https://pay.test/change"}
 
     def parse_webhook(self, payload, signature):
         self.webhook_calls.append((payload, signature))
@@ -268,6 +275,115 @@ class TestCheckout:
     def test_provider_failure_is_a_502_not_a_500(self, client):
         set_gateway(FakeGateway(fail=True))
         assert client.post("/api/billing/checkout", json={}).status_code == 502
+
+
+class TestChangePlan:
+    """Switching tier without buying a second subscription (issue #153).
+
+    The counterpart of ``TestCheckout.test_a_live_subscriber_is_refused``: what
+    that refusal is supposed to send the user to.
+    """
+
+    @pytest.fixture
+    def subscriber(self, engine, monkeypatch):
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_2, status="active",
+                      provider_customer_id="cus_1",
+                      provider_subscription_id="sub_1",
+                      current_period_end=9e9)
+
+    def test_404_when_the_deployment_sells_nothing(self, client):
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_3})
+        assert res.status_code == 404
+
+    def test_moves_a_live_subscriber_to_the_new_tier(self, client, gateway,
+                                                     subscriber):
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_3})
+        assert res.status_code == 200
+        assert res.json()["url"] == "https://pay.test/change"
+        call = gateway.change_calls[0]
+        assert call["plan"] == TIER_3
+        assert call["customer_id"] == "cus_1"
+        assert call["subscription_id"] == "sub_1"
+
+    def test_free_is_allowed_and_means_cancel(self, client, gateway, subscriber):
+        """There is no price to move to — the subscription ending *is* the
+        downgrade, so the gateway opens the cancel flow."""
+        res = client.post("/api/billing/change-plan", json={"plan": FREE})
+        assert res.status_code == 200
+        assert gateway.change_calls[0]["plan"] == FREE
+
+    def test_an_unknown_plan_is_refused(self, client, gateway, subscriber):
+        res = client.post("/api/billing/change-plan", json={"plan": "tier_9"})
+        assert res.status_code == 422
+        assert gateway.change_calls == []
+
+    def test_the_current_plan_is_not_a_change(self, client, gateway, subscriber):
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_2})
+        assert res.status_code == 409
+        assert res.json()["code"] == "already_on_plan"
+        assert gateway.change_calls == []
+
+    def test_a_non_subscriber_is_told_to_buy_instead(self, client, gateway,
+                                                     monkeypatch):
+        """Not an error the user should see: the client reads the code and
+        retries on /checkout, which is the right route for them."""
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_3})
+        assert res.status_code == 409
+        assert res.json()["code"] == billing_mod.NOT_SUBSCRIBED
+        assert gateway.change_calls == []
+
+    def test_a_cancelled_subscriber_is_told_to_buy_instead(
+        self, client, engine, gateway, monkeypatch
+    ):
+        """Cancelled inside the paid period has nothing running to move; that
+        person goes back through checkout, exactly as TestCheckout allows."""
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_2, status="canceled",
+                      provider_customer_id="cus_1",
+                      provider_subscription_id="sub_1",
+                      current_period_end=time.time() + 86_400)
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_3})
+        assert res.status_code == 409
+        assert res.json()["code"] == billing_mod.NOT_SUBSCRIBED
+
+    def test_a_comped_account_without_a_subscription_cannot_change(
+        self, client, engine, gateway, monkeypatch
+    ):
+        """An admin comp is not something Stripe knows about — there is no
+        subscription behind it to move."""
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, admin_override_plan=TIER_3)
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_1})
+        assert res.status_code == 409
+        assert res.json()["code"] == billing_mod.NOT_SUBSCRIBED
+
+    def test_return_path_is_honoured(self, client, gateway, subscriber,
+                                     monkeypatch):
+        monkeypatch.setattr(billing_mod, "_FRONTEND_ORIGIN", "https://app.test")
+        client.post("/api/billing/change-plan",
+                    json={"plan": TIER_3, "return_path": "/settings/plan"})
+        assert gateway.change_calls[0]["return_url"] == \
+            "https://app.test/settings/plan"
+
+    def test_absolute_return_url_is_refused(self, client, gateway, subscriber,
+                                            monkeypatch):
+        monkeypatch.setattr(billing_mod, "_FRONTEND_ORIGIN", "https://app.test")
+        client.post("/api/billing/change-plan",
+                    json={"plan": TIER_3, "return_path": "https://evil.test"})
+        assert gateway.change_calls[0]["return_url"] == \
+            "https://app.test/settings"
+
+    def test_provider_failure_is_a_502_not_a_500(self, client, engine,
+                                                 monkeypatch):
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_2, status="active",
+                      provider_customer_id="cus_1",
+                      provider_subscription_id="sub_1")
+        set_gateway(FakeGateway(fail=True))
+        res = client.post("/api/billing/change-plan", json={"plan": TIER_3})
+        assert res.status_code == 502
 
 
 class TestPortal:
