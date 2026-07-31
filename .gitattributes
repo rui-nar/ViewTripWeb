@@ -6,3 +6,11 @@
 flutter_client/**/generated_plugin_registrant.*    text eol=lf
 flutter_client/**/generated_plugins.cmake          text eol=lf
 flutter_client/**/GeneratedPluginRegistrant.swift  text eol=lf
+
+# Shell scripts run inside Linux containers (issue #185). core.autocrlf=true
+# checks them out with CRLF on Windows, and deploy.ps1 builds the :validation
+# image from the working tree — so a CRLF `#!/bin/sh\r` shebang gets baked in
+# and the kernel looks for an interpreter literally named "/bin/sh\r". The
+# container then dies with the very misleading
+# "exec /worker-entrypoint.sh: no such file or directory".
+*.sh                                               text eol=lf
