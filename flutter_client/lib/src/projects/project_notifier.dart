@@ -37,6 +37,60 @@ import 'project_service.dart';
 int progressiveGeoBatchSize(int activityCount) =>
     activityCount <= 8 ? 1 : (activityCount / 8).ceil();
 
+/// Waits between the automatic retries of a failed project fetch.
+///
+/// A slow server or a stalled connection is transient far more often than not —
+/// a cold load of a large trip can outlast even a generous timeout, and the
+/// server finishes and caches the result regardless, so the next attempt lands
+/// on warm data. Retrying is therefore the right default, and the only one the
+/// user should ever have to take: the panel stays in its loading state while
+/// this runs (issue #178).
+///
+/// Bounded on purpose: three attempts, then the caller surfaces a plain-language
+/// error. An unbounded retry would hammer an already-struggling server and never
+/// tell the user anything was wrong.
+const kFetchRetryBackoff = [Duration(seconds: 2), Duration(seconds: 6)];
+
+/// Whether [e] is worth another attempt.
+///
+/// A 4xx is the server's considered answer — "you can't see this trip" doesn't
+/// become truer after 8 s of backoff, it just reaches the user 8 s later. 408
+/// and 429 are the exceptions: they mean "ask again". Everything else here is a
+/// transport failure (timeout, dropped socket, truncated body) and is exactly
+/// what retrying exists for.
+@visibleForTesting
+bool isRetriableFetchError(Object e) {
+  if (e is ApiException) {
+    return e.statusCode >= 500 || e.statusCode == 408 || e.statusCode == 429;
+  }
+  return true;
+}
+
+/// Runs [operation], retrying it after each delay in [backoff] until it
+/// succeeds, the delays run out (the last failure is rethrown), the failure
+/// isn't worth retrying, or [abort] returns true between attempts (the user
+/// navigated away).
+///
+/// Catches Object, not Exception: a decode failure throws an Error
+/// (RangeError/TypeError), and that is exactly the kind of transient corruption
+/// a truncated response produces — letting it escape uncaught would be worse
+/// than retrying it.
+Future<T> retryFetch<T>(
+  Future<T> Function() operation, {
+  List<Duration> backoff = kFetchRetryBackoff,
+  bool Function()? abort,
+}) async {
+  for (var attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } on Object catch (e) {
+      if (attempt >= backoff.length || !isRetriableFetchError(e)) rethrow;
+      await Future<void>.delayed(backoff[attempt]);
+      if (abort?.call() ?? false) rethrow;
+    }
+  }
+}
+
 /// Calendar day-of-trip numbering for the hero, matching the activity-panel
 /// headers: day N = whole days from the trip start (gaps counted), total = span
 /// to the last day present. Sort-order independent (uses min/max, not index).
@@ -476,6 +530,11 @@ class ProjectNotifier extends ChangeNotifier
   // name is overwritten with the server's returned name during Phase 1).
   ProjectRef? _loadKey;
 
+  /// Retry delays for the initial fetch pair — overridable so tests don't wait
+  /// real seconds, like refreshActivity's pollInterval/pollTimeout.
+  @visibleForTesting
+  List<Duration> loadRetryBackoff = kFetchRetryBackoff;
+
   Timer? _photoPollingTimer;
 
   Future<void> load(ProjectRef ref) async {
@@ -512,9 +571,17 @@ class ProjectNotifier extends ChangeNotifier
       // activity's geometry (issue #29) — skip the parallel low-res fetch
       // (it would be discarded) and build low-res geo client-side below,
       // once decrypted activities/items are available.
-      final detailsFuture = _service.getDetailsMeta(ref);
-      final lowResFuture =
-          encryption.isUnlocked ? null : _service.getLowResGeo(ref);
+      //
+      // Each is retried on its own (issue #178): both start immediately, so the
+      // parallelism is unchanged, but a slow /meta no longer re-fetches the
+      // low-res geo that already arrived. isLoading stays true throughout, so
+      // the panel shows its spinner while the retries run rather than an error.
+      final detailsFuture = retryFetch(() => _service.getDetailsMeta(ref),
+          backoff: loadRetryBackoff, abort: () => _loadKey != ref);
+      final lowResFuture = encryption.isUnlocked
+          ? null
+          : retryFetch(() => _service.getLowResGeo(ref),
+              backoff: loadRetryBackoff, abort: () => _loadKey != ref);
       // Both futures need a listener from the moment they're created: if
       // lowResFuture rejects first, the catch below returns before
       // detailsFuture is ever awaited, leaving it truly unobserved — a later
@@ -613,17 +680,26 @@ class ProjectNotifier extends ChangeNotifier
       if (loadOwnerExtras) {
         await Future.wait([_loadSyncMeta(ref), _loadShareInfo(ref)]);
       }
-    } on Exception catch (e) {
-      error = _msg(e);
-      if (e is ApiException) loadErrorStatus = e.statusCode;
+      // Catch Object, not just Exception: retryFetch rethrows whatever the last
+      // attempt threw, and a truncated response decodes into an Error
+      // (RangeError/TypeError) that would otherwise escape this handler.
+    } on Object catch (e) {
+      if (_loadKey == ref) {
+        error = _loadErrorMessage(e);
+        if (e is ApiException) loadErrorStatus = e.statusCode;
+      }
     } finally {
       isLoading = false;
       notifyListeners();   // map appears here with low-res straight lines
     }
 
-    // Phase 2: full-res GeoJSON + elevation data in background.
-    _loadFullGeoProgressively(ref);
-    _loadElevationData(ref);
+    // Phase 2: full-res GeoJSON, then elevation data — chained rather than
+    // fired together. Both are whole-project loads server-side (the elevation
+    // one fetches the ~12 MB full dict), so racing them made a cold open ask
+    // for the same project three times at once, each slowing the others down
+    // into the timeout that produced issue #178.
+    unawaited(_loadFullGeoProgressively(ref)
+        .whenComplete(() => _loadElevationData(ref)));
     // Background sync check — fires only for active trips with auto-sync on.
     // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
     if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
@@ -1946,6 +2022,23 @@ class ProjectNotifier extends ChangeNotifier
     final s = e.toString();
     final m = RegExp(r'"detail"\s*:\s*"([^"]+)"').firstMatch(s);
     return m?.group(1) ?? s.replaceFirst('Exception: ', '');
+  }
+
+  /// A message for a project load that failed even after its retries.
+  ///
+  /// [_msg] is right for the action-triggered failures it was written for — it
+  /// unwraps the server's `detail` — but a raw
+  /// `TimeoutException after 0:00:30.000000: Future not completed` sitting in
+  /// the middle of the activity panel is a stack-trace fragment, not a message
+  /// (issue #178). Anything the server actually explained is still passed
+  /// through verbatim; only the transport failures get plain language.
+  String _loadErrorMessage(Object e) {
+    if (e is ApiException) return _msg(e);
+    if (e is TimeoutException) {
+      return 'The server took too long to answer. It may still be catching up '
+          '— reopen the trip in a moment.';
+    }
+    return "Couldn't load this trip. Check your connection and reopen it.";
   }
 
 }

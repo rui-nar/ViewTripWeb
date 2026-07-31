@@ -10,8 +10,11 @@ import '../map/polyline_decoder.dart';
 class ProjectService {
   /// Fetches the full project dict for [ref] including elevation_profile data.
   /// GET /api/projects/{name}
+  ///
+  /// The heaviest endpoint in the app (~12 MB on a large trip), so it gets the
+  /// most generous budget rather than the 30 s default it used to inherit.
   Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
-    final data = await api.get(ref.path());
+    final data = await api.get(ref.path(), timeout: const Duration(minutes: 2));
     return data as Map<String, dynamic>;
   }
 
@@ -19,10 +22,19 @@ class ProjectService {
   /// Typically 10-15× smaller than getDetails(); use for initial load and
   /// reloads that don't need the elevation chart to update.
   /// GET /api/projects/{name}/meta
+  ///
+  /// 60 s, not the 30 s default: a cold load of a large project measured 11-13 s
+  /// server-side before a byte of the body moved, so the default left almost no
+  /// headroom for the transfer — see issue #178.
   Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
-    final data = await api.get(ref.path('/meta'));
+    final data = await api.get(ref.path('/meta'), timeout: _kLoadTimeout);
     return data as Map<String, dynamic>;
   }
+
+  /// Budget for the two requests the activity panel blocks on (see
+  /// getDetailsMeta and getLowResGeo). ProjectNotifier.load() retries them, so
+  /// this is the wait before a *retry*, not before a visible failure.
+  static const _kLoadTimeout = Duration(seconds: 60);
 
   /// Fetches the GeoJSON FeatureCollection for [ref].
   /// GET /api/geo/project?name={name}
@@ -85,8 +97,9 @@ class ProjectService {
   /// GET /api/geo/project/low-res?name={name}
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async {
     final encoded = Uri.encodeComponent(ref.name);
-    final data =
-        await api.get(ref.withOwner('/api/geo/project/low-res?name=$encoded'));
+    final data = await api.get(
+        ref.withOwner('/api/geo/project/low-res?name=$encoded'),
+        timeout: _kLoadTimeout);
     return data as Map<String, dynamic>;
   }
 

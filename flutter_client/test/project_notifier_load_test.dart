@@ -39,7 +39,10 @@ void main() {
   test(
       'load() does not leave an orphaned unhandled future when the '
       'first-awaited request fails before the second one settles', () async {
-    final notifier = ProjectNotifier(_OrphanRiskService());
+    // No retry delays: load() now retries a failed fetch (issue #178), and this
+    // test is about the orphaned-future race, not about waiting out a backoff.
+    final notifier = ProjectNotifier(_OrphanRiskService())
+      ..loadRetryBackoff = const [];
 
     await notifier.load(const ProjectRef(name: 'Trip'));
     expect(notifier.error, isNotNull);
