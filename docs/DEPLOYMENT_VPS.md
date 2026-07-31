@@ -88,20 +88,29 @@ The API serves fine on its own: with `REDIS_URL` unset, every background job
 process via FastAPI `BackgroundTasks`. That is the original behaviour and a
 reasonable setup for this instance's load.
 
-Adding the `redis` + `worker` services buys two things:
+Adding the `redis` + worker services buys two things:
 
 - **Durability.** A job survives an API restart. Previously a restart mid-resolve
   left a segment on `route_status="pending"` forever, and the only recovery was
   client-side — it ran when someone happened to reopen the project.
-- **A real concurrency bound.** Overpass rate-limits per IP. An RQ worker runs
-  one job at a time, so the `resolve` queue's replica count *is* the parallelism.
-  Raising it is a decision about load on a free public service, not a throughput
-  dial; 2 is a sensible ceiling.
+- **A real concurrency bound.** An RQ worker runs one job at a time, so the
+  number of processes listening on a queue *is* that queue's parallelism.
+
+The bounds are not the same for every queue, which is why there are two worker
+services rather than one scaled to two replicas (issue #188): `resolve` is
+capped at 2 because Overpass rate-limits per IP and it is a free public service,
+while `poster` is capped at **1** because two concurrent A0 renders are what
+takes a small host out on memory. Identical replicas can only give every queue
+the same bound, so they cannot express this.
+
+`QUEUE_MAX_CONCURRENCY` in `src/jobs/queue.py` is the source of truth for those
+numbers, and `tests/test_worker_topology.py` fails if the compose example stops
+matching it. Change the map and the compose file together.
 
 See `docker-compose.yml.example` for the service definitions. Three things about
 it are easy to get wrong:
 
-- The worker **must mount the same host paths** as the API container. The
+- The workers **must mount the same host paths** as the API container. The
   database is a SQLite file, so "sharing" it means sharing the volume, on one
   host. Two engines writing one file is fine — WAL and a 30 s `busy_timeout` are
   set on every connection (`models/db.py`) — but only on the same machine.
@@ -112,12 +121,12 @@ it are easy to get wrong:
   port — and an unauthenticated Redis reachable from the internet is a
   well-known way to lose a host.
 
-The worker sets `VIEWTRIP_ROLE=worker`, which stops it running migrations, the
+The workers set `VIEWTRIP_ROLE=worker`, which stops them running migrations, the
 admin seed, and the scheduled jobs. Only the API container owns those: two
 containers racing `alembic upgrade head` at boot, or each taking its own nightly
 backup and 60 s WAL checkpoint, is the failure that guards against.
 
-Keep the `worker` service on the **same image tag** as the API. They share one
+Keep both worker services on the **same image tag** as the API. They share one
 image and only the API runs migrations, so a worker left on an older tag would
 run stale job code against a schema it does not know about.
 
@@ -126,7 +135,7 @@ then runs `docker compose down && pull && up -d`, which is service-agnostic.
 Adding the services to each host's compose file and the keys to its `.env` is
 the whole deployment change.
 
-**Rollback** is unsetting `REDIS_URL` and removing the worker service. No image
+**Rollback** is unsetting `REDIS_URL` and removing the worker services. No image
 rebuild — jobs simply run in-process again.
 
 If you scrape `/metrics`, also set `PROMETHEUS_MULTIPROC_DIR` to a directory

@@ -34,6 +34,23 @@ QUEUE_DEFAULT = "default"   # share tiles, stats: short and cheap
 
 ALL_QUEUES = (QUEUE_RESOLVE, QUEUE_POSTER, QUEUE_DEFAULT)
 
+# How many jobs from each queue may run at once. An RQ worker takes one job at a
+# time, so a queue's bound *is* the number of worker processes listening on it —
+# which makes this a property of the deployment topology, not of any code path
+# here. It lives in this module anyway because the numbers are properties of the
+# jobs, not of a host: 2 on `resolve` is the Overpass politeness bound, and 1 on
+# `poster` is the memory footprint of an A0 render.
+#
+# Nothing at runtime reads this — a worker cannot know how many siblings it has.
+# `tests/test_worker_topology.py` checks the shipped compose file against it, so
+# that changing one without the other fails CI instead of silently doubling the
+# load on a free public API (issue #188).
+QUEUE_MAX_CONCURRENCY = {
+    QUEUE_RESOLVE: 2,
+    QUEUE_POSTER: 1,
+    QUEUE_DEFAULT: 2,
+}
+
 # Generous: a rail resolve makes several Overpass queries, each with a 45 s HTTP
 # timeout. Well past the point where the client has stopped polling, but the
 # result is still worth persisting for the next page load.
