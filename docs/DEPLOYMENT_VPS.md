@@ -198,6 +198,27 @@ existing NAS validation flow — unchanged). `-Target Prod`:
 .\deploy.ps1 -Target Prod
 ```
 
+### Alternative: cutting `:validation` from CI instead of a Windows checkout
+
+`deploy.ps1 -Target Validation` builds the image from the local working tree,
+which is how CRLF line endings on a Windows checkout of a `*.sh` file baked a
+broken `#!/bin/sh\r` shebang into the image and crash-looped the worker
+containers (issue #190) — `.gitattributes` pins shell scripts to LF, but that
+only takes effect on a fresh checkout of the affected path, not retroactively.
+
+`docker-build.yml` also builds `ghcr.io/rui-nar/viewtripweb:validation` from a
+force-pushed `validation` git tag, entirely on `ubuntu-latest` — no Windows
+working tree involved, so the CRLF failure mode can't happen:
+
+```bash
+git tag -f validation <commit-or-branch>
+git push origin validation --force
+```
+
+Then on the validation host: `docker compose pull && docker compose up -d`.
+This path only ever produces `:validation` — it never touches `:latest` or a
+`:<sha>` tag, which stay reserved for real `v*` releases.
+
 ## Open items
 
 - [ ] Off-site backups independent of OVH (the VPS's datacenter, Strasbourg,
