@@ -20,6 +20,8 @@
 //  - the poll gives up at its own deadline, which is what bounds a job orphaned
 //    by a server restart.
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
@@ -263,6 +265,45 @@ void main() {
           pollInterval: _fast, pollTimeout: const Duration(seconds: 5));
 
       expect(n.error, 'Project not found');
+    });
+
+    test(
+        'a trigger timeout is a sentence, not "Future not completed" '
+        '(issue #190)', () async {
+      final service = _PollService(
+        metaSequence: const [],
+        triggerError:
+            TimeoutException('after 0:00:30.000000', const Duration(seconds: 30)),
+      );
+      final n = _notifier(service);
+
+      await n.refreshActivity(111,
+          pollInterval: _fast, pollTimeout: const Duration(seconds: 5));
+
+      expect(n.error, isNotNull);
+      expect(n.error, isNot(contains('TimeoutException')));
+      expect(n.error, isNot(contains('Future not completed')));
+      expect(service.metaCalls, 0);
+    });
+
+    test(
+        'a post-verdict details timeout is a sentence, not "Future not '
+        'completed" (issue #190)', () async {
+      final service = _PollService(
+        metaSequence: [
+          [_activity(refreshStatus: 'resolved')],
+        ],
+        detailsError:
+            TimeoutException('after 0:00:30.000000', const Duration(seconds: 30)),
+      );
+      final n = _notifier(service);
+
+      await n.refreshActivity(111,
+          pollInterval: _fast, pollTimeout: const Duration(seconds: 5));
+
+      expect(n.error, isNotNull);
+      expect(n.error, isNot(contains('TimeoutException')));
+      expect(n.error, isNot(contains('Future not completed')));
     });
 
     test('the poll gives up once its own deadline passes', () async {

@@ -725,7 +725,7 @@ class ProjectNotifier extends ChangeNotifier
         _buildFullTrack();
         isGeoLoaded = true;
       } catch (e) {
-        error = e is Exception ? _msg(e) : e.toString();
+        error = _loadErrorMessage(e);
       }
       notifyListeners();
       return;
@@ -747,7 +747,7 @@ class ProjectNotifier extends ChangeNotifier
         // unhandled async exception and never surface here.
         if (_loadKey != ref) return;
         if (attempt == 1) {
-          error = 'Could not load full-resolution tracks: $e';
+          error = _loadErrorMessage(e);
           isGeoLoaded = false;
           notifyListeners();
           return;
@@ -825,7 +825,7 @@ class ProjectNotifier extends ChangeNotifier
     } on Object catch (e) {
       // Non-fatal — low-res map is still shown. Catch Object so an Error in the
       // apply path can't escape as a recurring unhandled exception.
-      error = e is Exception ? _msg(e) : e.toString();
+      error = _loadErrorMessage(e);
       notifyListeners();
     }
   }
@@ -1511,7 +1511,7 @@ class ProjectNotifier extends ChangeNotifier
     try {
       await _service.refreshActivity(ref, activityId);
     } on Exception catch (e) {
-      error = _msg(e);
+      error = _loadErrorMessage(e);
       notifyListeners();
       return;
     }
@@ -1584,7 +1584,7 @@ class ProjectNotifier extends ChangeNotifier
     try {
       details = await _service.getDetails(ref);
     } on Exception catch (e) {
-      error = _msg(e);
+      error = _loadErrorMessage(e);
       notifyListeners();
       return;
     }
@@ -2024,20 +2024,23 @@ class ProjectNotifier extends ChangeNotifier
     return m?.group(1) ?? s.replaceFirst('Exception: ', '');
   }
 
-  /// A message for a project load that failed even after its retries.
+  /// A message for a background project fetch that failed — the initial load,
+  /// the full-res geo upgrade, or an activity re-fetch (issues #178, #190).
   ///
   /// [_msg] is right for the action-triggered failures it was written for — it
   /// unwraps the server's `detail` — but a raw
   /// `TimeoutException after 0:00:30.000000: Future not completed` sitting in
-  /// the middle of the activity panel is a stack-trace fragment, not a message
-  /// (issue #178). Anything the server actually explained is still passed
-  /// through verbatim; only the transport failures get plain language.
+  /// the middle of the activity panel is a stack-trace fragment, not a message.
+  /// Anything the server actually explained is still passed through verbatim;
+  /// only the transport failures get plain language.
   String _loadErrorMessage(Object e) {
-    if (e is ApiException) return _msg(e);
+    // Checked before the general Exception case below: TimeoutException
+    // implements Exception, and its toString has no `detail` to unwrap.
     if (e is TimeoutException) {
       return 'The server took too long to answer. It may still be catching up '
           '— reopen the trip in a moment.';
     }
+    if (e is Exception) return _msg(e);
     return "Couldn't load this trip. Check your connection and reopen it.";
   }
 
