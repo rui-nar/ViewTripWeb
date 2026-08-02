@@ -49,12 +49,14 @@ class _FlakyService extends ProjectService {
   _FlakyService({
     this.metaFailures = 0,
     this.lowResFailures = 0,
+    this.geoFailures = 0,
     this.failOnly,
     Object? error,
   }) : error = error ?? TimeoutException('after 0:00:60.000000', const Duration(seconds: 60));
 
   final int metaFailures;
   final int lowResFailures;
+  final int geoFailures;
 
   /// Project name to fail for; null fails for every project.
   final String? failOnly;
@@ -86,6 +88,7 @@ class _FlakyService extends ProjectService {
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef ref) async {
     geoCalls++;
+    if (_shouldFail(ref, geoCalls, geoFailures)) throw error;
     events.add('geo:start');
     await Future<void>.delayed(const Duration(milliseconds: 5));
     events.add('geo:done');
@@ -153,6 +156,29 @@ void main() {
     expect(notifier.error, isNot(contains('TimeoutException')));
     expect(notifier.error, isNot(contains('Future not completed')));
     expect(notifier.error, contains('reopen'));
+  });
+
+  test(
+      'a persistent full-res geo timeout is a sentence, not an exception '
+      '(issue #190)', () async {
+    // Opening a trip: phase 1 (meta + low-res) succeeds, so the map renders,
+    // but phase 2 (full-res geo) times out on both attempts. That background
+    // failure used to write the raw `TimeoutException ...: Future not
+    // completed` into `error`, which the activity panel shows verbatim.
+    final service = _FlakyService(geoFailures: 99);
+    final notifier = _notifier(service);
+    final done = Completer<void>();
+    notifier.addListener(() {
+      if (notifier.error != null && !done.isCompleted) done.complete();
+    });
+
+    await notifier.load(_ref);
+    await done.future.timeout(const Duration(seconds: 5));
+
+    expect(notifier.error, isNotNull);
+    expect(notifier.error, isNot(contains('TimeoutException')));
+    expect(notifier.error, isNot(contains('Future not completed')));
+    expect(notifier.isGeoLoaded, isFalse);
   });
 
   test('a refusal reaches the user verbatim, and immediately', () async {
