@@ -14,12 +14,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+import api.strava as strava_module
 import models.db as db_module
 from api.deps import get_current_user
 from api.router import app
 from models.billing import Subscription
 from models.project_db import DBMemory, DBProject, DBProjectMember
-from models.user import UserInfo
+from models.user import StravaToken, UserInfo
 from src.billing.plans import TIER_1, TIER_3
 
 
@@ -76,6 +77,28 @@ def _add_journal(client, date, project="Trip 1"):
         "project_name": project, "date": date, "geo_mode": "custom",
         "description": "notes", "lat": 1.0, "lon": 2.0,
     })
+
+
+def _raw_strava_activity(act_id, start):
+    return {
+        "id": act_id, "name": "Ride", "type": "Ride",
+        "distance": 1000.0, "moving_time": 100, "elapsed_time": 120,
+        "total_elevation_gain": 0.0,
+        "start_date": start, "start_date_local": start,
+    }
+
+
+def _seed_strava_token(engine, user_id=1):
+    with Session(engine) as sess:
+        sess.add(StravaToken(user_info_id=user_id, access_token="tok",
+                             refresh_token="ref", expires_at=9e9))
+        sess.commit()
+
+
+class _FakeStravaClient:
+    """Stands in for StravaAPI: no Strava config needed, and its token_data
+    matches the seeded token so _save_refreshed_token is a no-op."""
+    token_data = {"access_token": "tok", "refresh_token": "ref", "expires_at": 9e9}
 
 
 class TestMemoryDates:
@@ -162,6 +185,57 @@ class TestOtherDatedThings:
         res = client.put("/api/projects/Trip 1",
                          json={"trip_start": None, "trip_end": None})
         assert res.status_code == 200
+
+
+class TestStravaImport:
+    """Both import paths — the manual pick-and-add screen and the
+    fetch-everything sync — must be checked identically. #192: the sync
+    endpoint fetched and added every Strava activity without ever calling
+    ensure_trip_days_quota, so a free-plan account could blow past the
+    trip-days limit through it even with enforcement on."""
+
+    def test_manual_import_is_limited_too(self, env, monkeypatch):
+        client, engine = env
+        _enforcing(monkeypatch)
+        _seed_memory(engine, "2026-06-01")
+        res = client.post("/api/projects/Trip 1/activities", json={
+            "activities": [_raw_strava_activity(1, "2026-07-01T10:00:00Z")],
+        })
+        assert res.status_code == 402
+        assert res.json()["resource"] == "trip_days"
+
+    def test_full_sync_is_limited_too(self, env, monkeypatch):
+        client, engine = env
+        _enforcing(monkeypatch)
+        _seed_memory(engine, "2026-06-01")
+        _seed_strava_token(engine)
+        monkeypatch.setattr(strava_module, "_strava_client_for_token",
+                            lambda token_row: _FakeStravaClient())
+        monkeypatch.setattr(
+            strava_module, "_fetch_all_strava",
+            lambda client, after=None, before=None: [
+                _raw_strava_activity(1, "2026-07-01T10:00:00Z"),
+            ],
+        )
+        res = client.post("/api/projects/Trip 1/strava/sync")
+        assert res.status_code == 402
+        assert res.json()["resource"] == "trip_days"
+
+    def test_full_sync_within_the_limit_still_works(self, env, monkeypatch):
+        client, engine = env
+        _enforcing(monkeypatch)
+        _seed_strava_token(engine)
+        monkeypatch.setattr(strava_module, "_strava_client_for_token",
+                            lambda token_row: _FakeStravaClient())
+        monkeypatch.setattr(
+            strava_module, "_fetch_all_strava",
+            lambda client, after=None, before=None: [
+                _raw_strava_activity(1, "2026-06-01T10:00:00Z"),
+            ],
+        )
+        res = client.post("/api/projects/Trip 1/strava/sync")
+        assert res.status_code == 200
+        assert res.json()["added"] == 1
 
 
 class TestAlreadyTooLong:
