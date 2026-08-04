@@ -1,9 +1,15 @@
 import 'package:flutter/foundation.dart';
 
 import '../api/client.dart';
+import '../billing/billing_service.dart';
 import '../core/project_ref.dart';
 
 class StravaImportNotifier extends ChangeNotifier {
+  final ApiClient _api;
+
+  // apiClient is injectable so tests can supply one backed by a MockClient.
+  StravaImportNotifier({ApiClient? apiClient}) : _api = apiClient ?? api;
+
   List<Map<String, dynamic>> activities = [];
   final Set<int> selectedIds = {};
   DateTime? startDate;
@@ -15,6 +21,18 @@ class StravaImportNotifier extends ChangeNotifier {
   bool isLoadingMore = false;
   String? error;
   bool stravaNotConnected = false;
+
+  /// A plan-limit refusal from the last [addSelected] call, until consumed.
+  /// Separate from [error] (issue #192): hitting a quota is not a failure the
+  /// user caused, and the screen should offer an upgrade, not a raw exception.
+  QuotaError? quotaError;
+
+  /// Take the pending refusal, clearing it — one 402, one prompt.
+  QuotaError? takeQuotaError() {
+    final quota = quotaError;
+    quotaError = null;
+    return quota;
+  }
 
   /// Count of selected activities not yet in the project.
   /// Pre-computed so the bottom bar never iterates the full list on each tap.
@@ -158,7 +176,7 @@ class StravaImportNotifier extends ChangeNotifier {
             '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
         .join('&');
 
-    return await api.get('/api/strava/activities?$query') as Map<String, dynamic>;
+    return await _api.get('/api/strava/activities?$query') as Map<String, dynamic>;
   }
 
   List<Map<String, dynamic>> _parseActivities(Map<String, dynamic> envelope) =>
@@ -247,15 +265,24 @@ class StravaImportNotifier extends ChangeNotifier {
 
     isLoading = true;
     error = null;
+    quotaError = null;
     notifyListeners();
 
     try {
-      final result = await api.post(
+      final result = await _api.post(
         ref.path('/activities'),
         {'activities': toAdd},
       ) as Map<String, dynamic>;
       pendingEnrichment = (result['pending_enrichment'] as int?) ?? 0;
       return (result['added'] as int?) ?? 0;
+    } on ApiException catch (e) {
+      final quota = QuotaError.fromApiException(e);
+      if (quota != null) {
+        quotaError = quota;
+      } else {
+        error = e.toString().replaceFirst('Exception: ', '');
+      }
+      return 0;
     } on Exception catch (e) {
       error = e.toString().replaceFirst('Exception: ', '');
       return 0;

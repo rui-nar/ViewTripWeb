@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../billing/upgrade_sheet.dart';
 import '../core/project_ref.dart';
 import 'sync_import_notifier.dart';
 
@@ -15,11 +16,18 @@ class SyncImportDialog extends StatefulWidget {
 
 class _SyncImportDialogState extends State<SyncImportDialog> {
   Future<void> _import() async {
+    final hostContext = Navigator.of(context, rootNavigator: true).context;
     final notifier = context.read<SyncImportNotifier>();
     final added = await notifier.importSelected(widget.projectRef);
     if (!mounted) return;
+    final quota = notifier.takeQuotaError();
     if (notifier.error == null || added > 0) {
       Navigator.of(context).pop();
+    }
+    if (quota != null && hostContext.mounted) {
+      // A plan limit, not a failure — offer the upgrade instead of an error
+      // (issue #192).
+      await maybeShowUpgradeSheet(hostContext, quota);
     }
   }
 

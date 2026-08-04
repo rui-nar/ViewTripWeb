@@ -2,9 +2,11 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
+import '../billing/billing_service.dart';
 import '../core/project_ref.dart';
 
 class SyncImportNotifier extends ChangeNotifier {
+  final ApiClient _api;
   final List<Map<String, dynamic>> stravaActivities;
   final List<Map<String, dynamic>> psSteps;
 
@@ -16,10 +18,24 @@ class SyncImportNotifier extends ChangeNotifier {
   int importTotal = 0;
   String? error;
 
+  /// A plan-limit refusal from the last [importSelected] call, until consumed.
+  /// Separate from [error] (issue #192): hitting a quota is not a failure the
+  /// user caused, and the dialog should offer an upgrade, not a raw exception.
+  QuotaError? quotaError;
+
+  /// Take the pending refusal, clearing it — one 402, one prompt.
+  QuotaError? takeQuotaError() {
+    final quota = quotaError;
+    quotaError = null;
+    return quota;
+  }
+
+  // apiClient is injectable so tests can supply one backed by a MockClient.
   SyncImportNotifier({
     required this.stravaActivities,
     required this.psSteps,
-  }) {
+    ApiClient? apiClient,
+  }) : _api = apiClient ?? api {
     // Pre-select everything
     for (final a in stravaActivities) {
       final id = a['id'];
@@ -97,6 +113,7 @@ class SyncImportNotifier extends ChangeNotifier {
     importedCount = 0;
     importTotal = stravaToImport.length + psToImport.length;
     error = null;
+    quotaError = null;
     notifyListeners();
 
     int created = 0;
@@ -104,11 +121,18 @@ class SyncImportNotifier extends ChangeNotifier {
       // ── Strava: one batch POST ─────────────────────────────────────────
       if (stravaToImport.isNotEmpty) {
         try {
-          final result = await api.post(
+          final result = await _api.post(
             ref.path('/activities'),
             {'activities': stravaToImport},
           ) as Map<String, dynamic>;
           created += (result['added'] as int?) ?? 0;
+        } on ApiException catch (e) {
+          final quota = QuotaError.fromApiException(e);
+          if (quota != null) {
+            quotaError = quota;
+          } else {
+            error = e.toString().replaceFirst('Exception: ', '');
+          }
         } on Exception catch (e) {
           error = e.toString().replaceFirst('Exception: ', '');
         }
@@ -133,7 +157,7 @@ class SyncImportNotifier extends ChangeNotifier {
         final lon = (step['lon'] as num?)?.toDouble();
 
         try {
-          final result = await api.post(ref.withOwner('/api/memories/'), {
+          final result = await _api.post(ref.withOwner('/api/memories/'), {
             'project_name': ref.name,
             'date': date,
             'geo_mode': (lat != null && lon != null) ? 'custom' : 'start_of_day',
@@ -173,7 +197,7 @@ class SyncImportNotifier extends ChangeNotifier {
   }
 
   Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
-    final token = api.tokenForUpload;
+    final token = _api.tokenForUpload;
     if (token == null) return;
     final photoResp = await http.get(Uri.parse(photoUrl));
     if (photoResp.statusCode < 200 || photoResp.statusCode >= 300) return;
@@ -181,7 +205,7 @@ class SyncImportNotifier extends ChangeNotifier {
     final filename =
         Uri.parse(photoUrl).pathSegments.lastOrNull ?? 'photo.jpg';
     final uploadUri =
-        Uri.parse('${api.baseUrl}/api/memories/$memId/photos');
+        Uri.parse('${_api.baseUrl}/api/memories/$memId/photos');
     final request = http.MultipartRequest('POST', uploadUri)
       ..headers['Authorization'] = 'Bearer $token'
       ..files

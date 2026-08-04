@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../billing/upgrade_sheet.dart';
 import '../core/project_ref.dart';
 import 'project_notifier.dart';
 import 'strava_import_notifier.dart';
@@ -98,6 +99,13 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     final notifier = ctx.read<StravaImportNotifier>();
     final added = await notifier.addSelected(widget.projectRef);
     if (!mounted) return;
+    final quota = notifier.takeQuotaError();
+    if (quota != null) {
+      // A plan limit, not a failure — offer the upgrade instead of an error
+      // (issue #192). The screen stays open so the selection isn't lost.
+      await maybeShowUpgradeSheet(ctx, quota);
+      return;
+    }
     if (notifier.error == null) {
       // Reload the project so the newly-added activities appear immediately
       // in the activity list when we pop back to AppScreen.
