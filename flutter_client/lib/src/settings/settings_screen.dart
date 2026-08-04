@@ -386,7 +386,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        leading: BackButton(onPressed: () => context.pop()),
+        // A checkout redirect lands here as a fresh navigation (issue #192),
+        // so there is nothing to pop back to — fall back to the app's home
+        // rather than let the arrow silently do nothing.
+        leading: BackButton(
+          onPressed: () => context.canPop() ? context.pop() : context.go('/'),
+        ),
         title: const Text('Settings'),
       ),
       body: SingleChildScrollView(

@@ -41,18 +41,48 @@ class _FakeBilling implements BillingService {
 
 Future<void> _pump(
   WidgetTester tester,
-  _FakeBilling billing, {
+  BillingService billing, {
   List<String>? opened,
+  Uri? currentUri,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
       body: BillingSection(
         service: billing,
         launcher: (url) async => opened?.add(url),
+        currentUri: currentUri,
+        retryDelay: Duration.zero,
       ),
     ),
   ));
   await tester.pumpAndSettle();
+}
+
+/// Returns each entry of [payloads] in turn, repeating the last one once
+/// exhausted — for simulating a webhook that lands a few calls in.
+class _SequenceBilling implements BillingService {
+  final List<Map<String, dynamic>> payloads;
+  int calls = 0;
+
+  _SequenceBilling(this.payloads);
+
+  @override
+  Future<BillingStatus> status() async {
+    final payload = payloads[calls < payloads.length ? calls : payloads.length - 1];
+    calls++;
+    return BillingStatus.fromJson(payload);
+  }
+
+  @override
+  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async =>
+      'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = '/settings'}) async =>
+      'https://pay.test/portal';
+
+  @override
+  Future<List<PlanInfo>> plans() async => const [];
 }
 
 void main() {
@@ -157,6 +187,61 @@ void main() {
     testWidgets('flags a comped account', (tester) async {
       await _pump(tester, _FakeBilling({...cloud, 'admin_override': true}));
       expect(find.text('Granted'), findsOneWidget);
+    });
+  });
+
+  group('returning from checkout (issue #192)', () {
+    final free = {
+      'billing_enabled': true,
+      'plan': 'free',
+      'plan_name': 'Free',
+      'status': 'none',
+      'limits': {'max_projects': 1, 'max_storage_bytes': 1, 'max_trip_days': 1},
+      'usage': {'projects': 0, 'storage_bytes': 0},
+    };
+    final paid = {
+      'billing_enabled': true,
+      'plan': 'tier_1',
+      'plan_name': 'Tier 1',
+      'status': 'active',
+      'limits': {'max_projects': 2, 'max_storage_bytes': 1, 'max_trip_days': 1},
+      'usage': {'projects': 0, 'storage_bytes': 0},
+    };
+
+    testWidgets('without ?checkout=success, a free read is not retried',
+        (tester) async {
+      final billing = _SequenceBilling([free]);
+      await _pump(tester, billing, currentUri: Uri.parse('https://x/settings'));
+      expect(billing.calls, 1);
+      expect(find.text('Free'), findsOneWidget);
+    });
+
+    testWidgets('?checkout=success but already paid needs no retry',
+        (tester) async {
+      final billing = _SequenceBilling([paid]);
+      await _pump(tester,
+          billing, currentUri: Uri.parse('https://x/settings?checkout=success'));
+      expect(billing.calls, 1);
+      expect(find.text('Tier 1'), findsOneWidget);
+    });
+
+    testWidgets(
+        '?checkout=success retries until the webhook-updated plan shows',
+        (tester) async {
+      final billing = _SequenceBilling([free, free, paid]);
+      await _pump(tester,
+          billing, currentUri: Uri.parse('https://x/settings?checkout=success'));
+      expect(billing.calls, 3);
+      expect(find.text('Tier 1'), findsOneWidget);
+    });
+
+    testWidgets('gives up after 6 reads rather than retrying forever',
+        (tester) async {
+      final billing = _SequenceBilling([free]);
+      await _pump(tester,
+          billing, currentUri: Uri.parse('https://x/settings?checkout=success'));
+      expect(billing.calls, 6); // 1 initial + 5 retries
+      expect(find.text('Free'), findsOneWidget);
     });
   });
 }

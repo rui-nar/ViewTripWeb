@@ -18,7 +18,22 @@ class BillingSection extends StatefulWidget {
   /// Opens checkout / portal URLs. Injected in tests.
   final Future<void> Function(String url)? launcher;
 
-  const BillingSection({super.key, this.service, this.launcher});
+  /// The page URL, checked for `?checkout=success` (issue #192). Injected in
+  /// tests; defaults to the real browser URL — checkout only ever happens on
+  /// web (see docs/BILLING.md), so this is always empty on other platforms.
+  final Uri? currentUri;
+
+  /// Spacing between plan-status retries after a checkout redirect.
+  /// Injected in tests to keep them fast; defaults to a real wait.
+  final Duration retryDelay;
+
+  const BillingSection({
+    super.key,
+    this.service,
+    this.launcher,
+    this.currentUri,
+    this.retryDelay = const Duration(seconds: 2),
+  });
 
   @override
   State<BillingSection> createState() => _BillingSectionState();
@@ -26,9 +41,25 @@ class BillingSection extends StatefulWidget {
 
 class _BillingSectionState extends State<BillingSection> {
   late final BillingService _billing = widget.service ?? BillingService();
-  late final Future<BillingStatus> _future = _billing.status();
+  late final Future<BillingStatus> _future = _loadStatus();
   bool _busy = false;
   String? _failure;
+
+  /// Stripe's webhook can lag a beat behind the checkout redirect (issue
+  /// #192): landing back on `?checkout=success` right after paying can still
+  /// read the pre-upgrade plan if we ask before the webhook has landed. Poll
+  /// briefly rather than believe the very first read.
+  Future<BillingStatus> _loadStatus() async {
+    final uri = widget.currentUri ?? Uri.base;
+    final justPaid = uri.queryParameters['checkout'] == 'success';
+    var status = await _billing.status();
+    if (!justPaid) return status;
+    for (var i = 0; i < 5 && !status.isPaid; i++) {
+      await Future.delayed(widget.retryDelay);
+      status = await _billing.status();
+    }
+    return status;
+  }
 
   Future<void> _changePlan(BillingStatus status) async {
     await showPlanPicker(
