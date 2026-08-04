@@ -165,6 +165,10 @@ void main() {
         launcher: (url) async => openedUrl = url,
       ),
     );
+    // The Users table scrolls horizontally and the link sits in the last
+    // column, past the test viewport's right edge — scroll it into view
+    // before tapping, or the tap misses (hits outside the render tree).
+    await tester.ensureVisible(find.byIcon(Icons.open_in_new));
     await tester.tap(find.byIcon(Icons.open_in_new));
     await tester.pumpAndSettle();
     expect(openedUrl, 'https://dashboard.stripe.com/test/customers/cus_1');
