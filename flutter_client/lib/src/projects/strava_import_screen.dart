@@ -101,6 +101,7 @@ class _StravaImportScreenState extends State<StravaImportScreen> {
     if (!mounted) return;
     final quota = notifier.takeQuotaError();
     if (quota != null) {
+      if (!ctx.mounted) return;
       // A plan limit, not a failure — offer the upgrade instead of an error
       // (issue #192). The screen stays open so the selection isn't lost.
       await maybeShowUpgradeSheet(ctx, quota);
