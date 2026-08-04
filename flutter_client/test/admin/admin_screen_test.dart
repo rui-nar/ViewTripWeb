@@ -34,12 +34,17 @@ class _FakeAdminService extends AdminService {
             'auth_provider': 'local', 'created_at': 1700000000,
             'project_count': 2, 'activity_count': 10, 'memory_count': 3,
             'storage_bytes': 1024, 'encryption_tier': 'high', 'is_admin': false,
+            'plan': 'tier_2', 'plan_name': 'Tier 2', 'is_comped': false,
+            'subscription_status': 'active',
+            'stripe_customer_url': 'https://dashboard.stripe.com/test/customers/cus_1',
           },
           {
             'id': 2, 'email': 'b@x.com', 'display_name': 'Bob',
             'auth_provider': 'local', 'created_at': 1700000000,
             'project_count': 1, 'activity_count': 1, 'memory_count': 0,
             'storage_bytes': 0, 'encryption_tier': 'none', 'is_admin': true,
+            'plan': 'tier_1', 'plan_name': 'Tier 1', 'is_comped': true,
+            'subscription_status': 'none', 'stripe_customer_url': null,
           },
         ],
       };
@@ -129,6 +134,95 @@ void main() {
     final tooltip = tester.widget<Tooltip>(
         find.ancestor(of: find.text('high'), matching: find.byType(Tooltip)).first);
     expect(tooltip.message, contains('Zero-knowledge'));
+  });
+
+  // ── Plan column (issue #194) ────────────────────────────────────────────────
+
+  testWidgets('shows a plan chip per user, and a Stripe link only for the '
+      'real subscriber', (tester) async {
+    await _pump(tester, AdminScreen(service: _FakeAdminService()));
+    expect(find.text('Tier 2'), findsOneWidget); // Alice: real subscription
+    expect(find.text('Tier 1 · Granted'), findsOneWidget); // Bob: comped
+    // Only Alice has a stripe_customer_url — exactly one link button.
+    expect(find.byIcon(Icons.open_in_new), findsOneWidget);
+  });
+
+  testWidgets('comped plan chip tooltip calls out the admin override, not a '
+      'real subscription', (tester) async {
+    await _pump(tester, AdminScreen(service: _FakeAdminService()));
+    final tooltip = tester.widget<Tooltip>(find.ancestor(
+        of: find.text('Tier 1 · Granted'), matching: find.byType(Tooltip)).first);
+    expect(tooltip.message, contains('Granted by an admin'));
+  });
+
+  testWidgets('tapping the Stripe link button opens the customer URL',
+      (tester) async {
+    String? openedUrl;
+    await _pump(
+      tester,
+      AdminScreen(
+        service: _FakeAdminService(),
+        launcher: (url) async => openedUrl = url,
+      ),
+    );
+    // The Users table scrolls horizontally and the link sits in the last
+    // column, past the test viewport's right edge — scroll it into view
+    // before tapping, or the tap misses (hits outside the render tree).
+    await tester.ensureVisible(find.byIcon(Icons.open_in_new));
+    await tester.tap(find.byIcon(Icons.open_in_new));
+    await tester.pumpAndSettle();
+    expect(openedUrl, 'https://dashboard.stripe.com/test/customers/cus_1');
+  });
+
+  testWidgets('search row also shows the plan chip and Stripe link',
+      (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {
+          'id': 50, 'email': 'payer@x.com', 'display_name': 'Payer',
+          'encryption_tier': 'none', 'is_admin': false,
+          'plan': 'tier_3', 'plan_name': 'Tier 3', 'is_comped': false,
+          'subscription_status': 'active',
+          'stripe_customer_url': 'https://dashboard.stripe.com/test/customers/cus_2',
+        },
+      ];
+    String? openedUrl;
+    await _pump(
+      tester,
+      AdminScreen(service: svc, launcher: (url) async => openedUrl = url),
+    );
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'payer');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Tier 3'), findsOneWidget);
+    // Two link buttons now: Alice's row in the Users table + this search row.
+    expect(find.byIcon(Icons.open_in_new), findsNWidgets(2));
+
+    await tester.tap(find.byIcon(Icons.open_in_new).last);
+    await tester.pumpAndSettle();
+    expect(openedUrl, 'https://dashboard.stripe.com/test/customers/cus_2');
+  });
+
+  testWidgets('a free user with no subscription shows the free plan chip '
+      'and no Stripe link', (tester) async {
+    final svc = _FakeAdminService()
+      ..searchResult = [
+        {
+          'id': 51, 'email': 'free@x.com', 'display_name': 'Freeloader',
+          'encryption_tier': 'none', 'is_admin': false,
+          'plan': 'free', 'plan_name': 'Free', 'is_comped': false,
+          'subscription_status': 'none', 'stripe_customer_url': null,
+        },
+      ];
+    await _pump(tester, AdminScreen(service: svc));
+    await tester.enterText(find.byKey(const Key('admin-search-field')), 'free');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Free'), findsOneWidget);
+    // Only Alice's row (Users table) has a link — the free search result doesn't.
+    expect(find.byIcon(Icons.open_in_new), findsOneWidget);
   });
 
   testWidgets('reset is enabled for None/Low, disabled for Medium/High',

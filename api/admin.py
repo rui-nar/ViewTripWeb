@@ -11,6 +11,7 @@ session so a slow walk never pins a pooled connection.
 from __future__ import annotations
 
 import html
+import os
 import secrets
 import time
 from typing import Annotated
@@ -21,12 +22,14 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from api.deps import require_admin
+from models.billing import Subscription
 from models.db import get_session
 from models.project_db import DBActivity, DBMemory, DBProject
 from models.user import LocalUser, UserInfo
 from src.admin.storage import cached_user_storage, refresh_storage_cache
 from src.admin.tiers import user_encryption_tier
-from src.billing.plans import PLAN_ORDER
+from src.billing.entitlements import plan_display_name, plan_from_subscription
+from src.billing.plans import FREE, PLAN_ORDER
 from src.billing.subscriptions import set_admin_override
 from src.email.service import EmailMessage, get_email_service
 from src.utils.logging import get_logger
@@ -61,6 +64,11 @@ class UserRow(BaseModel):
     storage_bytes: int
     encryption_tier: str
     is_admin: bool
+    plan: str
+    plan_name: str
+    is_comped: bool
+    subscription_status: str
+    stripe_customer_url: str | None
 
 
 class Totals(BaseModel):
@@ -85,6 +93,11 @@ class SearchResult(BaseModel):
     auth_provider: str
     encryption_tier: str
     is_admin: bool
+    plan: str
+    plan_name: str
+    is_comped: bool
+    subscription_status: str
+    stripe_customer_url: str | None
 
 
 class ResetPasswordResponse(BaseModel):
@@ -133,6 +146,48 @@ def _counts_by_user(sess, col, model) -> dict[int, int]:
     }
 
 
+def _stripe_customer_url(customer_id: str) -> str | None:
+    """Stripe dashboard link for a customer id, or ``None`` with no customer to
+    link to (a comped-only account never checked out).
+
+    Test-mode and live accounts have different dashboard hosts; which one we're
+    on is read off ``STRIPE_SECRET_KEY`` the same way scripts/stripe_catalog.py
+    tells a live key from a test one.
+    """
+    if not customer_id:
+        return None
+    is_live = os.environ.get("STRIPE_SECRET_KEY", "").strip().startswith("sk_live_")
+    base = "https://dashboard.stripe.com/customers/" if is_live \
+        else "https://dashboard.stripe.com/test/customers/"
+    return base + customer_id
+
+
+def _billing_fields(sub: Subscription | None) -> dict:
+    """Plan/comp/Stripe-link fields for one user's ``UserRow``/``SearchResult``.
+
+    ``sub`` is ``None`` for a user who never checked out and was never comped —
+    plain ``free``, same as a subscription row with no plan and no override.
+    """
+    if sub is None:
+        return {
+            "plan": FREE,
+            "plan_name": plan_display_name(FREE),
+            "is_comped": False,
+            "subscription_status": "none",
+            "stripe_customer_url": None,
+        }
+    plan = sub.admin_override_plan or plan_from_subscription(
+        sub.plan, sub.status, sub.current_period_end
+    )
+    return {
+        "plan": plan,
+        "plan_name": plan_display_name(plan),
+        "is_comped": bool(sub.admin_override_plan),
+        "subscription_status": sub.status or "none",
+        "stripe_customer_url": _stripe_customer_url(sub.provider_customer_id),
+    }
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=StatsResponse, summary="Dashboard metrics")
@@ -156,6 +211,11 @@ def stats(_admin: Annotated[dict, Depends(require_admin)]):
         }
 
         tiers = {u.id: user_encryption_tier(sess, u.id) for u in users}
+        # One bulk fetch for every user's subscription row, same reasoning as
+        # the GROUP BY counts above: N+1 here would mean one query per user.
+        subs_by_user = {
+            s.user_info_id: s for s in sess.exec(select(Subscription)).all()
+        }
         # Snapshot the plain profile fields before leaving the session so the
         # (potentially slow) storage walk below holds no DB connection.
         profiles = [
@@ -181,6 +241,7 @@ def stats(_admin: Annotated[dict, Depends(require_admin)]):
             storage_bytes=storage,
             encryption_tier=tiers.get(uid, "none"),
             is_admin=is_admin,
+            **_billing_fields(subs_by_user.get(uid)),
         ))
 
     recent = sum(
@@ -222,8 +283,9 @@ def search_users(
     like = f"%{q.lower()}%"
     with get_session() as sess:
         rows = sess.exec(
-            select(UserInfo, LocalUser)
+            select(UserInfo, LocalUser, Subscription)
             .join(LocalUser, LocalUser.id == UserInfo.local_auth_id, isouter=True)
+            .join(Subscription, Subscription.user_info_id == UserInfo.id, isouter=True)
             .where(
                 func.lower(UserInfo.email).like(like)
                 | func.lower(UserInfo.display_name).like(like)
@@ -240,8 +302,9 @@ def search_users(
                 auth_provider=ui.auth_provider,
                 encryption_tier=user_encryption_tier(sess, ui.id),
                 is_admin=bool(ui.is_admin),
+                **_billing_fields(sub),
             )
-            for ui, lu in rows
+            for ui, lu, sub in rows
         ]
 
 

@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/design_tokens.dart';
 import 'admin_service.dart';
@@ -50,11 +51,29 @@ Color tierColor(String tier) {
   }
 }
 
+/// Color for a plan chip — stronger plans get a stronger color.
+Color planColor(String plan) {
+  switch (plan) {
+    case 'tier_3':
+      return kSuccess;
+    case 'tier_2':
+      return kWarning;
+    case 'tier_1':
+      return kColorRide;
+    default:
+      return kColorOther;
+  }
+}
+
 class AdminScreen extends StatefulWidget {
   /// Injectable for tests; defaults to the real HTTP-backed service.
   final AdminService service;
 
-  AdminScreen({super.key, AdminService? service})
+  /// Opens a Stripe dashboard URL. Injected in tests; defaults to
+  /// `launchUrl` (same pattern as `BillingSection._open`).
+  final Future<void> Function(String url)? launcher;
+
+  AdminScreen({super.key, AdminService? service, this.launcher})
       : service = service ?? AdminService();
 
   @override
@@ -120,6 +139,21 @@ class _AdminScreenState extends State<AdminScreen> {
     } catch (_) {
     } finally {
       if (mounted) setState(() => _refreshingStorage = false);
+    }
+  }
+
+  Future<void> _openStripeLink(String url) async {
+    final launch = widget.launcher ??
+        (String u) async =>
+            launchUrl(Uri.parse(u), mode: LaunchMode.externalApplication);
+    try {
+      await launch(url);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open Stripe.')),
+        );
+      }
     }
   }
 
@@ -425,6 +459,7 @@ class _AdminScreenState extends State<AdminScreen> {
                         onToggle: _toggleUserSelected,
                         onToggleAll: (v) => _toggleSelectAll(
                             v, users.map((u) => u['id'] as int).toList()),
+                        onOpenStripe: _openStripeLink,
                       ),
               ),
               const SizedBox(height: 16),
@@ -539,6 +574,7 @@ class _AdminScreenState extends State<AdminScreen> {
                 onReset: () => _resetPassword(u),
                 onToggleAdmin: () => _toggleAdmin(u),
                 onDelete: () => _deleteUser(u),
+                onOpenStripe: _openStripeLink,
               )),
       ],
     );
@@ -579,12 +615,14 @@ class _UserTable extends StatelessWidget {
   final Set<int> selected;
   final void Function(int id, bool selected) onToggle;
   final void Function(bool selectAll) onToggleAll;
+  final void Function(String url) onOpenStripe;
 
   const _UserTable({
     required this.users,
     required this.selected,
     required this.onToggle,
     required this.onToggleAll,
+    required this.onOpenStripe,
   });
 
   @override
@@ -608,6 +646,7 @@ class _UserTable extends StatelessWidget {
           const DataColumn(label: Text('Activities'), numeric: true),
           const DataColumn(label: Text('Memories'), numeric: true),
           const DataColumn(label: Text('Storage')),
+          const DataColumn(label: Text('Plan')),
           const DataColumn(label: Text('Encryption')),
         ],
         rows: users.map((u) {
@@ -639,6 +678,7 @@ class _UserTable extends StatelessWidget {
               DataCell(Text('${u['activity_count'] ?? 0}')),
               DataCell(Text('${u['memory_count'] ?? 0}')),
               DataCell(Text(humanizeBytes((u['storage_bytes'] as num?)?.toInt() ?? 0))),
+              DataCell(_PlanCell(user: u, onOpenStripe: onOpenStripe)),
               DataCell(_TierChip(tier: tier)),
             ],
           );
@@ -693,6 +733,102 @@ class _TierChip extends StatelessWidget {
   }
 }
 
+/// Plan chip: colored by plan strength, visually distinct for a comped
+/// account (mirrors `BillingSection`'s "Granted" chip) vs. a real subscription.
+class _PlanChip extends StatelessWidget {
+  final String plan;
+  final String planName;
+  final bool isComped;
+  final String subscriptionStatus;
+
+  const _PlanChip({
+    required this.plan,
+    required this.planName,
+    required this.isComped,
+    required this.subscriptionStatus,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tooltip = isComped
+        ? 'Granted by an admin (override) — not a paid subscription.'
+        : plan == 'free'
+            ? 'No paid subscription.'
+            : 'Paid subscription — status: $subscriptionStatus.';
+    return Tooltip(
+      message: 'Plan: $planName. $tooltip',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: isComped
+              ? theme.colorScheme.secondaryContainer
+              : planColor(plan).withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isComped) ...[
+              Icon(Icons.card_giftcard,
+                  size: 12, color: theme.colorScheme.onSecondaryContainer),
+              const SizedBox(width: 4),
+            ],
+            Text(
+              isComped ? '$planName · Granted' : planName,
+              style: TextStyle(
+                color: isComped
+                    ? theme.colorScheme.onSecondaryContainer
+                    : planColor(plan),
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Plan chip + an optional "open in Stripe" button, shared by the Users
+/// table and the search-result rows.
+class _PlanCell extends StatelessWidget {
+  final Map<String, dynamic> user;
+  final void Function(String url) onOpenStripe;
+
+  const _PlanCell({required this.user, required this.onOpenStripe});
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = user['plan'] as String? ?? 'free';
+    final planName = user['plan_name'] as String? ?? 'Free';
+    final isComped = user['is_comped'] == true;
+    final status = user['subscription_status'] as String? ?? 'none';
+    final stripeUrl = user['stripe_customer_url'] as String?;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _PlanChip(
+          plan: plan,
+          planName: planName,
+          isComped: isComped,
+          subscriptionStatus: status,
+        ),
+        if (stripeUrl != null && stripeUrl.isNotEmpty)
+          Tooltip(
+            message: 'Manage in Stripe',
+            child: IconButton(
+              icon: const Icon(Icons.open_in_new, size: 16),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: () => onOpenStripe(stripeUrl),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _SearchRow extends StatelessWidget {
   final Map<String, dynamic> user;
   final bool busyReset;
@@ -701,6 +837,7 @@ class _SearchRow extends StatelessWidget {
   final VoidCallback onReset;
   final VoidCallback onToggleAdmin;
   final VoidCallback onDelete;
+  final void Function(String url) onOpenStripe;
 
   const _SearchRow({
     required this.user,
@@ -710,6 +847,7 @@ class _SearchRow extends StatelessWidget {
     required this.onReset,
     required this.onToggleAdmin,
     required this.onDelete,
+    required this.onOpenStripe,
   });
 
   @override
@@ -780,6 +918,7 @@ class _SearchRow extends StatelessWidget {
       alignment: WrapAlignment.end,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        _PlanCell(user: user, onOpenStripe: onOpenStripe),
         _TierChip(tier: tier),
         adminButton,
         deleteButton,
