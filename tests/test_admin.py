@@ -19,6 +19,7 @@ import models.db as db_module
 import src.admin.storage as storage_mod
 from api.admin import router as admin_router
 from api.deps import get_current_user
+from models.billing import Subscription
 from models.project_db import DBActivity, DBMemory, DBProject
 from models.user import LocalUser, UserInfo
 from src.billing.subscriptions import get_subscription
@@ -592,3 +593,91 @@ class TestSetPlan:
         client = TestClient(_admin_app(engine, payload))
         resp = client.put(f"/api/admin/users/{pid}/plan", json={"plan": "tier_1"})
         assert resp.status_code == 403
+
+
+# ── 20. Billing plan fields on stats/search (issue #194) ───────────────────────
+
+class TestBillingFields:
+    @pytest.fixture
+    def ctx(self, engine):
+        with Session(engine) as sess:
+            admin, _ = _mk_user(sess, display_name="admin", email="admin@x.io",
+                                is_admin=True)
+            free, _ = _mk_user(sess, display_name="Free", email="free@x.io")
+            comped, _ = _mk_user(sess, display_name="Comped", email="comped@x.io")
+            paying, _ = _mk_user(sess, display_name="Paying", email="paying@x.io")
+            aid, fid, cid, pid = admin.id, free.id, comped.id, paying.id
+
+            # Comped: an override plan, never actually checked out.
+            sess.add(Subscription(
+                user_info_id=cid, plan="free", status="none",
+                admin_override_plan="tier_2",
+            ))
+            # Real paying subscriber with a Stripe customer id.
+            sess.add(Subscription(
+                user_info_id=pid, plan="tier_1", status="active",
+                provider_customer_id="cus_123",
+            ))
+            sess.commit()
+        payload = {"sub": str(aid), "email": "admin@x.io", "auth_provider": "local"}
+        return TestClient(_admin_app(engine, payload)), fid, cid, pid
+
+    def test_free_user_has_no_subscription_row(self, ctx):
+        client, fid, _, _ = ctx
+        rows = {r["id"]: r for r in client.get("/api/admin/stats").json()["users"]}
+        row = rows[fid]
+        assert row["plan"] == "free"
+        assert row["plan_name"] == "Free"
+        assert row["is_comped"] is False
+        assert row["subscription_status"] == "none"
+        assert row["stripe_customer_url"] is None
+
+    def test_comped_user_is_flagged_with_no_stripe_link(self, ctx):
+        client, _, cid, _ = ctx
+        rows = {r["id"]: r for r in client.get("/api/admin/stats").json()["users"]}
+        row = rows[cid]
+        assert row["plan"] == "tier_2"
+        assert row["is_comped"] is True
+        assert row["stripe_customer_url"] is None  # comped-only, never checked out
+
+    def test_paying_user_has_a_stripe_link(self, ctx, monkeypatch):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+        client, _, _, pid = ctx
+        rows = {r["id"]: r for r in client.get("/api/admin/stats").json()["users"]}
+        row = rows[pid]
+        assert row["plan"] == "tier_1"
+        assert row["is_comped"] is False
+        assert row["subscription_status"] == "active"
+        assert row["stripe_customer_url"] == \
+            "https://dashboard.stripe.com/test/customers/cus_123"
+
+    def test_search_results_carry_the_same_plan_fields(self, ctx, monkeypatch):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+        client, *_ = ctx
+        res = client.get("/api/admin/users/search?q=paying").json()
+        assert res[0]["plan"] == "tier_1"
+        assert res[0]["stripe_customer_url"] == \
+            "https://dashboard.stripe.com/test/customers/cus_123"
+
+
+class TestStripeCustomerUrl:
+    """Unit tests for the pure URL-building helper (no DB, no HTTP)."""
+
+    def test_empty_customer_id_is_none(self, monkeypatch):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+        assert admin_mod._stripe_customer_url("") is None
+
+    def test_test_key_uses_the_test_dashboard(self, monkeypatch):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+        assert admin_mod._stripe_customer_url("cus_1") == \
+            "https://dashboard.stripe.com/test/customers/cus_1"
+
+    def test_live_key_uses_the_live_dashboard(self, monkeypatch):
+        monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc")
+        assert admin_mod._stripe_customer_url("cus_1") == \
+            "https://dashboard.stripe.com/customers/cus_1"
+
+    def test_missing_key_defaults_to_the_test_dashboard(self, monkeypatch):
+        monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+        assert admin_mod._stripe_customer_url("cus_1") == \
+            "https://dashboard.stripe.com/test/customers/cus_1"
