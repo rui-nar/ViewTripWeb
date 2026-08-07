@@ -42,6 +42,25 @@ void main() {
     });
   });
 
+  group('fromLonLat', () {
+    test('decodes [lon,lat] pairs with no elevation', () {
+      final m = TrackEditModel.fromLonLat(const [
+        [24.9414, 60.1719],
+        [24.8, 59.9],
+        [24.7536, 59.4370],
+      ]);
+      expect(m.length, 3);
+      expect(m.points.first.lat, closeTo(60.1719, 1e-6));
+      expect(m.points.first.lng, closeTo(24.9414, 1e-6));
+      expect(m.points.every((p) => p.elev == null), isTrue);
+    });
+
+    test('null or empty coords yield an empty, invalid model', () {
+      expect(TrackEditModel.fromLonLat(null).length, 0);
+      expect(TrackEditModel.fromLonLat(const []).isValid, isFalse);
+    });
+  });
+
   group('dirty tracking', () {
     test('pristine model is not dirty', () {
       final m = TrackEditModel.fromEncoded(encoded, elevPairs);

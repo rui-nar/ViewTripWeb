@@ -259,12 +259,17 @@ class ProjectService {
   }
 
   /// POST /api/projects/{name}/segments/{segId}/resolve-route
+  ///
+  /// [force] bypasses the server's guard against silently discarding a
+  /// manually edited route (issue #150) — pass it only after the caller has
+  /// confirmed with the user.
   Future<Map<String, dynamic>> resolveTrainRoute(
     ProjectRef ref,
     String segId, {
     String? hafasProvider,
     String? trainNumber,
     String? date,
+    bool force = false,
   }) async {
     final sid = Uri.encodeComponent(segId);
     final body = <String, dynamic>{
@@ -273,12 +278,27 @@ class ProjectService {
       if (trainNumber != null && trainNumber.isNotEmpty)
         'train_number': trainNumber,
       if (date != null && date.isNotEmpty) 'date': date,
+      if (force) 'force': true,
     };
     final data = await api.post(
       ref.path('/segments/$sid/resolve-route'),
       body,
       timeout: const Duration(minutes: 3),
     );
+    return data as Map<String, dynamic>;
+  }
+
+  /// Replace a segment's route geometry with a manually edited point list.
+  /// PUT /api/projects/{name}/segments/{segId}/track
+  /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated segment
+  /// route fields (`route_polyline`/`route_mode`/`route_status`/`route_edited`).
+  Future<Map<String, dynamic>> saveSegmentTrack(
+    ProjectRef ref,
+    String segId,
+    Map<String, dynamic> payload,
+  ) async {
+    final sid = Uri.encodeComponent(segId);
+    final data = await api.put(ref.path('/segments/$sid/track'), payload);
     return data as Map<String, dynamic>;
   }
 }

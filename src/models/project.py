@@ -111,6 +111,8 @@ class ConnectingSegment:
     route_degraded: bool = False            # rail only: resolved to a straight endpoint-chord, not
     #   real track (Overpass found no usable geometry). Surfaced to the UI so a straight segment
     #   isn't silently mistaken for a real resolved route.
+    route_edited: bool = False              # True after a manual track edit (issue #150) — guards
+    #   a subsequent auto-resolve from silently discarding the user's hand-drawn geometry.
 
     def to_dict(self) -> dict:
         """Serialise to a dict that can be round-tripped via from_dict()."""
@@ -137,6 +139,7 @@ class ConnectingSegment:
             "route_error": self.route_error,
             "route_started_at": self.route_started_at,
             "route_degraded": self.route_degraded,
+            "route_edited": self.route_edited,
         }
 
     @classmethod
@@ -164,6 +167,7 @@ class ConnectingSegment:
             route_status=d.get("route_status", "idle"),
             route_error=d.get("route_error"),
             route_started_at=d.get("route_started_at"),
+            route_edited=d.get("route_edited", False),
         )
 
 

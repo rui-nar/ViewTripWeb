@@ -233,6 +233,21 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     }
   }
 
+  /// Save a manually edited route track (add/remove/move/trim, issue #150) for
+  /// [segId]. [payload] is [TrackEditModel.toSavePayload]. The server echoes
+  /// back the canonical stored route fields, which are patched straight into
+  /// [items]/[geo] — no full reload needed since segments are already fully
+  /// loaded client-side (unlike activities' meta-only list).
+  Future<void> saveSegmentTrack(
+    String segId, Map<String, dynamic> payload,
+  ) async {
+    final ref = projectRef;
+    if (ref == null) return;
+    final result = await service.saveSegmentTrack(ref, segId, payload);
+    applyResolvedSegment(segId, result);
+    notifyListeners();
+  }
+
   /// Trigger async OSM route resolution for a train, boat, or bus segment and
   /// poll until it completes.
   ///
@@ -249,6 +264,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     String? hafasProvider,
     String? trainNumber,
     String? date,
+    bool force = false,
   }) async {
     final ref = projectRef;
     if (ref == null) throw Exception('No project open');
@@ -257,6 +273,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       hafasProvider: hafasProvider,
       trainNumber: trainNumber,
       date: date,
+      force: force,
     );
     _patchSegmentFields(segId, {
       'route_status': 'pending',
@@ -349,7 +366,9 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     return null;
   }
 
-  /// Apply a resolved segment from `/meta` into [items] and [geo].
+  /// Apply a resolved (or manually edited) segment route into [items] and [geo].
+  /// Used both after polling an auto-resolve to completion and after a manual
+  /// track edit saves (issue #150) — both hand back the same route fields.
   @visibleForTesting
   void applyResolvedSegment(String segId, Map<String, dynamic> segMeta) {
     final routeMode = segMeta['route_mode'] as String? ?? 'rail';
@@ -359,6 +378,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       'route_status': 'resolved',
       'route_error': null,
       'route_degraded': degraded,
+      'route_edited': segMeta['route_edited'] == true,
       'route_polyline': segMeta['route_polyline'],
       if (segMeta['train_number'] != null) 'train_number': segMeta['train_number'],
       if (segMeta['hafas_provider'] != null) 'hafas_provider': segMeta['hafas_provider'],

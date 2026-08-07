@@ -119,4 +119,5 @@ class RowMappersMixin:
             route_error=sd.get("route_error"),
             route_started_at=sd.get("route_started_at"),
             route_degraded=sd.get("route_degraded", False),
+            route_edited=sd.get("route_edited", False),
         )
