@@ -3,6 +3,7 @@
 Routes:
     POST   /api/projects/{name}/segments                       — create a connecting segment
     PUT    /api/projects/{name}/segments/{id}                   — update a segment
+    PUT    /api/projects/{name}/segments/{id}/track             — replace route with a manual edit
     DELETE /api/projects/{name}/segments/{id}                   — delete a segment
     POST   /api/projects/{name}/segments/{id}/resolve-route     — trigger async route resolution
 """
@@ -168,6 +169,9 @@ def _resolve_route_job(
                 "route_mode": _mode_for_type.get(seg.segment_type, "great_circle"),
                 "route_error": None,
                 "route_degraded": degraded,
+                # A fresh auto-resolve is authoritative again — clears the
+                # guard a prior manual edit (issue #150) set.
+                "route_edited": False,
             }
             if params.get("train_number"):
                 fields["train_number"] = params["train_number"]
@@ -368,6 +372,106 @@ def update_segment(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
 
+class SegmentTrackPointIn(BaseModel):
+    lat: float = Field(description="Latitude, decimal degrees")
+    lng: float = Field(description="Longitude, decimal degrees")
+
+
+class SegmentTrackEditRequest(BaseModel):
+    points: List[SegmentTrackPointIn] = Field(
+        description="Full edited route as an ordered list of {lat, lng} points")
+
+
+class SegmentTrackOut(BaseModel):
+    route_polyline: str = Field(description="JSON-encoded [[lon,lat],…] coordinates")
+    route_mode: str = Field(
+        description="The segment's resolved mode after the edit — always "
+                     "'rail', 'ferry', or 'bus' (matching the segment's type)")
+    route_status: str = Field(description="Always 'resolved' after a successful manual edit")
+    route_edited: bool = Field(
+        description="Always true — a manual edit always sets this flag, guarding "
+                     "a later auto-resolve (see ResolveRouteRequest.force)")
+
+
+@router.put("/{name}/segments/{seg_id}/track", response_model=SegmentTrackOut,
+            summary="Replace a segment's route with a manually edited track")
+def edit_segment_track(
+    name: str,
+    seg_id: str,
+    body: SegmentTrackEditRequest,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+    owner: OwnerParam = None,
+):
+    """Overwrite a segment's route geometry with a hand-edited point list (issue #150).
+
+    Sometimes the auto-resolved OSM route is missing or malformed; this lets the
+    user fix it directly rather than delete and recreate the segment. Only the
+    route geometry changes here — start/end anchors, label, and date are
+    untouched (those stay under ``update_segment``/the segment form).
+
+    Marks the segment ``route_edited=True`` so a later auto-resolve
+    (:func:`resolve_segment_route`) refuses to silently discard the edit
+    unless the caller passes ``force``.
+
+    Uses the same single-row payload write as the resolve job
+    (``ItemOrderingMixin.update_segment_fields``, issue #173) rather than a
+    whole-project CAS — editing a track never contends with an unrelated
+    concurrent edit.
+    """
+    user_info_id = int(current_user["sub"])
+    if len(body.points) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="A route needs at least 2 points",
+        )
+    mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
+        owner_id = row.user_info_id
+        # include_heavy=False: this load is only used to find the segment and
+        # check its type below — see edit_activity_track for why.
+        project = _repo.get_project(
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
+            include_heavy=False,
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        seg = _find_segment(project, seg_id)
+        if seg is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+        route_mode = mode_for_type.get(seg.segment_type)
+        if route_mode is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Track editing only supported for train, boat, and bus segments",
+            )
+        polyline = json.dumps([[p.lng, p.lat] for p in body.points])
+        fields: Dict[str, Any] = {
+            "route_polyline": polyline,
+            "route_mode": route_mode,
+            "route_status": "resolved",
+            "route_error": None,
+            "route_degraded": False,
+            "route_edited": True,
+            "route_started_at": None,
+        }
+        if not _repo.update_segment_fields(sess, row.id, seg_id, fields):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+        sess.commit()
+
+    bust_geo_cache(owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
+    return {
+        "route_polyline": polyline,
+        "route_mode": route_mode,
+        "route_status": "resolved",
+        "route_edited": True,
+    }
+
+
 @router.delete("/{name}/segments/{seg_id}", status_code=status.HTTP_204_NO_CONTENT,
                summary="Delete a transport segment")
 def delete_segment(
@@ -404,6 +508,13 @@ class ResolveRouteRequest(BaseModel):
     hafas_provider: Optional[str] = None   # omit to skip HAFAS
     train_number: Optional[str] = None
     date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
+    force: bool = Field(
+        default=False,
+        description="Must be true when the segment's route_edited flag is set "
+                     "(issue #150) — otherwise the request 409s rather than "
+                     "silently discarding a manually edited route. The client "
+                     "should confirm with the user before setting this.",
+    )
 
 
 @router.post("/{name}/segments/{seg_id}/resolve-route", response_model=RouteResolveTriggered,
@@ -432,6 +543,12 @@ def resolve_segment_route(
     (issue #173): triggering two resolves at once — or triggering one while
     another finishes — used to lose the optimistic lock and return a 409 the
     client never retried, so the second segment simply never resolved.
+
+    Returns **409** instead if the segment has a manually edited route
+    (``route_edited=True``, issue #150) and ``force`` is not set — an
+    auto-resolve would otherwise silently overwrite the user's hand-drawn
+    track. Pass ``force=True`` to proceed anyway; the client should confirm
+    with the user first. A successful resolve clears ``route_edited``.
     """
     user_info_id = int(current_user["sub"])
     started_at = datetime.now(timezone.utc).isoformat()
@@ -456,6 +573,14 @@ def resolve_segment_route(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Route resolution only supported for train, boat, and bus segments",
+            )
+        # A manually edited route (issue #150) is not silently overwritten by
+        # an auto-resolve — the caller must confirm and pass force=True.
+        if seg.route_edited and not body.force:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This route has a manually edited track. "
+                       "Resolving again will discard it.",
             )
 
         fields: Dict[str, Any] = {

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../map/great_circle.dart';
 import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
+import 'segment_track_editor_page.dart';
 
 class SegmentDialog extends StatefulWidget {
   final ProjectNotifier notifier;
@@ -273,6 +274,28 @@ class _SegmentDialogState extends State<SegmentDialog> {
     }
   }
 
+  /// Close this dialog and push the full-screen track editor (issue #150) for
+  /// the segment being edited — the same close-then-push hand-off
+  /// [ActivityEditorPage]'s "Cut & add transport" flow uses. Unsaved label/
+  /// date changes in this form are discarded; only the route geometry is
+  /// edited on the next screen.
+  void _openTrackEditor(BuildContext context) {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final seg = widget.editSegment!;
+    navigator.pop();
+    navigator.push(MaterialPageRoute(
+      builder: (_) =>
+          SegmentTrackEditorPage(notifier: widget.notifier, segment: seg),
+    ));
+  }
+
+  /// Whether the current form selection would trigger an auto-resolve on save
+  /// (i.e. "Follow route" is selected for a type that supports one).
+  bool get _needsResolve =>
+      (_segmentType == 'train' && _routeMode == 'rail')  ||
+      (_segmentType == 'boat'  && _routeMode == 'ferry') ||
+      (_segmentType == 'bus'   && _routeMode == 'bus');
+
   Future<void> _save() async {
     final startLat = double.tryParse(_startLatCtrl.text.trim());
     final startLon = double.tryParse(_startLonCtrl.text.trim());
@@ -287,12 +310,44 @@ class _SegmentDialogState extends State<SegmentDialog> {
       setState(() => _formError = 'Set a start and end location');
       return;
     }
+
+    // Re-resolving a manually edited route (issue #150) discards the edit —
+    // confirm BEFORE the saving spinner starts, not after: showing this on
+    // top of an already-spinning Save button leaves that indeterminate
+    // progress indicator animating for as long as the confirm dialog is
+    // open, which (as well as reading oddly — nothing is saving yet) never
+    // lets a widget test's pumpAndSettle() converge.
+    final wasManuallyEdited = widget.editSegment?['route_edited'] == true;
+    if (_needsResolve && wasManuallyEdited) {
+      final discard = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Discard manual route edits?'),
+          content: const Text(
+            'This route was manually edited. Resolving it automatically will '
+            'discard those edits and replace them with the auto-calculated route.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Discard & re-resolve'),
+            ),
+          ],
+        ),
+      );
+      if (discard != true || !mounted) return;
+    }
+
     setState(() {
       _formError = null;
       _saving = true;
     });
     try {
-      await _saveBody(startLat, startLon, endLat, endLon);
+      await _saveBody(startLat, startLon, endLat, endLon, force: wasManuallyEdited);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -304,8 +359,9 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   Future<void> _saveBody(
     double startLat, double startLon,
-    double endLat, double endLon,
-  ) async {
+    double endLat, double endLon, {
+    required bool force,
+  }) async {
     final dateStr = _toIso(_date!);
 
     // Default label: "Day N - Type M" when user leaves the field empty.
@@ -344,10 +400,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final trainNum = _trainNumberCtrl.text.trim().isEmpty
         ? null
         : _trainNumberCtrl.text.trim();
-    final needsResolve =
-        (_segmentType == 'train' && _routeMode == 'rail')  ||
-        (_segmentType == 'boat'  && _routeMode == 'ferry') ||
-        (_segmentType == 'bus'   && _routeMode == 'bus');
+    final needsResolve = _needsResolve;
 
     // If a start activity is selected, insert the segment immediately after it
     // so it sits between the start and end activities in the panel.
@@ -413,7 +466,10 @@ class _SegmentDialogState extends State<SegmentDialog> {
       ));
       Navigator.of(context).pop();
       if (widget.editSegment == null) notifier.selectSegment(segId);
-      unawaited(_resolveAsync(notifier, segId, routeMode, provider, trainNum, dateStr, messenger));
+      unawaited(_resolveAsync(
+        notifier, segId, routeMode, provider, trainNum, dateStr, messenger,
+        force: force,
+      ));
     } else {
       Navigator.of(context).pop();
       if (widget.editSegment == null && resolveSegId.isNotEmpty) {
@@ -429,8 +485,9 @@ class _SegmentDialogState extends State<SegmentDialog> {
     String hafasProvider,
     String? trainNumber,
     String? date,
-    ScaffoldMessengerState messenger,
-  ) async {
+    ScaffoldMessengerState messenger, {
+    bool force = false,
+  }) async {
     try {
       final result = await notifier.resolveTrainRoute(
         segId,
@@ -438,6 +495,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
         hafasProvider: routeMode == 'rail' ? hafasProvider : null,
         trainNumber:   routeMode == 'rail' ? trainNumber   : null,
         date: date,
+        force: force,
       );
       final status = result['route_status'] as String? ?? 'resolved';
       if (status == 'cancelled') return; // navigated away / deleted — stay silent
@@ -780,6 +838,24 @@ class _SegmentDialogState extends State<SegmentDialog> {
                     selected: {_routeMode == 'bus' ? 'bus' : 'great_circle'},
                     onSelectionChanged: (s) => setState(() => _routeMode = s.first),
                     multiSelectionEnabled: false,
+                  ),
+                ),
+              ],
+
+              // ── Manual track editing (issue #150) ─────────────────────
+              // Only for an existing segment (nothing to attach a track to
+              // before it's created) whose type supports a real route.
+              if (isEdit &&
+                  (_segmentType == 'train' ||
+                      _segmentType == 'boat' ||
+                      _segmentType == 'bus')) ...[
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.edit_road, size: 18),
+                    label: const Text('Edit track manually'),
+                    onPressed: () => _openTrackEditor(context),
                   ),
                 ),
               ],

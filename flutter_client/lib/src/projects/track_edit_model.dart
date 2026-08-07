@@ -84,6 +84,17 @@ class TrackEditModel {
   factory TrackEditModel.fromPoints(List<EditPoint> points) =>
       TrackEditModel._(List<EditPoint>.of(points));
 
+  /// Build from a stored segment route (`[[lon,lat],…]`, no elevation) — the
+  /// shape `ConnectingSegment.route_polyline` uses, distinct from the
+  /// Google-encoded + elevation-paired shape activities store.
+  factory TrackEditModel.fromLonLat(List<List<double>>? coords) {
+    if (coords == null || coords.isEmpty) return TrackEditModel._(<EditPoint>[]);
+    return TrackEditModel._([
+      for (final pt in coords)
+        if (pt.length >= 2) EditPoint(pt[1], pt[0]),
+    ]);
+  }
+
   List<EditPoint> get points => List<EditPoint>.unmodifiable(_points);
   int get length => _points.length;
 
