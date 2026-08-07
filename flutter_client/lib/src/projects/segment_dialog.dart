@@ -289,6 +289,13 @@ class _SegmentDialogState extends State<SegmentDialog> {
     ));
   }
 
+  /// Whether the current form selection would trigger an auto-resolve on save
+  /// (i.e. "Follow route" is selected for a type that supports one).
+  bool get _needsResolve =>
+      (_segmentType == 'train' && _routeMode == 'rail')  ||
+      (_segmentType == 'boat'  && _routeMode == 'ferry') ||
+      (_segmentType == 'bus'   && _routeMode == 'bus');
+
   Future<void> _save() async {
     final startLat = double.tryParse(_startLatCtrl.text.trim());
     final startLon = double.tryParse(_startLonCtrl.text.trim());
@@ -303,12 +310,44 @@ class _SegmentDialogState extends State<SegmentDialog> {
       setState(() => _formError = 'Set a start and end location');
       return;
     }
+
+    // Re-resolving a manually edited route (issue #150) discards the edit —
+    // confirm BEFORE the saving spinner starts, not after: showing this on
+    // top of an already-spinning Save button leaves that indeterminate
+    // progress indicator animating for as long as the confirm dialog is
+    // open, which (as well as reading oddly — nothing is saving yet) never
+    // lets a widget test's pumpAndSettle() converge.
+    final wasManuallyEdited = widget.editSegment?['route_edited'] == true;
+    if (_needsResolve && wasManuallyEdited) {
+      final discard = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Discard manual route edits?'),
+          content: const Text(
+            'This route was manually edited. Resolving it automatically will '
+            'discard those edits and replace them with the auto-calculated route.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Discard & re-resolve'),
+            ),
+          ],
+        ),
+      );
+      if (discard != true || !mounted) return;
+    }
+
     setState(() {
       _formError = null;
       _saving = true;
     });
     try {
-      await _saveBody(startLat, startLon, endLat, endLon);
+      await _saveBody(startLat, startLon, endLat, endLon, force: wasManuallyEdited);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -320,8 +359,9 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   Future<void> _saveBody(
     double startLat, double startLon,
-    double endLat, double endLon,
-  ) async {
+    double endLat, double endLon, {
+    required bool force,
+  }) async {
     final dateStr = _toIso(_date!);
 
     // Default label: "Day N - Type M" when user leaves the field empty.
@@ -360,10 +400,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
     final trainNum = _trainNumberCtrl.text.trim().isEmpty
         ? null
         : _trainNumberCtrl.text.trim();
-    final needsResolve =
-        (_segmentType == 'train' && _routeMode == 'rail')  ||
-        (_segmentType == 'boat'  && _routeMode == 'ferry') ||
-        (_segmentType == 'bus'   && _routeMode == 'bus');
+    final needsResolve = _needsResolve;
 
     // If a start activity is selected, insert the segment immediately after it
     // so it sits between the start and end activities in the panel.
@@ -412,38 +449,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
     if (!mounted) return;
 
-    // Re-resolving a manually edited route (issue #150) discards the edit —
-    // confirm while the dialog (and its context) is still around, rather than
-    // surfacing the server's 409 guard after it's already closed.
-    final wasManuallyEdited = widget.editSegment?['route_edited'] == true;
-    if (needsResolve && resolveSegId.isNotEmpty && wasManuallyEdited) {
-      final discard = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Discard manual route edits?'),
-          content: const Text(
-            'This route was manually edited. Resolving it automatically will '
-            'discard those edits and replace them with the auto-calculated route.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Discard & re-resolve'),
-            ),
-          ],
-        ),
-      );
-      if (discard != true) {
-        if (mounted) setState(() => _saving = false);
-        return;
-      }
-      if (!mounted) return;
-    }
-
     if (needsResolve && resolveSegId.isNotEmpty) {
       final messenger = ScaffoldMessenger.of(context);
       final notifier  = widget.notifier;
@@ -463,7 +468,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
       if (widget.editSegment == null) notifier.selectSegment(segId);
       unawaited(_resolveAsync(
         notifier, segId, routeMode, provider, trainNum, dateStr, messenger,
-        force: wasManuallyEdited,
+        force: force,
       ));
     } else {
       Navigator.of(context).pop();
