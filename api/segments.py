@@ -373,8 +373,8 @@ def update_segment(
 
 
 class SegmentTrackPointIn(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(description="Latitude, decimal degrees")
+    lng: float = Field(description="Longitude, decimal degrees")
 
 
 class SegmentTrackEditRequest(BaseModel):
@@ -384,9 +384,13 @@ class SegmentTrackEditRequest(BaseModel):
 
 class SegmentTrackOut(BaseModel):
     route_polyline: str = Field(description="JSON-encoded [[lon,lat],…] coordinates")
-    route_mode: str
-    route_status: str
-    route_edited: bool
+    route_mode: str = Field(
+        description="The segment's resolved mode after the edit — always "
+                     "'rail', 'ferry', or 'bus' (matching the segment's type)")
+    route_status: str = Field(description="Always 'resolved' after a successful manual edit")
+    route_edited: bool = Field(
+        description="Always true — a manual edit always sets this flag, guarding "
+                     "a later auto-resolve (see ResolveRouteRequest.force)")
 
 
 @router.put("/{name}/segments/{seg_id}/track", response_model=SegmentTrackOut,
@@ -504,7 +508,13 @@ class ResolveRouteRequest(BaseModel):
     hafas_provider: Optional[str] = None   # omit to skip HAFAS
     train_number: Optional[str] = None
     date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
-    force: bool = False                    # bypass the route_edited guard below (issue #150)
+    force: bool = Field(
+        default=False,
+        description="Must be true when the segment's route_edited flag is set "
+                     "(issue #150) — otherwise the request 409s rather than "
+                     "silently discarding a manually edited route. The client "
+                     "should confirm with the user before setting this.",
+    )
 
 
 @router.post("/{name}/segments/{seg_id}/resolve-route", response_model=RouteResolveTriggered,
@@ -533,6 +543,12 @@ def resolve_segment_route(
     (issue #173): triggering two resolves at once — or triggering one while
     another finishes — used to lose the optimistic lock and return a 409 the
     client never retried, so the second segment simply never resolved.
+
+    Returns **409** instead if the segment has a manually edited route
+    (``route_edited=True``, issue #150) and ``force`` is not set — an
+    auto-resolve would otherwise silently overwrite the user's hand-drawn
+    track. Pass ``force=True`` to proceed anyway; the client should confirm
+    with the user first. A successful resolve clears ``route_edited``.
     """
     user_info_id = int(current_user["sub"])
     started_at = datetime.now(timezone.utc).isoformat()
