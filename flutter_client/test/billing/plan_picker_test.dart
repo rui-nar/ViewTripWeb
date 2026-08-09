@@ -36,6 +36,7 @@ class _FakeBilling implements BillingService {
   final List<PlanInfo> catalogue;
   final bool failCheckout;
   final List<String> bought = [];
+  final List<String> changed = [];
 
   _FakeBilling({List<PlanInfo>? catalogue, this.failCheckout = false})
       : catalogue = catalogue ?? _catalogue;
@@ -44,18 +45,38 @@ class _FakeBilling implements BillingService {
   Future<List<PlanInfo>> plans() async => catalogue;
 
   @override
-  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async {
+  Future<String> checkoutUrl({String? plan, String returnPath = kPlanRoute}) async {
     bought.add(plan ?? '');
     if (failCheckout) throw Exception('nope');
     return 'https://pay.test/${plan ?? 'none'}';
   }
 
   @override
+  Future<String> planChangeUrl({
+    required String plan,
+    String returnPath = kPlanRoute,
+  }) async {
+    changed.add(plan);
+    if (failCheckout) throw Exception('nope');
+    return 'https://pay.test/change/$plan';
+  }
+
+  @override
+  Future<String> urlToReach({
+    required String plan,
+    required bool subscribed,
+    String returnPath = kPlanRoute,
+  }) async =>
+      subscribed
+          ? planChangeUrl(plan: plan, returnPath: returnPath)
+          : checkoutUrl(plan: plan, returnPath: returnPath);
+
+  @override
   Future<BillingStatus> status() async =>
       BillingStatus.fromJson({'billing_enabled': true});
 
   @override
-  Future<String> portalUrl({String returnPath = '/settings'}) async =>
+  Future<String> portalUrl({String returnPath = kPlanRoute}) async =>
       'https://pay.test/portal';
 }
 

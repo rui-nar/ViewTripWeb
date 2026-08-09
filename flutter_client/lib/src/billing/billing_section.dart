@@ -1,26 +1,36 @@
-/// "Plan" section of the settings screen (issue #121).
+/// "Plan" summary in the settings screen (issues #121, #153).
 ///
-/// Renders nothing at all when the server reports `billing_enabled: false` —
-/// a self-hosted instance has no tiers, and showing a greyed-out plan card
-/// there would advertise a limit that does not exist.
+/// A summary, not the whole story: plan, the state worth flagging, and how full
+/// the account is. Anything you can *do* about it lives on the plan page, which
+/// the whole card opens — keeping the actions here is what let a broken button
+/// row leave Settings with no way to change plan at all.
+///
+/// Renders nothing when the server reports `billing_enabled: false` — a
+/// self-hosted instance has no tiers, and showing a greyed-out plan card there
+/// would advertise a limit that does not exist.
 library;
 
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:go_router/go_router.dart';
 
 import 'billing_service.dart';
-import 'plan_picker.dart';
+import 'plan_widgets.dart';
 
 class BillingSection extends StatefulWidget {
   /// Injected in tests; defaults to the live service.
   final BillingService? service;
 
-  /// Opens checkout / portal URLs. Injected in tests.
-  final Future<void> Function(String url)? launcher;
+  /// Opens the plan page. Injected in tests.
+  final void Function()? onOpen;
 
   /// The page URL, checked for `?checkout=success` (issue #192). Injected in
   /// tests; defaults to the real browser URL — checkout only ever happens on
   /// web (see docs/BILLING.md), so this is always empty on other platforms.
+  ///
+  /// Still checked here even though the plan page is now where the provider
+  /// returns to (issue #153): `_return_url` falls back to `/settings` for a
+  /// missing or unsafe return path, and sessions created before that change
+  /// come back here too.
   final Uri? currentUri;
 
   /// Spacing between plan-status retries after a checkout redirect.
@@ -30,7 +40,7 @@ class BillingSection extends StatefulWidget {
   const BillingSection({
     super.key,
     this.service,
-    this.launcher,
+    this.onOpen,
     this.currentUri,
     this.retryDelay = const Duration(seconds: 2),
   });
@@ -41,9 +51,7 @@ class BillingSection extends StatefulWidget {
 
 class _BillingSectionState extends State<BillingSection> {
   late final BillingService _billing = widget.service ?? BillingService();
-  late final Future<BillingStatus> _future = _loadStatus();
-  bool _busy = false;
-  String? _failure;
+  late Future<BillingStatus> _future = _loadStatus();
 
   /// Stripe's webhook can lag a beat behind the checkout redirect (issue
   /// #192): landing back on `?checkout=success` right after paying can still
@@ -61,31 +69,20 @@ class _BillingSectionState extends State<BillingSection> {
     return status;
   }
 
-  Future<void> _changePlan(BillingStatus status) async {
-    await showPlanPicker(
-      context,
-      currentPlan: status.plan,
-      service: _billing,
-      launcher: widget.launcher,
-    );
-  }
-
-  Future<void> _open(Future<String> Function() fetch) async {
-    setState(() {
-      _busy = true;
-      _failure = null;
-    });
-    try {
-      final url = await fetch();
-      if (url.isEmpty) throw Exception('empty url');
-      final launch = widget.launcher ??
-          (String u) async =>
-              launchUrl(Uri.parse(u), mode: LaunchMode.externalApplication);
-      await launch(url);
-    } catch (_) {
-      if (mounted) setState(() => _failure = 'Could not reach the billing service.');
-    } finally {
-      if (mounted) setState(() => _busy = false);
+  Future<void> _open() async {
+    final open = widget.onOpen;
+    if (open != null) {
+      open();
+      return;
+    }
+    await context.push(kPlanRoute);
+    // Re-read on the way back: the plan may have changed while they were away.
+    // Braces, not an arrow: an arrow would *return* the assigned Future, and
+    // setState rejects a callback that returns one.
+    if (mounted) {
+      setState(() {
+        _future = _billing.status();
+      });
     }
   }
 
@@ -111,156 +108,52 @@ class _BillingSectionState extends State<BillingSection> {
   Widget _card(BuildContext context, BillingStatus status) {
     final theme = Theme.of(context);
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.workspace_premium_outlined,
-                    color: theme.colorScheme.primary, size: 20),
-                const SizedBox(width: 8),
-                Text('Plan', style: theme.textTheme.titleLarge),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: _open,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.workspace_premium_outlined,
+                      color: theme.colorScheme.primary, size: 20),
+                  const SizedBox(width: 8),
+                  Text('Plan', style: theme.textTheme.titleLarge),
+                  const Spacer(),
+                  Icon(Icons.chevron_right,
+                      color: theme.colorScheme.onSurfaceVariant),
+                ],
+              ),
+              const Divider(height: 24),
+              Wrap(
+                spacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(status.planName, style: theme.textTheme.titleMedium),
+                  PlanStatusChip(status: status),
+                ],
+              ),
+              if (pendingPlanNotice(status) case final notice?) ...[
+                const SizedBox(height: 6),
+                Text(notice,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.primary)),
               ],
-            ),
-            const Divider(height: 24),
-            Row(
-              children: [
-                Text(status.planName, style: theme.textTheme.titleMedium),
-                const SizedBox(width: 8),
-                if (status.adminOverride)
-                  const _Chip(label: 'Granted')
-                else if (status.cancelAtPeriodEnd)
-                  const _Chip(label: 'Ends soon')
-                else if (status.status == 'past_due')
-                  const _Chip(label: 'Payment failed'),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _usage(
-              context,
-              label: 'Trips',
-              used: '${status.projects}',
-              limit: status.limits.maxProjects == null
-                  ? 'unlimited'
-                  : '${status.limits.maxProjects}',
-              fraction: status.limits.maxProjects == null
-                  ? null
-                  : (status.projects / status.limits.maxProjects!)
-                      .clamp(0.0, 1.0),
-            ),
-            const SizedBox(height: 12),
-            _usage(
-              context,
-              label: 'Photos',
-              used: formatBytes(status.storageBytes),
-              limit: status.limits.maxStorageBytes == null
-                  ? 'unlimited'
-                  : formatBytes(status.limits.maxStorageBytes!),
-              fraction: status.storageFraction,
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('Trip length', style: theme.textTheme.bodySmall),
-                Text(
-                  status.limits.maxTripDays == null
-                      ? 'any length'
-                      : 'up to ${status.limits.maxTripDays} days',
-                  style: theme.textTheme.bodySmall,
-                ),
-              ],
-            ),
-            if (_failure != null) ...[
-              const SizedBox(height: 12),
-              Text(_failure!,
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.error)),
+              const SizedBox(height: 16),
+              PlanUsageBars(status: status),
+              const SizedBox(height: 16),
+              Text(
+                status.isPaid ? 'Manage or change plan' : 'See plans & upgrade',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.primary),
+              ),
             ],
-            const SizedBox(height: 20),
-            // Wrap, not Row: on a narrow phone the two actions stack instead of
-            // overflowing. The explicit minimumSize is required — the app theme
-            // sets ElevatedButton's to Size.fromHeight(44), i.e. *infinite*
-            // width, which a Row's unbounded main axis turns into a layout
-            // failure and an invisible button (issue #153).
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(0, 40)),
-                  onPressed: _busy ? null : () => _changePlan(status),
-                  icon: const Icon(Icons.rocket_launch_outlined, size: 18),
-                  label: Text(status.isPaid ? 'Change plan' : 'Upgrade'),
-                ),
-                if (status.canManage)
-                  OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                        minimumSize: const Size(0, 40)),
-                    onPressed:
-                        _busy ? null : () => _open(() => _billing.portalUrl()),
-                    icon: const Icon(Icons.receipt_long_outlined, size: 18),
-                    label: const Text('Manage billing'),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _usage(
-    BuildContext context, {
-    required String label,
-    required String used,
-    required String limit,
-    required double? fraction,
-  }) {
-    final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(label, style: theme.textTheme.bodySmall),
-            Text('$used / $limit', style: theme.textTheme.bodySmall),
-          ],
-        ),
-        const SizedBox(height: 6),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: fraction ?? 0,
-            minHeight: 6,
-            backgroundColor: theme.colorScheme.surfaceContainerHighest,
           ),
         ),
-      ],
-    );
-  }
-}
-
-class _Chip extends StatelessWidget {
-  final String label;
-  const _Chip({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(999),
       ),
-      child: Text(label,
-          style: theme.textTheme.labelSmall
-              ?.copyWith(color: theme.colorScheme.onSecondaryContainer)),
     );
   }
 }

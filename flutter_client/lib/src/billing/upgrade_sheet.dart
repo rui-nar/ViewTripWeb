@@ -26,6 +26,10 @@ Future<void> showUpgradeSheet(
     // The refusal names the plan that was in force, so the picker can mark it
     // as current and never offer it back as an "upgrade".
     currentPlan: error.plan,
+    // A 402 says which plan was in force, not whether it is still running, so
+    // the picker asks the change endpoint first and falls back to checkout on
+    // `not_subscribed`. Guessing here would bill a subscriber twice.
+    subscribed: error.plan != 'free',
     because: error,
     service: service,
     launcher: launcher,

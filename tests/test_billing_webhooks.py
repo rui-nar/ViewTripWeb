@@ -17,11 +17,18 @@ from sqlmodel import Session, SQLModel, create_engine
 from models.billing import Subscription
 from models.user import UserInfo
 from src.billing.plans import FREE, TIER_1, TIER_2, TIER_3, price_lookup_key
-from src.billing.subscriptions import apply_update, get_subscription, set_admin_override
+from src.billing.subscriptions import (
+    apply_schedule,
+    apply_update,
+    get_subscription,
+    set_admin_override,
+)
 from src.billing.webhook_events import (
+    ScheduleUpdate,
     SubscriptionUpdate,
     plan_for_price,
     plan_for_price_object,
+    schedule_update_from_event,
     subscription_update_from_event,
 )
 
@@ -337,6 +344,146 @@ class TestApplyUpdate:
         row = get_subscription(sess, 1)
         assert row.admin_override_plan == TIER_2
         assert row.plan == FREE  # provider state is still recorded faithfully
+
+
+# ── Scheduled changes (issue #153) ────────────────────────────────────────────
+
+def _schedule_event(etype="subscription_schedule.updated", *, event_id="evt_s",
+                    created=1000, customer="cus_1", sub_id="sub_1",
+                    phases=None) -> dict:
+    """A schedule payload shaped like the one the portal's downgrade creates."""
+    if phases is None:
+        phases = [
+            # Running now on the old price…
+            {"start_date": 1000, "end_date": 5000,
+             "items": [{"price": "price_t3"}]},
+            # …switching to the new one when the paid period ends.
+            {"start_date": 5000, "items": [{"price": "price_t1"}]},
+        ]
+    return {
+        "id": event_id, "type": etype, "created": created,
+        "data": {"object": {
+            "id": "sub_sched_1", "customer": customer,
+            "subscription": sub_id, "phases": phases,
+        }},
+    }
+
+
+class TestScheduleMapping:
+    def test_reads_the_tier_the_account_is_moving_to(self):
+        update = schedule_update_from_event(_schedule_event(), now=2000)
+        assert update.plan == TIER_1
+        assert update.effective_at == 5000
+        assert update.customer_id == "cus_1"
+        assert update.subscription_id == "sub_1"
+
+    def test_ignores_the_phase_already_running(self):
+        """Reading the first phase would announce the tier they already have as
+        the one that is coming."""
+        update = schedule_update_from_event(_schedule_event(), now=2000)
+        assert update.plan != TIER_3
+
+    def test_a_schedule_whose_phases_have_all_started_is_not_pending(self):
+        update = schedule_update_from_event(_schedule_event(), now=9000)
+        assert update.plan == ""
+        assert update.effective_at == 0.0
+
+    def test_the_nearest_future_phase_wins(self):
+        update = schedule_update_from_event(_schedule_event(phases=[
+            {"start_date": 8000, "items": [{"price": "price_t3"}]},
+            {"start_date": 5000, "items": [{"price": "price_t1"}]},
+        ]), now=2000)
+        assert update.plan == TIER_1
+
+    def test_an_expanded_price_object_resolves_by_lookup_key(self):
+        """Same rule as the subscription events: our handles beat account-scoped
+        ids, so a payload from an unconfigured account still maps (#154)."""
+        update = schedule_update_from_event(_schedule_event(phases=[
+            {"start_date": 5000, "items": [
+                {"price": {"id": "price_unknown",
+                           "lookup_key": price_lookup_key(TIER_2)}}]},
+        ]), now=2000)
+        assert update.plan == TIER_2
+
+    @pytest.mark.parametrize("etype", [
+        "subscription_schedule.released",
+        "subscription_schedule.canceled",
+        "subscription_schedule.completed",
+    ])
+    def test_a_schedule_that_will_not_run_clears_the_pending_change(self, etype):
+        update = schedule_update_from_event(_schedule_event(etype), now=2000)
+        assert update.plan == ""
+
+    def test_other_events_are_not_schedules(self):
+        assert schedule_update_from_event(
+            _subscription_event("customer.subscription.updated")) is None
+        assert schedule_update_from_event(_checkout_event()) is None
+
+
+def _schedule(**kw) -> ScheduleUpdate:
+    defaults = dict(
+        event_id="evt_s", event_at=1000.0, customer_id="cus_1",
+        subscription_id="sub_1", plan=TIER_1, effective_at=5000.0,
+    )
+    defaults.update(kw)
+    return ScheduleUpdate(**defaults)
+
+
+class TestApplySchedule:
+    def test_records_the_pending_change_without_touching_the_plan(self, sess):
+        apply_update(sess, _update(plan=TIER_3))
+        assert apply_schedule(sess, _schedule()) is True
+        row = get_subscription(sess, 1)
+        assert row.pending_plan == TIER_1
+        assert row.pending_plan_at == 5000.0
+        # The point of "at the end of the period": they keep what they paid for.
+        assert row.plan == TIER_3
+
+    def test_an_unattributable_schedule_is_ignored_not_an_error(self, sess):
+        assert apply_schedule(sess, _schedule(customer_id="cus_unknown")) is False
+
+    def test_a_redelivery_changes_nothing(self, sess):
+        apply_update(sess, _update(plan=TIER_3))
+        apply_schedule(sess, _schedule())
+        assert apply_schedule(sess, _schedule(event_id="evt_s2")) is False
+
+    def test_a_schedule_for_another_subscription_is_ignored(self, sess):
+        apply_update(sess, _update(plan=TIER_3, subscription_id="sub_1"))
+        assert apply_schedule(sess, _schedule(subscription_id="sub_other")) is False
+        assert get_subscription(sess, 1).pending_plan == ""
+
+    def test_cancelling_the_schedule_clears_what_was_pending(self, sess):
+        apply_update(sess, _update(plan=TIER_3))
+        apply_schedule(sess, _schedule())
+        assert apply_schedule(sess, _schedule(plan="", effective_at=0.0)) is True
+        row = get_subscription(sess, 1)
+        assert row.pending_plan == ""
+        assert row.pending_plan_at == 0.0
+
+    def test_the_change_landing_clears_the_promise(self, sess):
+        """The scheduled phase runs and Stripe sends a subscription.updated with
+        the new price — nothing is pending any more."""
+        apply_update(sess, _update(plan=TIER_3))
+        apply_schedule(sess, _schedule())
+        apply_update(sess, _update(event_id="evt_2", event_at=6000.0, plan=TIER_1))
+        row = get_subscription(sess, 1)
+        assert row.plan == TIER_1
+        assert row.pending_plan == ""
+
+    def test_buying_a_different_tier_supersedes_the_promise(self, sess):
+        """A queued downgrade the account can no longer keep is worse than none."""
+        apply_update(sess, _update(plan=TIER_3))
+        apply_schedule(sess, _schedule())
+        apply_update(sess, _update(event_id="evt_2", event_at=6000.0, plan=TIER_2))
+        assert get_subscription(sess, 1).pending_plan == ""
+
+    def test_an_unrelated_update_leaves_the_promise_alone(self, sess):
+        """A card retry does not cancel a scheduled downgrade."""
+        apply_update(sess, _update(plan=TIER_3))
+        apply_schedule(sess, _schedule())
+        apply_update(sess, _update(event_id="evt_2", event_at=6000.0,
+                                   plan=TIER_3, status="past_due"))
+        assert get_subscription(sess, 1).pending_plan == TIER_1
 
 
 class TestAdminOverride:

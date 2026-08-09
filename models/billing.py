@@ -40,6 +40,14 @@ class Subscription(sqlmodel.SQLModel, table=True):
     # even after a cancellation, which is what "cancel at period end" means.
     current_period_end: float = sqlmodel.Field(default=0.0)
     cancel_at_period_end: bool = sqlmodel.Field(default=False)
+    # A tier change the provider has agreed to but not applied yet — a downgrade
+    # waits for the paid period to end (issue #153). Stored separately from
+    # ``plan`` because the plan in force is still the old one: overwriting it
+    # would downgrade the account the moment they asked, which is the opposite
+    # of what "at the end of the period" means. "" = nothing pending.
+    pending_plan: str = sqlmodel.Field(default="")
+    # When the pending change takes effect, unix seconds.
+    pending_plan_at: float = sqlmodel.Field(default=0.0)
     # Operator-granted plan, independent of any payment ("" = no override).
     admin_override_plan: str = sqlmodel.Field(default="")
     # Last provider event applied, for idempotent webhook replay.

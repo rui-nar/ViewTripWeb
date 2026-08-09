@@ -13,6 +13,7 @@ event id and timestamp needed to reject a duplicate or an out-of-date event.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 from src.billing.plans import FREE, PAID_PLANS, TIER_1, plan_for_lookup_key
@@ -28,6 +29,17 @@ HANDLED_TYPES = frozenset({
     "customer.subscription.updated",
     "customer.subscription.deleted",
     "invoice.payment_failed",
+})
+
+#: Events describing a change agreed now and applied later — a downgrade waiting
+#: for the paid period to end (issue #153). A separate family because they say
+#: something different: not "this is the plan", but "this will be the plan".
+SCHEDULE_TYPES = frozenset({
+    "subscription_schedule.created",
+    "subscription_schedule.updated",
+    "subscription_schedule.released",
+    "subscription_schedule.canceled",
+    "subscription_schedule.completed",
 })
 
 
@@ -46,6 +58,22 @@ class SubscriptionUpdate:
     current_period_end: float
     cancel_at_period_end: bool
     user_info_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleUpdate:
+    """A tier change agreed now and applied later.
+
+    ``plan`` is empty when the schedule no longer implies one — it was released,
+    cancelled, or has finished running — which clears whatever was pending.
+    """
+
+    event_id: str
+    event_at: float
+    customer_id: str
+    subscription_id: str
+    plan: str
+    effective_at: float
 
 
 def price_id_for_plan(plan: str) -> str:
@@ -189,6 +217,72 @@ def _user_info_id(obj: dict) -> int | None:
     """Our own user id, as attached when the checkout session was created."""
     meta = obj.get("metadata") or {}
     return _as_int(meta.get("user_info_id")) or _as_int(obj.get("client_reference_id"))
+
+
+def _future_phase(schedule: dict, now: float) -> dict:
+    """The phase that has not started yet, ``{}`` when every phase has.
+
+    A schedule Stripe builds for a plan change has two phases: the one running
+    now on the old price, and the one that starts when the paid period ends on
+    the new one. The *second* is the pending change; reading the first would
+    report the tier they already have as "coming soon".
+    """
+    phases = schedule.get("phases") or []
+    upcoming = [p for p in phases if _as_float(p.get("start_date")) > now]
+    if not upcoming:
+        return {}
+    return min(upcoming, key=lambda p: _as_float(p.get("start_date")))
+
+
+def _phase_price(phase: dict) -> dict:
+    """The price object of a phase's first item, ``{}`` when it has none."""
+    for item in (phase.get("items") or []):
+        price = item.get("price")
+        # A phase item's price is an id unless the payload expanded it.
+        if isinstance(price, dict) and price.get("id"):
+            return price
+        if price:
+            return {"id": str(price)}
+    return {}
+
+
+def schedule_update_from_event(
+    event: dict, now: float | None = None
+) -> ScheduleUpdate | None:
+    """Translate a subscription-schedule event. ``None`` for events we ignore.
+
+    Pure, like :func:`subscription_update_from_event`: ``now`` is a parameter so
+    "which phase is still in the future" is testable against a fixed payload.
+    """
+    etype = event.get("type") or ""
+    if etype not in SCHEDULE_TYPES:
+        return None
+
+    obj = ((event.get("data") or {}).get("object")) or {}
+    ts = time.time() if now is None else now
+
+    # A schedule that is no longer going to run implies nothing pending. Say so
+    # explicitly rather than leaving a stale promise on the account.
+    ended = etype in (
+        "subscription_schedule.released",
+        "subscription_schedule.canceled",
+        "subscription_schedule.completed",
+    )
+    phase = {} if ended else _future_phase(obj, ts)
+    plan = plan_for_price_object(_phase_price(phase)) if phase else ""
+    # plan_for_price_object maps "no price" to free; an empty phase means "no
+    # pending change at all", which is a different statement.
+    if phase and not _phase_price(phase):
+        plan = ""
+
+    return ScheduleUpdate(
+        event_id=str(event.get("id") or ""),
+        event_at=_as_float(event.get("created")),
+        customer_id=_customer_id(obj),
+        subscription_id=_subscription_id(obj),
+        plan=plan,
+        effective_at=_as_float(phase.get("start_date")) if phase else 0.0,
+    )
 
 
 def subscription_update_from_event(event: dict) -> SubscriptionUpdate | None:

@@ -1,4 +1,4 @@
-/// The Plan section of Settings (issue #121).
+/// The Plan summary in Settings (issues #121, #153).
 ///
 /// The load-bearing case is the self-hosted one: a deployment that sells
 /// nothing must render no billing UI at all.
@@ -18,25 +18,36 @@ import 'package:viewtrip_client/src/core/theme.dart';
 
 class _FakeBilling implements BillingService {
   final Map<String, dynamic> payload;
-  int checkoutCalls = 0;
-  int portalCalls = 0;
+  int statusCalls = 0;
 
   _FakeBilling(this.payload);
 
   @override
-  Future<BillingStatus> status() async => BillingStatus.fromJson(payload);
-
-  @override
-  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async {
-    checkoutCalls++;
-    return 'https://pay.test/checkout';
+  Future<BillingStatus> status() async {
+    statusCalls++;
+    return BillingStatus.fromJson(payload);
   }
 
   @override
-  Future<String> portalUrl({String returnPath = '/settings'}) async {
-    portalCalls++;
-    return 'https://pay.test/portal';
-  }
+  Future<String> checkoutUrl({String? plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/checkout';
+
+  @override
+  Future<String> planChangeUrl(
+          {required String plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/change';
+
+  @override
+  Future<String> urlToReach({
+    required String plan,
+    required bool subscribed,
+    String returnPath = kPlanRoute,
+  }) async =>
+      subscribed ? 'https://pay.test/change' : 'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = kPlanRoute}) async =>
+      'https://pay.test/portal';
 
   @override
   Future<List<PlanInfo>> plans() async => const [
@@ -64,7 +75,7 @@ Future<void> _pump(
     home: Scaffold(
       body: BillingSection(
         service: billing,
-        launcher: (url) async => opened?.add(url),
+        onOpen: () => opened?.add('plan-page'),
         currentUri: currentUri,
         retryDelay: Duration.zero,
       ),
@@ -89,11 +100,24 @@ class _SequenceBilling implements BillingService {
   }
 
   @override
-  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async =>
+  Future<String> checkoutUrl({String? plan, String returnPath = kPlanRoute}) async =>
       'https://pay.test/checkout';
 
   @override
-  Future<String> portalUrl({String returnPath = '/settings'}) async =>
+  Future<String> planChangeUrl(
+          {required String plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/change';
+
+  @override
+  Future<String> urlToReach({
+    required String plan,
+    required bool subscribed,
+    String returnPath = kPlanRoute,
+  }) async =>
+      subscribed ? 'https://pay.test/change' : 'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = kPlanRoute}) async =>
       'https://pay.test/portal';
 
   @override
@@ -137,18 +161,9 @@ void main() {
       expect(find.text('up to 10 days'), findsOneWidget);
     });
 
-    testWidgets('opens the plan picker to upgrade', (tester) async {
+    testWidgets('invites the user to the plan page', (tester) async {
       await _pump(tester, _FakeBilling(free));
-      await tester.tap(find.text('Upgrade'));
-      await tester.pumpAndSettle();
-      expect(find.text('Choose a plan'), findsOneWidget);
-      expect(find.text('Choose Tier 1'), findsOneWidget);
-    });
-
-    testWidgets('hides "Manage billing" before the first purchase',
-        (tester) async {
-      await _pump(tester, _FakeBilling(free));
-      expect(find.text('Manage billing'), findsNothing);
+      expect(find.text('See plans & upgrade'), findsOneWidget);
     });
   });
 
@@ -173,20 +188,9 @@ void main() {
       expect(find.text('any length'), findsOneWidget);
     });
 
-    testWidgets('offers a plan change rather than an upgrade', (tester) async {
+    testWidgets('offers management rather than an upgrade', (tester) async {
       await _pump(tester, _FakeBilling(cloud));
-      expect(find.text('Change plan'), findsOneWidget);
-      expect(find.text('Upgrade'), findsNothing);
-    });
-
-    testWidgets('opens the billing portal', (tester) async {
-      final billing = _FakeBilling(cloud);
-      final opened = <String>[];
-      await _pump(tester, billing, opened: opened);
-      await tester.tap(find.text('Manage billing'));
-      await tester.pumpAndSettle();
-      expect(billing.portalCalls, 1);
-      expect(opened, ['https://pay.test/portal']);
+      expect(find.text('Manage or change plan'), findsOneWidget);
     });
 
     testWidgets('flags a subscription that is ending', (tester) async {
@@ -203,17 +207,33 @@ void main() {
       await _pump(tester, _FakeBilling({...cloud, 'admin_override': true}));
       expect(find.text('Granted'), findsOneWidget);
     });
+  });
 
-    // Issue #153: the actions laid out under the app theme, which forces every
-    // ElevatedButton to infinite width unless the button overrides it. Both
-    // buttons are present here, so this is the narrowest the section ever gets.
-    testWidgets('lays the actions out without overflowing a phone',
-        (tester) async {
-      await _pump(tester, _FakeBilling(cloud), surface: const Size(360, 800));
+  group('opening the plan page', () {
+    final free = {
+      'billing_enabled': true,
+      'plan': 'free',
+      'plan_name': 'Free',
+      'status': 'none',
+      'limits': {'max_projects': 1},
+      'usage': {'projects': 1},
+    };
+
+    testWidgets('the whole card is the way in', (tester) async {
+      final opened = <String>[];
+      await _pump(tester, _FakeBilling(free), opened: opened);
+      await tester.tap(find.text('Free'));
+      await tester.pumpAndSettle();
+      expect(opened, ['plan-page']);
+    });
+
+    // Issue #153: the section laid out under the app theme, which forces every
+    // ElevatedButton to infinite width unless the button overrides it. This is
+    // the narrowest the card ever gets.
+    testWidgets('lays out without overflowing a phone', (tester) async {
+      await _pump(tester, _FakeBilling(free), surface: const Size(360, 800));
       expect(tester.takeException(), isNull);
-      expect(find.text('Change plan'), findsOneWidget);
-      expect(find.text('Manage billing'), findsOneWidget);
-      expect(tester.getSize(find.text('Change plan')).width, lessThan(360));
+      expect(find.text('See plans & upgrade'), findsOneWidget);
     });
   });
 

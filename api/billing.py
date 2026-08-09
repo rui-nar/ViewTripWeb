@@ -39,7 +39,10 @@ from src.billing.entitlements import (
 )
 from src.billing.gateway import GatewayError, get_gateway
 from src.billing.plans import FREE, PAID_PLANS, catalogue
-from src.billing.webhook_events import subscription_update_from_event
+from src.billing.webhook_events import (
+    schedule_update_from_event,
+    subscription_update_from_event,
+)
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -83,6 +86,17 @@ class BillingMeOut(BaseModel):
     cancel_at_period_end: bool
     current_period_end: float = Field(description="Unix seconds; 0 when not subscribed")
     admin_override: bool = Field(description="Plan was granted by an operator")
+    pending_plan: str = Field(
+        default="",
+        description="Tier this subscription switches to at the end of the paid "
+                    "period; empty when nothing is scheduled",
+    )
+    pending_plan_name: str = Field(
+        default="", description="Display name of `pending_plan`, or empty"
+    )
+    pending_plan_at: float = Field(
+        default=0.0, description="When the pending change applies; unix seconds"
+    )
     limits: dict
     usage: UsageOut
 
@@ -128,6 +142,11 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
             projects=project_count(sess, user_info_id),
             storage_bytes=storage_used(sess, user_info_id),
         )
+    # A scheduled change to the plan already in force says nothing worth
+    # showing — it would read as "switching to the tier you are on".
+    pending = (row.pending_plan if row else "") or ""
+    if pending == plan:
+        pending = ""
     return BillingMeOut(
         billing_enabled=billing_enabled(),
         quotas_enforced=quotas_enforced(),
@@ -137,6 +156,9 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
         cancel_at_period_end=bool(row.cancel_at_period_end) if row else False,
         current_period_end=(row.current_period_end if row else 0.0),
         admin_override=bool(row.admin_override_plan) if row else False,
+        pending_plan=pending,
+        pending_plan_name=plan_display_name(pending) if pending else "",
+        pending_plan_at=(row.pending_plan_at if row and pending else 0.0),
         limits=limits.as_dict(),
         usage=usage,
     )
@@ -367,6 +389,21 @@ async def webhook(request: Request):
     except GatewayError as exc:
         _log.warning("Rejected webhook: %s", exc)
         raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # A scheduled change is a different statement about the account — "this will
+    # be the plan", not "this is" — so it is translated and stored separately
+    # (issue #153).
+    schedule = schedule_update_from_event(event)
+    if schedule is not None:
+        with get_session() as sess:
+            applied = subs.apply_schedule(sess, schedule)
+        if applied:
+            _log.info(
+                "Billing: %s → pending plan=%s at %s (event %s)",
+                schedule.customer_id, schedule.plan or "none",
+                schedule.effective_at, schedule.event_id,
+            )
+        return WebhookAck(received=True, applied=applied)
 
     update = subscription_update_from_event(event)
     if update is None:

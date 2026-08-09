@@ -160,6 +160,37 @@ class TestBillingMe:
         assert body["plan"] == TIER_2
         assert body["admin_override"] is True
 
+    def test_a_scheduled_downgrade_is_reported(self, client, engine, monkeypatch):
+        """The plan in force is still the old one — that is what "at the end of
+        the period" means — so the pending tier rides alongside it (#153)."""
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_3, status="active",
+                      current_period_end=9e9,
+                      pending_plan=TIER_1, pending_plan_at=8e9)
+        body = client.get("/api/billing/me").json()
+        assert body["plan"] == TIER_3
+        assert body["pending_plan"] == TIER_1
+        assert body["pending_plan_name"]
+        assert body["pending_plan_at"] == 8e9
+
+    def test_nothing_pending_is_reported_as_nothing(self, client, engine,
+                                                    monkeypatch):
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_2, status="active")
+        body = client.get("/api/billing/me").json()
+        assert body["pending_plan"] == ""
+        assert body["pending_plan_at"] == 0
+
+    def test_a_change_to_the_current_plan_is_not_announced(self, client, engine,
+                                                           monkeypatch):
+        """Would read as "switching to the tier you are on"."""
+        monkeypatch.setenv("BILLING_ENABLED", "1")
+        _subscription(engine, plan=TIER_2, status="active",
+                      current_period_end=9e9,
+                      pending_plan=TIER_2, pending_plan_at=8e9)
+        body = client.get("/api/billing/me").json()
+        assert body["pending_plan"] == ""
+
     def test_usage_is_reported(self, client, monkeypatch):
         monkeypatch.setenv("BILLING_ENABLED", "1")
         body = client.get("/api/billing/me").json()
