@@ -1,21 +1,27 @@
 # VPS Deployment (traxjourney.com)
 
-Runbook for the production deployment on an OVH VPS, replacing the Synology
-NAS as the public-facing host. The NAS deployment (`deploy.ps1`,
-`viewtrip.narciso.synology.me`) is unaffected and kept running as a fallback
-during the transition — this is a separate host on a separate domain, not a
-cutover of existing traffic.
+Runbook for the OVH VPS, which now hosts **both** environments and has fully
+replaced the Synology NAS:
+
+- **production** — `traxjourney.com`, `/opt/viewtrip/`, image `:latest`
+- **validation** — `val.traxjourney.com`, `/opt/viewtrip-val/`, image `:validation`
+
+Validation moved off the NAS because its firewall could not be opened up enough
+to serve the environment. Nothing about ViewTripWeb forced the move, so there is
+no application-level workaround to look for — the NAS is simply no longer a
+deployment target, and `deploy.ps1` no longer has a code path that reaches it.
 
 ## Infrastructure
 
 | Item | Value |
 |------|-------|
-| Domain | traxjourney.com (+ www, redirected to apex) |
+| Domain | traxjourney.com (+ www, redirected to apex), val.traxjourney.com |
 | Provider | OVH, VPS-1 2027 range |
 | Specs | 2 vCore, 4 GB RAM, 40 GB NVMe SSD, Strasbourg (FR) datacenter |
 | Image | Debian 12 - Docker (Docker preinstalled) |
 | SSH user | `debian` (OVH default account, sudo + docker group) |
-| App directory | `/opt/viewtrip/` (`db/`, `config/`, `data/`, `docker-compose.yml`, `.env`) |
+| Prod directory | `/opt/viewtrip/` (`db/`, `config/`, `data/`, `docker-compose.yml`, `.env`) |
+| Val directory | `/opt/viewtrip-val/` (same layout, own `.env`, own data) |
 | Reverse proxy | Caddy (automatic Let's Encrypt TLS) |
 
 ## 1. VPS hardening
@@ -52,15 +58,36 @@ traxjourney.com {
 www.traxjourney.com {
     redir https://traxjourney.com{uri} permanent
 }
+
+val.traxjourney.com {
+    reverse_proxy 127.0.0.1:8001
+}
 ```
+
+Each hostname gets its own certificate automatically. No `tls` directive is
+needed, and WebSocket upgrades pass through without extra configuration.
 
 **Gotcha:** the Caddy Debian package ships a default `:80 { root * ...;
 file_server }` block in the Caddyfile. This block has no hostname, so it
 matches *any* host on port 80 and will intercept requests meant for your
-domain block — delete it, don't just append your own block alongside it.
+domain block — including the ACME challenge for a newly added subdomain.
+Delete it, don't just append your own block alongside it.
 
-`systemctl reload caddy` after any edit. Cert issuance is automatic on first
-request, provided DNS already resolves and 80/443 are open.
+**DNS before reload.** A new hostname needs its A record live *before* the
+first request, or the HTTP-01 challenge fails and Caddy backs off with a retry
+timer. `dig` is not installed on the OVH Debian image (it is in `dnsutils`);
+`getent hosts val.traxjourney.com` answers the same question with nothing to
+install. If that comes back empty but the record is definitely published,
+query a public resolver directly — `getent` goes through the local resolver
+and can serve a stale negative answer:
+
+```bash
+curl -s "https://dns.google/resolve?name=val.traxjourney.com&type=A"
+```
+
+`caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy` after
+any edit. Cert issuance is automatic on first request, provided DNS already
+resolves and 80/443 are open.
 
 ## 3. App deployment
 
@@ -75,11 +102,11 @@ request, provided DNS already resolves and 80/443 are open.
 All other env values (Mapbox, Google client ID/Translate key, Strava
 client ID/secret) are unchanged from NAS prod.
 
-**Before going live:** add `https://traxjourney.com/...` equivalents to
+**Before going live** (done for prod, and the same applies to any new
+hostname — see §5): add the `https://traxjourney.com/...` equivalents to
 Google OAuth console's authorized redirect URIs and Strava's app
-"Authorization Callback Domain" — both are still only registered for the
-`narciso.synology.me` domain, and login/Strava sync will fail on the new
-domain until updated.
+"Authorization Callback Domain". Login and Strava sync fail on a domain that
+is not registered there.
 
 ### Background job worker (optional, issue #173)
 
@@ -144,6 +171,9 @@ job-side DB metrics silently go missing (see docs/METRICS.md).
 
 ## 4. Data migration (NAS -> VPS)
 
+*Historical — the one-time move of prod data off the NAS. Kept for the gotchas,
+which apply to any Synology copy. To seed validation from prod, see §5.*
+
 1. **Consistent DB snapshot on the NAS**, via SQLite's online backup API in a
    throwaway container (safe on a live DB — unlike a raw `cp`, correctly
    handles WAL mode, which the app already runs — see `models/db.py`):
@@ -183,45 +213,155 @@ job-side DB metrics silently go missing (see docs/METRICS.md).
 4. `cd /opt/viewtrip && docker compose up -d`, then `docker compose logs -f`
    to confirm a clean Alembic migration + startup before checking the site.
 
-## 5. `deploy.ps1`
+## 5. Validation environment (`/opt/viewtrip-val`)
 
-Added a `-Target Validation|Prod` parameter (default `Validation`, the
-existing NAS validation flow — unchanged). `-Target Prod`:
+Same host, same Docker, same image repository — a second directory with its own
+compose file, `.env` and data. Three things differ from prod:
 
-- Skips the Flutter/Docker build entirely — prod runs whatever `:latest` CI
-  already published for the current tagged release, not a local build.
-- SSHes to the VPS (`164.132.195.154`, user `Rui`, key
-  `$HOME\.ssh\traxjourney_vps`) and runs `docker compose down / pull / up -d`
-  in `/opt/viewtrip`.
+- **Port `127.0.0.1:8001:8000`.** Loopback-bound for the reason in §1: Docker
+  publishes ports by writing DNAT rules that bypass `ufw`, so a bare
+  `8001:8000` would put validation on the public internet regardless of the
+  firewall. Only Caddy needs to reach it.
+- **Image `:validation`**, not `:latest`.
+- **Its own `db/`, `data/`, `config/`.** Pointing val at `/opt/viewtrip/db`
+  would put validation writes into the production SQLite file.
 
-```powershell
-.\deploy.ps1 -Target Prod
+`.env` must set `FRONTEND_ORIGIN` and `STRAVA_REDIRECT_URI` to
+`val.traxjourney.com`, or CORS rejects the client and Strava's callback lands
+on prod. Add `val.traxjourney.com` to Google OAuth's authorized redirect URIs;
+Strava allows only one callback domain per app, so val either gets its own
+Strava app or does without Strava sync.
+
+**Use Stripe test keys and val's own webhook secret.** This matters more than it
+looks once the section below is used: a database seeded from prod carries real
+`stripe_customer_id` values, and val running unreleased code against live Stripe
+keys can bill or mutate a real customer.
+
+### Seeding val from the latest prod backup
+
+Prod's nightly job writes `/opt/viewtrip/db/backups/viewtripweb_<YYYY-MM-DD>.db`
+(`src/backup/backup_service.py`). Each file is self-contained —
+`wal_checkpoint(TRUNCATE)` folds the WAL in — so there is no sidecar to carry
+along. Both stacks are on one host, so a bind mount reaches them:
+
+```yaml
+  # One-shot: seed val's DB from prod's newest nightly backup.
+  # Behind a profile so a routine `docker compose up -d` can never clobber val.
+  #   docker compose down
+  #   docker compose --profile seed run --rm db-seed
+  #   docker compose up -d
+  db-seed:
+    image: alpine:3.20
+    profiles: ["seed"]
+    volumes:
+      - /opt/viewtrip/db/backups:/prod-backups:ro
+      - ./db:/db
+    command:
+      - sh
+      - -euc
+      - |
+        latest=$$(ls -1 /prod-backups/viewtripweb_*.db 2>/dev/null | tail -n1)
+        [ -n "$$latest" ] || { echo "no prod backup in /prod-backups"; exit 1; }
+        echo "seeding val from $$latest"
+        rm -f /db/viewtripweb.db-wal /db/viewtripweb.db-shm
+        cp "$$latest" /db/viewtripweb.db
+        echo done
 ```
 
-### Alternative: cutting `:validation` from CI instead of a Windows checkout
+Three things about it are easy to get wrong:
 
-`deploy.ps1 -Target Validation` builds the image from the local working tree,
-which is how CRLF line endings on a Windows checkout of a `*.sh` file baked a
-broken `#!/bin/sh\r` shebang into the image and crash-looped the worker
-containers (issue #190) — `.gitattributes` pins shell scripts to LF, but that
-only takes effect on a fresh checkout of the affected path, not retroactively.
+- **Deleting the `-wal` / `-shm` sidecars is not optional.** If val has been
+  running, `./db` holds a WAL belonging to *val's* database. Drop a different
+  `.db` next to it and SQLite replays that WAL onto the new file — a corrupt
+  database, not a clean copy.
+- **Run it with val stopped** (`docker compose down` first). Overwriting a
+  SQLite file under a live connection is the same hazard as §4 step 2.
+- **The profile is what keeps it safe.** Wired as a `depends_on:
+  service_completed_successfully` dependency instead, every `docker compose
+  up -d` would silently reset val, which makes it useless for testing anything
+  that spans a deploy.
 
-`docker-build.yml` also builds `ghcr.io/rui-nar/viewtripweb:validation` from a
-force-pushed `validation` git tag, entirely on `ubuntu-latest` — no Windows
-working tree involved, so the CRLF failure mode can't happen:
+Backups are ISO-dated, so `ls -1 | tail -n1` really is the newest. `$$` is
+compose escaping — the shell receives a single `$`.
+
+Schema drift needs no action: val's API runs `alembic upgrade head` in its
+lifespan, so a prod DB on an older revision migrates forward on first boot.
+
+The database references media under `data/`, so a DB-only seed leaves memories
+pointing at files that do not exist. Add `/opt/viewtrip/data:/prod-data:ro` plus
+`./data:/val-data` and `cp -a /prod-data/. /val-data/` if you want them — check
+free space first, it is a full copy of prod's media onto a 40 GB disk.
+
+## 6. `deploy.ps1`
+
+`-Target Validation|Prod` (default `Validation`). Both targets SSH to the VPS
+(`164.132.195.154`, user `rui`, key `$HOME\.ssh\traxjourney_vps`) and run
+`docker compose down / pull / up -d`; they differ in directory, image tag and
+whether anything is built locally.
+
+| | `Validation` | `Prod` |
+|---|---|---|
+| Directory | `/opt/viewtrip-val` | `/opt/viewtrip` |
+| Image tag | `:validation` | `:latest` |
+| Builds locally | yes (unless `-SkipBuild`) | never |
+| URL | val.traxjourney.com | traxjourney.com |
+
+```powershell
+.\deploy.ps1                      # build working tree -> :validation -> val
+.\deploy.ps1 -FromMain            # build a clean export of origin/main instead
+.\deploy.ps1 -SkipBuild           # deploy the :validation CI already published
+.\deploy.ps1 -Target Prod         # pull :latest, no build
+```
+
+`-FromMain` builds a pristine export of `origin/main` in a throwaway git
+worktree, so the image is exactly what is on main — never contaminated by local
+edits or untracked files.
+
+Every path that skips the build first checks GitHub Actions for an in-progress
+`docker-build.yml` run and refuses to deploy while one is going, since the tag
+it is about to pull may be stale or only half-pushed.
+
+Note `deploy.ps1` itself is **gitignored** and lives only on the dev machine.
+
+### The other way to cut `:validation`
+
+A session with no local Docker — a web Claude Code session, say — produces the
+same image by force-pushing the floating `validation` git tag:
 
 ```bash
 git tag -f validation <commit-or-branch>
 git push origin validation --force
 ```
 
-Then on the validation host: `docker compose pull && docker compose up -d`.
-This path only ever produces `:validation` — it never touches `:latest` or a
-`:<sha>` tag, which stay reserved for real `v*` releases.
+`docker-build.yml` builds `ghcr.io/rui-nar/viewtripweb:validation` on
+`ubuntu-latest`. It is the **same tag** `deploy.ps1` pushes, so the val host
+pulls it either way and needs no reconfiguration. Deploy it with
+`.\deploy.ps1 -SkipBuild`, or directly on the VPS:
+
+```bash
+cd /opt/viewtrip-val && docker compose pull && docker compose up -d
+```
+
+This path only ever produces `:validation` — never `:latest` or a `:<sha>` tag,
+which stay reserved for real `v*` releases.
+
+Building on Linux is also the only way to avoid issue #190: `deploy.ps1` builds
+from a Windows working tree, which is how CRLF line endings on a `*.sh` file
+baked a broken `#!/bin/sh\r` shebang into the image and crash-looped the worker
+containers. `.gitattributes` pins shell scripts to LF, but only on a fresh
+checkout of the affected path, not retroactively.
+
+**One consequence of the shared tag:** two producers write `:validation`, and
+the host cannot tell which one it is running. If a local build and a tag push
+race, last writer wins. Prefer the tag route when it matters who built it.
 
 ## Open items
 
 - [ ] Off-site backups independent of OVH (the VPS's datacenter, Strasbourg,
       is the same site that suffered OVH's 2021 fire — the in-house
       "Automated Backup" option isn't sufficient on its own).
-- [ ] Decommission or keep the NAS deployment as a standing fallback.
+- [x] Decommission the NAS as a deployment target. Validation moved to
+      `/opt/viewtrip-val` on the VPS; `deploy.ps1` no longer reaches the NAS.
+- [ ] Both environments now share one host, one disk and one 4 GB of RAM. A
+      poster render in val competes with prod for memory — worth watching
+      before assuming val is free.
