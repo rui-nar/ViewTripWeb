@@ -9,15 +9,28 @@ clicks nobody could review.
 The two rules asserted hardest are the ones a reader of `docs/BILLING.md` is
 entitled to rely on: a downgrade lands at the end of the paid period, and so
 does a cancellation.
+
+**The configurations here are real ``StripeObject`` instances, not dicts.** The
+first version of this file used dicts and passed while the script crashed
+against Stripe on the first run: ``StripeObject`` does not subclass ``dict``, so
+``config["metadata"].get("managed_by")`` reaches the SDK's GET helper and raises
+``AttributeError``. That is the same trap ``test_billing_stripe_gateway.py``
+exists to catch, and a dict fake walks straight past it.
 """
 from __future__ import annotations
 
 import types
 
 import pytest
+from stripe import StripeObject
 
 from scripts import stripe_catalog as cat
 from src.billing import plans
+
+
+def _obj(**fields) -> StripeObject:
+    """A real StripeObject — the type the SDK actually returns."""
+    return StripeObject.construct_from(dict(fields), "sk_test_x")
 
 
 @pytest.fixture
@@ -67,23 +80,27 @@ class TestPortalFeatures:
 
 
 class _FakeConfiguration:
-    """Records writes; answers `list` from whatever it was seeded with."""
+    """Records writes; answers `list` from whatever it was seeded with.
 
-    def __init__(self, existing: list[dict] | None = None):
+    Everything it hands back is a ``StripeObject``, because that is what the SDK
+    hands back — see the module docstring.
+    """
+
+    def __init__(self, existing: list[StripeObject] | None = None):
         self.existing = existing or []
         self.created: list[dict] = []
         self.modified: list[tuple[str, dict]] = []
 
     def list(self, *, limit):
-        return {"data": self.existing}
+        return _obj(data=list(self.existing))
 
     def create(self, **params):
         self.created.append(params)
-        return {"id": "bpc_new"}
+        return _obj(id="bpc_new")
 
     def modify(self, config_id, **params):
         self.modified.append((config_id, params))
-        return {"id": config_id}
+        return _obj(id=config_id)
 
 
 def _stripe(configuration: _FakeConfiguration):
@@ -109,23 +126,65 @@ class TestSyncPortalConfiguration:
     def test_reuses_its_own_configuration_on_a_second_run(self, price_ids):
         """Stripe assigns the id, so without the marker every run would leave
         another configuration behind."""
-        config = _FakeConfiguration(
-            [{"id": "bpc_mine", "metadata": {"managed_by": cat._MANAGED_BY}}])
+        config = _FakeConfiguration([
+            _obj(id="bpc_mine",
+                 metadata=_obj(managed_by=cat._MANAGED_BY)),
+        ])
         cat._sync_portal_configuration(_stripe(config), price_ids, apply=True)
         assert config.created == []
         assert config.modified[0][0] == "bpc_mine"
 
     def test_leaves_a_hand_made_configuration_alone(self, price_ids):
         """Someone else's portal configuration is not ours to rewrite."""
-        config = _FakeConfiguration([{"id": "bpc_theirs", "metadata": {}}])
+        config = _FakeConfiguration([_obj(id="bpc_theirs", metadata=_obj())])
         cat._sync_portal_configuration(_stripe(config), price_ids, apply=True)
         assert config.modified == []
         assert len(config.created) == 1
 
     def test_tolerates_a_configuration_with_no_metadata(self, price_ids):
-        config = _FakeConfiguration([{"id": "bpc_old", "metadata": None}])
+        config = _FakeConfiguration([_obj(id="bpc_old", metadata=None)])
         cat._sync_portal_configuration(_stripe(config), price_ids, apply=True)
         assert len(config.created) == 1
+
+    def test_tolerates_a_configuration_with_no_metadata_field_at_all(
+        self, price_ids
+    ):
+        """Reading a key a StripeObject does not have raises; ``_field`` is what
+        keeps that from taking the whole run down."""
+        config = _FakeConfiguration([_obj(id="bpc_bare")])
+        cat._sync_portal_configuration(_stripe(config), price_ids, apply=True)
+        assert len(config.created) == 1
+
+
+class TestFieldAccess:
+    """The trap that broke the first live run of this script."""
+
+    def test_stripe_objects_have_no_dict_get(self):
+        with pytest.raises(AttributeError):
+            _obj(managed_by="x").get("managed_by")
+
+    def test_nested_reads_return_stripe_objects_not_dicts(self):
+        """Why the bug survived review: the *outer* read looks fine."""
+        config = _obj(metadata=_obj(managed_by="x"))
+        assert isinstance(config["metadata"], StripeObject)
+        with pytest.raises(AttributeError):
+            config["metadata"].get("managed_by")
+
+    def test_managed_by_reads_through_both_levels(self):
+        config = _obj(metadata=_obj(managed_by=cat._MANAGED_BY))
+        assert cat._managed_by(config) == cat._MANAGED_BY
+
+    @pytest.mark.parametrize("config", [
+        _obj(id="x"),                    # no metadata key at all
+        _obj(id="x", metadata=None),     # metadata explicitly null
+        _obj(id="x", metadata=_obj()),   # metadata present but empty
+    ])
+    def test_managed_by_is_empty_rather_than_raising(self, config):
+        assert cat._managed_by(config) == ""
+
+    def test_plain_dicts_still_work(self):
+        """A dry run and the tests both hand it ordinary dicts."""
+        assert cat._managed_by({"metadata": {"managed_by": "z"}}) == "z"
 
     def test_skips_when_the_prices_do_not_exist_yet(self):
         """A dry run reports "(new)" for prices it did not create; naming those

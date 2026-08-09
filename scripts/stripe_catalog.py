@@ -184,6 +184,29 @@ def _sync_price(stripe, plan: str, *, apply: bool) -> tuple[str, list[str]]:
 _MANAGED_BY = "scripts/stripe_catalog.py"
 
 
+def _field(obj, name: str):
+    """Read a field off a Stripe SDK object, or a plain dict.
+
+    ``StripeObject`` does **not** subclass ``dict``: ``.get`` is the API's GET
+    helper, so ``config.get("managed_by")`` raises ``AttributeError`` instead of
+    returning the value — and nested reads return ``StripeObject`` too, so it is
+    the *second* access that usually bites. Subscripting is the supported form,
+    and a missing key raises, hence the membership check.
+
+    The same helper, for the same reason, as ``src.billing.stripe_gateway._field``
+    — duplicated rather than imported so this script keeps running with nothing
+    but ``src.billing.plans`` on the path.
+    """
+    if obj is None:
+        return None
+    return obj[name] if name in obj else None
+
+
+def _managed_by(config) -> str:
+    """``metadata.managed_by`` of a portal configuration, "" when absent."""
+    return str(_field(_field(config, "metadata"), "managed_by") or "")
+
+
 def _portal_features(price_ids: dict[str, str]) -> dict:
     """Customer-portal behaviour, declared here rather than clicked in a dashboard.
 
@@ -236,7 +259,7 @@ def _sync_portal_configuration(
     features = _portal_features(price_ids)
     existing = None
     for config in stripe.billing_portal.Configuration.list(limit=100)["data"]:
-        if (config["metadata"] or {}).get("managed_by") == _MANAGED_BY:
+        if _managed_by(config) == _MANAGED_BY:
             existing = config
             break
 
