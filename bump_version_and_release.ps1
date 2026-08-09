@@ -72,8 +72,13 @@ if ($Patch) {
 # version ("v$major.$minor.$patchNum") silently produced the wrong commit range
 # whenever a tag was cut by hand or pubspec drifted, and the old fallback then
 # used an arbitrary "last 30 commits".
+#
+# --match keeps this to release tags. Without it `git describe` returns the
+# nearest tag of any kind, so the non-release `validation` tag (issue #191)
+# became the range base and cut the notes down to the handful of commits since
+# the last validation build.
 git fetch --tags 2>$null
-$oldTag = (git describe --tags --abbrev=0 2>$null)
+$oldTag = (git describe --tags --abbrev=0 --match "v[0-9]*" 2>$null)
 if (-not $oldTag) {
     Write-Host "  Note: no tags found -- notes will cover the full history" -ForegroundColor Yellow
 }
