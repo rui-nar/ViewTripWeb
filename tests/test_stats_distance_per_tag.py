@@ -98,3 +98,40 @@ class TestDistancePerTag:
         filtered = _compute_stats(project_with_tags, tag_filter=["Alps"])
         unfiltered = _compute_stats(project_with_tags)
         assert filtered["distance_per_tag"] == unfiltered["distance_per_tag"]
+
+
+class TestDistancePerTagUntagged:
+    """A ride day with no tags of its own falls into "Untagged" rather than
+    being dropped from the breakdown entirely (issue #203 follow-up)."""
+
+    @pytest.fixture
+    def project_with_untagged_day(self):
+        p = Project(name="Untagged Test")
+        p.day_meta = {
+            "2024-06-01": DayMeta(tags=["Alps"]),
+            "2024-06-02": DayMeta(tags=[]),  # explicitly no tags
+            "2024-06-03": DayMeta(),  # no tags data at all
+        }
+        p.activities = [
+            _activity(1, "2024-06-01", 50_000),
+            _activity(2, "2024-06-02", 30_000),
+            _activity(3, "2024-06-03", 20_000),
+        ]
+        return p
+
+    def test_untagged_ride_days_are_bucketed(self, project_with_untagged_day):
+        result = _compute_stats(project_with_untagged_day)
+        dpt = result["distance_per_tag"]
+        assert dpt["Alps"] == pytest.approx(50_000)
+        # Jun-02 (30k) + Jun-03 (20k) = 50k, whether explicitly [] or unset.
+        assert dpt["Untagged"] == pytest.approx(50_000)
+
+    def test_no_untagged_bucket_when_project_never_uses_tags(self):
+        """No tag has ever been defined on this project — the whole
+        breakdown stays absent rather than showing a lone 100% "Untagged"
+        slice for a feature nobody has touched."""
+        p = Project(name="No Tags At All")
+        p.day_meta = {"2024-06-01": DayMeta(tags=[])}
+        p.activities = [_activity(1, "2024-06-01", 50_000)]
+        result = _compute_stats(p)
+        assert result["distance_per_tag"] == {}

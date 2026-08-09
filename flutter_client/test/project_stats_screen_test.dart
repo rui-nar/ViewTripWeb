@@ -61,6 +61,17 @@ class _FakeStatsService extends ProjectService {
       <String, dynamic>{};
 }
 
+/// Stats payload with a mix of tagged and untagged ride distance, for the
+/// "Distance by tag" breakdown (issue #203 follow-up).
+class _FakeStatsServiceWithTagBreakdown extends ProjectService {
+  @override
+  Future<Map<String, dynamic>> getStats(ProjectRef ref,
+          {List<String> tags = const []}) async =>
+      <String, dynamic>{
+        'distance_per_tag': {'Alps': 50000.0, 'Untagged': 30000.0},
+      };
+}
+
 void main() {
   // ProjectNotifier.load() now round-trips selection/filter state through
   // shared_preferences (issue #76 follow-up) — without a mock, getInstance()
@@ -105,5 +116,26 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(notifier.projectName, 'Trip');
+  });
+
+  testWidgets(
+      'a ride day with no tags shows up as "Untagged" in the tag breakdown '
+      '(issue #203 follow-up)', (tester) async {
+    final notifier = _TestProjectNotifier(_FakeProjectService());
+    await notifier.load(const ProjectRef(name: 'Trip'));
+
+    await tester.pumpWidget(MaterialApp(
+      home: ChangeNotifierProvider<ProjectNotifier>.value(
+        value: notifier,
+        child: ProjectStatsScreen(
+          projectName: 'Trip',
+          service: _FakeStatsServiceWithTagBreakdown(),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Untagged'), findsOneWidget);
+    expect(find.textContaining('Alps'), findsOneWidget);
   });
 }

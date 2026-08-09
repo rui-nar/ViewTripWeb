@@ -797,6 +797,9 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
         sleeping_counts[label] += 1
 
     # ── Ride distance per tag (always over all activities, ignores tag_filter) ─
+    # A ride day with no tags of its own falls into "Untagged" rather than
+    # being dropped, so the breakdown always accounts for all ride distance
+    # (issue #203 follow-up).
     dist_per_tag: Dict[str, float] = {}
     if tag_options:
         date_tags: Dict[str, list] = {
@@ -812,8 +815,12 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
                 act_date = a.start_date_local.date().isoformat()
             except AttributeError:
                 act_date = str(a.start_date_local)[:10]
-            for tag in date_tags.get(act_date, []):
-                dist_per_tag[tag] = dist_per_tag.get(tag, 0.0) + (a.distance or 0.0)
+            day_tags = date_tags.get(act_date, [])
+            if day_tags:
+                for tag in day_tags:
+                    dist_per_tag[tag] = dist_per_tag.get(tag, 0.0) + (a.distance or 0.0)
+            else:
+                dist_per_tag["Untagged"] = dist_per_tag.get("Untagged", 0.0) + (a.distance or 0.0)
 
     # ── Distance + counts by segment type ───────────────────────────────────
     seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}

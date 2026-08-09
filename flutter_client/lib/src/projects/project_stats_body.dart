@@ -64,6 +64,20 @@ class _StatsBody extends StatelessWidget {
     final totalTagDist =
         tagPieEntries.fold<double>(0, (s, e) => s + e.value);
 
+    // "Untagged" (issue #203 follow-up) always renders in a fixed grey,
+    // regardless of its rank in the sort, so it reads as "no data" rather
+    // than as just another tag; real tags cycle through the palette using
+    // only their own count, so adding/removing the Untagged slice never
+    // shifts their colours.
+    const untaggedColor = Color(0xFF9E9E9E);
+    var paletteIdx = 0;
+    final tagColors = {
+      for (final e in tagPieEntries)
+        e.key: e.key == 'Untagged'
+            ? untaggedColor
+            : _counterPalette[paletteIdx++ % _counterPalette.length],
+    };
+
     // Filter to modes with non-zero distance.
     final modeEntries = _modeColors.entries
         .where((e) => ((byMode[e.key] as num?)?.toDouble() ?? 0.0) > 0)
@@ -106,14 +120,12 @@ class _StatsBody extends StatelessWidget {
                 PieChartData(
                   sectionsSpace: 2,
                   centerSpaceRadius: 44,
-                  sections: tagPieEntries.indexed.map((pair) {
-                    final idx = pair.$1;
-                    final e = pair.$2;
+                  sections: tagPieEntries.map((e) {
                     final pct = totalTagDist > 0
                         ? e.value / totalTagDist * 100
                         : 0.0;
                     return PieChartSectionData(
-                      color: _counterPalette[idx % _counterPalette.length],
+                      color: tagColors[e.key]!,
                       value: e.value,
                       title: '${pct.toStringAsFixed(0)}%',
                       radius: 68,
@@ -131,9 +143,7 @@ class _StatsBody extends StatelessWidget {
             Wrap(
               spacing: 16,
               runSpacing: 8,
-              children: tagPieEntries.indexed.map((pair) {
-                final idx = pair.$1;
-                final e = pair.$2;
+              children: tagPieEntries.map((e) {
                 return Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -141,7 +151,7 @@ class _StatsBody extends StatelessWidget {
                       width: 12,
                       height: 12,
                       decoration: BoxDecoration(
-                        color: _counterPalette[idx % _counterPalette.length],
+                        color: tagColors[e.key]!,
                         shape: BoxShape.circle,
                       ),
                     ),
