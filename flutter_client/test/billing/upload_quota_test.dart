@@ -37,11 +37,24 @@ class _FakeBilling implements BillingService {
       ];
 
   @override
-  Future<String> checkoutUrl({String? plan, String returnPath = '/settings'}) async =>
+  Future<String> checkoutUrl({String? plan, String returnPath = kPlanRoute}) async =>
       'https://pay.test/checkout';
 
   @override
-  Future<String> portalUrl({String returnPath = '/settings'}) async =>
+  Future<String> planChangeUrl(
+          {required String plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/change';
+
+  @override
+  Future<String> urlToReach({
+    required String plan,
+    required bool subscribed,
+    String returnPath = kPlanRoute,
+  }) async =>
+      subscribed ? 'https://pay.test/change' : 'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = kPlanRoute}) async =>
       'https://pay.test/portal';
 
   @override

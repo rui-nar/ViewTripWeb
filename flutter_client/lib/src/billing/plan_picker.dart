@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'billing_service.dart';
+import 'plan_widgets.dart';
 
 /// The cheapest plan in [plans] that covers [needed] of [resource], or null.
 ///
@@ -36,6 +37,11 @@ class PlanPicker extends StatefulWidget {
   /// Plan the user is on — shown as current, never offered as an upgrade.
   final String currentPlan;
 
+  /// Whether a subscription is actually running, i.e. there is something to
+  /// *move* rather than buy. Drives which provider flow each tile opens, and
+  /// whether the free tile means "cancel".
+  final bool subscribed;
+
   /// The refusal that opened this, when it was opened by one.
   final QuotaError? because;
 
@@ -45,6 +51,7 @@ class PlanPicker extends StatefulWidget {
   const PlanPicker({
     super.key,
     required this.currentPlan,
+    this.subscribed = false,
     this.because,
     this.service,
     this.launcher,
@@ -66,16 +73,19 @@ class _PlanPickerState extends State<PlanPicker> {
       _failure = null;
     });
     try {
-      final url = await _billing.checkoutUrl(plan: plan.id);
-      if (url.isEmpty) throw Exception('empty checkout url');
+      final url = await _billing.urlToReach(
+          plan: plan.id, subscribed: widget.subscribed);
+      if (url.isEmpty) throw Exception('empty provider url');
       final launch = widget.launcher ??
           (String u) async =>
               launchUrl(Uri.parse(u), mode: LaunchMode.externalApplication);
       await launch(url);
-      if (mounted) Navigator.of(context).maybePop();
+      if (mounted) Navigator.of(context).maybePop(true);
     } catch (_) {
       if (mounted) {
-        setState(() => _failure = 'Could not start checkout. Please try again.');
+        setState(() => _failure = widget.subscribed
+            ? 'Could not start the plan change. Please try again.'
+            : 'Could not start checkout. Please try again.');
       }
     } finally {
       if (mounted) setState(() => _busyPlan = null);
@@ -130,14 +140,19 @@ class _PlanPickerState extends State<PlanPicker> {
               ],
               const SizedBox(height: 16),
               for (final plan in plans)
-                _PlanTile(
+                PlanTile(
                   plan: plan,
                   isCurrent: plan.id == widget.currentPlan,
                   isRecommended: recommended != null && plan.id == recommended.id,
                   busy: _busyPlan == plan.id,
-                  onChoose: plan.isFree || plan.id == widget.currentPlan
+                  // Free is not something you buy — but a subscriber *can*
+                  // move down to it, which means ending the subscription.
+                  action: plan.id == widget.currentPlan
                       ? null
-                      : () => _buy(plan),
+                      : plan.isFree
+                          ? (widget.subscribed ? 'Cancel subscription' : null)
+                          : 'Choose ${plan.name}',
+                  onChoose: () => _buy(plan),
                 ),
             ],
           ),
@@ -147,102 +162,29 @@ class _PlanPickerState extends State<PlanPicker> {
   }
 }
 
-class _PlanTile extends StatelessWidget {
-  final PlanInfo plan;
-  final bool isCurrent;
-  final bool isRecommended;
-  final bool busy;
-  final VoidCallback? onChoose;
-
-  const _PlanTile({
-    required this.plan,
-    required this.isCurrent,
-    required this.isRecommended,
-    required this.busy,
-    required this.onChoose,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        border: Border.all(
-          color: isRecommended ? theme.colorScheme.primary : theme.dividerColor,
-          width: isRecommended ? 1.5 : 1,
-        ),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(plan.name, style: theme.textTheme.titleMedium),
-              const SizedBox(width: 8),
-              Text(plan.priceLabel, style: theme.textTheme.bodySmall),
-              const Spacer(),
-              if (isCurrent)
-                Text('Current plan', style: theme.textTheme.labelSmall)
-              else if (isRecommended)
-                Text('Recommended',
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: theme.colorScheme.primary)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          for (final feature in plan.features)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                children: [
-                  Icon(Icons.check_rounded,
-                      size: 16, color: theme.colorScheme.primary),
-                  const SizedBox(width: 6),
-                  Expanded(
-                      child: Text(feature, style: theme.textTheme.bodySmall)),
-                ],
-              ),
-            ),
-          if (onChoose != null) ...[
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: busy ? null : onChoose,
-                child: busy
-                    ? const SizedBox(
-                        width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : Text('Choose ${plan.name}'),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
 /// Open the picker. [because] frames it as an upgrade after a refusal.
-Future<void> showPlanPicker(
+///
+/// Returns true when the user was sent off to the provider, so the caller can
+/// refresh the plan it is displaying.
+Future<bool> showPlanPicker(
   BuildContext context, {
   required String currentPlan,
+  bool subscribed = false,
   QuotaError? because,
   BillingService? service,
   Future<void> Function(String url)? launcher,
-}) {
-  return showModalBottomSheet<void>(
+}) async {
+  final left = await showModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
     builder: (_) => PlanPicker(
       currentPlan: currentPlan,
+      subscribed: subscribed,
       because: because,
       service: service,
       launcher: launcher,
     ),
   );
+  return left ?? false;
 }

@@ -13,7 +13,7 @@ import time
 from sqlmodel import select
 
 from models.billing import Subscription
-from src.billing.webhook_events import SubscriptionUpdate
+from src.billing.webhook_events import ScheduleUpdate, SubscriptionUpdate
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -78,6 +78,14 @@ def apply_update(sess, update: SubscriptionUpdate) -> bool:
     if update.event_at and row.last_event_at and update.event_at < row.last_event_at:
         return False  # out-of-order redelivery of an older event
 
+    # A pending change that has now happened is no longer pending. Clearing it
+    # on *any* plan move, not just the one that was scheduled, is deliberate:
+    # buying a different tier outright supersedes whatever was queued, and a
+    # promise the account can no longer keep is worse than none.
+    if update.plan != row.plan:
+        row.pending_plan = ""
+        row.pending_plan_at = 0.0
+
     row.plan = update.plan
     row.status = update.status
     row.provider = "stripe"
@@ -96,6 +104,56 @@ def apply_update(sess, update: SubscriptionUpdate) -> bool:
     sess.add(row)
     sess.commit()
     return True
+
+
+def apply_schedule(sess, update: ScheduleUpdate) -> bool:
+    """Record a tier change agreed now and applied later. True when it changed.
+
+    Deliberately *not* folded into :func:`apply_update`. Schedule events and
+    subscription events are two streams about the same account, arriving
+    independently: sharing ``last_event_id`` / ``last_event_at`` would make each
+    look like an out-of-order redelivery of the other and drop it. This one has
+    no ordering guard of its own — a schedule event always carries the schedule's
+    whole current shape, so the latest one to arrive is the right answer and a
+    redelivery is a no-op by construction.
+    """
+    row = _by_customer(sess, update.customer_id)
+    if row is None:
+        _log.info(
+            "Schedule webhook %s: no account for customer %s — ignoring",
+            update.event_id, update.customer_id,
+        )
+        return False
+
+    # A schedule for some *other* subscription of the same customer says nothing
+    # about the one we track.
+    if (
+        update.subscription_id
+        and row.provider_subscription_id
+        and update.subscription_id != row.provider_subscription_id
+    ):
+        return False
+
+    if row.pending_plan == update.plan and row.pending_plan_at == update.effective_at:
+        return False
+
+    row.pending_plan = update.plan
+    row.pending_plan_at = update.effective_at if update.plan else 0.0
+    row.updated_at = time.time()
+    sess.add(row)
+    sess.commit()
+    return True
+
+
+def clear_pending_plan(sess, row: Subscription) -> None:
+    """Forget a scheduled change. Called once the plan itself has moved."""
+    if not row.pending_plan and not row.pending_plan_at:
+        return
+    row.pending_plan = ""
+    row.pending_plan_at = 0.0
+    row.updated_at = time.time()
+    sess.add(row)
+    sess.commit()
 
 
 def set_admin_override(sess, user_info_id: int, plan: str) -> Subscription:

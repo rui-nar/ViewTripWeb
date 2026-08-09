@@ -98,6 +98,123 @@ class TestCheckoutSession:
             )
 
 
+class TestPlanChangeSession:
+    """Switching tier through the provider's hosted flow (issue #153).
+
+    Driven with real ``StripeObject`` instances for the same reason as the rest
+    of this file: the subscription item id has to be dug out of a nested SDK
+    object, which is exactly where the ``.get`` trap bites.
+    """
+
+    def _gateway(self, monkeypatch, *, items=("si_1",), retrieve_fails=False):
+        created: dict = {}
+
+        class _Session:
+            @staticmethod
+            def create(**params):
+                created.update(params)
+                return _obj(url="https://billing.stripe.com/p/session/flow_1")
+
+        class _Subscription:
+            @staticmethod
+            def retrieve(sub_id):
+                if retrieve_fails:
+                    raise RuntimeError("no such subscription")
+                return _obj(id=sub_id,
+                            items=_obj(data=[_obj(id=i) for i in items]))
+
+        fake = types.SimpleNamespace(
+            billing_portal=types.SimpleNamespace(Session=_Session),
+            Subscription=_Subscription,
+        )
+        monkeypatch.setattr("src.billing.stripe_gateway._stripe", lambda: fake)
+        return StripeGateway(), created
+
+    def test_opens_the_confirm_change_flow_for_the_target_price(self, monkeypatch):
+        gateway, params = self._gateway(monkeypatch)
+        out = gateway.create_plan_change_session(
+            customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+            return_url="https://app/settings/plan",
+        )
+        assert out["url"] == "https://billing.stripe.com/p/session/flow_1"
+        assert params["customer"] == "cus_1"
+        flow = params["flow_data"]
+        assert flow["type"] == "subscription_update_confirm"
+        confirm = flow["subscription_update_confirm"]
+        assert confirm["subscription"] == "sub_1"
+        # The flow updates a subscription *item*: the id has to come off the
+        # subscription, not be invented from the subscription id.
+        assert confirm["items"] == [
+            {"id": "si_1", "price": "price_t2", "quantity": 1}
+        ]
+
+    def test_comes_back_to_the_app_afterwards(self, monkeypatch):
+        gateway, params = self._gateway(monkeypatch)
+        gateway.create_plan_change_session(
+            customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+            return_url="https://app/settings/plan",
+        )
+        after = params["flow_data"]["after_completion"]
+        assert after == {"type": "redirect",
+                         "redirect": {"return_url": "https://app/settings/plan"}}
+
+    def test_moving_to_free_cancels_instead(self, monkeypatch):
+        """There is no free price to move to — ending the subscription *is* the
+        downgrade, so asking Stripe to switch price would be meaningless."""
+        gateway, params = self._gateway(monkeypatch)
+        gateway.create_plan_change_session(
+            customer_id="cus_1", subscription_id="sub_1", plan=FREE,
+            return_url="https://app/settings/plan",
+        )
+        flow = params["flow_data"]
+        assert flow["type"] == "subscription_cancel"
+        assert flow["subscription_cancel"] == {"subscription": "sub_1"}
+
+    def test_the_first_priced_item_is_used(self, monkeypatch):
+        gateway, params = self._gateway(monkeypatch, items=("si_first", "si_second"))
+        gateway.create_plan_change_session(
+            customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+            return_url="https://app/x",
+        )
+        items = params["flow_data"]["subscription_update_confirm"]["items"]
+        assert items[0]["id"] == "si_first"
+
+    def test_a_subscription_without_items_raises(self, monkeypatch):
+        gateway, _ = self._gateway(monkeypatch, items=())
+        with pytest.raises(GatewayError, match="no items"):
+            gateway.create_plan_change_session(
+                customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+                return_url="https://app/x",
+            )
+
+    def test_a_failed_retrieve_is_a_gateway_error(self, monkeypatch):
+        gateway, _ = self._gateway(monkeypatch, retrieve_fails=True)
+        with pytest.raises(GatewayError):
+            gateway.create_plan_change_session(
+                customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+                return_url="https://app/x",
+            )
+
+    def test_an_unconfigured_price_is_refused(self, monkeypatch):
+        monkeypatch.delenv("STRIPE_PRICE_TIER_2", raising=False)
+        gw.reset_price_cache()
+        gateway, _ = self._gateway(monkeypatch)
+        with pytest.raises(GatewayError):
+            gateway.create_plan_change_session(
+                customer_id="cus_1", subscription_id="sub_1", plan=TIER_2,
+                return_url="https://app/x",
+            )
+
+    @pytest.mark.parametrize("customer,subscription", [("", "sub_1"), ("cus_1", "")])
+    def test_missing_provider_ids_raise(self, monkeypatch, customer, subscription):
+        gateway, _ = self._gateway(monkeypatch)
+        with pytest.raises(GatewayError):
+            gateway.create_plan_change_session(
+                customer_id=customer, subscription_id=subscription, plan=TIER_2,
+                return_url="https://app/x",
+            )
+
+
 class TestParseWebhook:
     def _gateway(self, monkeypatch, *, verified=True):
         def construct_event(payload, signature, secret):

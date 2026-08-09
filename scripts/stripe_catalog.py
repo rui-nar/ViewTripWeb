@@ -14,7 +14,14 @@ renders, so a Stripe product can never advertise limits the server does not
 grant. Only the amounts live in this file — Stripe is the one place that has to
 know what to charge.
 
-Idempotency has two handles:
+It also provisions the **customer portal configuration**, because
+`POST /api/billing/change-plan` (issue #153) is only as correct as that is: the
+in-app tier switch opens a portal flow, and the flow refuses a price the
+configuration does not list. Declaring it here is what makes "a downgrade takes
+effect at the end of the paid period" a fact in the repository rather than a
+setting somebody remembers toggling.
+
+Idempotency has three handles:
 
 * **Products** use a caller-supplied id (`traxjourney_tier_1`), so re-running
   updates the existing product rather than creating a second one.
@@ -24,6 +31,9 @@ Idempotency has two handles:
   (`transfer_lookup_key`), and archives the old one. Subscriptions already on
   the old price keep paying the old amount; Stripe does not re-price anyone
   behind your back, and neither does this script.
+* **The portal configuration** carries `metadata.managed_by`, since Stripe
+  assigns its id — the run finds its own configuration by that mark instead of
+  creating another one each time.
 
 Dry run by default — it prints what it would do and touches nothing. Pass
 ``--apply`` to write, and additionally ``--live`` if the key is a live one:
@@ -168,6 +178,86 @@ def _sync_price(stripe, plan: str, *, apply: bool) -> tuple[str, list[str]]:
     return new["id"], [f"  price   {key}: CREATED {new['id']}"]
 
 
+#: Marks the portal configuration this script owns, so re-running updates it
+#: rather than stacking up a new one per run. Same idea as the caller-supplied
+#: product ids: an idempotency handle we choose, not one Stripe assigns.
+_MANAGED_BY = "scripts/stripe_catalog.py"
+
+
+def _portal_features(price_ids: dict[str, str]) -> dict:
+    """Customer-portal behaviour, declared here rather than clicked in a dashboard.
+
+    ``POST /api/billing/change-plan`` opens a ``subscription_update_confirm``
+    flow, and that flow only works if the portal configuration permits price
+    updates on these products — so the endpoint is only as correct as this is.
+
+    The two rules worth reading:
+
+    * ``schedule_at_period_end`` on ``decreasing_item_amount`` — a **downgrade
+      takes effect at the end of the paid period**, not immediately. It matches
+      what ``entitlements.plan_from_subscription`` already does for a
+      cancellation: they paid for that time, so they keep it. Upgrades stay
+      immediate, prorated, and are what ``create_prorations`` bills for.
+    * ``subscription_cancel.mode = at_period_end`` — same rule, same reason.
+    """
+    return {
+        "subscription_update": {
+            "enabled": True,
+            "default_allowed_updates": ["price", "promotion_code"],
+            "products": [
+                {"product": product_id(plan), "prices": [price_ids[plan]]}
+                for plan in plans.PAID_PLANS
+            ],
+            "proration_behavior": "create_prorations",
+            "schedule_at_period_end": {
+                "conditions": [{"type": "decreasing_item_amount"}],
+            },
+        },
+        "subscription_cancel": {"enabled": True, "mode": "at_period_end"},
+        "payment_method_update": {"enabled": True},
+        "invoice_history": {"enabled": True},
+        "customer_update": {
+            "enabled": True,
+            "allowed_updates": ["email", "address", "tax_id"],
+        },
+    }
+
+
+def _sync_portal_configuration(
+    stripe, price_ids: dict[str, str], *, apply: bool
+) -> list[str]:
+    """Create or update the customer-portal configuration. Returns report lines.
+
+    Must run *after* the prices, since it names them.
+    """
+    if any(not pid or pid == "(new)" for pid in price_ids.values()):
+        return ["  portal  : SKIP (prices not created yet — re-run with --apply)"]
+
+    features = _portal_features(price_ids)
+    existing = None
+    for config in stripe.billing_portal.Configuration.list(limit=100)["data"]:
+        if (config["metadata"] or {}).get("managed_by") == _MANAGED_BY:
+            existing = config
+            break
+
+    if existing is None:
+        if apply:
+            created = stripe.billing_portal.Configuration.create(
+                features=features,
+                business_profile={"headline": "TraxJourney"},
+                metadata={"managed_by": _MANAGED_BY},
+            )
+            return [f"  portal  : CREATED {created['id']}"]
+        return ["  portal  : CREATE  price updates + cancel, both at period end"]
+
+    if apply:
+        stripe.billing_portal.Configuration.modify(existing["id"], features=features)
+    # No diffing: the feature block is nested deeply enough that comparing it
+    # would be more code than the update it saves, and a modify with identical
+    # values is a no-op at Stripe.
+    return [f"  portal  : UPDATE  {existing['id']}"]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true",
@@ -201,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         price_ids[plan] = pid
         print()
+
+    print("customer portal")
+    for line in _sync_portal_configuration(stripe, price_ids, apply=args.apply):
+        print(line)
+    print()
 
     print("Environment:")
     for plan in plans.PAID_PLANS:

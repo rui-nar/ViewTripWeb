@@ -1,17 +1,18 @@
 """Billing REST endpoints — plans, entitlements and Stripe checkout (issue #121).
 
 Routes:
-    GET  /api/billing/plans     — public plan catalogue (what the pricing UI renders)
-    GET  /api/billing/me        — the caller's plan, limits and current usage
-    POST /api/billing/checkout  — start a subscription purchase → provider URL
-    POST /api/billing/portal    — open the provider's billing portal → URL
-    POST /api/billing/webhook   — provider callbacks (signature-verified, no auth)
+    GET  /api/billing/plans       — public plan catalogue (what the pricing UI renders)
+    GET  /api/billing/me          — the caller's plan, limits and current usage
+    POST /api/billing/checkout    — start a subscription purchase → provider URL
+    POST /api/billing/change-plan — move a live subscription to another tier → URL
+    POST /api/billing/portal      — open the provider's billing portal → URL
+    POST /api/billing/webhook     — provider callbacks (signature-verified, no auth)
 
 A deployment that has not configured a payment provider does not sell anything:
 ``/plans`` and ``/me`` still answer (reporting ``billing_enabled: false`` and no
 limits) so the client can render "self-hosted, everything unlocked" without a
-special case, and the three payment routes 404. That is the self-hosting
-promise on the landing page, enforced in code.
+special case, and the payment routes 404. That is the self-hosting promise on
+the landing page, enforced in code.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import os
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from api.deps import get_current_user
@@ -36,8 +38,11 @@ from src.billing.entitlements import (
     subscription_is_live,
 )
 from src.billing.gateway import GatewayError, get_gateway
-from src.billing.plans import PAID_PLANS, catalogue
-from src.billing.webhook_events import subscription_update_from_event
+from src.billing.plans import FREE, PAID_PLANS, catalogue
+from src.billing.webhook_events import (
+    schedule_update_from_event,
+    subscription_update_from_event,
+)
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -81,6 +86,17 @@ class BillingMeOut(BaseModel):
     cancel_at_period_end: bool
     current_period_end: float = Field(description="Unix seconds; 0 when not subscribed")
     admin_override: bool = Field(description="Plan was granted by an operator")
+    pending_plan: str = Field(
+        default="",
+        description="Tier this subscription switches to at the end of the paid "
+                    "period; empty when nothing is scheduled",
+    )
+    pending_plan_name: str = Field(
+        default="", description="Display name of `pending_plan`, or empty"
+    )
+    pending_plan_at: float = Field(
+        default=0.0, description="When the pending change applies; unix seconds"
+    )
     limits: dict
     usage: UsageOut
 
@@ -126,6 +142,11 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
             projects=project_count(sess, user_info_id),
             storage_bytes=storage_used(sess, user_info_id),
         )
+    # A scheduled change to the plan already in force says nothing worth
+    # showing — it would read as "switching to the tier you are on".
+    pending = (row.pending_plan if row else "") or ""
+    if pending == plan:
+        pending = ""
     return BillingMeOut(
         billing_enabled=billing_enabled(),
         quotas_enforced=quotas_enforced(),
@@ -135,6 +156,9 @@ def billing_me(current_user: Annotated[dict, Depends(get_current_user)]):
         cancel_at_period_end=bool(row.cancel_at_period_end) if row else False,
         current_period_end=(row.current_period_end if row else 0.0),
         admin_override=bool(row.admin_override_plan) if row else False,
+        pending_plan=pending,
+        pending_plan_name=plan_display_name(pending) if pending else "",
+        pending_plan_at=(row.pending_plan_at if row and pending else 0.0),
         limits=limits.as_dict(),
         usage=usage,
     )
@@ -238,6 +262,91 @@ def create_checkout(
     return CheckoutOut(url=result.get("url") or "")
 
 
+class ChangePlanBody(BaseModel):
+    plan: str = Field(
+        description="Plan to move to — 'tier_1'..'tier_3', or 'free' to cancel."
+    )
+    return_path: Optional[str] = Field(
+        default=None,
+        description="Client route to come back to, e.g. '/settings/plan'. "
+                    "Relative paths only — anything else falls back to the default.",
+    )
+
+
+#: Told to the client in the 409 body so it can retry on ``/checkout`` rather
+#: than showing a dead end. There is nothing to *change* when nothing is running.
+NOT_SUBSCRIBED = "not_subscribed"
+
+
+@router.post("/change-plan", response_model=CheckoutOut,
+             summary="Move an existing subscription to another plan")
+def change_plan(
+    body: ChangePlanBody,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    """Switch tier without buying a second subscription (issue #153).
+
+    ``/checkout`` cannot do this — in subscription mode it always creates a new
+    subscription, which is why it refuses a live subscriber (issue #163). This
+    route hands the change to the provider's hosted flow, so the prorated
+    amount, tax and any re-authentication are shown and handled where they are
+    already correct. Nothing is written here: the change comes back as a
+    ``customer.subscription.updated`` webhook like every other state change.
+    """
+    gateway = _require_gateway()
+    user_info_id = int(current_user["sub"])
+    plan = (body.plan or "").strip()
+    if plan != FREE and plan not in PAID_PLANS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"'{plan}' is not a plan that can be switched to",
+        )
+
+    with get_session() as sess:
+        row = subs.get_subscription(sess, user_info_id)
+        customer_id = row.provider_customer_id if row else ""
+        subscription_id = row.provider_subscription_id if row else ""
+        live = subscription_is_live(row.status or "") if row else False
+        current_plan = plan_for(sess, user_info_id)
+
+    # Only a *live* subscription can be moved. Someone who cancelled but is still
+    # inside their paid period has nothing running to change; buying again is the
+    # right path for them, and the client retries on /checkout when it sees this.
+    #
+    # Flat bodies with a top-level ``code``, like the 402 quota refusal in
+    # api/router.py — HTTPException would nest them under ``detail``, and the
+    # client already knows how to read this shape.
+    if not (live and customer_id and subscription_id):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": "No running subscription to change — subscribe first.",
+                "code": NOT_SUBSCRIBED,
+            },
+        )
+    if plan == current_plan:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": "You are already on that plan.",
+                "code": "already_on_plan",
+            },
+        )
+
+    try:
+        result = gateway.create_plan_change_session(
+            customer_id=customer_id,
+            subscription_id=subscription_id,
+            plan=plan,
+            return_url=_return_url(body.return_path, ""),
+        )
+    except GatewayError as exc:
+        _log.warning("Plan change failed for user %s: %s", user_info_id, exc)
+        raise HTTPException(status_code=502, detail="Could not start the plan change")
+
+    return CheckoutOut(url=result.get("url") or "")
+
+
 @router.post("/portal", response_model=CheckoutOut, summary="Open the billing portal")
 def create_portal(
     body: PortalBody,
@@ -280,6 +389,21 @@ async def webhook(request: Request):
     except GatewayError as exc:
         _log.warning("Rejected webhook: %s", exc)
         raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # A scheduled change is a different statement about the account — "this will
+    # be the plan", not "this is" — so it is translated and stored separately
+    # (issue #153).
+    schedule = schedule_update_from_event(event)
+    if schedule is not None:
+        with get_session() as sess:
+            applied = subs.apply_schedule(sess, schedule)
+        if applied:
+            _log.info(
+                "Billing: %s → pending plan=%s at %s (event %s)",
+                schedule.customer_id, schedule.plan or "none",
+                schedule.effective_at, schedule.event_id,
+            )
+        return WebhookAck(received=True, applied=applied)
 
     update = subscription_update_from_event(event)
     if update is None:

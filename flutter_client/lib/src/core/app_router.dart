@@ -13,6 +13,8 @@ import '../auth/login_screen.dart';
 import '../auth/register_screen.dart';
 import '../auth/verify_email_screen.dart';
 import '../auth/welcome_screen.dart';
+import '../billing/billing_service.dart' show kPlanRoute;
+import '../billing/plan_screen.dart';
 import 'last_opened_project.dart';
 import 'return_to.dart';
 import '../projects/projects_screen.dart';
@@ -223,6 +225,15 @@ GoRouter buildRouter(BuildContext context) {
       GoRoute(
         path: '/settings',
         builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        // A real route rather than a pushed MaterialPageRoute: the payment
+        // provider redirects the browser here by URL after checkout or a plan
+        // change (issue #153), carrying ?checkout=success|cancelled.
+        path: kPlanRoute,
+        builder: (context, state) => PlanScreen(
+          checkoutOutcome: state.uri.queryParameters['checkout'],
+        ),
       ),
       GoRoute(
         path: '/join/:token',
