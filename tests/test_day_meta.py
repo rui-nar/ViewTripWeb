@@ -50,7 +50,7 @@ class TestDayMetaModel:
         assert dm.sleeping is None
         assert dm.weather is None
         assert dm.journal is None
-        assert dm.tags == []
+        assert dm.tags is None
         assert dm.counters == []
 
     def test_full_construction(self):
@@ -109,9 +109,19 @@ class TestProjectIODayMeta:
         )
         assert d["tags"] == ["border", "rain"]
 
-    def test_tags_excluded_when_empty_list(self):
+    def test_tags_included_when_explicitly_empty(self):
+        """An explicit tags=[] (issue #203: 'this day has no tags, don't
+        inherit') must round-trip as [] rather than being dropped — dropping
+        it would make it indistinguishable from "no tags data at all"."""
         d = _to_dict_day(
             _project_with_day("2025-06-01", tags=[]),
+            "2025-06-01",
+        )
+        assert d["tags"] == []
+
+    def test_tags_excluded_when_unset(self):
+        d = _to_dict_day(
+            _project_with_day("2025-06-01"),  # tags left at the default (None)
             "2025-06-01",
         )
         assert "tags" not in d
@@ -181,7 +191,7 @@ class TestDayMetaParsing:
                 sleeping=v.get("sleeping"),
                 weather=v.get("weather"),
                 journal=v.get("journal"),
-                tags=v.get("tags") or [],
+                tags=v.get("tags"),
                 counters=day_counters_from_json(v.get("counters")),
             )
             for dk, v in raw_dm.items()
@@ -235,7 +245,7 @@ class TestDayMetaParsing:
         assert dm.sleeping is None
         assert dm.weather is None
         assert dm.journal is None
-        assert dm.tags == []
+        assert dm.tags is None
         assert dm.counters == []
 
     def test_missing_fields_default_to_none(self):

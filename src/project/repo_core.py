@@ -554,7 +554,7 @@ class ProjectCoreMixin:
                 sleeping=v.get("sleeping"),
                 weather=v.get("weather"),
                 journal=v.get("journal"),
-                tags=v.get("tags") or [],
+                tags=v.get("tags"),
                 counters=day_counters_from_json(v.get("counters")),
             )
             for dk, v in raw_dm.items()

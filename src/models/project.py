@@ -78,7 +78,9 @@ class DayMeta:
     sleeping: Optional[str] = None
     weather: Optional[WeatherCondition] = None
     journal: Optional[str] = None
-    tags: List[str] = field(default_factory=list)
+    # None = no own tags (inherit from an earlier day, issue #18); [] = this day
+    # explicitly has no tags and must not inherit (issue #203).
+    tags: Optional[List[str]] = None
     # Per-day counter occurrences; the same counter name may appear more than once.
     counters: List[CounterEntry] = field(default_factory=list)
 

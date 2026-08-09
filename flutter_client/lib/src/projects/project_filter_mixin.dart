@@ -66,10 +66,11 @@ mixin ProjectFilterMixin on ChangeNotifier {
   List<String> effectiveTagsFor(String dateKey) =>
       effectiveDayTags(dayMeta, dateKey);
 
-  /// Whether [dateKey] carries tags of its own (vs only inherited ones). Lets
-  /// the UI render inherited tags faded and distinguish them from real ones.
-  bool dayHasOwnTags(String dateKey) =>
-      _ownDayTags(dayMeta, dateKey).isNotEmpty;
+  /// Whether [dateKey] carries tags of its own (vs only inherited ones) — true
+  /// for an explicit empty set too, since that means "no tags, don't inherit"
+  /// rather than "no data" (issue #203). Lets the UI render inherited tags
+  /// faded and distinguish them from real ones.
+  bool dayHasOwnTags(String dateKey) => _hasOwnTagsKey(dayMeta, dateKey);
 
   List<String> get availableSleepingModes {
     final s = <String>{};
@@ -203,6 +204,15 @@ mixin ProjectFilterMixin on ChangeNotifier {
 // ProjectNotifier. Date keys are "YYYY-MM-DD", so lexicographic string order is
 // chronological order — no DateTime parsing needed.
 
+/// Whether [dateKey] has an explicit 'tags' entry of its own — including an
+/// empty one. An empty-but-present list means "this day has no tags, don't
+/// inherit" (issue #203); an absent key means "no data, please inherit".
+bool _hasOwnTagsKey(
+  Map<String, Map<String, dynamic>> dayMeta,
+  String dateKey,
+) =>
+    dayMeta[dateKey]?['tags'] is List;
+
 /// The tags a day owns outright (an empty list if it has none of its own).
 List<String> _ownDayTags(
   Map<String, Map<String, dynamic>> dayMeta,
@@ -215,10 +225,13 @@ List<String> _ownDayTags(
 /// Effective tags for [dateKey] under the "inherit from the previous day" rule
 /// (issue #18, "live fallback" model):
 ///
-/// * a day with its own tags shows exactly those;
-/// * a day with none falls back to the tags of the nearest *strictly earlier*
-///   day that has its own tags — empty days in between are skipped (so a gap
-///   day never blanks out the inheritance chain);
+/// * a day with its own tags — even an explicit empty set — shows exactly
+///   those and never inherits (issue #203: clearing every tag on a day must
+///   stick, not silently fall back to an earlier day's tags);
+/// * a day with no tags data at all falls back to the tags of the nearest
+///   *strictly earlier* day that has (non-empty) tags of its own — empty/gap
+///   days in between are skipped (so a gap day never blanks out the
+///   inheritance chain);
 /// * a day with no own tags and no earlier tagged day shows nothing.
 ///
 /// Inherited tags are never persisted: they vanish the moment the source day's
@@ -228,13 +241,12 @@ List<String> effectiveDayTags(
   Map<String, Map<String, dynamic>> dayMeta,
   String dateKey,
 ) {
-  final own = _ownDayTags(dayMeta, dateKey);
-  if (own.isNotEmpty) return own;
+  if (_hasOwnTagsKey(dayMeta, dateKey)) return _ownDayTags(dayMeta, dateKey);
 
   String? best;
   for (final k in dayMeta.keys) {
     if (k.compareTo(dateKey) >= 0) continue; // must be strictly earlier
-    if (_ownDayTags(dayMeta, k).isEmpty) continue; // must own tags
+    if (_ownDayTags(dayMeta, k).isEmpty) continue; // must own non-empty tags
     if (best == null || k.compareTo(best) > 0) best = k; // keep the latest
   }
   return best == null ? const <String>[] : _ownDayTags(dayMeta, best);

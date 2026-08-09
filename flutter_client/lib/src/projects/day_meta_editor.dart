@@ -427,6 +427,13 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
   String? _weather;
   late TextEditingController _journalCtrl;
   late List<String> _tags;
+  // Whether the loaded day already owned an explicit 'tags' entry (even an
+  // empty one) and whether the user has touched the Tags section this
+  // session — either one means Save must persist 'tags' even if it's now
+  // empty, so a day cleared down to zero tags stays cleared instead of
+  // silently falling back to inheriting an earlier day's tags (issue #203).
+  bool _hasOwnTagsInitially = false;
+  bool _tagsTouched = false;
   final TextEditingController _tagInputCtrl = TextEditingController();
   // counter name → amount (TextEditingController for the amount field)
   late List<({String name, double value})> _counterMods;
@@ -461,6 +468,8 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     _weather    = m['weather']    as String?;
     _journalCtrl.text = m['journal'] as String? ?? '';
     final rawTags = m['tags'];
+    _hasOwnTagsInitially = rawTags is List;
+    _tagsTouched = false;
     // No own tags yet → pre-select the inherited (previous-day) tags so the
     // chips reflect what the hero already shows. Not persisted until Save.
     _tags = rawTags is List
@@ -500,10 +509,25 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     final t = tag.trim();
     if (t.isEmpty || _tags.contains(t)) return;
     _markDirty(() {
+      _tagsTouched = true;
       _tags.add(t);
       _tagInputCtrl.clear();
     });
   }
+
+  void _toggleTag(String tag) => _markDirty(() {
+        _tagsTouched = true;
+        if (_tags.contains(tag)) {
+          _tags.remove(tag);
+        } else {
+          _tags.add(tag);
+        }
+      });
+
+  void _removeTagChip(String tag) => _markDirty(() {
+        _tagsTouched = true;
+        _tags.remove(tag);
+      });
 
   void _setCounter(int i, double v) =>
       _markDirty(() => _counterMods[i] = (name: _counterMods[i].name, value: v));
@@ -523,7 +547,12 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
     if (_weather    != null) result['weather']    = _weather;
     final j = _journalCtrl.text.trim();
     if (j.isNotEmpty) result['journal'] = j;
-    if (_tags.isNotEmpty) result['tags'] = List<String>.from(_tags);
+    // Emit 'tags' even when empty once the day owns (or now owns) an explicit
+    // tag set, so an explicit "no tags" doesn't get mistaken for "no tag data"
+    // and silently re-inherit an earlier day's tags on reload (issue #203).
+    if (_tags.isNotEmpty || _hasOwnTagsInitially || _tagsTouched) {
+      result['tags'] = List<String>.from(_tags);
+    }
     if (_counterMods.isNotEmpty) {
       result['counters'] = [
         for (final m in _counterMods) {'name': m.name, 'value': m.value},
@@ -773,14 +802,8 @@ class _DayMetaEditorState extends State<DayMetaEditor> {
                   active: _tags.contains(tag),
                   leadingCheck: _tags.contains(tag),
                   removable: _tags.contains(tag),
-                  onRemove: () => _markDirty(() => _tags.remove(tag)),
-                  onTap: () => _markDirty(() {
-                    if (_tags.contains(tag)) {
-                      _tags.remove(tag);
-                    } else {
-                      _tags.add(tag);
-                    }
-                  }),
+                  onRemove: () => _removeTagChip(tag),
+                  onTap: () => _toggleTag(tag),
                 ),
             ],
           ),
