@@ -110,11 +110,24 @@ past 500 MB before the limits existed is locked out the moment you deploy.
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
    - `invoice.payment_failed`
+   - `subscription_schedule.created`
+   - `subscription_schedule.updated`
+   - `subscription_schedule.released`
+   - `subscription_schedule.canceled`
+   - `subscription_schedule.completed`
+
+   The `subscription_schedule.*` family is what a downgrade looks like before it
+   happens (see [Changing tier](#changing-tier)). Without them the app cannot
+   tell anyone that the change they just asked for is coming.
 
    Copy the signing secret (`whsec_...`) into `STRIPE_WEBHOOK_SECRET`.
-3. **Customer portal** — enable it in the Stripe dashboard (Settings → Billing →
-   Customer portal). "Manage billing" opens it; cancellations and card updates
-   happen there and come back as webhooks.
+3. **Customer portal** — provisioned by the same script as the catalogue, in the
+   same run. It is not optional and not a dashboard task: in-app tier switching
+   opens a portal flow, and Stripe refuses the flow unless the configuration
+   lists the price being switched to. `scripts/stripe_catalog.py --apply`
+   creates or updates a configuration marked
+   `metadata.managed_by=scripts/stripe_catalog.py`; a configuration it did not
+   create is left alone.
 4. **Secret key** → `STRIPE_SECRET_KEY`.
 
 All four are **runtime** environment variables. Never pass them to
@@ -140,6 +153,7 @@ reports the tier you bought.
 | `GET /api/billing/plans` | none | Plan catalogue for the pricing UI |
 | `GET /api/billing/me` | user | Plan, limits, usage |
 | `POST /api/billing/checkout` | user | → Stripe Checkout URL; body carries the `plan` to buy |
+| `POST /api/billing/change-plan` | user | → Stripe URL that *moves* a live subscription to another `plan` |
 | `POST /api/billing/portal` | user | → Stripe Customer Portal URL |
 | `POST /api/billing/webhook` | signature | Provider callbacks |
 | `PUT /api/admin/users/{id}/plan` | admin | Comp an account, or clear a comp |
@@ -172,6 +186,10 @@ that would have allowed it, rather than always pushing the most expensive.
 - `src/billing/subscriptions.py` — applies those updates idempotently. Stripe
   delivers at least once and out of order; a repeated event id is dropped, and
   an event older than the last applied one cannot move state backwards.
+  `apply_schedule` is deliberately separate from `apply_update`: schedule events
+  and subscription events are two streams about one account, arriving
+  independently, and sharing the ordering guards would make each look like a
+  stale redelivery of the other and drop it.
 - `src/billing/stripe_gateway.py` — the only module that imports the Stripe SDK,
   lazily, so a self-hosted instance never loads it. `resolve_price_id` turns a
   plan into a price id by lookup key, cached for ten minutes — long enough to
@@ -182,6 +200,45 @@ that would have allowed it, rather than always pushing the most expensive.
   and every delete subtracts them, because walking the filesystem (what the
   admin dashboard does) is far too slow to put on an upload path. A nightly job
   (03:30 UTC) re-walks each user's tree and corrects any drift.
+
+### Changing tier
+
+Issue #153. **Checkout cannot change a plan** — in subscription mode it always
+*creates* a subscription, so sending a subscriber there bills them twice
+(issue #163). `/api/billing/checkout` refuses a live subscriber for that reason;
+`/api/billing/change-plan` is where they go instead.
+
+It returns a Customer Portal session opened straight on the confirm-change
+screen (`flow_data.type=subscription_update_confirm`). The change is Stripe's to
+carry out, not ours: the prorated amount, tax, 3DS re-authentication on an
+upgrade and the receipt all already work there, and reimplementing them is how
+you end up charging the wrong number. Nothing is written when the session is
+created — the result arrives as a `customer.subscription.updated` webhook like
+every other state change.
+
+| Direction | When it applies | What the customer pays |
+|---|---|---|
+| Up a tier | immediately | the difference, prorated, on the spot |
+| Down a tier | at the end of the paid period | nothing now; the lower price from then on |
+| To **Free** | at the end of the paid period | nothing; this is a cancellation |
+
+"Down" waiting for the period to end is the same rule as a cancellation: they
+paid for that time, so they keep it. It is expressed as
+`schedule_at_period_end` on `decreasing_item_amount` in the portal
+configuration, in `scripts/stripe_catalog.py` — in code, so it can be reviewed,
+rather than in a dashboard toggle nobody can diff.
+
+**A scheduled change is not the plan in force.** Stripe records it as a
+subscription *schedule*, and the subscription keeps reporting the old tier until
+the phase runs. `Subscription.pending_plan` / `pending_plan_at` mirror that,
+stored beside `plan` rather than in it — writing it into `plan` would downgrade
+the account the moment they asked, which is the opposite of what they were
+promised. `/api/billing/me` reports both, and the app says "Switching to Tier 1
+on 3 September" instead of looking untouched.
+
+The promise is cleared as soon as the plan actually moves, including when a
+different tier is bought outright: a queued change the account can no longer
+keep is worse than none.
 
 ### Grace and cancellation
 
@@ -200,13 +257,33 @@ Account deletion removes the local subscription and usage rows. It does **not**
 cancel anything at Stripe — that record is Stripe's, and must be cancelled
 through the dashboard or the customer portal first.
 
+## Where the plan UI lives
+
+`/settings` shows a summary card — plan, anything worth flagging, and how full
+the account is — and opens **`/settings/plan`**, which is the whole picture:
+usage against the limits, every tier, change or cancel, and a link into the
+provider's portal for invoices and the card.
+
+`/settings/plan` is a real route rather than a pushed page because the payment
+provider redirects the *browser* back to it by URL, with
+`?checkout=success|cancelled`. Two consequences that have already caused bugs:
+
+- The plan is granted by a webhook that can land after the redirect, so a single
+  read on arrival shows the old plan and reads as "the payment did nothing".
+  Both the page and the Settings card re-read a few times before believing it
+  (issue #192).
+- That redirect is a *fresh* navigation with nothing on the router stack, so an
+  unconditional `context.pop()` on the back arrow is a silent no-op. Both
+  screens fall back to `context.go('/')`.
+
 ## Not in scope yet
 
 - Apple / Google in-app purchase (the App Store requires IAP for digital goods
-  sold inside the iOS app, so mobile currently has no purchase flow).
+  sold inside the iOS app, so mobile currently has no purchase flow). Checkout
+  and plan changes open the provider in an external browser on every platform;
+  the plan page makes them more prominent, which is worth remembering when the
+  iOS build is submitted.
 - Feature gates beyond trip count, storage and trip length.
-- Proration and in-app tier switching: moving between paid tiers goes through
-  the Stripe customer portal, not the app.
 - Dunning and receipt emails (Stripe sends its own for now).
 - VAT: we are the merchant of record. Stripe Tax can be switched on when the
   thresholds start to matter.
