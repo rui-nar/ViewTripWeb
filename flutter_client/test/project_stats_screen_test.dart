@@ -72,6 +72,21 @@ class _FakeStatsServiceWithTagBreakdown extends ProjectService {
       };
 }
 
+/// Records every `tags` argument getStats is called with, so a test can
+/// assert what a filter-chip tap actually requested.
+class _RecordingStatsService extends ProjectService {
+  final List<List<String>> calls = [];
+
+  @override
+  Future<Map<String, dynamic>> getStats(ProjectRef ref,
+      {List<String> tags = const []}) async {
+    calls.add(tags);
+    return <String, dynamic>{
+      'tag_options': ['norway', 'Untagged'],
+    };
+  }
+}
+
 void main() {
   // ProjectNotifier.load() now round-trips selection/filter state through
   // shared_preferences (issue #76 follow-up) — without a mock, getInstance()
@@ -137,5 +152,31 @@ void main() {
 
     expect(find.textContaining('Untagged'), findsOneWidget);
     expect(find.textContaining('Alps'), findsOneWidget);
+  });
+
+  testWidgets(
+      'the "Untagged" filter chip is selectable and requests untagged-only '
+      'stats (issue #203 follow-up)', (tester) async {
+    final notifier = _TestProjectNotifier(_FakeProjectService());
+    await notifier.load(const ProjectRef(name: 'Trip'));
+    final service = _RecordingStatsService();
+
+    await tester.pumpWidget(MaterialApp(
+      home: ChangeNotifierProvider<ProjectNotifier>.value(
+        value: notifier,
+        child: ProjectStatsScreen(
+          projectName: 'Trip',
+          service: service,
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.widgetWithText(FilterChip, 'Untagged'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilterChip, 'Untagged'));
+    await tester.pumpAndSettle();
+
+    expect(service.calls.last, ['Untagged']);
   });
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from src.models.activity import Activity
 from src.models.encounter import Encounter
@@ -83,6 +83,33 @@ class DayMeta:
     tags: Optional[List[str]] = None
     # Per-day counter occurrences; the same counter name may appear more than once.
     counters: List[CounterEntry] = field(default_factory=list)
+
+
+# Pseudo-tag standing in for "this day has no tags of its own" wherever tags
+# are offered as a filterable option (issue #203 follow-up) — never stored in
+# a DayMeta.tags list itself.
+UNTAGGED_LABEL = "Untagged"
+
+
+def tag_options_with_untagged(tags_by_day: Iterable[Optional[List[str]]]) -> List[str]:
+    """Distinct tags used across *tags_by_day*, plus :data:`UNTAGGED_LABEL`
+    appended when at least one day has no tags of its own.
+
+    Returns ``[]`` when the project has never used tags at all — a lone
+    "Untagged" option would be meaningless noise for a feature nobody has
+    touched.
+    """
+    real: set[str] = set()
+    has_untagged = False
+    for tags in tags_by_day:
+        if tags:
+            real.update(tags)
+        else:
+            has_untagged = True
+    options = sorted(real)
+    if options and has_untagged:
+        options.append(UNTAGGED_LABEL)
+    return options
 
 
 @dataclass

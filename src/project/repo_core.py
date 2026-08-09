@@ -29,6 +29,8 @@ from src.models.project import (
     Project,
     ProjectFilterState,
     ProjectItem,
+    tag_options_with_untagged,
+    UNTAGGED_LABEL,
 )
 from src.project.project_io import ProjectIO
 
@@ -715,21 +717,25 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
     """
     from src.models.great_circle import haversine_km
 
-    # ── Derive tag_options (all tags defined on any day) ────────────────────
-    tag_options: List[str] = sorted({
-        t
-        for meta in project.day_meta.values()
-        for t in (meta.tags or [])
-    })
+    # ── Derive tag_options (all tags defined on any day, plus "Untagged" when
+    # applicable — issue #203 follow-up) ─────────────────────────────────────
+    tag_options = tag_options_with_untagged(
+        meta.tags for meta in project.day_meta.values()
+    )
 
     # ── Build allowed-dates set when tag filter is active ───────────────────
+    # UNTAGGED_LABEL is a pseudo-tag, not a real one: a day matches it when it
+    # has no tags of its own, regardless of which real tags are also selected.
     allowed_dates: Optional[set] = None
     if tag_filter:
         tag_set = set(tag_filter)
+        want_untagged = UNTAGGED_LABEL in tag_set
+        real_tag_set = tag_set - {UNTAGGED_LABEL}
         allowed_dates = {
             date_key
             for date_key, meta in project.day_meta.items()
-            if tag_set & set(meta.tags or [])
+            if (real_tag_set & set(meta.tags or []))
+            or (want_untagged and not (meta.tags or []))
         }
 
     # ── Aggregate totals over activities (filtered if needed) ────────────────
@@ -820,7 +826,7 @@ def _compute_stats(project: Project, tag_filter: Optional[List[str]] = None) -> 
                 for tag in day_tags:
                     dist_per_tag[tag] = dist_per_tag.get(tag, 0.0) + (a.distance or 0.0)
             else:
-                dist_per_tag["Untagged"] = dist_per_tag.get("Untagged", 0.0) + (a.distance or 0.0)
+                dist_per_tag[UNTAGGED_LABEL] = dist_per_tag.get(UNTAGGED_LABEL, 0.0) + (a.distance or 0.0)
 
     # ── Distance + counts by segment type ───────────────────────────────────
     seg_dist: Dict[str, float] = {"train": 0.0, "flight": 0.0, "boat": 0.0, "bus": 0.0}

@@ -81,6 +81,7 @@ from src.utils.encryption_check import is_encrypted_envelope
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 from src.models.great_circle import great_circle_points
+from src.models.project import tag_options_with_untagged
 from src.project.project_repo import ProjectRepo, _compute_stats
 from src.tile_renderer import get_cached_tile, get_or_build_features, get_or_create_tile
 from src.utils.encryption_check import is_encrypted_envelope
@@ -550,11 +551,9 @@ def shared_project_stats(
             _repo.compute_and_cache_stats(sess, row.user_info_id, row.name)
             row = sess.exec(select(DBProject).where(DBProject.id == project_id)).first()
         stats = json.loads(row.stats_json or "{}")
-        stats["tag_options"] = sorted({
-            t
-            for dm in json.loads(row.day_meta_json or "{}").values()
-            for t in (dm.get("tags") or [])
-        })
+        stats["tag_options"] = tag_options_with_untagged(
+            dm.get("tags") for dm in json.loads(row.day_meta_json or "{}").values()
+        )
     return stats
 
 
