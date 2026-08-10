@@ -9,8 +9,10 @@ from typing import Any
 
 import requests
 
+from src.utils.logging import get_logger
 from src.utils.metrics import normalise_path, outcome_for_status, track_external
 
+_log = get_logger(__name__)
 
 # A step's `type` marks publication state: 0 = draft (unpublished/offline),
 # 1 = published. Imports surface published steps only (issue #23).
@@ -64,8 +66,13 @@ class PolarstepsClient:
 
     def _get(self, path: str, **params: Any) -> Any:
         url = f"{self.BASE_URL}{path}"
-        with track_external("polarsteps", normalise_path(path)) as call:
-            resp = self._session.get(url, params=params or None, timeout=20)
+        endpoint = normalise_path(path)
+        with track_external("polarsteps", endpoint) as call:
+            try:
+                resp = self._session.get(url, params=params or None, timeout=20)
+            except requests.RequestException:
+                _log.warning("polarsteps request failed endpoint=%s", endpoint)
+                raise
             call.outcome = outcome_for_status(resp.status_code)
         # Capture any rotated cookie before raising, so even a final successful
         # call's refreshed token is kept.
@@ -73,9 +80,18 @@ class PolarstepsClient:
         if rotated:
             self._current_token = rotated
         if resp.status_code == 401:
+            _log.warning("polarsteps token rejected endpoint=%s", endpoint)
             raise PermissionError("Invalid or expired Polarsteps token")
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError:
+            _log.warning("polarsteps request failed endpoint=%s status=%s", endpoint, resp.status_code)
+            raise
+        try:
+            return resp.json()
+        except ValueError:
+            _log.warning("polarsteps returned malformed JSON endpoint=%s status=%s", endpoint, resp.status_code)
+            raise
 
     def get_me(self) -> dict[str, Any]:
         """Return current user info — used to validate the token."""

@@ -50,8 +50,11 @@ from src.api.polarsteps_client import format_step, format_trip
 from src.billing.entitlements import ensure_storage_quota
 from src.billing.usage import record_written, unlink_and_record
 from src.models.person import polarsteps_from_socials
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/people", tags=["people"])
+
+_log = get_logger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
@@ -416,13 +419,16 @@ def _person_ps_username(sess, person_id: int, user_info_id: int) -> str:
     return username
 
 
-def _ps_not_visible_or_502(exc: Exception):
+def _ps_not_visible_or_502(exc: Exception, *, person_id: int, trip_id: int | None = None):
+    ctx = f"person_id={person_id}" + ("" if trip_id is None else f" trip_id={trip_id}")
     if isinstance(exc, requests.HTTPError) and exc.response is not None \
             and exc.response.status_code in (403, 404):
+        _log.warning("polarsteps profile not visible %s status=%s", ctx, exc.response.status_code)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="That Polarsteps profile or trip isn't visible to you",
         )
+    _log.exception("polarsteps fetch failed %s", ctx)
     raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
 
@@ -443,7 +449,7 @@ def person_polarsteps_trips(
     except PermissionError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
-        _ps_not_visible_or_502(exc)
+        _ps_not_visible_or_502(exc, person_id=person_id)
     _persist_rotated_token(user_info_id, client)
     trips = list(reversed(user.get("trips") or []))
     return [format_trip(t) for t in trips]
@@ -467,6 +473,6 @@ def person_polarsteps_trip_steps(
     except PermissionError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
-        _ps_not_visible_or_502(exc)
+        _ps_not_visible_or_502(exc, person_id=person_id, trip_id=trip_id)
     _persist_rotated_token(user_info_id, client)
     return [format_step(s) for s in raw_steps]
