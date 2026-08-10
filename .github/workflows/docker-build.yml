@@ -26,11 +26,25 @@ jobs:
         with:
           channel: stable
 
+      # The `validation` tag is floating (re-pushed to a new commit each time),
+      # so `github.ref_name` alone is always just "validation" — giving no way
+      # to tell which commit a running validation build is on. Real v* tags are
+      # one-shot and already identify their commit, so they pass through as-is.
+      - name: Determine app version
+        id: app_version
+        run: |
+          if [ "${{ github.ref_name }}" = "validation" ]; then
+            version="validation-$(git rev-parse --short "${{ github.sha }}")"
+          else
+            version="${{ github.ref_name }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Build Flutter Web
         working-directory: flutter_client
         run: |
           flutter pub get
-          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=MAPBOX_TOKEN=${{ secrets.MAPBOX_TOKEN }}
+          flutter build web --release --dart-define=APP_VERSION=${{ steps.app_version.outputs.version }} --dart-define=MAPBOX_TOKEN=${{ secrets.MAPBOX_TOKEN }}
 
       - name: Stage Flutter build output for Docker
         run: cp -r flutter_client/build/web web_client
@@ -68,5 +82,5 @@ jobs:
           context: .
           push: true
           build-args: |
-            APP_VERSION=${{ github.ref_name }}
+            APP_VERSION=${{ steps.app_version.outputs.version }}
           tags: ${{ steps.image_tags.outputs.tags }}
