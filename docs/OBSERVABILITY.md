@@ -19,102 +19,38 @@ this genuinely needs to scale multi-tenant later — repointing Alloy's
 `remote_write` endpoint at Mimir afterwards is cheap; standing up Mimir now
 for that hypothetical isn't.
 
-## NAS-side compose (sketch — adapt, don't copy-paste as final)
+## NAS-side compose (committed — `nas/`)
 
-Not committed to this repo as a working file — like the VPS's real
-`docker-compose.yml`, this is host-specific (paths, the NAS's own Docker
-setup). Sketch, matching the pattern `docker-compose.yml.example` already
-sets for the VPS side:
+Unlike the VPS's real `docker-compose.yml` (host-specific, gitignored), the
+NAS-side stack is checked into this repo under `nas/` — `nas/README.md` is
+the step-by-step deployment runbook, `nas/docker-compose.yml.example` the
+compose file. **Not verified against live Loki/Prometheus/Grafana/Tailscale
+binaries from the session that wrote this** — treat it as a documented
+starting point, the same caveat as the VPS-side Alloy config.
 
-```yaml
-services:
-  loki:
-    image: grafana/loki:latest
-    container_name: observability-loki
-    restart: unless-stopped
-    ports:
-      - "3100:3100"   # reachable over Tailscale only in practice — nothing
-                       # forwards this from the NAS's router to the WAN
-    volumes:
-      - ./loki/config.yaml:/etc/loki/config.yaml:ro
-      - ./loki/data:/loki
-    command: ["-config.file=/etc/loki/config.yaml"]
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: observability-prometheus
-    restart: unless-stopped
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.enable-remote-write-receiver"   # Alloy pushes here
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: observability-grafana
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./grafana/data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-```
-
-If the NAS's Docker setup lets you bind these to the Tailscale interface
-specifically rather than `0.0.0.0`, do that. Otherwise this relies on the
-NAS's router/firewall not forwarding these ports to the WAN — the same
-"Docker writes NAT rules that can bypass a host firewall" gotcha
-`docs/DEPLOYMENT_VPS.md` §1 documents for the VPS applies here too if the
-NAS's router does UPnP/port-forwarding. Verify from outside the LAN before
-trusting it.
-
-**Not verified against live Loki/Prometheus/Grafana binaries from the
-session that wrote this** — same caveat as the VPS-side Alloy config:
-documented starting point, not tested software.
+Loki, Prometheus and Grafana all run with `network_mode: service:tailscale`
+— they share Tailscale's network namespace rather than publishing ports to
+the NAS's LAN-facing bridge at all. This is stricter than "bind to the
+Tailscale interface if your Docker setup allows it, otherwise rely on the
+firewall," which was this section's original sketch — the sidecar pattern
+removes the LAN-exposure question entirely instead of mitigating it. It
+needs `/dev/net/tun` on the NAS; `nas/README.md` §0 covers checking for it
+and the fallback (native Tailscale + firewall-reliant port binding) if your
+NAS model doesn't have it.
 
 ## Loki retention
 
 Cap it explicitly — "the NAS has disk to spare" is not the same as
-"unbounded is fine." A starting point matching the existing 30-day backup
-convention (`src/backup/backup_service.py`), in `loki/config.yaml`:
-
-```yaml
-limits_config:
-  retention_period: 720h   # 30 days
-
-compactor:
-  working_directory: /loki/compactor
-  retention_enabled: true
-  delete_request_store: filesystem
-```
-
-Monolithic mode, filesystem storage — no object store (S3/MinIO) needed at
-this scale; add the `schema_config`/`storage_config` blocks Loki's own
-"getting started" docs specify for filesystem storage alongside this.
+"unbounded is fine." `nas/loki-config.yaml` defaults to 30 days, matching
+the existing backup-retention convention (`src/backup/backup_service.py`);
+revisit after seeing a few weeks of real volume.
 
 ## Grafana datasources
 
-Both point at `localhost` since everything is colocated —
-`grafana/provisioning/datasources/datasources.yaml`:
-
-```yaml
-apiVersion: 1
-datasources:
-  - name: Prometheus
-    type: prometheus
-    access: proxy
-    url: http://prometheus:9090
-    isDefault: true
-  - name: Loki
-    type: loki
-    access: proxy
-    url: http://loki:3100
-```
+`nas/grafana/provisioning/datasources/datasources.yaml`. Both point at
+`localhost`, not a service name — the sidecar pattern above means Loki,
+Prometheus and Grafana share one network namespace and reach each other
+over loopback, not Docker's usual bridge-network service discovery.
 
 ## Queries an operator actually runs
 

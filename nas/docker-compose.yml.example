@@ -1,0 +1,122 @@
+# ViewTripWeb — NAS-side observability stack (issue #205).
+#
+# Loki + Prometheus + Grafana, colocated here deliberately: generous disk,
+# no CPU contention with the VPS's production traffic. See
+# ../docs/OBSERVABILITY.md for the reasoning (why Loki+Prometheus rather than
+# Mimir, retention policy, the LogQL/PromQL you'll actually run) and
+# ../docs/DEPLOYMENT_VPS.md's "Observability" section for the VPS-side half
+# (the Alloy shipper that pushes here). ./README.md in this directory is the
+# step-by-step deployment runbook — read that first if this is a fresh setup.
+#
+#   cp docker-compose.yml.example docker-compose.yml
+#   cp .env.example .env      # fill in TS_AUTHKEY and GRAFANA_ADMIN_PASSWORD
+#   docker compose up -d
+#
+# SECURITY MODEL: Loki, Prometheus and Grafana all run with
+# `network_mode: service:tailscale` — they share Tailscale's network
+# namespace instead of publishing ports to this NAS's LAN-facing bridge.
+# Nothing here is reachable from your LAN, let alone the public internet,
+# unless the caller is on the same tailnet. This is stricter than the
+# "bind to the Tailscale interface if your Docker setup allows it, otherwise
+# rely on the firewall" fallback docs/OBSERVABILITY.md originally sketched —
+# the sidecar pattern below removes the LAN-exposure question entirely
+# rather than mitigating it.
+
+services:
+  # ── Tailscale ────────────────────────────────────────────────────────────────
+  # Every other service in this file joins this container's network namespace
+  # (network_mode: service:tailscale) rather than getting its own. Needs
+  # /dev/net/tun — see README.md §0 for the DSM-specific check before you
+  # bring this up, and the fallback if it's not available on your model.
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: observability-tailscale
+    hostname: viewtrip-observability
+    restart: unless-stopped
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      # Don't let Tailscale override this NAS's own DNS resolver for
+      # everything else it does — only route tailnet traffic through it.
+      - TS_EXTRA_ARGS=--accept-dns=false
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Loki ─────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: observability-loki
+    network_mode: service:tailscale
+    restart: unless-stopped
+    depends_on:
+      - tailscale
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - ./loki-data:/loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  # --web.enable-remote-write-receiver is what lets Alloy (VPS side) push
+  # here instead of this Prometheus reaching back out over the internet to
+  # scrape the VPS — see docs/OBSERVABILITY.md's "Why Loki + Prometheus, not
+  # Mimir" for why plain Prometheus in receiver mode is enough at this scale.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: observability-prometheus
+    network_mode: service:tailscale
+    restart: unless-stopped
+    depends_on:
+      - tailscale
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-remote-write-receiver"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: observability-grafana
+    network_mode: service:tailscale
+    restart: unless-stopped
+    depends_on:
+      - tailscale
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - ./grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Ports, for reference (all reachable only via the tailnet, at whatever
+# Tailscale IP/MagicDNS name `tailscale status` shows for
+# "viewtrip-observability" once this is up):
+#   Loki       3100
+#   Prometheus 9090
+#   Grafana    3000
