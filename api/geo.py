@@ -28,6 +28,7 @@ from src.project.project_repo import ProjectRepo, _compute_low_res_geo
 from src.jobs.redis_client import get_redis
 from src.utils.encryption_check import is_encrypted_envelope
 from src.utils.logging import get_logger
+from src.utils.metrics import track_external
 
 router = APIRouter(prefix="/api/geo", tags=["geo"])
 
@@ -198,15 +199,16 @@ _PLACES_UA = "ViewTrip/1.0 (city autocomplete; https://github.com/rui-nar/ViewTr
 
 def _nominatim_search(q: str) -> List[Dict[str, Any]]:
     """Raw Nominatim search for *q* (extracted so tests can stub the upstream)."""
-    resp = requests.get(
-        _NOMINATIM_URL,
-        params={"q": q, "format": "jsonv2", "addressdetails": 1,
-                "limit": 8, "accept-language": "en"},
-        headers={"User-Agent": _PLACES_UA},
-        timeout=6,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    with track_external("nominatim", "/search"):
+        resp = requests.get(
+            _NOMINATIM_URL,
+            params={"q": q, "format": "jsonv2", "addressdetails": 1,
+                    "limit": 8, "accept-language": "en"},
+            headers={"User-Agent": _PLACES_UA},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _place_label(result: Dict[str, Any]) -> str | None:
