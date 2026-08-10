@@ -1,5 +1,7 @@
 """Tests for project data models and ProjectIO round-trip — no Qt required."""
 
+import json
+import logging
 import os
 import pytest
 
@@ -292,6 +294,35 @@ class TestProjectIORoundTrip:
         assert "name" in data
         assert "items" in data
         assert "activities" in data
+
+    def test_load_drops_malformed_activities_and_logs(self, tmp_path, caplog):
+        """Issue #205: a corrupt activity entry used to be dropped by
+        ProjectIO.load() with zero trace (`except Exception: pass`).
+        Now routed through the shared parse_activities_or_log helper."""
+        path = str(tmp_path / "corrupt.viewtrip")
+        data = {
+            "name": "Test",
+            "version": 1,
+            "activities": [
+                {
+                    "id": 1, "name": "Ride", "type": "Ride",
+                    "start_date": "2024-01-01T00:00:00Z",
+                    "start_date_local": "2024-01-01T00:00:00Z",
+                },
+                {"id": 2, "start_date": "not-a-date"},
+            ],
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+        with caplog.at_level(logging.WARNING, logger="src.models.activity"):
+            loaded = ProjectIO.load(path)
+
+        assert [a.id for a in loaded.activities] == [1]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "project_io_load" in warnings[0].message
+        assert "1/2" in warnings[0].message
 
     def test_unicode_in_label(self, tmp_path):
         p = Project(name="München → Paris 🚂")

@@ -1,5 +1,6 @@
 """Unit tests for StravaAPI client with mocked requests."""
 
+import logging
 import time
 import pytest
 from unittest.mock import patch, MagicMock
@@ -70,6 +71,36 @@ def test_clear_token_removes_data():
     with patch("src.api.strava_client.TokenStore.delete_token"):
         client.clear_token()
     assert client.token_data == {}
+
+
+# ---------------------------------------------------------------------------
+# Logging (issue #205) — the client used to swallow both of these failures
+# with a bare `except Exception: pass`.
+# ---------------------------------------------------------------------------
+
+def test_clear_token_logs_on_delete_failure(caplog):
+    client = _client_with_token()
+    with patch("src.api.strava_client.TokenStore.delete_token", side_effect=Exception("db locked")):
+        with caplog.at_level(logging.WARNING, logger="src.api.strava_client"):
+            client.clear_token()
+    assert client.token_data == {}
+    assert "could not delete stored token" in caplog.text
+
+
+@patch("src.api.strava_client.requests.request")
+def test_request_401_refresh_failure_is_logged(mock_req, caplog):
+    """A failed token refresh during the 401 retry path must be logged, not
+    silently discarded — the caller still gets AuthenticationError either way."""
+    client = _client_with_token()
+    mock_req.return_value = MagicMock(status_code=401, text="unauthorized")
+
+    with patch.object(OAuth2Session, "refresh_token", side_effect=Exception("refresh token revoked")):
+        with patch("src.api.strava_client.TokenStore.delete_token"):
+            with caplog.at_level(logging.WARNING, logger="src.api.strava_client"):
+                with pytest.raises(AuthenticationError):
+                    client.request("GET", "/test")
+
+    assert "token refresh after 401 failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,12 @@
 """Activity data model for Strava activities."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
 
 
 @dataclass
@@ -207,3 +211,28 @@ class Activity:
             end_latlng_enc=data.get("end_latlng_enc"),
             elevation_profile_enc=data.get("elevation_profile_enc"),
         )
+
+
+def parse_activities_or_log(raw_list: List[Dict[str, Any]], source: str) -> List["Activity"]:
+    """Parse raw Strava-shaped activity dicts, skipping malformed ones.
+
+    Every call site that used to wrap ``Activity.from_strava_api(raw)`` in a
+    silent ``except Exception: pass`` shared the same bug: a malformed
+    activity vanished with zero trace. This centralises that parsing so the
+    fix (and its test coverage) lives in one place. If any entries are
+    dropped, logs a single ``WARNING`` naming ``source`` and the count
+    dropped vs. total — one line per call, not one per bad activity, so a
+    large import failing on many activities doesn't spam the log.
+    """
+    parsed: List[Activity] = []
+    dropped = 0
+    for raw in raw_list:
+        try:
+            parsed.append(Activity.from_strava_api(raw))
+        except Exception:
+            dropped += 1
+    if dropped:
+        _log.warning(
+            "%s: dropped %d/%d malformed activities", source, dropped, len(raw_list)
+        )
+    return parsed
