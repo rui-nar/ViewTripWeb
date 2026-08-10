@@ -11,6 +11,7 @@ Two groups:
 from __future__ import annotations
 
 import io
+import logging
 
 import pytest
 from PIL import Image
@@ -27,6 +28,7 @@ from src.poster.poster_renderer import (
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
     _Projector,
+    _paste_cover,
     _pdf_resolution,
     _target_size,
     assemble_card_content,
@@ -438,3 +440,28 @@ def test_preview_shows_pins_scaled_down_but_still_visible(project_id):
             for x in range(0, w)
             for y in range(0, h)
         ), "no pin-colored pixel found anywhere in the preview"
+
+
+# ── _paste_cover failure logging (issue #205, Unit D) ────────────────────────
+# _paste_cover used to swallow a failed photo open/decode with a bare
+# `except Exception: return`, leaving a blank card slot with nothing in the
+# logs to explain a "my poster is missing a photo" report.
+
+def test_paste_cover_logs_warning_and_leaves_blank_slot_on_corrupt_photo(tmp_path, caplog):
+    bad_photo = tmp_path / "corrupt.jpg"
+    bad_photo.write_bytes(b"not a real image")
+
+    canvas = Image.new("RGB", (200, 200), (10, 20, 30))
+    before = canvas.copy()
+
+    with caplog.at_level(logging.WARNING, logger="src.poster.poster_renderer"):
+        _paste_cover(canvas, bad_photo, (10, 10, 50, 50))  # must not raise
+
+    # Behavior unchanged: nothing pasted, canvas untouched (blank slot).
+    assert canvas.tobytes() == before.tobytes()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING log line for the failed cover-photo paste"
+    assert any(str(bad_photo) in r.getMessage() for r in warnings)
+    # .exception()-style call: traceback must be captured, not just the message.
+    assert warnings[0].exc_info is not None

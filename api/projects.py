@@ -56,7 +56,7 @@ from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProje
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quota
-from src.models.activity import Activity
+from src.models.activity import parse_activities_or_log
 from src.models.project import DEFAULT_SLEEPING_GROUPS, tag_options_with_untagged
 from src.project.project_io import ProjectIO
 from src.project.project_repo import _compute_stats
@@ -568,26 +568,22 @@ def sync_check(
                 ).all()
                 in_project_ids = {r.activity_id for r in item_rows if r.activity_id is not None}
 
-                for raw in raw_list:
-                    try:
-                        act = Activity.from_strava_api(raw)
-                        if act.id in in_project_ids:
-                            continue
-                        act_ts = act.start_date.timestamp() if act.start_date else 0.0
-                        if act_ts <= cutoff:
-                            continue
-                        act_date = act.start_date.date() if act.start_date else None
-                        if act_date is None:
-                            continue
-                        if trip_start_date and act_date < trip_start_date:
-                            continue
-                        if trip_end_date and act_date > trip_end_date:
-                            continue
-                        d = act.to_strava_dict()
-                        d["in_project"] = False
-                        strava_results.append(d)
-                    except Exception:
-                        pass
+                for act in parse_activities_or_log(raw_list, "projects_unimported"):
+                    if act.id in in_project_ids:
+                        continue
+                    act_ts = act.start_date.timestamp() if act.start_date else 0.0
+                    if act_ts <= cutoff:
+                        continue
+                    act_date = act.start_date.date() if act.start_date else None
+                    if act_date is None:
+                        continue
+                    if trip_start_date and act_date < trip_start_date:
+                        continue
+                    if trip_end_date and act_date > trip_end_date:
+                        continue
+                    d = act.to_strava_dict()
+                    d["in_project"] = False
+                    strava_results.append(d)
 
         # ── Polarsteps ────────────────────────────────────────────────────────
         ps_results: List[Dict[str, Any]] = []

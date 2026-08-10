@@ -15,6 +15,7 @@ from src.exceptions.errors import (
     RateLimitError,
     TokenError,
 )
+from src.utils.logging import get_logger
 from src.utils.metrics import (
     STRAVA_RATE_LIMIT_CAPACITY,
     STRAVA_RATE_LIMIT_USAGE,
@@ -23,6 +24,8 @@ from src.utils.metrics import (
     outcome_for_status,
     track_external,
 )
+
+_log = get_logger(__name__)
 
 
 class RateLimiter:
@@ -195,7 +198,9 @@ class StravaAPI:
         try:
             TokenStore.delete_token(self.user_id)
         except Exception:
-            pass  # Token might not exist or can't be deleted
+            # Anticipated — the token may already be gone (e.g. a previous
+            # clear_token() call, or it was never persisted).
+            _log.warning("clear_token: could not delete stored token for user=%s", self.user_id, exc_info=True)
 
     def set_token(self, token_data: Dict[str, Any]) -> None:
         """Store initial token data."""
@@ -257,7 +262,10 @@ class StravaAPI:
                         headers = {"Authorization": f"Bearer {self.token_data['access_token']}"}
                         continue   # retry with new token
                     except Exception:
-                        pass
+                        # Anticipated — the refresh token itself may be
+                        # revoked/expired; falls through to clear_token() and
+                        # AuthenticationError below either way.
+                        _log.warning("token refresh after 401 failed for user=%s", self.user_id, exc_info=True)
                 self.clear_token()
                 raise AuthenticationError(
                     "Strava access token is invalid or expired. "

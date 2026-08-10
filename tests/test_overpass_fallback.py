@@ -1,12 +1,14 @@
 """Tests for overpass_service ferry/bus fallback — ensures OverpassError
 is raised (not a silent 2-point chord) when no OSM route is found."""
 
+import logging
 from unittest.mock import patch
 
 import pytest
 
 from src.services.overpass_service import (
     OverpassError,
+    _find_station_near,
     get_ferry_geometry,
     get_bus_geometry,
 )
@@ -226,3 +228,24 @@ class TestBusFallbackRaisesOnMissingRoute:
         with patch("src.services.overpass_service._overpass", side_effect=_empty_overpass):
             with pytest.raises(OverpassError):
                 get_bus_geometry(_LAT1, _LON1, _LAT2, _LON2)
+
+
+class TestFindStationNearLogsOnOverpassFailure:
+    """_find_station_near swallows OverpassError into None with no log at all,
+    even though _overpass() already built a detailed error message (mirror
+    fallback exhausted). The umbrella get_rail_geometry() logs its own WARNING
+    once the *overall* resolve attempt finishes, so this inner swallow must not
+    add a second WARNING — just make sure the detail isn't dropped entirely
+    (issue #205, Unit C)."""
+
+    def test_overpass_failure_returns_none_and_logs_detail(self, caplog):
+        with patch("src.services.overpass_service._overpass",
+                   side_effect=_failing_overpass):
+            with caplog.at_level(logging.DEBUG, logger="src.services.overpass_service"):
+                result = _find_station_near(_LAT1, _LON1)
+
+        assert result is None
+        # The detail _overpass() built is captured somewhere (not silently lost)...
+        assert "Overpass timeout" in caplog.text
+        # ...but not as a second WARNING — the umbrella function already logs one.
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]

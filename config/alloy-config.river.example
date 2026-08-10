@@ -1,0 +1,65 @@
+// Grafana Alloy config — ships this host's container logs and the app's
+// Prometheus metrics to Loki/Prometheus colocated on the NAS (issue #205).
+// See docs/OBSERVABILITY.md for the NAS-side stack these push to, and
+// docs/DEPLOYMENT_VPS.md's "Observability" section for the Tailscale tunnel
+// LOKI_PUSH_URL / PROMETHEUS_REMOTE_WRITE_URL point across.
+//
+//   cp config/alloy-config.river.example config/alloy-config.river
+//
+// No secrets belong in this file — both endpoint URLs come from .env via
+// env(), read by the `alloy` service in docker-compose.yml.example.
+//
+// NOT verified against a live Alloy binary from the session that wrote this —
+// treat it as a documented starting point to adapt and test against your own
+// Loki/Prometheus, the same spirit docker-compose.yml.example itself already
+// is for the app containers.
+
+// Discover every container on this host via the Docker socket (read-only —
+// see the volume mount in docker-compose.yml.example) so new services (a
+// future worker, say) are picked up automatically with no config change here.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Tail every discovered container's stdout/stderr and forward to Loki. This
+// is what actually reads the logs — the json-file rotation configured on
+// each service in docker-compose.yml.example is the separate, independent
+// fallback for when this pipeline (or the NAS/tunnel) is down.
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.containers.targets
+  forward_to = [loki.write.nas.receiver]
+}
+
+loki.write "nas" {
+  endpoint {
+    url = env("LOKI_PUSH_URL")
+  }
+
+  // Bounded local write-ahead log: a NAS or tunnel outage (home power cut, a
+  // DSM update reboot) buffers here and retries rather than blocking the app
+  // or growing without limit on this host's disk. Tune down if disk is
+  // tighter than expected; the app's own rotated container logs are still
+  // the fallback of last resort either way.
+  wal {
+    max_segment_age = "1h"
+  }
+}
+
+// Scrape the API's /metrics over the compose-internal network by service
+// name — never published to the host or the internet for this to work, only
+// reachable from other containers on this same compose network.
+prometheus.scrape "viewtrip" {
+  targets = [
+    {"__address__" = "viewtripweb:8000", "job" = "viewtrip"},
+  ]
+  metrics_path    = "/metrics"
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.nas.receiver]
+}
+
+prometheus.remote_write "nas" {
+  endpoint {
+    url = env("PROMETHEUS_REMOTE_WRITE_URL")
+  }
+}

@@ -61,6 +61,9 @@ docker-compose.yml
 dev.bat
 dev_client.bat
 dev.ps1
+vps/webhook/hooks.yaml
+nas/docker-compose.yml
+nas/.env
 # Graphify knowledge graph outputs
 graphify-out/
 .graphify_*

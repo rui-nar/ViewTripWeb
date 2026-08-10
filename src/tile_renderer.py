@@ -31,6 +31,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import mercantile
 from PIL import Image, ImageDraw
 
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
+
 TILE_SIZE = 512
 _CACHE_ROOT = Path(__file__).parent.parent / "data" / "tiles"
 
@@ -238,7 +242,11 @@ def _do_prerender(token: str, features: List[Dict[str, Any]]) -> None:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(render_tile(features, tile.z, tile.x, tile.y))
                 except Exception:
-                    pass  # best-effort; never crash the background thread
+                    # best-effort; never crash the background thread
+                    _log.warning(
+                        "Pre-render failed for token=%s tile=%s/%s/%s",
+                        token, tile.z, tile.x, tile.y, exc_info=True,
+                    )
 
 
 def _submit_prerender(token: str, features: List[Dict[str, Any]]) -> None:

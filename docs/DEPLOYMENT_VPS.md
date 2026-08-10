@@ -246,10 +246,8 @@ along. Both stacks are on one host, so a bind mount reaches them:
 
 ```yaml
   # One-shot: seed val's DB from prod's newest nightly backup.
-  # Behind a profile so a routine `docker compose up -d` can never clobber val.
-  #   docker compose down
-  #   docker compose --profile seed run --rm db-seed
-  #   docker compose up -d
+  # Behind a profile so a routine `docker compose up -d` can never clobber
+  # val — see "Run it" below for the commands.
   db-seed:
     image: alpine:3.20
     profiles: ["seed"]
@@ -267,6 +265,20 @@ along. Both stacks are on one host, so a bind mount reaches them:
         cp "$$latest" /db/viewtripweb.db
         echo done
 ```
+
+**Run it** (from `/opt/viewtrip-val`, in this order — val must be stopped
+before the copy, per the first gotcha below):
+
+```bash
+docker compose down
+docker compose --profile seed run --rm db-seed
+docker compose up -d
+```
+
+The `--profile seed` flag is required on that middle command — `db-seed` is
+in the `seed` profile specifically so it never runs as a side effect of a
+plain `docker compose up -d` (see the third gotcha below). `--rm` cleans up
+the one-shot container after it exits; it isn't a long-running service.
 
 Three things about it are easy to get wrong:
 
@@ -354,6 +366,178 @@ checkout of the affected path, not retroactively.
 **One consequence of the shared tag:** two producers write `:validation`, and
 the host cannot tell which one it is running. If a local build and a tag push
 race, last writer wins. Prefer the tag route when it matters who built it.
+
+## 7. Observability: Loki/Prometheus/Grafana on the NAS (issue #205)
+
+Logs and metrics ship off this VPS to a stack colocated on the NAS —
+generous disk there, no CPU contention with production traffic here. See
+`docs/OBSERVABILITY.md` for the NAS-side compose, retention, and the
+LogQL/PromQL an operator actually runs. This section is only the VPS-side
+half: the tunnel and the shipper.
+
+### Tailscale tunnel
+
+Deliberately not a port-forward + DDNS + bearer token, the way `/metrics`
+is secured today (`docs/METRICS.md`) — the NAS has never had an inbound
+port opened for anything but SSH, and a second internet-facing ingestion
+endpoint there is a materially different risk than this VPS's already
+locked-down setup (§1). Install Tailscale on both hosts instead, so
+Loki/Prometheus never touch the public internet at all:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+Same on the NAS — DSM's Package Center or Container Manager, depending on
+DSM version. `tailscale status` on either host shows the other's Tailscale
+IP/MagicDNS name — that's what `LOKI_PUSH_URL` and
+`PROMETHEUS_REMOTE_WRITE_URL` below point at.
+
+### Alloy (VPS side)
+
+`docker-compose.yml.example`'s `alloy` service tails every container's logs
+via the Docker socket (read-only) and scrapes `viewtripweb:8000/metrics`
+over the compose-internal network — `/metrics` itself never needs to be
+reachable from outside this host for this to work. Copy the example config
+and fill in `.env`:
+
+```bash
+cp config/alloy-config.river.example config/alloy-config.river
+```
+
+```
+LOKI_PUSH_URL=http://<nas-tailscale-host>:3100/loki/api/v1/push
+PROMETHEUS_REMOTE_WRITE_URL=http://<nas-tailscale-host>:9090/api/v1/write
+```
+
+**Not verified against a live Alloy binary** — `config/alloy-config.river.example`
+is a documented starting point to adapt, the same spirit
+`docker-compose.yml.example` itself already is. Confirm log lines and the
+`viewtrip_*` metrics actually arrive in Grafana on the NAS before relying
+on it for an incident.
+
+### Dropping `/metrics`'s public exposure
+
+Once Alloy's scrape is confirmed working, `/metrics` no longer needs the
+bearer-token + Caddy-block setup in `docs/METRICS.md` — Alloy reaches it
+over the internal compose network, never the public internet. Remove the
+`handle /metrics { respond 403 }` Caddy block (§2) and unset
+`METRICS_TOKEN`, or leave the token as defence in depth and just drop the
+Caddy exposure — either is fine, but the token alone was always the weaker
+of the two.
+
+### Keep local rotation regardless
+
+Every service in `docker-compose.yml.example` now sets `max-size`/`max-file`
+on its `logging:` driver (previously unbounded — a latent disk-fill risk on
+this 40GB host). This stays even with Loki live: if the NAS or the tunnel
+is down during an incident, `docker compose logs` here must still answer
+"what just happened" on its own.
+
+## 8. Auto-deploy validation on new image (issue #205)
+
+`deploy.ps1` needs a human at a Windows dev machine to redeploy validation.
+`vps/webhook/` closes that loop: `docker-build.yml` finishing successfully
+off the `validation` tag triggers a `docker compose pull && up -d` on
+`/opt/viewtrip-val` automatically, with no runner registered in GitHub and
+no SSH key stored in GitHub's secrets — the trust boundary stays entirely
+on this VPS. Deliberately scoped to **validation only**: auto-deploying
+prod on every release would remove `deploy.ps1 -Target Prod`'s existing
+manual gate, which is a bigger safety call than "keep val fresh" and not
+something to fold in as a side effect of this.
+
+**Not verified against a live `webhook` binary from the session that wrote
+this** — `vps/webhook/` is a documented starting point, same caveat as the
+Alloy/Loki configs above.
+
+### Install `webhook`
+
+```bash
+sudo apt install webhook   # Debian's own repo; check `webhook -version` after
+```
+
+If it's missing or too old there, grab a static binary from
+[adnanh/webhook's releases](https://github.com/adnanh/webhook/releases)
+instead and drop it at `/usr/bin/webhook`.
+
+### Configure the hook
+
+```bash
+mkdir -p /opt/viewtrip-val/webhook
+cp vps/webhook/*.sh vps/webhook/hooks.yaml.example /opt/viewtrip-val/webhook/
+cd /opt/viewtrip-val/webhook
+mv hooks.yaml.example hooks.yaml
+openssl rand -hex 32   # generate a secret, paste it into hooks.yaml AND
+                        # into GitHub's webhook config below — same value
+```
+
+`hooks.yaml` is gitignored (the secret lives inline — `webhook` has no
+env-var interpolation in its config), same pattern as `docker-compose.yml`
+and `config/config.json` elsewhere in this repo.
+
+### systemd unit
+
+```bash
+sudo cp /opt/viewtrip-val/webhook/webhook.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now webhook
+sudo systemctl status webhook   # confirm it's listening on 127.0.0.1:9999
+```
+
+### Caddy routing
+
+Loopback-bound (`127.0.0.1:9999`), same discipline as everything else in
+§1 — add a `handle_path` block to the existing `traxjourney.com` site
+(order matters: this must come before the catch-all `reverse_proxy
+127.0.0.1:8000`, same as the existing `/metrics` block):
+
+```
+traxjourney.com {
+    handle /metrics { respond 403 }
+    handle_path /gh-webhook/* {
+        reverse_proxy 127.0.0.1:9999
+    }
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+`handle_path` (not `handle`) strips the `/gh-webhook` prefix before
+forwarding — `webhook`'s own server serves each hook at `/hooks/<id>`
+relative to its own root (its default `-urlprefix`), so the public URL
+ends up `https://traxjourney.com/gh-webhook/hooks/deploy-validation`.
+`caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy`
+after editing, per §2.
+
+### GitHub-side webhook
+
+Repo → Settings → Webhooks → Add webhook:
+
+| Field | Value |
+|---|---|
+| Payload URL | `https://traxjourney.com/gh-webhook/hooks/deploy-validation` |
+| Content type | `application/json` |
+| Secret | same value as `hooks.yaml`'s `secret` |
+| Events | "Let me select individual events" → **Workflow runs** only |
+| Active | checked |
+
+No changes needed to `docker-build.yml` itself — repo webhooks subscribe to
+workflow-run completions independently of the workflow's own
+`permissions:` block.
+
+### Verify
+
+Force-push the `validation` tag (see §6's "other way to cut `:validation`")
+and watch:
+
+```bash
+tail -f /opt/viewtrip-val/deploy.log
+```
+
+`deploy-validation.sh` logs each attempt (triggered/succeeded/failed) with
+a UTC timestamp, and is `flock`-guarded so a retried GitHub delivery for
+the same build can't run a second `pull`/`up -d` concurrently against the
+same compose project.
 
 ## Open items
 

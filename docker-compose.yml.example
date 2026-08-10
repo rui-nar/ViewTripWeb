@@ -11,6 +11,19 @@
 # Note `docker compose restart` does NOT pick up `.env` changes — the container
 # has to be recreated (`up -d`) for new environment values to apply.
 
+# Every service below gets the same log-rotation policy (issue #205): Docker's
+# default json-file driver has no cap at all, and this is the fallback of last
+# resort if the observability stack (docs/OBSERVABILITY.md) or its VPS→NAS
+# tunnel is down during an incident — `docker compose logs` needs to still
+# answer "what just happened" without having silently filled the disk between
+# now and whenever that last happened. 20m × 5 files = 100MB/service ceiling;
+# adjust if your traffic warrants more history.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # ── API ─────────────────────────────────────────────────────────────────────
   viewtripweb:
@@ -20,6 +33,7 @@ services:
     ports:
       - "7777:8000"
     env_file: .env
+    logging: *default-logging
     volumes:
       - ./db:/app/db
       - ./config:/app/config
@@ -78,6 +92,7 @@ services:
     env_file: .env
     environment:
       VIEWTRIP_ROLE: worker
+    logging: *default-logging
     volumes:
       # MUST be the same host paths as the API container: the database is a
       # SQLite file, so "sharing" it means sharing the volume, on one host.
@@ -101,6 +116,7 @@ services:
     env_file: .env
     environment:
       VIEWTRIP_ROLE: worker
+    logging: *default-logging
     volumes:
       - ./db:/app/db
       - ./config:/app/config
@@ -123,6 +139,7 @@ services:
     # bounce silently drops every in-flight job — the exact failure the queue
     # was introduced to fix.
     command: ["redis-server", "--appendonly", "yes"]
+    logging: *default-logging
     volumes:
       - ./redis:/data
     healthcheck:
@@ -130,6 +147,42 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # ── Observability shipper (optional, issue #205) ────────────────────────────
+  # Ships this host's container logs + app metrics to Loki/Prometheus running
+  # on the NAS — see docs/OBSERVABILITY.md for the NAS-side stack and
+  # docs/DEPLOYMENT_VPS.md's "Observability" section for the Tailscale tunnel
+  # this depends on. Delete this service (and the two env keys below) to run
+  # without it; nothing else in this file depends on it, and dropping it just
+  # means falling back to local `docker compose logs` + Dozzle (already
+  # deployed separately) for everything.
+  #
+  # Reaches the API over the compose-internal network by service name
+  # (viewtripweb:8000) — /metrics is never published to the host or the
+  # internet for this to work, only to the other containers on this network.
+  #
+  # NOT verified against a live Alloy binary from the session that wrote this
+  # — config/alloy-config.river.example is a documented starting point to
+  # adapt, in the same spirit docker-compose.yml.example itself already is.
+  alloy:
+    image: grafana/alloy:latest
+    container_name: viewtrip-alloy
+    restart: unless-stopped
+    env_file: .env
+    logging: *default-logging
+    volumes:
+      - ./config/alloy-config.river:/etc/alloy/config.river:ro
+      # Read-only — how loki.source.docker discovers and tails every
+      # container's logs without a bind-mounted log file per service. Nothing
+      # about this container listens inward, so this is a read capability
+      # leaving the host, not an attack surface being opened on it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "run"
+      - "--server.http.listen-addr=127.0.0.1:12345"
+      - "/etc/alloy/config.river"
+    depends_on:
+      - viewtripweb
 
 # Relevant .env keys for the above (see .env.example for the full list):
 #
@@ -141,3 +194,9 @@ services:
 #     Only if you scrape /metrics AND run the workers. Without it a scrape sees
 #     the API process only, so job-side DB metrics silently go missing. Leave
 #     unset when there are no workers.
+#
+#   LOKI_PUSH_URL=http://<nas-tailscale-host>:3100/loki/api/v1/push
+#   PROMETHEUS_REMOTE_WRITE_URL=http://<nas-tailscale-host>:9090/api/v1/write
+#     Read by config/alloy-config.river via env(). Only needed if you run the
+#     alloy service above — see docs/OBSERVABILITY.md and
+#     docs/DEPLOYMENT_VPS.md's "Observability" section.

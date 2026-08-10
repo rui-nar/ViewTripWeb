@@ -1,0 +1,14 @@
+# No secrets in this file — committed as-is, no .example copy step needed.
+#
+# No scrape_configs: this Prometheus never reaches out to the VPS itself —
+# Alloy (VPS side) pushes to it instead via --web.enable-remote-write-receiver
+# (set in docker-compose.yml.example's prometheus command), which is what
+# lets this stay off the public internet entirely (see
+# ../docs/OBSERVABILITY.md). Add a scrape_configs entry only if this
+# Prometheus should also scrape something reachable directly from the NAS.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs: []

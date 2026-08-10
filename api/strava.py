@@ -34,7 +34,7 @@ from src.auth.oauth import OAuth2Session
 from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.filters.filter_engine import FilterCriteria, FilterEngine
-from src.models.activity import Activity
+from src.models.activity import Activity, parse_activities_or_log
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo
 
@@ -348,12 +348,7 @@ def strava_activities(
                 _save_cache(user_info_id, raw_list)
                 _save_refreshed_token(sess, token_row, client)
 
-    activities: List[Activity] = []
-    for raw in raw_list:
-        try:
-            activities.append(Activity.from_strava_api(raw))
-        except Exception:
-            pass
+    activities: List[Activity] = parse_activities_or_log(raw_list, "strava_browse")
 
     if types:
         type_set = {t.strip() for t in types.split(",") if t.strip()}
@@ -451,12 +446,7 @@ def strava_sync(
         all_raw = _fetch_all_strava(client)
         _save_cache(user_info_id, all_raw)
 
-        activities = []
-        for raw in all_raw:
-            try:
-                activities.append(Activity.from_strava_api(raw))
-            except Exception:
-                pass
+        activities = parse_activities_or_log(all_raw, "strava_sync")
 
         project = _project_repo.get_project(sess, owner_id, name)
         if project is None:

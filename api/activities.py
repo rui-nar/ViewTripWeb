@@ -35,7 +35,7 @@ from src.api.strava_client import RateLimiter, StravaAPI
 from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.exceptions.errors import RateLimitError
-from src.models.activity import Activity
+from src.models.activity import Activity, parse_activities_or_log
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -219,12 +219,7 @@ def add_activities(
     """
     user_info_id = int(current_user["sub"])
 
-    activities: List[Activity] = []
-    for raw in body.activities:
-        try:
-            activities.append(Activity.from_strava_api(raw))
-        except Exception:
-            pass
+    activities: List[Activity] = parse_activities_or_log(body.activities, "activities_add")
 
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")

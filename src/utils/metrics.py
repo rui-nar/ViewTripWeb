@@ -39,6 +39,10 @@ from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import event
 
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
+
 # ── Authentication ────────────────────────────────────────────────────────────
 
 LOGINS = Counter(
@@ -227,7 +231,12 @@ class ExternalCall:
 
 @contextmanager
 def track_external(service: str, endpoint: str) -> Iterator[ExternalCall]:
-    """Time a third-party call and record its outcome."""
+    """Time a third-party call, record its outcome, and log it (issue #205).
+
+    The single choke point for external-call logging: every caller gets an
+    INFO line on success and a WARNING on failure/exception for free, with no
+    per-site logging code needed.
+    """
     call = ExternalCall()
     start = time.perf_counter()
     try:
@@ -237,8 +246,16 @@ def track_external(service: str, endpoint: str) -> Iterator[ExternalCall]:
             call.outcome = "exception"
         raise
     finally:
-        EXTERNAL_DURATION.labels(service, endpoint).observe(time.perf_counter() - start)
-        EXTERNAL_REQUESTS.labels(service, endpoint, call.outcome or "success").inc()
+        duration = time.perf_counter() - start
+        EXTERNAL_DURATION.labels(service, endpoint).observe(duration)
+        outcome = call.outcome or "success"
+        EXTERNAL_REQUESTS.labels(service, endpoint, outcome).inc()
+        if outcome == "success":
+            _log.info("external call succeeded service=%s endpoint=%s duration=%.3fs",
+                       service, endpoint, duration)
+        else:
+            _log.warning("external call failed service=%s endpoint=%s outcome=%s duration=%.3fs",
+                          service, endpoint, outcome, duration)
 
 
 def outcome_for_status(status_code: int) -> str:

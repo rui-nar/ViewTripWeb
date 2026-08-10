@@ -1,5 +1,6 @@
 """Logging utilities for ViewTrip."""
 
+import contextvars
 import logging
 import logging.handlers
 from pathlib import Path
@@ -82,6 +83,36 @@ _APP_HANDLER_MARK = "_viewtrip_app_handler"
 # still renders correctly.
 _UVICORN_LOGGER_NAMES = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
+# Request/user correlation (issue #205). Populated by api.middleware's
+# access-log middleware for the lifetime of one request; every other caller —
+# APScheduler jobs, the "ViewTrip API starting..." import-time line, a worker
+# process — never sets these, so the explicit "-" default is what actually
+# shows up for them. ContextVar.get() with no default raises LookupError, and
+# a logging.Filter running on every record can't be allowed to raise.
+request_id_var: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "request_id", default="-"
+)
+user_id_var: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "user_id", default="-"
+)
+
+
+class _RequestContextFilter(logging.Filter):
+    """Stamps every LogRecord with the current request_id/user_id.
+
+    Attached at the handler level (both the shared app handler and each
+    restyled uvicorn handler below) so it covers every path a record can take
+    to the console, not just ``api.*``/``src.*``.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get()
+        record.user_id = user_id_var.get()
+        return True
+
+
+_context_filter = _RequestContextFilter()
+
 
 def configure_logging(level: int = logging.INFO) -> None:
     """Attach a millisecond-timestamped console handler across every logger
@@ -110,11 +141,13 @@ def configure_logging(level: int = logging.INFO) -> None:
     only if one isn't already there.
     """
     formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s - %(name)s - %(levelname)s - "
+        "request_id=%(request_id)s user_id=%(user_id)s - %(message)s"
     )
     handler = logging.StreamHandler()
     handler.setLevel(level)
     handler.setFormatter(formatter)
+    handler.addFilter(_context_filter)
     setattr(handler, _APP_HANDLER_MARK, True)
 
     for name in _APP_LOGGER_NAMES:
@@ -129,3 +162,5 @@ def configure_logging(level: int = logging.INFO) -> None:
     for name in _UVICORN_LOGGER_NAMES:
         for h in logging.getLogger(name).handlers:
             h.setFormatter(formatter)
+            if _context_filter not in h.filters:
+                h.addFilter(_context_filter)

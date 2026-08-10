@@ -342,6 +342,9 @@ def _paste_cover(canvas: Image.Image, path: Path, box: Tuple[int, int, int, int]
         with Image.open(path) as src:
             photo = src.convert("RGB")
     except Exception:
+        _log.warning(
+            "Could not open cover photo %s; leaving card slot blank", path, exc_info=True,
+        )
         return
 
     src_w, src_h = photo.size

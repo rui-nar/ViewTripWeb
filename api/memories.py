@@ -504,12 +504,16 @@ def _append_photo_to_memory(memory_id: int, uuid_str: str) -> None:
         bust_project_payloads(cache_ref)
 
 
-def _download_photo_from_url(memory_id: int, url: str, user_id: str) -> None:
+def _download_photo_from_url(memory_id: int, url: str, user_id: str, project_id: Optional[int] = None) -> None:
     import requests as _req
     try:
         resp = _req.get(url, timeout=30)
         resp.raise_for_status()
     except Exception:
+        _log.exception(
+            "Photo download failed for memory: memory_id=%s project_id=%s user_id=%s url=%s",
+            memory_id, project_id, user_id, url,
+        )
         return
     # Same quota rule as a direct upload, but this runs in a background task —
     # there is no request left to answer 402 on, so it just declines to store.
@@ -564,7 +568,8 @@ async def queue_photo_from_url(
     with get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         owner_dir = _owner_dir_id(sess, mem_row)
-    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, owner_dir)
+        project_id = mem_row.project_id
+    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, owner_dir, project_id)
     return {"queued": True}
 
 

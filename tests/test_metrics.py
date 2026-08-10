@@ -1,5 +1,7 @@
 """Unit tests for the metric catalogue helpers (issue #125)."""
 
+import logging
+
 import pytest
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -95,6 +97,33 @@ class TestTrackExternal:
                 raise RuntimeError("401")
         assert metric("viewtrip_external_requests_total",
                       service="demo", endpoint="/auth", outcome="auth_error") - before == 1
+
+
+class TestTrackExternalLogging:
+    """track_external is the single choke point for external-call logging
+    (issue #205) — every caller gets an INFO/WARNING line for free."""
+
+    def test_success_logs_at_info(self, caplog):
+        with caplog.at_level(logging.INFO, logger="src.utils.metrics"):
+            with track_external("demo", "/ping"):
+                pass
+        info_lines = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("demo" in r.message and "/ping" in r.message for r in info_lines)
+
+    def test_failure_logs_at_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="src.utils.metrics"):
+            with pytest.raises(ValueError):
+                with track_external("demo", "/boom"):
+                    raise ValueError("upstream exploded")
+        assert "demo" in caplog.text and "/boom" in caplog.text
+
+    def test_caller_set_outcome_logs_at_warning(self, caplog):
+        """A caller-classified failure (e.g. auth_error) still logs as a
+        failure, not a success, even though no exception was raised."""
+        with caplog.at_level(logging.WARNING, logger="src.utils.metrics"):
+            with track_external("demo", "/auth") as call:
+                call.outcome = "auth_error"
+        assert "auth_error" in caplog.text and "/auth" in caplog.text
 
 
 class TestRecordJobEvent:
