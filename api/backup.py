@@ -4,8 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from api.deps import get_current_user
 from models.user import UserInfo
 from src.backup.backup_service import list_backups, restore_db
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/backup", tags=["backup"])
+
+_log = get_logger(__name__)
 
 
 @router.get("/", summary="List database backups")
@@ -20,7 +23,7 @@ async def get_backups(_user: UserInfo = Depends(get_current_user)) -> list[dict]
 
 @router.post("/{date}/restore", summary="Restore a database backup")
 async def restore_backup(
-    date: str, _user: UserInfo = Depends(get_current_user)
+    date: str, current_user: UserInfo = Depends(get_current_user)
 ) -> dict:
     """Restore the database to the backup taken on *date* (YYYY-MM-DD).
 
@@ -28,10 +31,15 @@ async def restore_backup(
     connection pool so new requests use the restored data. Returns 404 if no
     backup exists for that date.
     """
+    triggered_by = current_user["sub"]
+    _log.info("Backup restore requested: date=%s triggered_by=%s", date, triggered_by)
     try:
         restore_db(date)
     except FileNotFoundError:
+        _log.warning("Backup restore failed: date=%s triggered_by=%s reason=not_found", date, triggered_by)
         raise HTTPException(status_code=404, detail=f"No backup found for {date}")
     except Exception as e:
+        _log.exception("Backup restore failed: date=%s triggered_by=%s", date, triggered_by)
         raise HTTPException(status_code=500, detail=str(e))
+    _log.info("Backup restore succeeded: date=%s triggered_by=%s", date, triggered_by)
     return {"status": "restored", "date": date}
