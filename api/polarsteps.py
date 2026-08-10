@@ -22,8 +22,11 @@ from models.project_db import DBMemory
 from models.user import PolarstepsToken
 from src.api.polarsteps_client import PolarstepsClient, format_step, format_trip
 from src.project.memory_match import step_key
+from src.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/polarsteps", tags=["polarsteps"])
+
+_log = get_logger(__name__)
 
 # Single-sourced so the client can reliably distinguish a Polarsteps cookie
 # expiry from an app-JWT expiry (which uses "Token expired"). The substring
@@ -125,6 +128,7 @@ def polarsteps_connect(
             detail="Invalid Polarsteps token — please check and try again",
         )
     except Exception as exc:
+        _log.exception("polarsteps connect failed user_id=%s", user_info_id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not reach Polarsteps: {exc}",
@@ -187,6 +191,7 @@ def polarsteps_trips(
     except PermissionError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
+        _log.exception("polarsteps trips fetch failed user_id=%s", user_info_id)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
     _persist_rotated_token(user_info_id, client)
     return [format_trip(t) for t in raw_trips]
@@ -214,6 +219,7 @@ def polarsteps_trip_steps(
     except PermissionError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=POLARSTEPS_TOKEN_EXPIRED_DETAIL)
     except Exception as exc:
+        _log.exception("polarsteps trip steps fetch failed user_id=%s trip_id=%s", user_info_id, trip_id)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
     _persist_rotated_token(user_info_id, client)
 

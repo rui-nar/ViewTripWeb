@@ -1,6 +1,8 @@
 """Tests for viewing a person's Polarsteps trip (issue #40 follow-up)."""
 from __future__ import annotations
 
+import logging
+
 import pytest
 import requests
 from fastapi import FastAPI
@@ -130,3 +132,62 @@ def test_handle_parsing():
     assert _parse_ps_username("polarsteps.com/alice/1234-trip") == "alice"
     assert _parse_ps_username("  ") is None
     assert _parse_ps_username(None) is None
+
+
+# ── Logging (issue #205, Unit B) ─────────────────────────────────────────────
+# `_ps_not_visible_or_502` used to build its HTTPException with no server-side
+# trace at all. These assert it now logs before raising, for both branches.
+
+_LOGGER = "api.people"
+
+
+def test_private_profile_logs_warning(env, caplog):
+    client, monkeypatch, with_id, _ = env
+    with Session(db_module.engine) as sess:
+        p = sess.get(DBPerson, with_id)
+        p.polarsteps = "private"
+        sess.add(p); sess.commit()
+    monkeypatch.setattr(people_module, "_require_client", lambda uid: _FakeClient())
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        r = client.get(f"/api/people/{with_id}/polarsteps/trips")
+
+    assert r.status_code == 404
+    assert "polarsteps profile not visible" in caplog.text
+    assert f"person_id={with_id}" in caplog.text
+
+
+def test_trips_fetch_failure_logs_and_502(env, caplog):
+    client, monkeypatch, with_id, _ = env
+
+    class _BrokenClient:
+        def get_user_by_username(self, username):
+            raise RuntimeError("upstream broke")
+
+    monkeypatch.setattr(people_module, "_require_client", lambda uid: _BrokenClient())
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        r = client.get(f"/api/people/{with_id}/polarsteps/trips")
+
+    assert r.status_code == 502
+    assert "upstream broke" in r.json()["detail"]
+    assert "polarsteps fetch failed" in caplog.text
+    assert f"person_id={with_id}" in caplog.text
+
+
+def test_trip_steps_fetch_failure_logs_and_502(env, caplog):
+    client, monkeypatch, with_id, _ = env
+
+    class _BrokenClient:
+        def get_trip_steps(self, trip_id):
+            raise RuntimeError("upstream broke")
+
+    monkeypatch.setattr(people_module, "_require_client", lambda uid: _BrokenClient())
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        r = client.get(f"/api/people/{with_id}/polarsteps/trips/5/steps")
+
+    assert r.status_code == 502
+    assert "polarsteps fetch failed" in caplog.text
+    assert f"person_id={with_id}" in caplog.text
+    assert "trip_id=5" in caplog.text
