@@ -19,6 +19,9 @@ from sqlmodel import select
 
 from models.db import get_session
 from models.user import UserInfo
+from src.utils.logging import get_logger
+
+_log = get_logger(__name__)
 
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRY_HOURS = 24 * 7  # 7 days
@@ -82,10 +85,18 @@ def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, jwt_secret(), algorithms=[_JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
+        # Not logged: every issued token expires eventually, so on a running app
+        # with several concurrent users this is routine and high-volume, not a
+        # signal worth a line per occurrence (open decision #3,
+        # docs/LOGGING_OBSERVABILITY_PLAN.md Section 5). InvalidTokenError below
+        # (bad signature / malformed token) is the one that's actually suspicious.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
         )
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as exc:
+        # Bad signature or malformed token — could be a forged/tampered token or
+        # a client bug, unlike plain expiry above. Never log the token itself.
+        _log.warning("invalid JWT rejected: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
         )
@@ -130,7 +141,15 @@ def require_admin(
     """
     try:
         user_info_id = int(current_user["sub"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as exc:
+        # A well-formed, validly-signed token with a malformed/missing 'sub' is
+        # more suspicious than plain expiry (see decode_token) — could be a
+        # forged/tampered token or a client bug. Log the claim name and error,
+        # never the raw token.
+        _log.warning(
+            "malformed 'sub' claim in token payload (%s): %r",
+            type(exc).__name__, current_user.get("sub"),
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
         )
