@@ -1,0 +1,65 @@
+# adnanh/webhook config — auto-deploys val.traxjourney.com the moment
+# docker-build.yml finishes publishing a new :validation image (issue #205).
+# See ../../docs/DEPLOYMENT_VPS.md's "Auto-deploy validation" section for the
+# full setup (Caddy routing, GitHub-side webhook config, systemd unit).
+#
+#   cp hooks.yaml.example hooks.yaml
+#   # edit hooks.yaml: replace REPLACE_WITH_YOUR_WEBHOOK_SECRET with a real
+#   # secret (same value goes into GitHub's webhook "Secret" field) —
+#   # generate one with: openssl rand -hex 32
+#
+# hooks.yaml is gitignored (it holds the secret inline — adnanh/webhook has
+# no env-var interpolation in its config), same pattern as
+# docker-compose.yml / config/config.json elsewhere in this repo.
+#
+# NOT verified against a live `webhook` binary from the session that wrote
+# this — same caveat as the Alloy/Loki configs: a documented starting point
+# to test against your actual install, not verified software.
+#
+# Deliberately scoped to validation only, not prod — auto-deploying prod on
+# every release would remove `deploy.ps1 -Target Prod`'s existing manual
+# gate, which is a bigger safety decision than "update val automatically"
+# and not something to fold in silently.
+
+- id: deploy-validation
+  execute-command: "/opt/viewtrip-val/webhook/deploy-validation.sh"
+  command-working-directory: "/opt/viewtrip-val"
+  response-message: "Deploying validation..."
+  trigger-rule:
+    and:
+      - match:
+          type: payload-hmac-sha256
+          secret: "REPLACE_WITH_YOUR_WEBHOOK_SECRET"
+          parameter:
+            source: header
+            name: X-Hub-Signature-256
+      - match:
+          type: value
+          value: "workflow_run"
+          parameter:
+            source: header
+            name: X-GitHub-Event
+      - match:
+          type: value
+          value: "completed"
+          parameter:
+            source: payload
+            name: action
+      - match:
+          type: value
+          value: "success"
+          parameter:
+            source: payload
+            name: workflow_run.conclusion
+      - match:
+          type: value
+          value: "validation"
+          parameter:
+            source: payload
+            name: workflow_run.head_branch
+      - match:
+          type: value
+          value: "Build and publish Docker image"
+          parameter:
+            source: payload
+            name: workflow_run.name

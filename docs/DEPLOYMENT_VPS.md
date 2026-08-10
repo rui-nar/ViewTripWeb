@@ -423,6 +423,110 @@ this 40GB host). This stays even with Loki live: if the NAS or the tunnel
 is down during an incident, `docker compose logs` here must still answer
 "what just happened" on its own.
 
+## 8. Auto-deploy validation on new image (issue #205)
+
+`deploy.ps1` needs a human at a Windows dev machine to redeploy validation.
+`vps/webhook/` closes that loop: `docker-build.yml` finishing successfully
+off the `validation` tag triggers a `docker compose pull && up -d` on
+`/opt/viewtrip-val` automatically, with no runner registered in GitHub and
+no SSH key stored in GitHub's secrets — the trust boundary stays entirely
+on this VPS. Deliberately scoped to **validation only**: auto-deploying
+prod on every release would remove `deploy.ps1 -Target Prod`'s existing
+manual gate, which is a bigger safety call than "keep val fresh" and not
+something to fold in as a side effect of this.
+
+**Not verified against a live `webhook` binary from the session that wrote
+this** — `vps/webhook/` is a documented starting point, same caveat as the
+Alloy/Loki configs above.
+
+### Install `webhook`
+
+```bash
+sudo apt install webhook   # Debian's own repo; check `webhook -version` after
+```
+
+If it's missing or too old there, grab a static binary from
+[adnanh/webhook's releases](https://github.com/adnanh/webhook/releases)
+instead and drop it at `/usr/bin/webhook`.
+
+### Configure the hook
+
+```bash
+mkdir -p /opt/viewtrip-val/webhook
+cp vps/webhook/*.sh vps/webhook/hooks.yaml.example /opt/viewtrip-val/webhook/
+cd /opt/viewtrip-val/webhook
+mv hooks.yaml.example hooks.yaml
+openssl rand -hex 32   # generate a secret, paste it into hooks.yaml AND
+                        # into GitHub's webhook config below — same value
+```
+
+`hooks.yaml` is gitignored (the secret lives inline — `webhook` has no
+env-var interpolation in its config), same pattern as `docker-compose.yml`
+and `config/config.json` elsewhere in this repo.
+
+### systemd unit
+
+```bash
+sudo cp /opt/viewtrip-val/webhook/webhook.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now webhook
+sudo systemctl status webhook   # confirm it's listening on 127.0.0.1:9999
+```
+
+### Caddy routing
+
+Loopback-bound (`127.0.0.1:9999`), same discipline as everything else in
+§1 — add a `handle_path` block to the existing `traxjourney.com` site
+(order matters: this must come before the catch-all `reverse_proxy
+127.0.0.1:8000`, same as the existing `/metrics` block):
+
+```
+traxjourney.com {
+    handle /metrics { respond 403 }
+    handle_path /gh-webhook/* {
+        reverse_proxy 127.0.0.1:9999
+    }
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+`handle_path` (not `handle`) strips the `/gh-webhook` prefix before
+forwarding — `webhook`'s own server serves each hook at `/hooks/<id>`
+relative to its own root (its default `-urlprefix`), so the public URL
+ends up `https://traxjourney.com/gh-webhook/hooks/deploy-validation`.
+`caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy`
+after editing, per §2.
+
+### GitHub-side webhook
+
+Repo → Settings → Webhooks → Add webhook:
+
+| Field | Value |
+|---|---|
+| Payload URL | `https://traxjourney.com/gh-webhook/hooks/deploy-validation` |
+| Content type | `application/json` |
+| Secret | same value as `hooks.yaml`'s `secret` |
+| Events | "Let me select individual events" → **Workflow runs** only |
+| Active | checked |
+
+No changes needed to `docker-build.yml` itself — repo webhooks subscribe to
+workflow-run completions independently of the workflow's own
+`permissions:` block.
+
+### Verify
+
+Force-push the `validation` tag (see §6's "other way to cut `:validation`")
+and watch:
+
+```bash
+tail -f /opt/viewtrip-val/deploy.log
+```
+
+`deploy-validation.sh` logs each attempt (triggered/succeeded/failed) with
+a UTC timestamp, and is `flock`-guarded so a retried GitHub delivery for
+the same build can't run a second `pull`/`up -d` concurrently against the
+same compose project.
+
 ## Open items
 
 - [ ] Off-site backups independent of OVH (the VPS's datacenter, Strasbourg,
