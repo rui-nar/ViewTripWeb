@@ -91,8 +91,12 @@ def _compute_segment_geometry(
                     start_lat=seg.start.lat, start_lon=seg.start.lon,
                     end_lat=seg.end.lat,     end_lon=seg.end.lon,
                 )
-            except HafasError:
-                pass  # fall back to two-point geometry
+            except HafasError as exc:
+                _log.warning(
+                    "seg=%s HAFAS lookup failed (provider=%s train=%r): %s — "
+                    "degrading to straight-line geometry",
+                    seg.id, params.get("hafas_provider"), params.get("train_number"), exc)
+                # fall back to two-point geometry
         rail = get_rail_geometry(stops)
         return rail.polyline, len(stops), rail.degraded, rail.strategy
 

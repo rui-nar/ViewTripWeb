@@ -17,6 +17,11 @@ from typing import Optional
 
 import requests
 
+from src.utils.logging import get_logger
+from src.utils.metrics import track_external
+
+_log = get_logger(__name__)
+
 # transport.rest mirrors for supported providers
 _ENDPOINTS: dict[str, str] = {
     "db":  "https://v6.db.transport.rest",
@@ -64,6 +69,8 @@ def get_stop_sequence(
 
     base = _ENDPOINTS.get(p)
     if not base:
+        _log.warning("HAFAS lookup failed: unsupported provider %r (train=%r)",
+                      provider, train_number)
         raise HafasError(f"Unsupported HAFAS provider: {provider!r}")
 
     train_name = re.sub(r"\s+", " ", train_number.strip())
@@ -72,10 +79,17 @@ def get_stop_sequence(
         start_stop = _nearest_stop(base, start_lat, start_lon)
         end_stop   = _nearest_stop(base, end_lat, end_lon)
         if not start_stop or not end_stop:
+            _log.warning(
+                "HAFAS lookup failed: could not locate nearby stops "
+                "(provider=%s train=%r start=%s,%s end=%s,%s)",
+                p, train_name, start_lat, start_lon, end_lat, end_lon)
             raise HafasError("Could not locate nearby stops")
 
         trip_id = _find_trip_id(base, start_stop["id"], end_stop["id"], date, train_name)
         if not trip_id:
+            _log.warning(
+                "HAFAS lookup failed: train %r not found in journeys %s → %s (provider=%s)",
+                train_name, start_stop["name"], end_stop["name"], p)
             raise HafasError(
                 f"Train {train_name!r} not found in journeys "
                 f"{start_stop['name']} → {end_stop['name']}"
@@ -83,6 +97,9 @@ def get_stop_sequence(
 
         stops = _trip_stops(base, trip_id)
         if len(stops) < 2:
+            _log.warning(
+                "HAFAS lookup failed: trip %r returned fewer than 2 stops (provider=%s)",
+                train_name, p)
             raise HafasError("Trip returned fewer than 2 stops")
 
         return _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
@@ -90,6 +107,9 @@ def get_stop_sequence(
     except HafasError:
         raise
     except Exception as exc:
+        _log.exception(
+            "HAFAS request failed unexpectedly (provider=%s train=%r start=%s,%s end=%s,%s)",
+            p, train_name, start_lat, start_lon, end_lat, end_lon)
         raise HafasError(f"HAFAS request failed: {exc}") from exc
 
 
@@ -101,11 +121,12 @@ def _vr_stations() -> list[dict]:
     """Fetch and cache VR station metadata from rata.digitraffic.fi."""
     global _vr_stations_cache
     if _vr_stations_cache is None:
-        resp = requests.get(
-            f"{_VR_BASE}/metadata/stations",
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
+        with track_external("hafas", "vr/metadata/stations"):
+            resp = requests.get(
+                f"{_VR_BASE}/metadata/stations",
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
         _vr_stations_cache = [
             s for s in resp.json()
             if s.get("latitude") and s.get("longitude")
@@ -139,16 +160,19 @@ def _vr_get_stop_sequence(
     number = re.sub(r"^[A-Za-z\s]+", "", train_number.strip()) or train_number.strip()
 
     try:
-        resp = requests.get(
-            f"{_VR_BASE}/trains/{date}/{number}",
-            timeout=_TIMEOUT,
-        )
-        resp.raise_for_status()
-        trains = resp.json()
+        with track_external("hafas", "vr/trains"):
+            resp = requests.get(
+                f"{_VR_BASE}/trains/{date}/{number}",
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            trains = resp.json()
     except Exception as exc:
+        _log.exception("VR train lookup failed (train=%r date=%s)", train_number, date)
         raise HafasError(f"VR train lookup failed: {exc}") from exc
 
     if not trains:
+        _log.warning("VR train %r not found for date %s", train_number, date)
         raise HafasError(f"VR train {train_number!r} not found for date {date}")
 
     # Build deduplicated stop list from the first matching train.
@@ -169,6 +193,8 @@ def _vr_get_stop_sequence(
             })
 
     if len(stops) < 2:
+        _log.warning("VR schedule for train %r (date=%s) returned fewer than 2 stops",
+                      train_number, date)
         raise HafasError("VR schedule returned fewer than 2 stops")
 
     return _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
@@ -191,10 +217,17 @@ def _rp_get_stop_sequence(
         start_stop = _rp_nearest_stop(start_lat, start_lon)
         end_stop   = _rp_nearest_stop(end_lat, end_lon)
         if not start_stop or not end_stop:
+            _log.warning(
+                "Rejseplanen lookup failed: could not locate nearby stops "
+                "(train=%r start=%s,%s end=%s,%s)",
+                train_name, start_lat, start_lon, end_lat, end_lon)
             raise HafasError("Could not locate nearby stops via Rejseplanen")
 
         ref = _rp_find_trip_ref(start_stop["id"], end_stop["id"], date, train_name)
         if not ref:
+            _log.warning(
+                "Rejseplanen lookup failed: train %r not found %s → %s",
+                train_name, start_stop["name"], end_stop["name"])
             raise HafasError(
                 f"Train {train_name!r} not found "
                 f"{start_stop['name']} → {end_stop['name']} via Rejseplanen"
@@ -202,27 +235,33 @@ def _rp_get_stop_sequence(
 
         stops = _rp_trip_stops(ref)
         if len(stops) < 2:
+            _log.warning(
+                "Rejseplanen trip %r returned fewer than 2 stops", train_name)
             raise HafasError("Rejseplanen trip returned fewer than 2 stops")
 
         return _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
     except HafasError:
         raise
     except Exception as exc:
+        _log.exception(
+            "Rejseplanen request failed unexpectedly (train=%r start=%s,%s end=%s,%s)",
+            train_name, start_lat, start_lon, end_lat, end_lon)
         raise HafasError(f"Rejseplanen request failed: {exc}") from exc
 
 
 def _rp_nearest_stop(lat: float, lon: float) -> Optional[dict]:
-    resp = requests.get(
-        f"{_REJSEPLANEN_BASE}/location.nearbystops",
-        params={
-            "coordX": int(lon * 1_000_000),
-            "coordY": int(lat * 1_000_000),
-            "maxNo": 1,
-            "format": "json",
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
+    with track_external("hafas", "rejseplanen/location.nearbystops"):
+        resp = requests.get(
+            f"{_REJSEPLANEN_BASE}/location.nearbystops",
+            params={
+                "coordX": int(lon * 1_000_000),
+                "coordY": int(lat * 1_000_000),
+                "maxNo": 1,
+                "format": "json",
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
     data = resp.json()
     locs = (data.get("LocationList") or {}).get("StopLocation") or []
     if isinstance(locs, dict):
@@ -242,18 +281,19 @@ def _rp_find_trip_ref(
     from_id: str, to_id: str, date: str, train_name: str
 ) -> Optional[str]:
     rp_date = f"{date[8:10]}.{date[5:7]}.{date[0:4]}"
-    resp = requests.get(
-        f"{_REJSEPLANEN_BASE}/trip",
-        params={
-            "originId": from_id,
-            "destId": to_id,
-            "date": rp_date,
-            "time": "06:00",
-            "format": "json",
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
+    with track_external("hafas", "rejseplanen/trip"):
+        resp = requests.get(
+            f"{_REJSEPLANEN_BASE}/trip",
+            params={
+                "originId": from_id,
+                "destId": to_id,
+                "date": rp_date,
+                "time": "06:00",
+                "format": "json",
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
     data = resp.json()
     trips = (data.get("TripList") or {}).get("Trip") or []
     if isinstance(trips, dict):
@@ -275,8 +315,9 @@ def _rp_trip_stops(ref: str) -> list[dict]:
     if "format=json" not in url:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}format=json"
-    resp = requests.get(url, timeout=_TIMEOUT)
-    resp.raise_for_status()
+    with track_external("hafas", "rejseplanen/journeyDetail"):
+        resp = requests.get(url, timeout=_TIMEOUT)
+        resp.raise_for_status()
     raw = (resp.json().get("JourneyDetail") or {}).get("Stop") or []
     if isinstance(raw, dict):
         raw = [raw]
@@ -300,12 +341,13 @@ def _rp_trip_stops(ref: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _nearest_stop(base: str, lat: float, lon: float) -> Optional[dict]:
-    resp = requests.get(
-        f"{base}/stops/nearby",
-        params={"latitude": lat, "longitude": lon, "results": 1, "distance": 3000},
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
+    with track_external("hafas", "stops/nearby"):
+        resp = requests.get(
+            f"{base}/stops/nearby",
+            params={"latitude": lat, "longitude": lon, "results": 1, "distance": 3000},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
     stops = resp.json()
     return stops[0] if stops else None
 
@@ -313,19 +355,20 @@ def _nearest_stop(base: str, lat: float, lon: float) -> Optional[dict]:
 def _find_trip_id(
     base: str, from_id: str, to_id: str, date: str, train_name: str
 ) -> Optional[str]:
-    resp = requests.get(
-        f"{base}/journeys",
-        params={
-            "from": from_id,
-            "to": to_id,
-            "departure": f"{date}T06:00:00+01:00",
-            "results": 15,
-            "stopovers": "false",
-            "lineName": train_name,
-        },
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
+    with track_external("hafas", "journeys"):
+        resp = requests.get(
+            f"{base}/journeys",
+            params={
+                "from": from_id,
+                "to": to_id,
+                "departure": f"{date}T06:00:00+01:00",
+                "results": 15,
+                "stopovers": "false",
+                "lineName": train_name,
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
     for journey in (resp.json().get("journeys") or []):
         for leg in (journey.get("legs") or []):
             line = (leg.get("line") or {})
@@ -338,12 +381,13 @@ def _find_trip_id(
 
 def _trip_stops(base: str, trip_id: str) -> list[dict]:
     encoded = requests.utils.quote(trip_id, safe="")
-    resp = requests.get(
-        f"{base}/trips/{encoded}",
-        params={"stopovers": "true"},
-        timeout=_TIMEOUT,
-    )
-    resp.raise_for_status()
+    with track_external("hafas", "trips"):
+        resp = requests.get(
+            f"{base}/trips/{encoded}",
+            params={"stopovers": "true"},
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
     stops = []
     for so in (resp.json().get("stopovers") or []):
         stop = so.get("stop") or {}
