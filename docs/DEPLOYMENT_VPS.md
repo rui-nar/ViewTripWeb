@@ -246,10 +246,8 @@ along. Both stacks are on one host, so a bind mount reaches them:
 
 ```yaml
   # One-shot: seed val's DB from prod's newest nightly backup.
-  # Behind a profile so a routine `docker compose up -d` can never clobber val.
-  #   docker compose down
-  #   docker compose --profile seed run --rm db-seed
-  #   docker compose up -d
+  # Behind a profile so a routine `docker compose up -d` can never clobber
+  # val — see "Run it" below for the commands.
   db-seed:
     image: alpine:3.20
     profiles: ["seed"]
@@ -267,6 +265,20 @@ along. Both stacks are on one host, so a bind mount reaches them:
         cp "$$latest" /db/viewtripweb.db
         echo done
 ```
+
+**Run it** (from `/opt/viewtrip-val`, in this order — val must be stopped
+before the copy, per the first gotcha below):
+
+```bash
+docker compose down
+docker compose --profile seed run --rm db-seed
+docker compose up -d
+```
+
+The `--profile seed` flag is required on that middle command — `db-seed` is
+in the `seed` profile specifically so it never runs as a side effect of a
+plain `docker compose up -d` (see the third gotcha below). `--rm` cleans up
+the one-shot container after it exits; it isn't a long-running service.
 
 Three things about it are easy to get wrong:
 
