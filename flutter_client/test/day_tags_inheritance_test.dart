@@ -1,8 +1,9 @@
 // Unit tests for effectiveDayTags — the "new days inherit the previous day's
-// tags" rule (issue #18). Model chosen: live fallback. A day with no tags of
-// its own shows the tags of the nearest STRICTLY EARLIER day that has tags;
-// empty/gap days in between are skipped; nothing is ever persisted by the
-// inheritance itself.
+// tags" rule (issue #18). Model chosen: live fallback. A day with no tags key
+// at all shows the tags of the nearest STRICTLY EARLIER day that has tags;
+// gap days with no key are skipped; nothing is ever persisted by the
+// inheritance itself. A day with an explicit empty tags list owns "no tags"
+// outright and never inherits (issue #203).
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/projects/project_filter_mixin.dart';
@@ -26,15 +27,23 @@ void main() {
       expect(effectiveDayTags(m, '2026-05-11'), ['norway']);
     });
 
-    test('inheritance skips empty gap days (nearest EARLIER tagged day wins)',
-        () {
+    test('a day with no tags key at all skips over an explicitly-empty gap '
+        'day and inherits the nearest earlier tagged day', () {
       final m = {
         '2026-05-10': {'tags': ['norway']},
-        '2026-05-11': {'tags': <String>[]}, // materialised but untagged
-        '2026-05-12': <String, dynamic>{}, // present, no tags key
+        '2026-05-11': {'tags': <String>[]}, // explicitly cleared — owns "no tags"
+        '2026-05-12': <String, dynamic>{}, // present, no tags key at all
       };
       expect(effectiveDayTags(m, '2026-05-12'), ['norway']);
-      expect(effectiveDayTags(m, '2026-05-11'), ['norway']);
+    });
+
+    test('an explicit empty tags list is owned outright and does not '
+        'inherit (issue #203)', () {
+      final m = {
+        '2026-05-10': {'tags': ['norway']},
+        '2026-05-11': {'tags': <String>[]}, // user cleared every tag
+      };
+      expect(effectiveDayTags(m, '2026-05-11'), isEmpty);
     });
 
     test('own tags win over an inheritable earlier day', () {

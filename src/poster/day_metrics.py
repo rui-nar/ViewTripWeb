@@ -72,7 +72,7 @@ def compute_day_metrics(project: Project, date: str) -> Dict[str, Any]:
         if act_date is None or act_date > date:
             continue
         meta = project.day_meta.get(act_date)
-        for tag in (meta.tags if meta else []):
+        for tag in ((meta.tags or []) if meta else []):
             tag_pie[tag] = tag_pie.get(tag, 0.0) + (a.distance or 0.0)
 
     return {

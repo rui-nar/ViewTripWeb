@@ -128,7 +128,7 @@ class ProjectIO:
                         "difficulty": dm.difficulty, "sleeping": dm.sleeping,
                         "weather": dm.weather, "journal": dm.journal,
                     }.items() if v is not None},
-                    **({"tags": dm.tags} if dm.tags else {}),
+                    **({"tags": dm.tags} if dm.tags is not None else {}),
                 }
                 for dk, dm in project.day_meta.items()
             },
@@ -182,7 +182,7 @@ class ProjectIO:
                         "difficulty": dm.difficulty, "sleeping": dm.sleeping,
                         "weather": dm.weather, "journal": dm.journal,
                     }.items() if v is not None},
-                    **({"tags": dm.tags} if dm.tags else {}),
+                    **({"tags": dm.tags} if dm.tags is not None else {}),
                     **({"counters": day_counters_to_json(dm.counters)} if dm.counters else {}),
                 }
                 for dk, dm in project.day_meta.items()
@@ -230,7 +230,7 @@ class ProjectIO:
                 sleeping=v.get("sleeping"),
                 weather=v.get("weather"),
                 journal=v.get("journal"),
-                tags=v.get("tags") or [],
+                tags=v.get("tags"),
             )
             for dk, v in raw_dm.items()
         }

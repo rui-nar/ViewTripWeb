@@ -57,7 +57,7 @@ from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quota
 from src.models.activity import Activity
-from src.models.project import DEFAULT_SLEEPING_GROUPS
+from src.models.project import DEFAULT_SLEEPING_GROUPS, tag_options_with_untagged
 from src.project.project_io import ProjectIO
 from src.project.project_repo import _compute_stats
 from src.utils.logging import get_logger
@@ -243,11 +243,9 @@ def get_project_stats(
 
         # Always derive tag_options live from day_meta_json so they are never
         # stale (cached stats pre-date the tag-save fix and stored [] here).
-        stats["tag_options"] = sorted({
-            t
-            for dm in json.loads(row.day_meta_json or "{}").values()
-            for t in (dm.get("tags") or [])
-        })
+        stats["tag_options"] = tag_options_with_untagged(
+            dm.get("tags") for dm in json.loads(row.day_meta_json or "{}").values()
+        )
     return stats
 
 

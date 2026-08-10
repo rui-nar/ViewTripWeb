@@ -181,7 +181,20 @@ void main() {
           availableTags: ['EV6'], initialMeta: {'tags': ['EV6']});
       await _tapVisible(tester, find.text('EV6')); // toggle off
       await _tapSave(tester);
-      expect(h.saved!.containsKey('tags'), isFalse);
+      // Saved as an explicit empty list, not omitted — otherwise the day
+      // would look like it has no tag data and silently re-inherit an
+      // earlier day's tag on reload (issue #203).
+      expect(h.saved!['tags'], isEmpty);
+    });
+
+    testWidgets('clearing an inherited tag down to zero saves an explicit '
+        'empty list (issue #203)', (tester) async {
+      final h = await _pump(tester, effectiveTags: ['EV6']);
+      // 'EV6' renders twice: once in the hero, once as the pre-selected chip
+      // in the Tags section below — the chip is the tappable one.
+      await _tapVisible(tester, find.text('EV6').last);
+      await _tapSave(tester);
+      expect(h.saved!['tags'], isEmpty);
     });
 
     testWidgets('a new tag is added via the field + Add', (tester) async {
