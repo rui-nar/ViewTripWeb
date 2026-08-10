@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from scalar_fastapi import get_scalar_api_reference
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
 from src.jobs.route_jobs import sweep_orphaned_jobs
@@ -27,6 +28,7 @@ from api.journal import router as journal_router
 from api.members import router as members_router, invites_router
 from api.memories import router as memories_router
 from api.metrics import router as metrics_router
+from api.middleware import install_middleware
 from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
 from api.poster import router as poster_router
@@ -44,7 +46,7 @@ from models.project_db import _check_schema_contract
 from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
 from src.billing.usage import reconcile_all_usage
-from src.utils.logging import configure_logging, get_logger
+from src.utils.logging import configure_logging, get_logger, request_id_var
 from src.utils.metrics import (
     JOB_EVENT_MASK,
     STALE_WRITES,
@@ -151,6 +153,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# request_id/user_id correlation + one access-log line per request (issue #205).
+install_middleware(app)
+
 app.include_router(activities_router)
 app.include_router(activity_fields_router)
 app.include_router(admin_router)
@@ -182,7 +187,10 @@ app.include_router(strava_router)
 async def _stale_write_handler(_request, exc: StaleWriteError):
     """Map an optimistic-lock conflict to 409 so clients can refetch and retry."""
     STALE_WRITES.inc()  # write contention signal — spikes when writers collide
-    return JSONResponse(status_code=409, content={"detail": str(exc)})
+    return JSONResponse(
+        status_code=409,
+        content={"detail": str(exc), "request_id": request_id_var.get()},
+    )
 
 
 @app.exception_handler(QuotaExceeded)
@@ -203,6 +211,7 @@ async def _quota_handler(_request, exc: QuotaExceeded):
             "limit": exc.limit,
             "used": exc.used,
             "needed": exc.needed,
+            "request_id": request_id_var.get(),
         },
     )
 
@@ -214,7 +223,10 @@ async def _auth_error_handler(_request, exc: AuthenticationError):
     The messages carried by AuthenticationError are already user-facing and
     actionable (e.g. "re-authenticate via Add track → From Strava…").
     """
-    return JSONResponse(status_code=401, content={"detail": str(exc)})
+    return JSONResponse(
+        status_code=401,
+        content={"detail": str(exc), "request_id": request_id_var.get()},
+    )
 
 
 @app.exception_handler(APIError)
@@ -227,7 +239,58 @@ async def _upstream_api_error_handler(_request, exc: APIError):
     _log.warning("Upstream API error: %s", exc)
     return JSONResponse(
         status_code=502,
-        content={"detail": "The Strava integration is currently unavailable. Please try again later."},
+        content={
+            "detail": "The Strava integration is currently unavailable. Please try again later.",
+            "request_id": request_id_var.get(),
+        },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(_request, exc: StarletteHTTPException):
+    """Replace FastAPI's default HTTPException handler with one that logs and
+    stamps request_id — the ~200 call sites across the app that raise
+    HTTPException directly (auth failures, 404s, validation-style 4xx, ...)
+    get correlation and a log line for free instead of each needing its own.
+
+    Logged at WARNING, not ``.exception()``: this is expected control flow (a
+    route deliberately raising 401/403/404/...), not a bug — the catch-all
+    below is for the unexpected kind.
+    """
+    _log.warning(
+        "%s %s -> %d: %s", _request.method, _request.url.path, exc.status_code, exc.detail
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "request_id": request_id_var.get()},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(_request, exc: Exception):
+    """Last-resort handler for anything no typed handler above claims.
+
+    Without this, an uncaught exception fell through to FastAPI's own bare
+    500 with no server-side record beyond whatever uvicorn's crash log
+    happened to catch (issue #205). Registering a handler for the bare
+    ``Exception`` type is safe alongside the typed handlers above — FastAPI
+    dispatches by the most specific exception class, so StaleWriteError,
+    QuotaExceeded, AuthenticationError, APIError and HTTPException still hit
+    their own handlers first.
+
+    Starlette special-cases a bare-``Exception``/500 handler onto
+    ``ServerErrorMiddleware``, which sits *outside* our own access-log
+    middleware (api/middleware.py) — that middleware's own
+    ``response.headers["X-Request-Id"] = ...`` line never runs for this path,
+    so the header is set here directly instead.
+    """
+    _log.exception("Unhandled exception on %s %s", _request.method, _request.url.path)
+    request_id = request_id_var.get()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "request_id": request_id},
+        headers={"X-Request-Id": request_id},
     )
 
 

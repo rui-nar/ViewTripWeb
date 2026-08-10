@@ -9,9 +9,12 @@ import pytest
 from src.utils.logging import (
     _APP_HANDLER_MARK,
     _APP_LOGGER_NAMES,
+    _context_filter,
     configure_logging,
     get_logger,
+    request_id_var,
     setup_logging,
+    user_id_var,
 )
 
 
@@ -69,6 +72,33 @@ class TestConfigureLogging:
             configure_logging()
             assert len(uvicorn_logger.handlers) == 1
             assert "%(asctime)s" in uvicorn_logger.handlers[0].formatter._fmt
+        finally:
+            uvicorn_logger.handlers = []
+
+    def test_formatter_carries_request_id_and_user_id_fields(self):
+        """issue #205: the logfmt preamble must be parseable at query time via
+        ``| logfmt`` (request_id/user_id are never Loki labels — unbounded
+        cardinality), so both field names have to appear literally in the
+        format string, not just render correctly."""
+        configure_logging()
+        fmt = _app_handlers(logging.getLogger("api"))[0].formatter._fmt
+        assert "request_id=%(request_id)s" in fmt
+        assert "user_id=%(user_id)s" in fmt
+
+    def test_uvicorn_handler_gets_context_filter(self):
+        """The restyled uvicorn handler must also inject request_id/user_id —
+        access lines uvicorn itself emits (not our own access-log middleware)
+        need the same correlation fields or they're unparseable by the same
+        ``| logfmt`` query as everything else."""
+        uvicorn_logger = logging.getLogger("uvicorn.access")
+        stub_handler = logging.StreamHandler()
+        stub_handler.setFormatter(logging.Formatter("%(message)s"))
+        uvicorn_logger.handlers = [stub_handler]
+        try:
+            configure_logging()
+            configure_logging()  # idempotent: must not attach the filter twice
+            handler = uvicorn_logger.handlers[0]
+            assert sum(1 for f in handler.filters if f is _context_filter) == 1
         finally:
             uvicorn_logger.handlers = []
 
@@ -201,3 +231,32 @@ class TestSetupLogging:
         assert logger1.name == "logger1"
         assert logger2.name == "logger2"
         assert logger1 is not logger2
+
+
+class TestRequestContextFilter:
+    """request_id_var/user_id_var + the filter that stamps them onto records."""
+
+    def test_defaults_outside_any_request_context(self):
+        """APScheduler jobs, the import-time startup line, a worker process —
+        none of them ever call .set(), so LookupError must never surface and
+        the record must show the documented "-" placeholder."""
+        record = logging.LogRecord(
+            "test", logging.INFO, __file__, 1, "msg", None, None
+        )
+        assert _context_filter.filter(record) is True
+        assert record.request_id == "-"
+        assert record.user_id == "-"
+
+    def test_stamps_bound_context_values(self):
+        req_token = request_id_var.set("abc12345")
+        user_token = user_id_var.set("42")
+        try:
+            record = logging.LogRecord(
+                "test", logging.INFO, __file__, 1, "msg", None, None
+            )
+            _context_filter.filter(record)
+            assert record.request_id == "abc12345"
+            assert record.user_id == "42"
+        finally:
+            request_id_var.reset(req_token)
+            user_id_var.reset(user_token)
