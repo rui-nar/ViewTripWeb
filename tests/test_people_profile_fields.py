@@ -149,6 +149,51 @@ def test_places_upstream_failure_is_502(env, monkeypatch):
     assert client.get("/api/geo/places", params={"q": "lisbon"}).status_code == 502
 
 
+class _FakeResponse:
+    def __init__(self, payload, status_error=None):
+        self._payload = payload
+        self._status_error = status_error
+
+    def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
+
+    def json(self):
+        return self._payload
+
+
+def test_places_call_is_tracked_via_track_external(env, monkeypatch, metric):
+    """The Nominatim call goes through track_external (issue #205) — it must
+    get metrics coverage without the endpoint itself changing behaviour."""
+    client, _, _ = env
+    monkeypatch.setattr(
+        geo_module.requests, "get",
+        lambda *a, **k: _FakeResponse(_FAKE_NOMINATIM),
+    )
+    before = metric("viewtrip_external_requests_total",
+                     service="nominatim", endpoint="/search", outcome="success")
+    resp = client.get("/api/geo/places", params={"q": "lisbon"})
+    assert resp.status_code == 200
+    assert metric("viewtrip_external_requests_total",
+                   service="nominatim", endpoint="/search", outcome="success") - before == 1
+
+
+def test_places_call_failure_is_tracked_and_logged(env, monkeypatch, metric, caplog):
+    client, _, _ = env
+    monkeypatch.setattr(
+        geo_module.requests, "get",
+        lambda *a, **k: _FakeResponse(None, status_error=RuntimeError("nominatim down")),
+    )
+    before = metric("viewtrip_external_requests_total",
+                     service="nominatim", endpoint="/search", outcome="exception")
+    with caplog.at_level("WARNING", logger="src.utils.metrics"):
+        resp = client.get("/api/geo/places", params={"q": "lisbon"})
+    assert resp.status_code == 502
+    assert metric("viewtrip_external_requests_total",
+                   service="nominatim", endpoint="/search", outcome="exception") - before == 1
+    assert "nominatim" in caplog.text
+
+
 def test_project_io_person_round_trip():
     """The .viewtrip import/export dicts must carry the new profile fields."""
     from src.models.person import Person
