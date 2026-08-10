@@ -71,7 +71,11 @@ def test_failed_fetch_leaves_entry_unchanged_and_logs(journal_db, monkeypatch, c
         assert json.loads(row.photos_json or "[]") == []
 
     # But the failure is now visible in the logs, with enough to reproduce it.
-    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # Scoped to this module's logger — caplog.records is process-wide and can
+    # otherwise pick up an unrelated module's import-time warning depending on
+    # what else has already imported in this test run.
+    records = [r for r in caplog.records
+               if r.levelno >= logging.WARNING and r.name == "api.journal"]
     assert len(records) == 1
     record = records[0]
     msg = record.getMessage()
