@@ -355,6 +355,74 @@ checkout of the affected path, not retroactively.
 the host cannot tell which one it is running. If a local build and a tag push
 race, last writer wins. Prefer the tag route when it matters who built it.
 
+## 7. Observability: Loki/Prometheus/Grafana on the NAS (issue #205)
+
+Logs and metrics ship off this VPS to a stack colocated on the NAS —
+generous disk there, no CPU contention with production traffic here. See
+`docs/OBSERVABILITY.md` for the NAS-side compose, retention, and the
+LogQL/PromQL an operator actually runs. This section is only the VPS-side
+half: the tunnel and the shipper.
+
+### Tailscale tunnel
+
+Deliberately not a port-forward + DDNS + bearer token, the way `/metrics`
+is secured today (`docs/METRICS.md`) — the NAS has never had an inbound
+port opened for anything but SSH, and a second internet-facing ingestion
+endpoint there is a materially different risk than this VPS's already
+locked-down setup (§1). Install Tailscale on both hosts instead, so
+Loki/Prometheus never touch the public internet at all:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+Same on the NAS — DSM's Package Center or Container Manager, depending on
+DSM version. `tailscale status` on either host shows the other's Tailscale
+IP/MagicDNS name — that's what `LOKI_PUSH_URL` and
+`PROMETHEUS_REMOTE_WRITE_URL` below point at.
+
+### Alloy (VPS side)
+
+`docker-compose.yml.example`'s `alloy` service tails every container's logs
+via the Docker socket (read-only) and scrapes `viewtripweb:8000/metrics`
+over the compose-internal network — `/metrics` itself never needs to be
+reachable from outside this host for this to work. Copy the example config
+and fill in `.env`:
+
+```bash
+cp config/alloy-config.river.example config/alloy-config.river
+```
+
+```
+LOKI_PUSH_URL=http://<nas-tailscale-host>:3100/loki/api/v1/push
+PROMETHEUS_REMOTE_WRITE_URL=http://<nas-tailscale-host>:9090/api/v1/write
+```
+
+**Not verified against a live Alloy binary** — `config/alloy-config.river.example`
+is a documented starting point to adapt, the same spirit
+`docker-compose.yml.example` itself already is. Confirm log lines and the
+`viewtrip_*` metrics actually arrive in Grafana on the NAS before relying
+on it for an incident.
+
+### Dropping `/metrics`'s public exposure
+
+Once Alloy's scrape is confirmed working, `/metrics` no longer needs the
+bearer-token + Caddy-block setup in `docs/METRICS.md` — Alloy reaches it
+over the internal compose network, never the public internet. Remove the
+`handle /metrics { respond 403 }` Caddy block (§2) and unset
+`METRICS_TOKEN`, or leave the token as defence in depth and just drop the
+Caddy exposure — either is fine, but the token alone was always the weaker
+of the two.
+
+### Keep local rotation regardless
+
+Every service in `docker-compose.yml.example` now sets `max-size`/`max-file`
+on its `logging:` driver (previously unbounded — a latent disk-fill risk on
+this 40GB host). This stays even with Loki live: if the NAS or the tunnel
+is down during an incident, `docker compose logs` here must still answer
+"what just happened" on its own.
+
 ## Open items
 
 - [ ] Off-site backups independent of OVH (the VPS's datacenter, Strasbourg,

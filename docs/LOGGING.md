@@ -50,13 +50,16 @@ Prometheus). So they're parsed out of the message body at query time instead,
 via `| logfmt` in a LogQL query. Keep messages human-grep-able too — this
 isn't JSON, it's logfmt.
 
-> **Status:** the `request_id`/`user_id` contextvars, the `logging.Filter`
-> that injects them, and the final formatter string are being built
-> concurrently (issue #205, Unit 0.2, touching `src/utils/logging.py` and
-> `api/router.py`). The names above are what the plan specifies. If that work
-> has landed by the time you read this, spot-check this section against the
-> actual field names and format string in `src/utils/logging.py` — don't
-> assume this doc is still accurate on that specific detail.
+Confirmed final format, as implemented in `configure_logging()`:
+
+```
+%(asctime)s - %(name)s - %(levelname)s - request_id=%(request_id)s user_id=%(user_id)s - %(message)s
+```
+
+Note `%(levelname)s` is positional, not a `level=` key — only `request_id`
+and `user_id` are real logfmt tokens in the line today. A LogQL query
+filtering by level needs a substring match (`|= "ERROR"`), not
+`| logfmt | level=...` — see `docs/OBSERVABILITY.md`.
 
 ## Redaction
 
