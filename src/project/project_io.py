@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from src.models.activity import Activity
+from src.models.activity import Activity, parse_activities_or_log
 from src.models.encounter import Encounter
 from src.models.journal import JournalEntry
 from src.models.memory import Memory
@@ -214,12 +214,7 @@ class ProjectIO:
             activity_types=fs_raw.get("activity_types"),
         )
 
-        activities = []
-        for raw in data.get("activities", []):
-            try:
-                activities.append(Activity.from_strava_api(raw))
-            except Exception:
-                pass  # skip corrupt entries silently
+        activities = parse_activities_or_log(data.get("activities", []), "project_io_load")
 
         items = [ProjectIO._deserialise_item(i) for i in data.get("items", [])]
 
