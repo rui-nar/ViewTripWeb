@@ -160,12 +160,16 @@ def _append_photo(journal_id: int, uuid_str: str) -> None:
         bust_project_payloads(cache_ref)
 
 
-def _download_photo_from_url(journal_id: int, url: str, user_id: str) -> None:
+def _download_photo_from_url(journal_id: int, url: str, user_id: str, project_id: Optional[int] = None) -> None:
     import requests as _req
     try:
         resp = _req.get(url, timeout=30)
         resp.raise_for_status()
     except Exception:
+        _log.exception(
+            "Photo download failed for journal entry: journal_id=%s project_id=%s user_id=%s url=%s",
+            journal_id, project_id, user_id, url,
+        )
         return
     # Background task — no request left to answer 402 on, so it declines to store.
     try:
@@ -378,8 +382,9 @@ async def queue_photo_from_url(
     """Enqueue a background download of a photo from a public URL."""
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
-        _get_owned_journal(sess, journal_id, user_info_id)
-    background_tasks.add_task(_download_photo_from_url, journal_id, body.url, current_user["sub"])
+        row = _get_owned_journal(sess, journal_id, user_info_id)
+        project_id = row.project_id
+    background_tasks.add_task(_download_photo_from_url, journal_id, body.url, current_user["sub"], project_id)
     return {"queued": True}
 
 
