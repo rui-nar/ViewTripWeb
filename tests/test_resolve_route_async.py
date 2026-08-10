@@ -15,6 +15,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -25,7 +27,7 @@ from sqlmodel import Session, SQLModel, create_engine
 import models.db as db_module
 import api.segments as segments_mod
 from api.deps import get_current_user
-from api.segments import router as segments_router, _resolve_route_job
+from api.segments import router as segments_router, _compute_segment_geometry, _resolve_route_job
 from models.project_db import DBProject, DBProjectItem
 from models.user import UserInfo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
@@ -521,3 +523,67 @@ def test_the_trigger_enqueues_onto_the_resolve_queue(env, monkeypatch):
     # discarded — see test_a_superseded_job_cannot_overwrite_a_newer_verdict.
     assert seen["args"][4] == _load_segment(
         engine, user_id, "My Trip", "ferry-1").route_started_at
+
+
+# ── HAFAS-failure fallback logging (issue #205, Unit C) ──────────────────────
+#
+# _compute_segment_geometry's `except HafasError: pass` used to swallow every
+# HAFAS failure silently and fall back to two-point (great-circle-endpoint)
+# geometry with no trace anywhere. It must now log a WARNING naming the
+# segment before falling through — and the fallback behaviour itself (still
+# resolving via get_rail_geometry on the two-point stop list) must be
+# unchanged.
+
+def test_hafas_failure_logs_warning_and_falls_back_unchanged(caplog):
+    from src.services.hafas_service import HafasError
+
+    seg = _train_segment()
+    straight = [[24.9414, 60.1719], [25.7294, 66.5039]]
+
+    with patch("src.services.hafas_service.get_stop_sequence",
+               side_effect=HafasError("VR train lookup failed: boom")), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": straight, "degraded": True, "strategy": "straight"})()
+
+        with caplog.at_level(logging.WARNING, logger="api.segments"):
+            polyline, stop_count, degraded, strategy = _compute_segment_geometry(
+                seg, {"hafas_provider": "vr", "train_number": "273"})
+
+    # Fallback behaviour unchanged: two-point geometry still resolved via
+    # get_rail_geometry, called with the plain start/end stops (no HAFAS stops).
+    called_stops = mock_rail.call_args[0][0]
+    assert called_stops == [
+        {"lat": seg.start.lat, "lon": seg.start.lon},
+        {"lat": seg.end.lat, "lon": seg.end.lon},
+    ]
+    assert polyline == straight
+    assert stop_count == 2
+    assert degraded is True
+    assert strategy == "straight"
+
+    # Visibility added: a WARNING naming the segment was logged before the fallback.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a WARNING log for the HAFAS fallback"
+    assert seg.id in warnings[0].getMessage()
+    assert "straight" in warnings[0].getMessage() or "fall" in warnings[0].getMessage().lower()
+
+
+def test_hafas_success_does_not_log_warning(caplog):
+    """No degradation, no log — the WARNING is specific to the fallback path."""
+    seg = _train_segment()
+    hafas_stops = [
+        {"lat": seg.start.lat, "lon": seg.start.lon, "uic": "1"},
+        {"lat": seg.end.lat, "lon": seg.end.lon, "uic": "2"},
+    ]
+
+    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": [[1.0, 1.0]], "degraded": False, "strategy": "relation_uic"})()
+
+        with caplog.at_level(logging.WARNING, logger="api.segments"):
+            _compute_segment_geometry(
+                seg, {"hafas_provider": "vr", "train_number": "273"})
+
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]

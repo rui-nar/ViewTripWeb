@@ -217,7 +217,12 @@ out center body;
             return None
         elat, elon = _coords(nearest)
         return {"lat": elat, "lon": elon, "uic": uic}
-    except OverpassError:
+    except OverpassError as exc:
+        # Sub-step of _enrich_uic — the umbrella get_rail_geometry() already logs
+        # a WARNING for the overall resolve once every strategy has been tried, so
+        # this stays at INFO to avoid a second, duplicate WARNING for one failed
+        # station lookup that resolution may still recover from.
+        _log.info("station lookup near %s,%s failed: %s", lat, lon, exc)
         return None
 
 
