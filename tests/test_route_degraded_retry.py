@@ -131,22 +131,51 @@ def test_sweep_skips_non_degraded_segment(env):
     assert _load_segment(engine, user_id, "My Trip", "seg-1").route_status == "resolved"
 
 
-def test_sweep_skips_segment_still_inside_backoff(env):
+def test_sweep_logs_a_summary_even_with_nothing_to_do(env, caplog):
+    """The sweep must never be silent (issue #207 follow-up) — a run that finds
+    nothing eligible still has to say so, or "is it even running?" is
+    unanswerable from the logs. Uses an in-backoff degraded segment (not
+    eligible) plus a plain resolved one, so nothing actually gets retried —
+    no real HAFAS/Overpass call should fire."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _degraded_segment(age_seconds=30))
+    _add_segment(engine, project_id, ConnectingSegment(
+        id="seg-plain", segment_type="train", route_status="resolved",
+        route_degraded=False,
+    ))
+
+    with caplog.at_level("INFO", logger="src.jobs.route_jobs"):
+        assert route_jobs_mod.retry_degraded_routes() == 0
+
+    summary = [r.message for r in caplog.records if "degraded-route sweep:" in r.message]
+    assert len(summary) == 1
+    assert "seen=1" in summary[0]   # the plain segment isn't counted
+    assert "retried=0" in summary[0]
+    assert "in_backoff=1" in summary[0]
+
+
+def test_sweep_skips_segment_still_inside_backoff(env, caplog):
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _degraded_segment(age_seconds=30))  # 30s ago
 
-    assert route_jobs_mod.retry_degraded_routes() == 0
+    with caplog.at_level("INFO", logger="src.jobs.route_jobs"):
+        assert route_jobs_mod.retry_degraded_routes() == 0
     seg = _load_segment(engine, user_id, "My Trip", "seg-1")
     assert seg.route_status == "resolved"  # untouched, not flipped to pending
     assert seg.route_degraded is True
+    summary = next(r.message for r in caplog.records if "degraded-route sweep:" in r.message)
+    assert "in_backoff=1" in summary
 
 
-def test_sweep_skips_segment_past_retry_cap(env):
+def test_sweep_skips_segment_past_retry_cap(env, caplog):
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _degraded_segment(
         retry_count=route_jobs_mod.MAX_DEGRADED_RETRIES))
 
-    assert route_jobs_mod.retry_degraded_routes() == 0
+    with caplog.at_level("INFO", logger="src.jobs.route_jobs"):
+        assert route_jobs_mod.retry_degraded_routes() == 0
+    summary = next(r.message for r in caplog.records if "degraded-route sweep:" in r.message)
+    assert "at_retry_cap=1" in summary
 
 
 # ── 4/5 — eligible segments actually get retried ────────────────────────────────

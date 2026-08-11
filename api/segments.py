@@ -189,6 +189,7 @@ def _resolve_route_job(
             # fell back to a straight chord and how many automatic retries it has
             # survived, so the sweep has a backoff/cap and the UI can tell the user
             # when a retry silently upgraded their geometry.
+            recovered = False
             if degraded:
                 fields["route_degraded_at"] = datetime.now(timezone.utc).isoformat()
                 fields["route_degraded_retry_count"] = (
@@ -199,13 +200,25 @@ def _resolve_route_job(
                 fields["route_degraded_retry_count"] = 0
                 if is_auto_retry and seg.route_degraded:
                     fields["route_recovered_notice"] = True
+                    recovered = True
             if params.get("train_number"):
                 fields["train_number"] = params["train_number"]
             if params.get("hafas_provider"):
                 fields["hafas_provider"] = params["hafas_provider"]
+            # is_auto_retry/retry_count make a degraded-route log searchable end
+            # to end — which manual/automatic attempt this was, and whether it's
+            # the one that finally recovered — without cross-referencing rows.
             _log.info(
-                "resolve seg=%s type=%s strategy=%s points=%d degraded=%s status=resolved",
-                seg_id, seg.segment_type, strategy, len(polyline), degraded)
+                "resolve seg=%s type=%s strategy=%s points=%d degraded=%s "
+                "auto_retry=%s retry_count=%d status=resolved",
+                seg_id, seg.segment_type, strategy, len(polyline), degraded,
+                is_auto_retry, fields["route_degraded_retry_count"])
+            if recovered:
+                _log.warning(
+                    "resolve seg=%s recovered from degraded after %d automatic "
+                    "retr%s — real track found",
+                    seg_id, seg.route_degraded_retry_count,
+                    "y" if seg.route_degraded_retry_count == 1 else "ies")
         except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
             # Leave route_mode/route_polyline so geo still renders the
             # great-circle arc; surface a short error for the UI.

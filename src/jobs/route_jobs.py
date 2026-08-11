@@ -219,6 +219,14 @@ def retry_degraded_routes() -> int:
 
     now = time.time()
     candidates: list[tuple[int, str, int, dict]] = []
+    # Counted regardless of outcome and always logged below — this sweep is
+    # the only thing that ever revisits a degraded segment, so a silent no-op
+    # run looks identical to a crashed/never-scheduled one from the logs
+    # alone. Debugging issue #207 itself took reading raw docker logs; this is
+    # what would have made "is it even retrying?" a one-line answer.
+    seen_degraded = 0
+    skipped_backoff = 0
+    skipped_cap = 0
     try:
         with get_session() as sess:
             items = sess.exec(
@@ -231,7 +239,9 @@ def retry_degraded_routes() -> int:
                 data = json.loads(item.segment_json)
                 if data.get("route_status") != "resolved" or not data.get("route_degraded"):
                     continue
+                seen_degraded += 1
                 if data.get("route_degraded_retry_count", 0) >= MAX_DEGRADED_RETRIES:
+                    skipped_cap += 1
                     continue
                 degraded_at = data.get("route_degraded_at")
                 if degraded_at:
@@ -240,6 +250,7 @@ def retry_degraded_routes() -> int:
                     except ValueError:
                         age = DEGRADED_RETRY_BACKOFF_SECONDS  # malformed — retry anyway
                     if age < DEGRADED_RETRY_BACKOFF_SECONDS:
+                        skipped_backoff += 1
                         continue
                 project = projects.get(item.project_id)
                 if project is None:
@@ -293,6 +304,10 @@ def retry_degraded_routes() -> int:
         except Exception:  # noqa: BLE001
             _log.exception("could not enqueue degraded-route retry for seg %s", seg_id)
 
-    if retried:
-        _log.info("retried %d degraded route(s)", retried)
+    # Unconditional, unlike the rest of this module's sweeps — the backoff/cap
+    # counts are the whole point: a segment sitting at skipped_cap is one the
+    # sweep has given up on, silently, unless this line says so.
+    _log.info(
+        "degraded-route sweep: seen=%d retried=%d in_backoff=%d at_retry_cap=%d",
+        seen_degraded, retried, skipped_backoff, skipped_cap)
     return retried

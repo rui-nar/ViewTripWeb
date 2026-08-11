@@ -355,6 +355,43 @@ def test_auto_retry_recovery_sets_notice_and_clears_bookkeeping(env, monkeypatch
     assert seg.route_recovered_notice is True
 
 
+def test_auto_retry_recovery_logs_a_warning(env, monkeypatch, caplog):
+    """The recovery is a state transition worth a line of its own — finding it
+    should not require diffing two "resolve seg=" INFO lines by hand."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_status = "resolved"
+    seg.route_degraded = True
+    seg.route_degraded_retry_count = 1
+    _add_segment(engine, project_id, seg)
+
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: ([[24.9, 60.1], [25.7, 66.5]], 2, False, "ferry"))
+
+    with caplog.at_level("WARNING", logger="api.segments"):
+        _resolve_route_job(user_id, "My Trip", "seg-1", {}, is_auto_retry=True)
+
+    assert any("recovered from degraded" in r.message for r in caplog.records)
+
+
+def test_manual_resolve_does_not_log_a_recovery_warning(env, monkeypatch, caplog):
+    """A manual trigger recovering on its own attempt isn't an automatic
+    recovery — the user is watching it directly, nothing to flag."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_status = "resolved"
+    seg.route_degraded = True
+    _add_segment(engine, project_id, seg)
+
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: ([[24.9, 60.1], [25.7, 66.5]], 2, False, "ferry"))
+
+    with caplog.at_level("WARNING", logger="api.segments"):
+        _resolve_route_job(user_id, "My Trip", "seg-1", {})  # is_auto_retry=False
+
+    assert not any("recovered from degraded" in r.message for r in caplog.records)
+
+
 def test_manual_trigger_clears_stale_recovered_notice(env, monkeypatch):
     """Re-triggering manually supersedes any notice from an earlier auto-retry
     the user hasn't seen yet — they're about to watch this attempt directly."""
