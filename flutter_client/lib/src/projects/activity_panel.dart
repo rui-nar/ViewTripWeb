@@ -628,6 +628,46 @@ class _ActivityPanelState extends State<ActivityPanel> {
         ),
       );
     }
+    // A scheduled retry upgraded this segment from a straight chord to real
+    // track while nobody was watching (issue #207) — the only signal for that
+    // used to be a SnackBar shown at the moment the resolve finished, which is
+    // easy to miss for a slow resolve. Surface it here until dismissed.
+    if (seg['route_recovered_notice'] == true) {
+      return InkWell(
+        onTap: () => notifier.ackRouteRecovered(segId),
+        child: Tooltip(
+          message: 'Tap to dismiss',
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.check_circle_outline,
+                size: 12, color: Colors.green.shade700),
+            const SizedBox(width: 4),
+            Text('Better route found automatically',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: Colors.green.shade700)),
+          ]),
+        ),
+      );
+    }
+    // Resolved but degraded to a straight endpoint chord — no real track was
+    // found (issue #207). This used to look identical to a real resolved
+    // route once the one-shot resolve-dialog SnackBar was gone; persist the
+    // distinction on the tile itself instead.
+    if (status == 'resolved' && seg['route_degraded'] == true) {
+      return InkWell(
+        onTap: () => _retrySegmentResolve(context, notifier, seg, segId, segType),
+        child: Tooltip(
+          message: 'No detailed track found — tap to retry',
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.timeline,
+                size: 12, color: theme.colorScheme.onSurfaceVariant),
+            const SizedBox(width: 4),
+            Text('Approximate route — tap to retry',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ]),
+        ),
+      );
+    }
     return null;
   }
 

@@ -380,6 +380,9 @@ def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Di
                 "segment_type": seg.segment_type,
                 "label": seg.label,
                 "route_mode": seg.route_mode,
+                # Surfaced so the map can render a degraded (straight-chord)
+                # rail resolve differently from real track (issue #207).
+                "route_degraded": seg.route_degraded,
             }))
 
     return features

@@ -285,6 +285,103 @@ def test_job_degraded_straight_line_is_flagged(env, monkeypatch):
     assert seg.route_status == "resolved"
     assert seg.route_degraded is True
     assert json.loads(seg.route_polyline) == straight
+    assert seg.route_degraded_at is not None
+    assert seg.route_degraded_retry_count == 0  # manual/first attempt — fresh budget
+    assert seg.route_recovered_notice is False
+
+
+# ── 3c. Degraded-route retry bookkeeping (issue #207) ────────────────────────────
+
+def test_manual_degraded_resolve_resets_retry_count(env, monkeypatch):
+    """A manual trigger always gets a fresh retry budget, even if the segment
+    was already sitting on a nonzero count from earlier automatic retries."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_degraded_retry_count = 3
+    _add_segment(engine, project_id, seg)
+
+    straight = [[24.94, 60.17], [25.73, 66.50]]
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: (straight, 2, True, "straight"))
+
+    _resolve_route_job(user_id, "My Trip", "seg-1", {})  # is_auto_retry defaults False
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_degraded_retry_count == 0
+
+
+def test_auto_retry_still_degraded_increments_count(env, monkeypatch):
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_status = "resolved"
+    seg.route_degraded = True
+    seg.route_degraded_retry_count = 1
+    _add_segment(engine, project_id, seg)
+
+    straight = [[24.94, 60.17], [25.73, 66.50]]
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: (straight, 2, True, "straight"))
+
+    _resolve_route_job(user_id, "My Trip", "seg-1", {}, is_auto_retry=True)
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_degraded is True
+    assert seg.route_degraded_retry_count == 2
+    assert seg.route_recovered_notice is False
+
+
+def test_auto_retry_recovery_sets_notice_and_clears_bookkeeping(env, monkeypatch):
+    """The headline case: a scheduled retry finds real track this time — the
+    segment must both un-degrade AND raise a notice the UI can surface, since
+    the user isn't watching this happen."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_status = "resolved"
+    seg.route_degraded = True
+    seg.route_degraded_retry_count = 2
+    seg.route_degraded_at = "2026-08-11T12:00:00+00:00"
+    _add_segment(engine, project_id, seg)
+
+    real_line = [[24.94, 60.17], [25.2, 61.0], [25.73, 66.50]]
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: (real_line, 3, False, "relation_endpoints"))
+
+    _resolve_route_job(user_id, "My Trip", "seg-1", {}, is_auto_retry=True)
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_degraded is False
+    assert seg.route_degraded_at is None
+    assert seg.route_degraded_retry_count == 0
+    assert seg.route_recovered_notice is True
+
+
+def test_manual_trigger_clears_stale_recovered_notice(env, monkeypatch):
+    """Re-triggering manually supersedes any notice from an earlier auto-retry
+    the user hasn't seen yet — they're about to watch this attempt directly."""
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_recovered_notice = True
+    _add_segment(engine, project_id, seg)
+    monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a, **k: None)
+
+    resp = client.post("/api/projects/My Trip/segments/seg-1/resolve-route", json={})
+    assert resp.status_code == 202
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_recovered_notice is False
+
+
+def test_ack_route_recovered_clears_notice(env):
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_recovered_notice = True
+    _add_segment(engine, project_id, seg)
+
+    resp = client.post("/api/projects/My Trip/segments/seg-1/ack-route-recovered")
+    assert resp.status_code == 204
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert seg.route_recovered_notice is False
 
 
 # ── 4. Optimistic concurrency lock ───────────────────────────────────────────────

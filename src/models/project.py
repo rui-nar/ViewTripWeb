@@ -140,6 +140,13 @@ class ConnectingSegment:
     route_degraded: bool = False            # rail only: resolved to a straight endpoint-chord, not
     #   real track (Overpass found no usable geometry). Surfaced to the UI so a straight segment
     #   isn't silently mistaken for a real resolved route.
+    route_degraded_at: Optional[str] = None  # ISO timestamp of the most recent degraded resolve;
+    #   None once real track geometry is found. Drives the scheduled retry's backoff (issue #207).
+    route_degraded_retry_count: int = 0     # bumped by each automatic retry that is still degraded;
+    #   reset by a real result or a fresh manual trigger. Caps the retry sweep (MAX_DEGRADED_RETRIES).
+    route_recovered_notice: bool = False    # True once an automatic retry upgrades this segment from
+    #   a straight line to real track — cleared when the client acknowledges it or the user
+    #   manually re-resolves. Lets the UI tell the user their geometry changed on its own.
     route_edited: bool = False              # True after a manual track edit (issue #150) — guards
     #   a subsequent auto-resolve from silently discarding the user's hand-drawn geometry.
 
@@ -168,6 +175,9 @@ class ConnectingSegment:
             "route_error": self.route_error,
             "route_started_at": self.route_started_at,
             "route_degraded": self.route_degraded,
+            "route_degraded_at": self.route_degraded_at,
+            "route_degraded_retry_count": self.route_degraded_retry_count,
+            "route_recovered_notice": self.route_recovered_notice,
             "route_edited": self.route_edited,
         }
 
@@ -196,6 +206,10 @@ class ConnectingSegment:
             route_status=d.get("route_status", "idle"),
             route_error=d.get("route_error"),
             route_started_at=d.get("route_started_at"),
+            route_degraded=d.get("route_degraded", False),
+            route_degraded_at=d.get("route_degraded_at"),
+            route_degraded_retry_count=d.get("route_degraded_retry_count", 0),
+            route_recovered_notice=d.get("route_recovered_notice", False),
             route_edited=d.get("route_edited", False),
         )
 

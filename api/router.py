@@ -11,7 +11,7 @@ from scalar_fastapi import get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
-from src.jobs.route_jobs import sweep_orphaned_jobs
+from src.jobs.route_jobs import retry_degraded_routes, sweep_orphaned_jobs
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
@@ -114,6 +114,13 @@ async def lifespan(_app: FastAPI):
     # enabled, so a self-hosted instance never pays for the walk.
     _scheduler.add_job(reconcile_all_usage, "cron", hour=3, minute=30,
                        id="usage_reconcile", replace_existing=True)
+    # Retries segments that fell back to a straight endpoint chord because the
+    # Overpass mirrors were down/rate-limited at resolve time — often transient
+    # (issue #207). The job itself enforces the backoff/retry cap; this just
+    # needs to tick often enough that a recovered segment doesn't sit stale for
+    # long once its backoff window has passed.
+    _scheduler.add_job(retry_degraded_routes, "interval", minutes=15,
+                       id="degraded_route_retry", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)

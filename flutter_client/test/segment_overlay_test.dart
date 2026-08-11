@@ -156,4 +156,42 @@ void main() {
       expect((feature['properties'] as Map)['route_degraded'], isFalse);
     });
   });
+
+  group('ack route recovered (issue #207)', () {
+    test('clears the local flag immediately, best-effort on the server', () async {
+      final h = _Host();
+      h.items = [
+        {
+          'item_type': 'segment',
+          'segment': {
+            'id': 's1',
+            'route_status': 'resolved',
+            'route_recovered_notice': true,
+          },
+        },
+      ];
+
+      // No server to talk to in this test — the network call fails and is
+      // swallowed; the local patch must already have happened regardless.
+      await h.ackRouteRecovered('s1');
+
+      final seg = h.items.single['segment'] as Map;
+      expect(seg['route_recovered_notice'], isFalse);
+    });
+
+    test('is a no-op with no project open', () async {
+      final h = _Host()..projectRef = null;
+      h.items = [
+        {
+          'item_type': 'segment',
+          'segment': {'id': 's1', 'route_recovered_notice': true},
+        },
+      ];
+
+      await h.ackRouteRecovered('s1');
+
+      final seg = h.items.single['segment'] as Map;
+      expect(seg['route_recovered_notice'], isTrue); // untouched
+    });
+  });
 }

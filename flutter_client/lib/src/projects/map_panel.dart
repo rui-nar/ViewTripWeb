@@ -1602,6 +1602,12 @@ List<Polyline> _buildPolylines(
       baseColor = isOdd ? altColor : trackColor;
       lineStyle = isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
     }
+    // A degraded rail resolve is a straight endpoint chord, not real track
+    // (issue #207) — render it visibly different from a normal segment line
+    // (which is already dashed by default) so it isn't mistaken for a
+    // resolved route on the map itself, not just on the segment tile.
+    final isDegraded = isSegment && props['route_degraded'] == true;
+    final effectiveLineStyle = isDegraded ? LineStyleKind.dotted : lineStyle;
 
     final Color color;
     final double strokeWidth;
@@ -1619,7 +1625,7 @@ List<Polyline> _buildPolylines(
       points: points,
       color: color,
       strokeWidth: strokeWidth,
-      pattern: switch (lineStyle) {
+      pattern: switch (effectiveLineStyle) {
         LineStyleKind.dashed => StrokePattern.dashed(segments: const [12, 8]),
         LineStyleKind.dotted => const StrokePattern.dotted(),
         LineStyleKind.solid  => const StrokePattern.solid(),

@@ -335,6 +335,24 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     return {'route_status': 'pending'}; // timed out — tile keeps its spinner
   }
 
+  /// Acknowledge a "route recovered automatically" notice (issue #207): a
+  /// scheduled retry upgraded this segment from a straight endpoint chord to
+  /// real track while the user wasn't watching. Clears the flag locally right
+  /// away so the tile's notice disappears immediately, and best-effort on the
+  /// server so it doesn't resurface on the next reload — a failed ack just
+  /// means the user dismisses it again next time, not a lost edit.
+  Future<void> ackRouteRecovered(String segId) async {
+    final ref = projectRef;
+    if (ref == null) return;
+    _patchSegmentFields(segId, {'route_recovered_notice': false});
+    notifyListeners();
+    try {
+      await service.ackRouteRecovered(ref, segId);
+    } catch (_) {
+      // Best-effort — see doc comment above.
+    }
+  }
+
   /// Merge [fields] into the matching segment in [items], assigning a new list
   /// reference so identity-based rebuilds fire.
   void _patchSegmentFields(String segId, Map<String, dynamic> fields) {

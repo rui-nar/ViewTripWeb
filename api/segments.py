@@ -136,6 +136,7 @@ def _token_guard(started_at: Optional[str]) -> Dict[str, Any]:
 def _resolve_route_job(
     user_info_id: int, name: str, seg_id: str, params: Dict[str, Any],
     started_at: Optional[str] = None, job_id: Optional[int] = None,
+    is_auto_retry: bool = False,
 ) -> None:
     """Background task: resolve a segment's real-world route geometry.
 
@@ -150,6 +151,13 @@ def _resolve_route_job(
     carried through and compared before writing, so a job superseded by a newer
     trigger cannot overwrite the fresh attempt's result.
     Mirrors the fire-and-forget pattern of :func:`api.project_shared._refresh_share_tiles`.
+
+    ``is_auto_retry`` marks a run started by the scheduled degraded-route sweep
+    (:func:`src.jobs.route_jobs.retry_degraded_routes`, issue #207) rather than a
+    user-triggered resolve. It controls the ``route_degraded_retry_count``/
+    ``route_recovered_notice`` bookkeeping below — a manual trigger always gets a
+    fresh retry budget and never raises a "recovered" notice, since the user is
+    already looking at the result.
     """
     _mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
     mark_running(job_id)
@@ -177,6 +185,20 @@ def _resolve_route_job(
                 # guard a prior manual edit (issue #150) set.
                 "route_edited": False,
             }
+            # Degraded-route bookkeeping (issue #207): track when a segment last
+            # fell back to a straight chord and how many automatic retries it has
+            # survived, so the sweep has a backoff/cap and the UI can tell the user
+            # when a retry silently upgraded their geometry.
+            if degraded:
+                fields["route_degraded_at"] = datetime.now(timezone.utc).isoformat()
+                fields["route_degraded_retry_count"] = (
+                    seg.route_degraded_retry_count + 1 if is_auto_retry else 0
+                )
+            else:
+                fields["route_degraded_at"] = None
+                fields["route_degraded_retry_count"] = 0
+                if is_auto_retry and seg.route_degraded:
+                    fields["route_recovered_notice"] = True
             if params.get("train_number"):
                 fields["train_number"] = params["train_number"]
             if params.get("hafas_provider"):
@@ -592,6 +614,10 @@ def resolve_segment_route(
             "route_error": None,
             "route_degraded": False,
             "route_started_at": started_at,
+            # A fresh manual trigger supersedes any pending "recovered
+            # automatically" notice — the user is about to see the result
+            # directly (issue #207).
+            "route_recovered_notice": False,
         }
         if body.train_number:
             fields["train_number"] = body.train_number
@@ -611,3 +637,30 @@ def resolve_segment_route(
         background_tasks=background_tasks,
     )
     return {"status": "pending", "route_status": "pending"}
+
+
+@router.post("/{name}/segments/{seg_id}/ack-route-recovered",
+             status_code=status.HTTP_204_NO_CONTENT,
+             summary="Acknowledge a route-recovered notice")
+def ack_route_recovered(
+    name: str,
+    seg_id: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
+):
+    """Clear ``route_recovered_notice`` once the client has shown it (issue #207).
+
+    A single-row payload write like the resolve verdict itself (issue #173) —
+    no optimistic lock, just this one field on this one segment. Any project
+    viewer may ack it: it is a cosmetic notice shared by everyone looking at
+    the project, not per-viewer state, so there is nothing to protect beyond
+    normal read access.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+        _repo.update_segment_fields(
+            sess, row.id, seg_id, {"route_recovered_notice": False})
+        sess.commit()
+    bust_geo_cache(owner_id, name)

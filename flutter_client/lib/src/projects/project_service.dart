@@ -288,6 +288,16 @@ class ProjectService {
     return data as Map<String, dynamic>;
   }
 
+  /// POST /api/projects/{name}/segments/{segId}/ack-route-recovered
+  ///
+  /// Clears the "recovered automatically" notice once the client has shown it
+  /// to the user (issue #207) — a scheduled retry upgraded this segment from a
+  /// straight endpoint chord to real track while nobody was watching.
+  Future<void> ackRouteRecovered(ProjectRef ref, String segId) async {
+    final sid = Uri.encodeComponent(segId);
+    await api.post(ref.path('/segments/$sid/ack-route-recovered'), const {});
+  }
+
   /// Replace a segment's route geometry with a manually edited point list.
   /// PUT /api/projects/{name}/segments/{segId}/track
   /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated segment
