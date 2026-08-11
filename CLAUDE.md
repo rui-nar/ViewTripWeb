@@ -76,6 +76,9 @@ Rules:
 ## testing
 ensure tests are available for every feature to ensure non-regressions
 
+## logging
+every new code write must include relevant logging at the appropriate level (debug/info/warning/error) — not just error paths. the goal is to be able to reconstruct the suite of steps and actions leading to a problem from logs alone, without re-deriving context. see docs/LOGGING.md for levels/format conventions and docs/OBSERVABILITY.md for how logs get queried.
+
 ## versioning
 version are standard x.y.z where y is for features and z is for patches. unless instructed otherwise, bumping a release means to increase the feature version. there is a github repository with github actions to automatically generate docker images so every verison bump shall also be tagged as latest
 
