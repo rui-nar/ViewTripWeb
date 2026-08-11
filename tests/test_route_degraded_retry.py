@@ -167,6 +167,40 @@ def test_sweep_skips_segment_still_inside_backoff(env, caplog):
     assert "in_backoff=1" in summary
 
 
+def test_sweep_is_quiet_at_info_when_fully_idle(env, caplog):
+    """A tick that finds nothing degraded at all is the common steady state —
+    it must still log (DEBUG), but not spam INFO forever on a healthy install."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, ConnectingSegment(
+        id="seg-plain", segment_type="train", route_status="resolved",
+        route_degraded=False,
+    ))
+
+    with caplog.at_level("DEBUG", logger="src.jobs.route_jobs"):
+        assert route_jobs_mod.retry_degraded_routes() == 0
+
+    info_records = [r for r in caplog.records if r.levelname == "INFO"]
+    assert not any("degraded-route sweep:" in r.message for r in info_records)
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any("degraded-route sweep: seen=0" in r.message for r in debug_records)
+
+
+def test_sweep_debug_logs_per_segment_reasoning(env, caplog):
+    """With DEBUG turned up, each skipped/eligible segment traces its own
+    reasoning — the level a specific stuck segment actually gets debugged at."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _degraded_segment("seg-backoff", age_seconds=30))
+    _add_segment(engine, project_id, _degraded_segment(
+        "seg-capped", retry_count=route_jobs_mod.MAX_DEGRADED_RETRIES))
+
+    with caplog.at_level("DEBUG", logger="src.jobs.route_jobs"):
+        assert route_jobs_mod.retry_degraded_routes() == 0
+
+    messages = [r.message for r in caplog.records if r.levelname == "DEBUG"]
+    assert any("seg-backoff" in m and "still in backoff" in m for m in messages)
+    assert any("seg-capped" in m and "at retry cap" in m for m in messages)
+
+
 def test_sweep_skips_segment_past_retry_cap(env, caplog):
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _degraded_segment(

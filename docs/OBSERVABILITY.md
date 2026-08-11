@@ -57,11 +57,11 @@ over loopback, not Docker's usual bridge-network service discovery.
 Log lines look like:
 
 ```
-2026-08-10 18:06:58,123 - api.polarsteps - WARNING - request_id=a1b2c3d4 user_id=42 - polarsteps connect failed user_id=42
+2026-08-10 18:06:58,123 - api.polarsteps - WARNING - request_id=a1b2c3d4 user_id=42 job_id=- - polarsteps connect failed user_id=42
 ```
 
-`request_id=` and `user_id=` are real logfmt tokens — `| logfmt` extracts
-them as labels for the query. `%(levelname)s` (`WARNING` above) is
+`request_id=`, `user_id=`, and `job_id=` are real logfmt tokens — `| logfmt`
+extracts them as labels for the query. `%(levelname)s` (`WARNING` above) is
 **positional, not a `level=` key** (see `docs/LOGGING.md`), so level
 filtering is a substring match, not a logfmt field.
 
@@ -75,6 +75,16 @@ filtering is a substring match, not a logfmt field.
   window:
   ```logql
   {service="viewtripweb"} | logfmt | user_id="42"
+  ```
+- **One background job end to end, across concurrent unrelated traffic** —
+  `request_id` doesn't reach here (issue #207): a route resolve outlives its
+  triggering request (or runs on a separate RQ worker process with no request
+  of its own), so `job_id` is the equivalent for work that isn't request-scoped.
+  Pulls the whole story for one segment's resolve — including the
+  HAFAS/Overpass failures underneath it, which have no idea a segment exists —
+  out from between whatever else the server logged in that window:
+  ```logql
+  {service="viewtripweb"} | logfmt | job_id="resolve:seg=f0ef7dec-9eb0-47fb-ac66-e57848ffa3a0"
   ```
 - **Error rate** (substring match — see the level-field note above):
   ```logql

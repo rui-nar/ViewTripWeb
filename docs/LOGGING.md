@@ -38,28 +38,50 @@ the single most common mistake to watch for in review.
 ## Format
 
 `configure_logging()`'s formatter is logfmt-shaped, not free text: a logfmt
-preamble (`request_id=... user_id=...`, populated by a `logging.Filter`)
-followed by the human-readable message.
+preamble (`request_id=... user_id=... job_id=...`, populated by a
+`logging.Filter`) followed by the human-readable message.
 
-Why `request_id`/`user_id` live in the message body instead of becoming Loki
-labels: Loki indexes labels, not message content, and a label whose values
-come from user/request identity has unbounded cardinality — one Loki time
-series per user or per request would eventually take Loki down with it (same
-reasoning as `docs/METRICS.md`'s "no label may carry user data" rule for
-Prometheus). So they're parsed out of the message body at query time instead,
-via `| logfmt` in a LogQL query. Keep messages human-grep-able too — this
-isn't JSON, it's logfmt.
+Why `request_id`/`user_id`/`job_id` live in the message body instead of
+becoming Loki labels: Loki indexes labels, not message content, and a label
+whose values come from user/request/job identity has unbounded cardinality —
+one Loki time series per user, request, or job would eventually take Loki
+down with it (same reasoning as `docs/METRICS.md`'s "no label may carry user
+data" rule for Prometheus). So they're parsed out of the message body at
+query time instead, via `| logfmt` in a LogQL query. Keep messages
+human-grep-able too — this isn't JSON, it's logfmt.
 
 Confirmed final format, as implemented in `configure_logging()`:
 
 ```
-%(asctime)s - %(name)s - %(levelname)s - request_id=%(request_id)s user_id=%(user_id)s - %(message)s
+%(asctime)s - %(name)s - %(levelname)s - request_id=%(request_id)s user_id=%(user_id)s job_id=%(job_id)s - %(message)s
 ```
 
-Note `%(levelname)s` is positional, not a `level=` key — only `request_id`
-and `user_id` are real logfmt tokens in the line today. A LogQL query
-filtering by level needs a substring match (`|= "ERROR"`), not
+Note `%(levelname)s` is positional, not a `level=` key — only `request_id`,
+`user_id`, and `job_id` are real logfmt tokens in the line today. A LogQL
+query filtering by level needs a substring match (`|= "ERROR"`), not
 `| logfmt | level=...` — see `docs/OBSERVABILITY.md`.
+
+### `job_id`: correlation for work that outlives its request (issue #207)
+
+`request_id` covers one HTTP request; it's meaningless for background work
+that keeps running after that request returned (in-process `BackgroundTasks`)
+or on an entirely different process (an RQ worker, which has no HTTP request
+of its own to inherit a `request_id` from). `job_id_var` (`src/utils/logging.py`)
+is the same `contextvars.ContextVar` + filter mechanism, set explicitly by a
+job's own entry point instead of request middleware.
+
+The payoff: every line a job logs carries the same `job_id`, including ones
+emitted several call layers down in code that has no idea which job is
+calling it — `_resolve_route_job` sets `job_id=resolve:seg=<id>` once, and
+every subsequent `hafas_service`/`overpass_service` log line (which only ever
+see raw coordinates, never a segment) is retroactively attributable without
+either module knowing a segment exists. Reset it (via the `Token` from
+`.set()`) in the job's `finally` — the thread/process a job ran on gets reused
+for the next one, and a stale value would misattribute that job's logs too.
+
+If you're adding a new background job whose failures span multiple internal
+calls, give it a `job_id_var.set(...)` at its entry point rather than
+threading an identifier through every function signature it touches.
 
 ## Redaction
 

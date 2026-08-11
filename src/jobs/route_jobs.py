@@ -239,9 +239,13 @@ def retry_degraded_routes() -> int:
                 data = json.loads(item.segment_json)
                 if data.get("route_status") != "resolved" or not data.get("route_degraded"):
                     continue
+                seg_id = data.get("id")
                 seen_degraded += 1
-                if data.get("route_degraded_retry_count", 0) >= MAX_DEGRADED_RETRIES:
+                retry_count = data.get("route_degraded_retry_count", 0)
+                if retry_count >= MAX_DEGRADED_RETRIES:
                     skipped_cap += 1
+                    _log.debug("seg=%s at retry cap (%d/%d) — not retrying",
+                               seg_id, retry_count, MAX_DEGRADED_RETRIES)
                     continue
                 degraded_at = data.get("route_degraded_at")
                 if degraded_at:
@@ -251,10 +255,14 @@ def retry_degraded_routes() -> int:
                         age = DEGRADED_RETRY_BACKOFF_SECONDS  # malformed — retry anyway
                     if age < DEGRADED_RETRY_BACKOFF_SECONDS:
                         skipped_backoff += 1
+                        _log.debug("seg=%s still in backoff (%.0fs/%.0fs)",
+                                   seg_id, age, DEGRADED_RETRY_BACKOFF_SECONDS)
                         continue
                 project = projects.get(item.project_id)
                 if project is None:
                     continue
+                _log.debug("seg=%s eligible for degraded-route retry (attempt %d)",
+                           seg_id, retry_count + 1)
                 candidates.append((project.user_info_id, project.name, item.project_id, data))
     except Exception:  # noqa: BLE001 — a broken sweep must not stop the scheduler
         _log.exception("degraded-route retry sweep failed to read candidates")
@@ -284,6 +292,11 @@ def retry_degraded_routes() -> int:
                 )
                 if written:
                     started.append((user_info_id, name, seg_id, data, token, project_id))
+                else:
+                    _log.debug(
+                        "seg=%s no longer resolved when the sweep tried to mark it "
+                        "pending — a manual trigger or another writer beat it to it",
+                        seg_id)
             sess.commit()
     except Exception:  # noqa: BLE001
         _log.exception("degraded-route retry sweep failed to mark candidates pending")
@@ -306,8 +319,12 @@ def retry_degraded_routes() -> int:
 
     # Unconditional, unlike the rest of this module's sweeps — the backoff/cap
     # counts are the whole point: a segment sitting at skipped_cap is one the
-    # sweep has given up on, silently, unless this line says so.
-    _log.info(
-        "degraded-route sweep: seen=%d retried=%d in_backoff=%d at_retry_cap=%d",
-        seen_degraded, retried, skipped_backoff, skipped_cap)
+    # sweep has given up on, silently, unless this line says so. INFO once
+    # there is anything degraded to report; a fully idle install (the common
+    # case — most ticks find nothing) stays at DEBUG so this doesn't become
+    # 24/7 INFO noise on a healthy instance while still answering "is the
+    # sweep even running?" when DEBUG is turned up.
+    level = _log.info if seen_degraded else _log.debug
+    level("degraded-route sweep: seen=%d retried=%d in_backoff=%d at_retry_cap=%d",
+          seen_degraded, retried, skipped_backoff, skipped_cap)
     return retried

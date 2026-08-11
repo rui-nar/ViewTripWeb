@@ -33,6 +33,7 @@ from models.user import UserInfo
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.project.project_io import ProjectIO
 from src.project.project_repo import StaleWriteError, bump_lock_version
+from src.utils.logging import job_id_var
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -288,6 +289,45 @@ def test_job_degraded_straight_line_is_flagged(env, monkeypatch):
     assert seg.route_degraded_at is not None
     assert seg.route_degraded_retry_count == 0  # manual/first attempt — fresh budget
     assert seg.route_recovered_notice is False
+
+
+# ── 3b-2. Job-context correlation for nested HAFAS/Overpass logs (issue #207) ────
+
+def test_resolve_job_sets_job_context_for_nested_calls(env, monkeypatch):
+    """hafas_service/overpass_service log from deep inside _compute_segment_geometry
+    with no idea a "segment" exists — job_id_var is how their lines get
+    attributed back to this resolve without threading seg_id through every
+    call in those modules. Must be set before the call and reset after,
+    regardless of outcome."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _train_segment())
+
+    seen = {}
+
+    def _fake_compute(seg, params):
+        seen["ctx"] = job_id_var.get()
+        return [[24.9, 60.1], [25.7, 66.5]], 2, False, "relation_endpoints"
+
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _fake_compute)
+
+    assert job_id_var.get() == "-"  # nothing set before the job runs
+    _resolve_route_job(user_id, "My Trip", "seg-1", {})
+
+    assert seen["ctx"] == "resolve:seg=seg-1"
+    assert job_id_var.get() == "-"  # reset afterwards — must not leak to the next job
+
+
+def test_resolve_job_resets_job_context_even_on_crash(env, monkeypatch):
+    def _boom(seg, params):
+        raise RuntimeError("overpass exploded")
+
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _boom)
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _train_segment())
+
+    _resolve_route_job(user_id, "My Trip", "seg-1", {})
+
+    assert job_id_var.get() == "-"
 
 
 # ── 3c. Degraded-route retry bookkeeping (issue #207) ────────────────────────────

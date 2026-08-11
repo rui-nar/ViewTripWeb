@@ -12,6 +12,7 @@ from src.utils.logging import (
     _context_filter,
     configure_logging,
     get_logger,
+    job_id_var,
     request_id_var,
     setup_logging,
     user_id_var,
@@ -84,6 +85,14 @@ class TestConfigureLogging:
         fmt = _app_handlers(logging.getLogger("api"))[0].formatter._fmt
         assert "request_id=%(request_id)s" in fmt
         assert "user_id=%(user_id)s" in fmt
+
+    def test_formatter_carries_job_id_field(self):
+        """issue #207: job_id is request_id's counterpart for work that
+        outlives its triggering request (or has none, on an RQ worker) — same
+        logfmt-token requirement as request_id/user_id above."""
+        configure_logging()
+        fmt = _app_handlers(logging.getLogger("api"))[0].formatter._fmt
+        assert "job_id=%(job_id)s" in fmt
 
     def test_uvicorn_handler_gets_context_filter(self):
         """The restyled uvicorn handler must also inject request_id/user_id —
@@ -246,10 +255,12 @@ class TestRequestContextFilter:
         assert _context_filter.filter(record) is True
         assert record.request_id == "-"
         assert record.user_id == "-"
+        assert record.job_id == "-"
 
     def test_stamps_bound_context_values(self):
         req_token = request_id_var.set("abc12345")
         user_token = user_id_var.set("42")
+        job_token = job_id_var.set("resolve:seg=seg-1")
         try:
             record = logging.LogRecord(
                 "test", logging.INFO, __file__, 1, "msg", None, None
@@ -257,6 +268,8 @@ class TestRequestContextFilter:
             _context_filter.filter(record)
             assert record.request_id == "abc12345"
             assert record.user_id == "42"
+            assert record.job_id == "resolve:seg=seg-1"
         finally:
             request_id_var.reset(req_token)
             user_id_var.reset(user_token)
+            job_id_var.reset(job_token)

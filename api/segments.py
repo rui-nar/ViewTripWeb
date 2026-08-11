@@ -32,7 +32,7 @@ from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
 from src.jobs.route_jobs import create_job, mark_done, mark_failed, mark_running
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger, job_id_var
 
 _log = get_logger(__name__)
 
@@ -160,6 +160,12 @@ def _resolve_route_job(
     already looking at the result.
     """
     _mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
+    # Stamped on every log line for the rest of this call — including ones
+    # emitted deep inside hafas_service/overpass_service, which take raw
+    # coordinates and have no idea a "segment" exists (issue #207). Without
+    # this, reconstructing which HAFAS/Overpass failure belonged to which
+    # resolve meant matching timestamps by hand.
+    job_ctx_token = job_id_var.set(f"resolve:seg={seg_id}")
     mark_running(job_id)
     try:
         # 1. Load the segment (cheap) and compute geometry with no session held.
@@ -261,6 +267,10 @@ def _resolve_route_job(
         # the resolve runs, and what the activity panel blocks on (issue #178).
         warm_geo_cache(user_info_id, name)
         warm_meta_cache(user_info_id, name)
+        # Reset rather than leave stamped — an RQ worker or the BackgroundTasks
+        # threadpool reuses its thread across jobs, and the next log line on it
+        # (an unrelated job, or nothing at all) must not still claim this seg_id.
+        job_id_var.reset(job_ctx_token)
 
 
 def _mark_segment_failed(
@@ -677,3 +687,7 @@ def ack_route_recovered(
             sess, row.id, seg_id, {"route_recovered_notice": False})
         sess.commit()
     bust_geo_cache(owner_id, name)
+    # DEBUG, not INFO: purely cosmetic client bookkeeping, no bearing on
+    # whether route resolution itself is working — noise at any level an
+    # operator would normally run at.
+    _log.debug("seg=%s route-recovered notice acked by user=%s", seg_id, user_info_id)

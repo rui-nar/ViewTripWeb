@@ -96,9 +96,24 @@ user_id_var: "contextvars.ContextVar[str]" = contextvars.ContextVar(
     "user_id", default="-"
 )
 
+# Background-job correlation (issue #207). request_id_var covers one HTTP
+# request; it's meaningless for a route-resolve job, which starts on the
+# trigger's request but keeps running long after that request has returned
+# (in-process BackgroundTasks) or on an entirely different process (an RQ
+# worker, which never sees the trigger's request_id at all — it has no HTTP
+# request of its own). A job sets this once at its own entry point instead,
+# so every line it logs — including calls several layers down into
+# hafas_service/overpass_service that have no idea a "segment" exists — carries
+# the same value. Diagnosing the incident that prompted this took manually
+# eyeballing which unlabelled HAFAS/Overpass lines belonged to which resolve;
+# `grep job_id=resolve:seg=<id>` now answers that directly.
+job_id_var: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "job_id", default="-"
+)
+
 
 class _RequestContextFilter(logging.Filter):
-    """Stamps every LogRecord with the current request_id/user_id.
+    """Stamps every LogRecord with the current request_id/user_id/job_id.
 
     Attached at the handler level (both the shared app handler and each
     restyled uvicorn handler below) so it covers every path a record can take
@@ -108,6 +123,7 @@ class _RequestContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = request_id_var.get()
         record.user_id = user_id_var.get()
+        record.job_id = job_id_var.get()
         return True
 
 
@@ -142,7 +158,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     """
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - "
-        "request_id=%(request_id)s user_id=%(user_id)s - %(message)s"
+        "request_id=%(request_id)s user_id=%(user_id)s job_id=%(job_id)s - %(message)s"
     )
     handler = logging.StreamHandler()
     handler.setLevel(level)
