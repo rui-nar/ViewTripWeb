@@ -24,6 +24,27 @@ x-logging: &default-logging
     max-size: "20m"
     max-file: "5"
 
+# Memory ceilings (issue #209): before this, nothing here bounded a
+# container's memory use below the whole host's. A single overloaded route
+# resolution was free to consume all available RAM; with no swap configured
+# on a host (docs/DEPLOYMENT_VPS.md), that produced a multi-hour system-wide
+# lockup rather than a clean, single-container OOM-kill Docker could recover
+# from on its own via `restart: unless-stopped`.
+#
+# These are starting points sized for one stack on a 4 GB host, not a
+# guarantee — halve them (or run fewer services) if prod and val share a
+# host, per the "Open items" note in docs/DEPLOYMENT_VPS.md. `worker-poster`
+# gets the largest share because an A0 render is the single most
+# memory-heavy thing this app does (see the worker services below).
+x-mem-api: &mem-api
+  memory: 512M
+x-mem-worker: &mem-worker
+  memory: 384M
+x-mem-worker-poster: &mem-worker-poster
+  memory: 768M
+x-mem-redis: &mem-redis
+  memory: 256M
+
 services:
   # ── API ─────────────────────────────────────────────────────────────────────
   viewtripweb:
@@ -34,6 +55,9 @@ services:
       - "7777:8000"
     env_file: .env
     logging: *default-logging
+    deploy:
+      resources:
+        limits: *mem-api
     volumes:
       - ./db:/app/db
       - ./config:/app/config
@@ -93,6 +117,9 @@ services:
     environment:
       VIEWTRIP_ROLE: worker
     logging: *default-logging
+    deploy:
+      resources:
+        limits: *mem-worker
     volumes:
       # MUST be the same host paths as the API container: the database is a
       # SQLite file, so "sharing" it means sharing the volume, on one host.
@@ -117,6 +144,9 @@ services:
     environment:
       VIEWTRIP_ROLE: worker
     logging: *default-logging
+    deploy:
+      resources:
+        limits: *mem-worker-poster
     volumes:
       - ./db:/app/db
       - ./config:/app/config
@@ -140,6 +170,9 @@ services:
     # was introduced to fix.
     command: ["redis-server", "--appendonly", "yes"]
     logging: *default-logging
+    deploy:
+      resources:
+        limits: *mem-redis
     volumes:
       - ./redis:/data
     healthcheck:

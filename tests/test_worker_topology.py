@@ -94,6 +94,45 @@ class TestQueueConcurrency:
                     f"after {queues[:queues.index(queue)]}")
 
 
+class TestMemoryLimits:
+    """A runaway job must hit a per-container ceiling, not the whole host's
+    (issue #209): with no swap on the VPS, an unbounded container was free to
+    consume all available RAM, which produced a multi-hour system-wide lockup
+    instead of a clean OOM-kill `restart: unless-stopped` could recover from.
+    """
+
+    _LIMITED_SERVICES = ("viewtripweb", "worker", "worker-poster", "redis")
+
+    @staticmethod
+    def _memory_limit_bytes(spec: dict) -> int:
+        raw = spec["deploy"]["resources"]["limits"]["memory"]
+        units = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000,
+                 "ki": 1024, "mi": 1024 ** 2, "gi": 1024 ** 3}
+        for suffix in sorted(units, key=len, reverse=True):
+            if raw.lower().endswith(suffix):
+                return int(raw[: -len(suffix)]) * units[suffix]
+        return int(raw)
+
+    def test_every_worker_and_the_api_declare_a_memory_limit(self, services):
+        for name in self._LIMITED_SERVICES:
+            assert "deploy" in services[name], f"{name} has no memory limit set"
+            limit = self._memory_limit_bytes(services[name])
+            assert limit > 0, f"{name} has a non-positive memory limit"
+
+    def test_limits_fit_a_single_4gb_host_with_room_to_spare(self, services):
+        """Sized for one stack (docs/DEPLOYMENT_VPS.md's 4 GB VPS). Halving
+        these is a documented operator step when a second stack shares the
+        host — this just guards against the total creeping past what even one
+        stack alone should be allowed to take."""
+        total = sum(
+            self._memory_limit_bytes(services[name])
+            for name in self._LIMITED_SERVICES)
+        four_gb = 4 * 1024 ** 3
+        assert total < four_gb, (
+            f"declared memory limits sum to {total} bytes, "
+            f"at or above the documented 4 GB host size")
+
+
 class TestWorkersTrackTheApi:
     def test_workers_run_the_same_image_tag_as_the_api(self, services, workers):
         """They share one image and only the API migrates. A worker on an older
