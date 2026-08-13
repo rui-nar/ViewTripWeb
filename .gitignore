@@ -65,7 +65,8 @@ vps/webhook/hooks.yaml
 nas/docker-compose.yml
 nas/.env
 # Graphify knowledge graph outputs
-graphify-out/
+**/graphify-out/*
+!/graphify-out/GRAPH_REPORT.md
 .graphify_*
 _viewtripweb.db_
 delete_memories.py
