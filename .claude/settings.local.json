@@ -23,7 +23,10 @@
       "Bash(.venv/Scripts/python -c \"import pytestqt; print\\(pytestqt.__version__\\)\")",
       "Bash(.venv/Scripts/python -m pytest tests/test_gui.py tests/test_filter_widget.py tests/test_map_widget.py -v)",
       "Bash(.venv/Scripts/python -m pytest tests/test_gui.py tests/test_filter_widget.py tests/test_map_widget.py tests/test_filter_engine.py tests/test_strava_client.py -q)",
-      "mcp__Claude_Code_Remote__subscribe_pr_activity"
+      "mcp__Claude_Code_Remote__subscribe_pr_activity",
+      "mcp__Claude_Code_Remote__unsubscribe_pr_activity",
+      "mcp__Claude_Code_Remote__list_triggers",
+      "mcp__Claude_Code_Remote__delete_trigger"
     ]
   }
 }
