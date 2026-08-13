@@ -54,6 +54,18 @@ _geo_cache: dict[tuple, tuple[bytes, float, int]] = {}
 _geo_cache_lock = Lock()
 _GEO_CACHE_TTL_S = 300.0
 
+# Nothing evicted an entry whose project was never mutated again — the TTL above
+# only turns a stale HIT into a MISS on the next *read* of that same key; a key
+# nobody re-requests just sits in the dict, gzip bytes and all, for as long as
+# the process lives. With enough distinct (user, project, variant) combinations
+# touched over an API process's uptime, that is unbounded growth with no upper
+# limit — the process OOMs on ordinary traffic with no single request to blame
+# (issue #209's third incident: the API container was killed at ~779M after an
+# hour of plain thumbnail requests, no resolve in flight). A hard cap plus an
+# opportunistic sweep of already-expired entries on every store bounds this to
+# a fixed number of live entries instead.
+_GEO_CACHE_MAX_ENTRIES = 200
+
 # Per-project invalidation counter, bumped by every bust (issue #132). A reader
 # captures it *before* its DB read and declines to persist its result if the
 # counter moved meanwhile — otherwise a read that started before a mutation can
@@ -156,8 +168,17 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
     """
     if _geo_generation(cache_key[0], cache_key[1]) != gen:
         return
+    now = monotonic()
     with _geo_cache_lock:
-        _geo_cache[cache_key] = (gz_bytes, monotonic() + _GEO_CACHE_TTL_S, gen)
+        expired = [k for k, (_, deadline, _) in _geo_cache.items() if deadline <= now]
+        for k in expired:
+            _geo_cache.pop(k, None)
+        if cache_key not in _geo_cache and len(_geo_cache) >= _GEO_CACHE_MAX_ENTRIES:
+            # Still over the cap after sweeping expired entries — evict whichever
+            # live entry is closest to its own TTL rather than pick arbitrarily.
+            soonest = min(_geo_cache, key=lambda k: _geo_cache[k][1])
+            _geo_cache.pop(soonest, None)
+        _geo_cache[cache_key] = (gz_bytes, now + _GEO_CACHE_TTL_S, gen)
 
 
 # Public names for the three primitives above, used by the other per-project
