@@ -172,6 +172,13 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   bool _autoZoom = false;
 
+  // Captured (not looked up via context) so dispose() can stop it: when this
+  // widget is torn down as part of a larger subtree/route unmount, its
+  // element is already deactivated by the time dispose() runs, and
+  // context.read() on a deactivated element throws ("Looking up a
+  // deactivated widget's ancestor is unsafe") — issue #207 CI failure.
+  ViewProjectNotifier? _degradedRouteWatchNotifier;
+
   // Highlighted point set when the user taps an encounter's place icon
   // (issue #72); cleared on the next unrelated map tap/selection.
   LatLng? _focusedLatLng;
@@ -284,6 +291,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
         // Issue #207: tied to this screen's lifecycle, not loadView()'s —
         // see the equivalent call in app_screen.dart for why.
+        _degradedRouteWatchNotifier = notifier;
         notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
@@ -296,7 +304,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     _mapEventSub?.cancel();
     _viewportSyncTimer?.cancel();
     _mapController.dispose();
-    context.read<ViewProjectNotifier>().stopDegradedRouteWatch();
+    _degradedRouteWatchNotifier?.stopDegradedRouteWatch();
     super.dispose();
   }
 

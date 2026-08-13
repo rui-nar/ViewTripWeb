@@ -73,6 +73,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   late final AnimatedMapController _mapController =
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
+
+  // Captured (not looked up via context) so dispose() can stop it: when this
+  // widget is torn down as part of a larger subtree/route unmount, its
+  // element is already deactivated by the time dispose() runs, and
+  // context.read() on a deactivated element throws ("Looking up a
+  // deactivated widget's ancestor is unsafe") — issue #207 CI failure.
+  ProjectNotifier? _degradedRouteWatchNotifier;
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   // Seeded true when a camera position was carried over from view mode.
   // Seeded in initState, NOT lazily: the camera→URL sync writes lat/lng onto
@@ -203,6 +210,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         // Issue #207: tied to this screen's lifecycle, not load()'s — this
         // notifier is also reused ambiently by screens (e.g. ProjectStatsScreen)
         // that never render the banner and must not carry this timer around.
+        _degradedRouteWatchNotifier = notifier;
         notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
@@ -225,7 +233,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     _mapFitted.dispose();
     _activityScrollController.dispose();
     _mobileActivityScrollController.dispose();
-    context.read<ProjectNotifier>().stopDegradedRouteWatch();
+    _degradedRouteWatchNotifier?.stopDegradedRouteWatch();
     super.dispose();
   }
 
