@@ -11,7 +11,7 @@ from scalar_fastapi import get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
-from src.jobs.route_jobs import sweep_orphaned_jobs
+from src.jobs.route_jobs import sweep_degraded_segments, sweep_orphaned_jobs
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
@@ -114,6 +114,14 @@ async def lifespan(_app: FastAPI):
     # enabled, so a self-hosted instance never pays for the walk.
     _scheduler.add_job(reconcile_all_usage, "cron", hour=3, minute=30,
                        id="usage_reconcile", replace_existing=True)
+    # A degraded (straight-line) resolve is often transient Overpass mirror
+    # flakiness, not permanent — retry it on a schedule instead of leaving it
+    # stuck until the user notices and taps to retry manually (issue #207).
+    # Hourly, not more often: resolve is concurrency-bounded to be polite to a
+    # free public API, and this competes with real user-triggered resolves for
+    # that same budget.
+    _scheduler.add_job(sweep_degraded_segments, "interval", hours=1,
+                       id="degraded_segment_retry", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)

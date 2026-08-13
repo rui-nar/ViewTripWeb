@@ -78,6 +78,14 @@ const Color _kEndMarkerColor   = Color(0xFFEF4444); // red-500
 // zooms in and drops this pin, distinct from the (red) encounter pins.
 const Color _kFocusMarkerColor = Color(0xFFF59E0B); // amber-500
 
+// A degraded segment (route_degraded=true — the server fell back to a
+// straight endpoint chord because it couldn't find real track geometry, see
+// api/segments.py) is drawn in this muted grey regardless of type colouring
+// or selection, so it reads as "approximate" on the map itself rather than
+// only in the tile list (issue #207). Line *style* (dashed/solid) is left
+// alone — colour is the only signal.
+const Color _kDegradedRouteColor = Color(0xFF64748B); // slate-500
+
 /// A single highlighted pin at [point] — rendered by both map widgets when
 /// [MapPanel.focusedLatLng] / [ManageMapPanel.focusedLatLng] is set (issue #72).
 Marker focusedLocationMarker(LatLng point) => Marker(
@@ -1602,17 +1610,22 @@ List<Polyline> _buildPolylines(
       baseColor = isOdd ? altColor : trackColor;
       lineStyle = isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
     }
+    // Degraded overrides type/track colouring but not line style — the tile
+    // list carries the same signal via _segmentStatusLine (issue #207).
+    final effectiveBaseColor = (isSegment && props['route_degraded'] == true)
+        ? _kDegradedRouteColor
+        : baseColor;
 
     final Color color;
     final double strokeWidth;
     if (isHighlighted) {
-      color = baseColor;
+      color = effectiveBaseColor;
       strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
     } else if (hasSelection) {
-      color = baseColor.withAlpha(0x60);
+      color = effectiveBaseColor.withAlpha(0x60);
       strokeWidth = trackWidth;
     } else {
-      color = baseColor;
+      color = effectiveBaseColor;
       strokeWidth = trackWidth;
     }
     polylines.add(Polyline(

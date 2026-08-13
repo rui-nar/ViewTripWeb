@@ -172,6 +172,13 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   bool _autoZoom = false;
 
+  // Captured (not looked up via context) so dispose() can stop it: when this
+  // widget is torn down as part of a larger subtree/route unmount, its
+  // element is already deactivated by the time dispose() runs, and
+  // context.read() on a deactivated element throws ("Looking up a
+  // deactivated widget's ancestor is unsafe") — issue #207 CI failure.
+  ViewProjectNotifier? _degradedRouteWatchNotifier;
+
   // Highlighted point set when the user taps an encounter's place icon
   // (issue #72); cleared on the next unrelated map tap/selection.
   LatLng? _focusedLatLng;
@@ -282,6 +289,10 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
         }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
+        // Issue #207: tied to this screen's lifecycle, not loadView()'s —
+        // see the equivalent call in app_screen.dart for why.
+        _degradedRouteWatchNotifier = notifier;
+        notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
     _mapEventSub =
@@ -293,6 +304,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     _mapEventSub?.cancel();
     _viewportSyncTimer?.cancel();
     _mapController.dispose();
+    _degradedRouteWatchNotifier?.stopDegradedRouteWatch();
     super.dispose();
   }
 
@@ -450,6 +462,32 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   TextButton(
                     onPressed: () => _openSyncDialog(context),
                     child: const Text('Import'),
+                  ),
+                ],
+              );
+            },
+          ),
+          // ── Degraded-route upgrade banner (issue #207) ───────────────────
+          Selector<ViewProjectNotifier, bool>(
+            selector: (_, n) => n.degradedRouteUpgradeAvailable,
+            builder: (context, hasUpgrade, __) {
+              if (!hasUpgrade) return const SizedBox.shrink();
+              final n = context.read<ViewProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  'A route that was only an approximate straight line has '
+                  'been resolved with real track data.',
+                ),
+                leading: const Icon(Icons.route, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissDegradedRouteUpgrade,
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: n.reloadForDegradedUpgrade,
+                    child: const Text('Reload'),
                   ),
                 ],
               );

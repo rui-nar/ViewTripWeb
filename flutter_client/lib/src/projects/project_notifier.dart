@@ -232,6 +232,15 @@ class ProjectNotifier extends ChangeNotifier
   /// Non-null when background check found new items; cleared by markSynced().
   ({List<Map<String, dynamic>> strava, List<Map<String, dynamic>> polarsteps})? pendingSync;
 
+  /// True when a periodic background check found a segment that was only an
+  /// approximate straight line (route_degraded=true) has since resolved with
+  /// real track data — most likely sweep_degraded_segments() on the server
+  /// (issue #207). Cleared by dismissDegradedRouteUpgrade() or
+  /// reloadForDegradedUpgrade(). Deliberately never applied automatically —
+  /// a silent background rewrite of the map/track a user is actively looking
+  /// at or editing is exactly what this avoids; the user picks the timing.
+  bool degradedRouteUpgradeAvailable = false;
+
   // ── Track style ───────────────────────────────────────────────────────────
   Color trackColor = const Color(0xFF6B7280); // gray-500 — shown while project loads
   Color? trackSecondaryColor; // null = auto-derive from primary
@@ -536,6 +545,8 @@ class ProjectNotifier extends ChangeNotifier
   List<Duration> loadRetryBackoff = kFetchRetryBackoff;
 
   Timer? _photoPollingTimer;
+  Timer? _degradedRouteCheckTimer;
+  int? _lastDegradedRouteCount;
 
   Future<void> load(ProjectRef ref) async {
     if (ref.name.isEmpty) return;
@@ -1137,6 +1148,92 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  // ── Degraded-route upgrade watch (issue #207) ─────────────────────────────
+  //
+  // sweep_degraded_segments() retries a degraded (straight-line) segment on
+  // its own hourly schedule, server-side, independent of whether anyone has
+  // the project open. A tab already open at that moment has no live channel
+  // telling it that happened, so this polls a cheap, already-cached endpoint
+  // (/meta) on an interval — purely to detect the change. It never applies
+  // the fresh data itself: only reloadForDegradedUpgrade() does that, and
+  // only when the user asks for it, so a background tick can never rewrite
+  // what someone is actively looking at or mid-edit on.
+  //
+  // Deliberately NOT started from load(): this notifier is reused as an
+  // ambient/shared instance by screens that never render the banner (e.g.
+  // ProjectStatsScreen reads it just for tags), and load() runs there too.
+  // Starting a 15-minute Timer.periodic every time *anything* loads a project
+  // — and only ever cancelling it in dispose(), which an ambient instance may
+  // never see — leaks a pending timer for the lifetime of whatever's running.
+  // Screens that actually show the banner (app_screen.dart, view_screen.dart)
+  // call start/stop from their own State's initState/dispose instead, so the
+  // timer's lifetime matches a mounted widget's, not the notifier's.
+
+  @visibleForTesting
+  Duration degradedRouteCheckInterval = const Duration(minutes: 15);
+
+  void startDegradedRouteWatch(ProjectRef ref) {
+    _degradedRouteCheckTimer?.cancel();
+    _lastDegradedRouteCount = null; // re-establish the baseline against fresh data
+    _degradedRouteCheckTimer =
+        Timer.periodic(degradedRouteCheckInterval, (_) => _checkDegradedRouteUpgrade(ref));
+  }
+
+  void stopDegradedRouteWatch() {
+    _degradedRouteCheckTimer?.cancel();
+    _degradedRouteCheckTimer = null;
+  }
+
+  @visibleForTesting
+  Future<void> checkDegradedRouteUpgrade(ProjectRef ref) => _checkDegradedRouteUpgrade(ref);
+
+  Future<void> _checkDegradedRouteUpgrade(ProjectRef ref) async {
+    if (this.ref != ref) return;
+    Map<String, dynamic> meta;
+    try {
+      meta = await _service.getDetailsMeta(ref);
+    } on Exception {
+      return; // transient — the next tick tries again
+    }
+    if (this.ref != ref) return;
+    final count = _degradedSegmentCount(meta);
+    final previous = _lastDegradedRouteCount;
+    if (previous != null && count < previous) {
+      degradedRouteUpgradeAvailable = true;
+      notifyListeners();
+    }
+    _lastDegradedRouteCount = count;
+  }
+
+  int _degradedSegmentCount(Map<String, dynamic> meta) {
+    final rawItems = meta['items'];
+    if (rawItems is! List) return 0;
+    var count = 0;
+    for (final item in rawItems) {
+      if (item is! Map) continue;
+      if (item['item_type'] != 'segment') continue;
+      final seg = item['segment'];
+      if (seg is! Map) continue;
+      if (seg['route_status'] == 'resolved' && seg['route_degraded'] == true) count++;
+    }
+    return count;
+  }
+
+  /// "Later" — hide the banner without touching any data.
+  void dismissDegradedRouteUpgrade() {
+    degradedRouteUpgradeAvailable = false;
+    notifyListeners();
+  }
+
+  /// "Reload" — the only path that ever applies the fresher data.
+  Future<void> reloadForDegradedUpgrade() async {
+    final r = ref;
+    if (r == null) return;
+    degradedRouteUpgradeAvailable = false;
+    notifyListeners();
+    await load(r);
+  }
+
   Future<void> saveSyncMeta({bool? autoSyncEnabled, int? linkedPsTripId, bool clearLinkedTrip = false}) async {
     final ref = this.ref;
     if (ref == null) return;
@@ -1478,6 +1575,7 @@ class ProjectNotifier extends ChangeNotifier
   void dispose() {
     _isDisposed = true;
     _stopPhotoPolling();
+    stopDegradedRouteWatch(); // usually already stopped by the owning screen's dispose()
     previewArcNotifier.dispose();
     elevationCursorNotifier.dispose();
     mapCursorDistNotifier.dispose();

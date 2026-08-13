@@ -289,7 +289,13 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   ///
   /// Self-cancels if the user navigates to another project (projectName change)
   /// or the segment is deleted mid-resolve. On `resolved`, patches the segment's
-  /// geometry into [geo]. On `failed`, throws with the server error message.
+  /// geometry into [geo]. On `failed`, throws with the server error message. On
+  /// a timeout, sets [error] — mirrors `_pollActivityRefresh`'s handling of the
+  /// same class of bug (issue #213): a resolve that outlives this poll's own
+  /// deadline (a backgrounded browser tab throttling the poll ticks, most
+  /// plausibly — real elapsed server time can be well under [timeout] even so)
+  /// used to leave the tile spinning forever with no way to notice the result
+  /// had actually landed.
   Future<Map<String, dynamic>> pollSegmentResolution(
     String segId, {
     Duration interval = const Duration(seconds: 3),
@@ -332,7 +338,10 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       }
       // still pending → keep polling
     }
-    return {'route_status': 'pending'}; // timed out — tile keeps its spinner
+    error = 'Route resolution is taking longer than expected. '
+        'Reopen the project to see the result.';
+    notifyListeners();
+    return {'route_status': 'pending'};
   }
 
   /// Merge [fields] into the matching segment in [items], assigning a new list

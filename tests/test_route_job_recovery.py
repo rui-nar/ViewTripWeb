@@ -23,10 +23,12 @@ from models.project_db import DBProject, DBProjectItem, DBRouteJob
 from models.user import UserInfo
 from src.jobs.route_jobs import (
     MAX_ATTEMPTS,
+    MAX_DEGRADE_RETRIES,
     create_job,
     mark_done,
     mark_failed,
     mark_running,
+    sweep_degraded_segments,
     sweep_orphaned_jobs,
 )
 
@@ -204,3 +206,117 @@ class TestStartupSweep:
 
         monkeypatch.setattr(route_jobs, "get_session", _boom)
         assert sweep_orphaned_jobs() == 0   # logged, not raised
+
+
+def _degraded_segment(**overrides):
+    seg = {
+        "id": "seg-1", "segment_type": "train",
+        "route_status": "resolved", "route_degraded": True,
+        "route_degrade_retries": 0,
+        "hafas_provider": "db", "train_number": "ICE 596",
+        "date": "2026-08-01",
+    }
+    seg.update(overrides)
+    return seg
+
+
+@pytest.fixture
+def degraded_env(monkeypatch):
+    """One project with one segment whose shape a test customises via [seg]."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+
+    def _seed(seg: dict):
+        with Session(engine) as sess:
+            user = UserInfo(display_name="A", email="a@e.com")
+            sess.add(user); sess.commit(); sess.refresh(user)
+            proj = DBProject(user_info_id=user.id, name="Trip")
+            sess.add(proj); sess.commit(); sess.refresh(proj)
+            sess.add(DBProjectItem(
+                project_id=proj.id, position=0, item_type="segment",
+                uid="u1", segment_id="seg-1", segment_json=json.dumps(seg),
+            ))
+            sess.commit()
+            return engine, user.id, proj.id
+
+    return _seed
+
+
+def _segment_row(engine):
+    with Session(engine) as sess:
+        return sess.exec(select(DBProjectItem).where(
+            DBProjectItem.segment_id == "seg-1")).first()
+
+
+class TestDegradedSegmentSweep:
+    def test_a_degraded_segment_is_retried(self, degraded_env, monkeypatch):
+        engine, user_id, project_id = degraded_env(_degraded_segment())
+
+        enqueued: list = []
+        import src.jobs.queue as queue_mod
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 1
+        assert len(enqueued) == 1
+        user_arg, name_arg, seg_id_arg, params, _started_at, _job_id = enqueued[0]
+        assert (user_arg, name_arg, seg_id_arg) == (user_id, "Trip", "seg-1")
+        assert params == {
+            "hafas_provider": "db", "train_number": "ICE 596", "date": "2026-08-01",
+        }
+
+        row = _segment_row(engine)
+        seg = json.loads(row.segment_json)
+        assert seg["route_status"] == "pending"
+        assert seg["route_degrade_retries"] == 1
+
+    def test_a_fully_resolved_segment_is_left_alone(self, degraded_env, monkeypatch):
+        engine, _user_id, _project_id = degraded_env(
+            _degraded_segment(route_degraded=False))
+
+        import src.jobs.queue as queue_mod
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 0
+        assert enqueued == []
+
+    def test_a_pending_segment_is_not_retried(self, degraded_env, monkeypatch):
+        """route_degraded=True with route_status="pending" shouldn't occur in
+        practice (a fresh resolve always clears route_degraded first), but the
+        sweep must not double-trigger an already in-flight resolve either way."""
+        degraded_env(_degraded_segment(route_status="pending"))
+
+        import src.jobs.queue as queue_mod
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 0
+        assert enqueued == []
+
+    def test_exhausted_retries_stop_being_retried(self, degraded_env, monkeypatch):
+        degraded_env(_degraded_segment(route_degrade_retries=MAX_DEGRADE_RETRIES))
+
+        import src.jobs.queue as queue_mod
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 0
+        assert enqueued == []
+
+    def test_a_broken_sweep_does_not_raise(self, degraded_env, monkeypatch):
+        degraded_env(_degraded_segment())
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(route_jobs, "get_session", _boom)
+        assert sweep_degraded_segments() == 0

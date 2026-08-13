@@ -628,6 +628,27 @@ class _ActivityPanelState extends State<ActivityPanel> {
         ),
       );
     }
+    // A resolved segment can still be a straight-endpoint chord rather than the
+    // real track, when the server couldn't find one (issue #213). That's a
+    // successful resolve, not a failure — but silently rendering nothing here
+    // makes it indistinguishable from a full success, so surface it the same
+    // way a failure is: a tappable retry affordance.
+    if (status == 'resolved' && seg['route_degraded'] == true) {
+      return InkWell(
+        onTap: () => _retrySegmentResolve(context, notifier, seg, segId, segType),
+        child: Tooltip(
+          message: 'Only a straight line between the endpoints could be '
+              'found. Tap to retry.',
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.timeline, size: 12, color: theme.colorScheme.tertiary),
+            const SizedBox(width: 4),
+            Text('Approximate route — tap to retry',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.tertiary)),
+          ]),
+        ),
+      );
+    }
     return null;
   }
 

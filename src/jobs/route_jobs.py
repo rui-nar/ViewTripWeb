@@ -18,20 +18,32 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from sqlmodel import select
 
 from models.db import get_session
-from models.project_db import DBRouteJob
+from models.project_db import DBProject, DBProjectItem, DBRouteJob
+from src.models.project import ConnectingSegment
+from src.project.project_repo import ProjectRepo
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
+_repo = ProjectRepo()
 
 # A job that dies mid-run is re-queued by the next sweep. One that dies *because
 # of its own inputs* would be re-queued forever, taking a worker with it every
 # boot — so the sweep gives up and fails it loudly instead.
 MAX_ATTEMPTS = 3
+
+# A degraded resolve (route_degraded=True) is a straight endpoint chord used
+# because Overpass failed every mirror/strategy at request time — not a
+# permanent verdict; the same mirror flakiness is often transient (issue
+# #207). sweep_degraded_segments retries a degraded segment up to this many
+# times before leaving it alone — still manually retryable from the tile,
+# same as any other resolve.
+MAX_DEGRADE_RETRIES = 5
 
 TERMINAL = ("done", "failed")
 
@@ -179,3 +191,86 @@ def _fail_segment_for(
         "Route resolution did not survive a server restart — please try again.",
         started_at,
     )
+
+
+def sweep_degraded_segments() -> int:
+    """Re-attempt every degraded, not-yet-exhausted segment. Returns how many.
+
+    Called on a schedule (hourly, api/router.py) — unlike :func:`sweep_orphaned_jobs`
+    there is no startup/crash urgency here, just giving a flaky Overpass mirror
+    room to recover between attempts (issue #207).
+
+    Reads candidates directly off ``DBProjectItem`` rows rather than loading
+    whole projects via :class:`ProjectRepo` — the same reason
+    :func:`sweep_orphaned_jobs` reads ``DBRouteJob`` rows directly instead of
+    going through a heavier path.
+    """
+    from api.geo import bust_geo_cache
+    from api.segments import _resolve_route_job
+    from src.jobs.queue import QUEUE_RESOLVE, enqueue
+
+    candidates: list = []
+    try:
+        with get_session() as sess:
+            rows = sess.exec(
+                select(DBProjectItem, DBProject.user_info_id, DBProject.name)
+                .join(DBProject, DBProject.id == DBProjectItem.project_id)
+                .where(DBProjectItem.item_type == "segment")
+            ).all()
+            for row, user_info_id, name in rows:
+                seg = ConnectingSegment.from_dict(json.loads(row.segment_json or "{}"))
+                if seg.route_status != "resolved" or not seg.route_degraded:
+                    continue
+                if seg.route_degrade_retries >= MAX_DEGRADE_RETRIES:
+                    continue
+                candidates.append((
+                    row.project_id, user_info_id, name, seg.id,
+                    seg.route_degrade_retries,
+                    {
+                        "hafas_provider": seg.hafas_provider,
+                        "train_number": seg.train_number,
+                        "date": seg.date,
+                    },
+                ))
+    except Exception:  # noqa: BLE001 — a broken sweep must not take the scheduler down
+        _log.exception("degraded-segment sweep failed to read candidates")
+        return 0
+
+    retried = 0
+    for project_id, user_info_id, name, seg_id, retries, params in candidates:
+        started_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with get_session() as sess:
+                # Only if still resolved+degraded: a manual trigger or edit
+                # racing this sweep owns the outcome instead.
+                written = _repo.update_segment_fields(
+                    sess, project_id, seg_id,
+                    {
+                        "route_status": "pending",
+                        "route_started_at": started_at,
+                        "route_degrade_retries": retries + 1,
+                    },
+                    expect_status="resolved",
+                )
+                sess.commit()
+        except Exception:  # noqa: BLE001
+            _log.exception("could not mark seg=%s pending for a degraded retry", seg_id)
+            continue
+        if not written:
+            continue
+        # Mirrors resolve_segment_route: a cached /meta must not keep serving
+        # the pre-retry "resolved+degraded" state, including to a client's own
+        # periodic degraded-route-upgrade check (project_notifier.dart).
+        bust_geo_cache(user_info_id, name)
+
+        job_id = create_job(user_info_id, project_id, name, seg_id, started_at, params)
+        try:
+            enqueue(QUEUE_RESOLVE, _resolve_route_job,
+                    user_info_id, name, seg_id, params, started_at, job_id)
+            retried += 1
+        except Exception:  # noqa: BLE001
+            _log.exception("could not enqueue degraded retry for seg=%s", seg_id)
+
+    if retried:
+        _log.info("retried %d degraded segment(s)", retried)
+    return retried

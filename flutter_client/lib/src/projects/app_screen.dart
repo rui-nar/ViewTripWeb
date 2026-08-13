@@ -73,6 +73,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   late final AnimatedMapController _mapController =
       AnimatedMapController(vsync: this, duration: const Duration(milliseconds: 500));
   final GlobalKey<ManageMapPanelState> _mapPanelKey = GlobalKey();
+
+  // Captured (not looked up via context) so dispose() can stop it: when this
+  // widget is torn down as part of a larger subtree/route unmount, its
+  // element is already deactivated by the time dispose() runs, and
+  // context.read() on a deactivated element throws ("Looking up a
+  // deactivated widget's ancestor is unsafe") — issue #207 CI failure.
+  ProjectNotifier? _degradedRouteWatchNotifier;
   // Survives ManageMapPanelState recreation — prevents re-fitting after user pans.
   // Seeded true when a camera position was carried over from view mode.
   // Seeded in initState, NOT lazily: the camera→URL sync writes lat/lng onto
@@ -200,6 +207,11 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
+        // Issue #207: tied to this screen's lifecycle, not load()'s — this
+        // notifier is also reused ambiently by screens (e.g. ProjectStatsScreen)
+        // that never render the banner and must not carry this timer around.
+        _degradedRouteWatchNotifier = notifier;
+        notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
     SharedPreferences.getInstance().then((prefs) {
@@ -221,6 +233,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     _mapFitted.dispose();
     _activityScrollController.dispose();
     _mobileActivityScrollController.dispose();
+    _degradedRouteWatchNotifier?.stopDegradedRouteWatch();
     super.dispose();
   }
 
@@ -775,6 +788,32 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   TextButton(
                     onPressed: () => _openSyncDialog(context),
                     child: const Text('Import'),
+                  ),
+                ],
+              );
+            },
+          ),
+          // ── Degraded-route upgrade banner (issue #207) ───────────────────
+          Selector<ProjectNotifier, bool>(
+            selector: (_, n) => n.degradedRouteUpgradeAvailable,
+            builder: (context, hasUpgrade, __) {
+              if (!hasUpgrade) return const SizedBox.shrink();
+              final n = context.read<ProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  'A route that was only an approximate straight line has '
+                  'been resolved with real track data.',
+                ),
+                leading: const Icon(Icons.route, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissDegradedRouteUpgrade,
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: n.reloadForDegradedUpgrade,
+                    child: const Text('Reload'),
                   ),
                 ],
               );
