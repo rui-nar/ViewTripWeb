@@ -455,6 +455,32 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
               );
             },
           ),
+          // ── Degraded-route upgrade banner (issue #207) ───────────────────
+          Selector<ViewProjectNotifier, bool>(
+            selector: (_, n) => n.degradedRouteUpgradeAvailable,
+            builder: (context, hasUpgrade, __) {
+              if (!hasUpgrade) return const SizedBox.shrink();
+              final n = context.read<ViewProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  'A route that was only an approximate straight line has '
+                  'been resolved with real track data.',
+                ),
+                leading: const Icon(Icons.route, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissDegradedRouteUpgrade,
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: n.reloadForDegradedUpgrade,
+                    child: const Text('Reload'),
+                  ),
+                ],
+              );
+            },
+          ),
           Expanded(
             child: Consumer<ViewProjectNotifier>(
               builder: (context, notifier, _) {

@@ -780,6 +780,32 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               );
             },
           ),
+          // ── Degraded-route upgrade banner (issue #207) ───────────────────
+          Selector<ProjectNotifier, bool>(
+            selector: (_, n) => n.degradedRouteUpgradeAvailable,
+            builder: (context, hasUpgrade, __) {
+              if (!hasUpgrade) return const SizedBox.shrink();
+              final n = context.read<ProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  'A route that was only an approximate straight line has '
+                  'been resolved with real track data.',
+                ),
+                leading: const Icon(Icons.route, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissDegradedRouteUpgrade,
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: n.reloadForDegradedUpgrade,
+                    child: const Text('Reload'),
+                  ),
+                ],
+              );
+            },
+          ),
           Expanded(child: LayoutBuilder(
         builder: (context, constraints) {
           // Auto-close the panel when switching to wide layout.
