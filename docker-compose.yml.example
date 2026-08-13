@@ -31,17 +31,33 @@ x-logging: &default-logging
 # lockup rather than a clean, single-container OOM-kill Docker could recover
 # from on its own via `restart: unless-stopped`.
 #
-# These are starting points sized for one stack on a 4 GB host, not a
-# guarantee — halve them (or run fewer services) if prod and val share a
-# host, per the "Open items" note in docs/DEPLOYMENT_VPS.md. `worker-poster`
-# gets the largest share because an A0 render is the single most
-# memory-heavy thing this app does (see the worker services below).
+# The first cut of these numbers (512M/384M) was a guess and was too low: a
+# resolve on a small test project pushed the API process past 512M and got
+# cgroup-OOM-killed (`journalctl -k`: "Memory cgroup out of memory: Killed
+# process ... (uvicorn) ... anon-rss:521900kB", still climbing when killed —
+# see issue #209's follow-up comment). These are revised upward from that
+# measurement, with headroom, not from a second guess.
+#
+# REQUIRES REDIS_URL to be set. Without it, `enqueue()` (src/jobs/queue.py)
+# falls back to running resolves in-process in the API container, which is
+# the smallest limit here — the exact way the 512M version broke. `worker`
+# is sized closest to the measured resolve peak; `worker-poster` gets the
+# largest share on top of that because an A0 render is the single most
+# memory-heavy thing this app does.
+#
+# These four limits sum to ~3.25 GB — on the documented 4 GB VPS
+# (docs/DEPLOYMENT_VPS.md), that leaves too little for the OS plus a second
+# full stack (prod + val share one host there). Halving everything is not a
+# real fix once resolve alone measures >512M; treat "both stacks, generous
+# limits, one 4 GB host" as an open capacity question, not solved by any
+# number in this file — either give the host more RAM, or don't run both
+# stacks' workers at full concurrency simultaneously.
 x-mem-api: &mem-api
-  memory: 512M
-x-mem-worker: &mem-worker
-  memory: 384M
-x-mem-worker-poster: &mem-worker-poster
   memory: 768M
+x-mem-worker: &mem-worker
+  memory: 1024M
+x-mem-worker-poster: &mem-worker-poster
+  memory: 1280M
 x-mem-redis: &mem-redis
   memory: 256M
 
