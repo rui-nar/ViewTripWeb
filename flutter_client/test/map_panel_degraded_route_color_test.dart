@@ -83,8 +83,14 @@ void main() {
     addTearDown(controller.dispose);
 
     await tester.pumpWidget(_panel(_notifier(degraded: degraded), controller));
+    // _fitBoundsOnce animates the initial camera fit (AnimatedMapController):
+    // one pump for the build + post-frame callback, a second for the ticker's
+    // zero-elapsed first tick, then the animation's own duration — otherwise
+    // its ticker is still running when the test tears down (mirrors
+    // map_panel_fit_bounds_test.dart's _settleFit).
     await tester.pump();
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
 
     final layer = tester.widget<PolylineLayer>(find.byType(PolylineLayer).first);
     expect(layer.polylines, hasLength(1));

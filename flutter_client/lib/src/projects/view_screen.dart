@@ -282,6 +282,9 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
         }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
+        // Issue #207: tied to this screen's lifecycle, not loadView()'s —
+        // see the equivalent call in app_screen.dart for why.
+        notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
     _mapEventSub =
@@ -293,6 +296,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     _mapEventSub?.cancel();
     _viewportSyncTimer?.cancel();
     _mapController.dispose();
+    context.read<ViewProjectNotifier>().stopDegradedRouteWatch();
     super.dispose();
   }
 

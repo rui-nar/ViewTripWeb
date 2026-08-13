@@ -200,6 +200,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         }
         saveLastOpenedProject(
             context.read<AuthNotifier>().user?.id, notifier.ref ?? projectRef);
+        // Issue #207: tied to this screen's lifecycle, not load()'s — this
+        // notifier is also reused ambiently by screens (e.g. ProjectStatsScreen)
+        // that never render the banner and must not carry this timer around.
+        notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
       });
     });
     SharedPreferences.getInstance().then((prefs) {
@@ -221,6 +225,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     _mapFitted.dispose();
     _activityScrollController.dispose();
     _mobileActivityScrollController.dispose();
+    context.read<ProjectNotifier>().stopDegradedRouteWatch();
     super.dispose();
   }
 

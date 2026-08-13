@@ -60,7 +60,11 @@ Future<void> _pumpPanel(WidgetTester tester, ProjectNotifier notifier) async {
   );
   // Days start collapsed; expand so the segment row renders.
   await tester.tap(find.byIcon(Icons.unfold_more));
-  await tester.pumpAndSettle();
+  // Not pumpAndSettle(): a 'pending' segment renders an indeterminate
+  // CircularProgressIndicator, whose animation never settles and hangs this
+  // forever. Two pumps (build + the tap's own frame) is enough either way.
+  await tester.pump();
+  await tester.pump();
 }
 
 void main() {

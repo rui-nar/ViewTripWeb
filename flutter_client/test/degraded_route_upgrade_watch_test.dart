@@ -162,8 +162,8 @@ void main() {
         _meta([_segment('a', degraded: true)]),
       ]);
       final n = _TestProjectNotifier(service)..ref = _ref;
-      // Simulate the banner already being up (as load() itself would have
-      // done via _startDegradedRouteWatch, without re-running a full load here).
+      // Simulate the banner already being up (as the owning screen's
+      // startDegradedRouteWatch would have done) without a real check here.
       n.degradedRouteUpgradeAvailable = true;
 
       await n.reloadForDegradedUpgrade();

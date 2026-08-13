@@ -718,9 +718,6 @@ class ProjectNotifier extends ChangeNotifier
         if (_loadKey == ref) _backgroundSyncCheck(ref);
       });
     }
-    // Any viewer of this project (not just the owner) may care that a
-    // degraded route got fixed, so this isn't gated on loadOwnerExtras.
-    _startDegradedRouteWatch(ref);
   }
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
@@ -1157,23 +1154,32 @@ class ProjectNotifier extends ChangeNotifier
   // its own hourly schedule, server-side, independent of whether anyone has
   // the project open. A tab already open at that moment has no live channel
   // telling it that happened, so this polls a cheap, already-cached endpoint
-  // (/meta) on an interval and on app resume — mirroring VersionGate's
-  // staleness check — purely to detect the change. It never applies the
-  // fresh data itself: only reloadForDegradedUpgrade() does that, and only
-  // when the user asks for it, so a background tick can never rewrite what
-  // someone is actively looking at or mid-edit on.
+  // (/meta) on an interval — purely to detect the change. It never applies
+  // the fresh data itself: only reloadForDegradedUpgrade() does that, and
+  // only when the user asks for it, so a background tick can never rewrite
+  // what someone is actively looking at or mid-edit on.
+  //
+  // Deliberately NOT started from load(): this notifier is reused as an
+  // ambient/shared instance by screens that never render the banner (e.g.
+  // ProjectStatsScreen reads it just for tags), and load() runs there too.
+  // Starting a 15-minute Timer.periodic every time *anything* loads a project
+  // — and only ever cancelling it in dispose(), which an ambient instance may
+  // never see — leaks a pending timer for the lifetime of whatever's running.
+  // Screens that actually show the banner (app_screen.dart, view_screen.dart)
+  // call start/stop from their own State's initState/dispose instead, so the
+  // timer's lifetime matches a mounted widget's, not the notifier's.
 
   @visibleForTesting
   Duration degradedRouteCheckInterval = const Duration(minutes: 15);
 
-  void _startDegradedRouteWatch(ProjectRef ref) {
+  void startDegradedRouteWatch(ProjectRef ref) {
     _degradedRouteCheckTimer?.cancel();
     _lastDegradedRouteCount = null; // re-establish the baseline against fresh data
     _degradedRouteCheckTimer =
         Timer.periodic(degradedRouteCheckInterval, (_) => _checkDegradedRouteUpgrade(ref));
   }
 
-  void _stopDegradedRouteWatch() {
+  void stopDegradedRouteWatch() {
     _degradedRouteCheckTimer?.cancel();
     _degradedRouteCheckTimer = null;
   }
@@ -1569,7 +1575,7 @@ class ProjectNotifier extends ChangeNotifier
   void dispose() {
     _isDisposed = true;
     _stopPhotoPolling();
-    _stopDegradedRouteWatch();
+    stopDegradedRouteWatch(); // usually already stopped by the owning screen's dispose()
     previewArcNotifier.dispose();
     elevationCursorNotifier.dispose();
     mapCursorDistNotifier.dispose();
