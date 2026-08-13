@@ -548,4 +548,11 @@ same compose project.
       `/opt/viewtrip-val` on the VPS; `deploy.ps1` no longer reaches the NAS.
 - [ ] Both environments now share one host, one disk and one 4 GB of RAM. A
       poster render in val competes with prod for memory — worth watching
-      before assuming val is free.
+      before assuming val is free. Confirmed a real constraint, not just a
+      theoretical one (issue #209): a route resolution alone measured over
+      512M in the API process. Sizing the per-container memory limits in
+      `docker-compose.yml.example` generously enough to survive a real
+      resolve/poster peak (~3.25 GB for one full stack) leaves too little
+      headroom for a second full stack plus the OS on this 4 GB host —
+      unresolved; needs either more host RAM or not running both stacks'
+      workers at full concurrency simultaneously.
