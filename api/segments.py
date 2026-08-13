@@ -173,6 +173,9 @@ def _resolve_route_job(
                 "route_mode": _mode_for_type.get(seg.segment_type, "great_circle"),
                 "route_error": None,
                 "route_degraded": degraded,
+                # Any successful resolve — manual or a sweep_degraded_segments
+                # retry — starts the automatic-retry budget over (issue #207).
+                "route_degrade_retries": 0,
                 # A fresh auto-resolve is authoritative again — clears the
                 # guard a prior manual edit (issue #150) set.
                 "route_edited": False,
