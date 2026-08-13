@@ -443,6 +443,8 @@ class TestDataclassRoundTrips:
             route_status="resolved",
             route_error=None,
             route_started_at="2024-03-14T10:00:00",
+            route_degraded=True,
+            route_degrade_retries=2,
         )
         restored = ConnectingSegment.from_dict(seg.to_dict())
         assert restored.id == seg.id
@@ -457,3 +459,14 @@ class TestDataclassRoundTrips:
         assert restored.route_polyline == seg.route_polyline
         assert restored.route_status == seg.route_status
         assert restored.route_started_at == seg.route_started_at
+        # Regression: from_dict() used to drop route_degraded entirely, so any
+        # code loading a project via ProjectRepo.get_project() saw False
+        # regardless of what was actually stored (issue #207).
+        assert restored.route_degraded is True
+        assert restored.route_degrade_retries == 2
+
+    def test_connecting_segment_defaults_are_not_degraded(self):
+        """A segment that was never resolved must not look like a stuck retry."""
+        restored = ConnectingSegment.from_dict({})
+        assert restored.route_degraded is False
+        assert restored.route_degrade_retries == 0
