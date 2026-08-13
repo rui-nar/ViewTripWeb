@@ -205,6 +205,7 @@ def sweep_degraded_segments() -> int:
     :func:`sweep_orphaned_jobs` reads ``DBRouteJob`` rows directly instead of
     going through a heavier path.
     """
+    from api.geo import bust_geo_cache
     from api.segments import _resolve_route_job
     from src.jobs.queue import QUEUE_RESOLVE, enqueue
 
@@ -257,6 +258,10 @@ def sweep_degraded_segments() -> int:
             continue
         if not written:
             continue
+        # Mirrors resolve_segment_route: a cached /meta must not keep serving
+        # the pre-retry "resolved+degraded" state, including to a client's own
+        # periodic degraded-route-upgrade check (project_notifier.dart).
+        bust_geo_cache(user_info_id, name)
 
         job_id = create_job(user_info_id, project_id, name, seg_id, started_at, params)
         try:
