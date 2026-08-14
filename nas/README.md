@@ -50,17 +50,55 @@ the container silently can't rejoin the tailnet on its next restart. Tag it
 
 ## 2. Deploy
 
+Loki, Prometheus and Grafana all drop root and run as a fixed non-root UID.
+Docker creates each bind-mounted data directory fresh on first `up`, owned
+by whoever ran the command — not by the container's UID — so each one starts
+out unwritable to the process that needs it, and the container crash-loops
+on "permission denied" until it's fixed. Create and `chown` them *before*
+the first `up` rather than discover this one container at a time:
+
 ```bash
 cd nas/
 cp docker-compose.yml.example docker-compose.yml
 cp .env.example .env
 # edit .env: TS_AUTHKEY (from §1), GRAFANA_ADMIN_PASSWORD (pick one)
+
+mkdir -p loki-data prometheus-data grafana-data
+sudo chown -R 10001:10001 loki-data        # Loki's image UID
+sudo chown -R 65534:65534 prometheus-data  # Prometheus's image UID ("nobody")
+sudo chown -R 472:472 grafana-data         # Grafana's image UID
+
 docker compose up -d
 docker compose logs -f tailscale   # confirm it joins the tailnet cleanly
 ```
 
 Watch for the Tailscale container logging that it authenticated and got an
 IP — if `TS_AUTHKEY` is wrong or expired, it'll sit retrying instead.
+
+**If a container still crash-loops on "permission denied" despite the
+`chown` above** — check for a DSM ACL overriding the plain POSIX
+permissions (common on Btrfs volumes, and especially likely if this
+directory has ever hosted another container's data, since DSM ACLs are
+inherited from the parent folder):
+
+```bash
+ls -la loki-config.yaml   # a trailing `+` on the mode means an ACL is present
+synoacltool -get loki-config.yaml
+```
+
+A `+` with no "everyone"/generic-allow entry in the ACL list means DSM is
+denying access to the container's UID regardless of what the POSIX bits
+say. Strip it back to plain POSIX permissions for the specific file or
+directory that's failing:
+
+```bash
+synoacltool -del loki-config.yaml
+```
+
+(There's no `-disable` verb, despite what you might expect — `-del` with no
+index removes the whole ACL. `synoacltool -h` lists the rest if you need
+finer-grained control, e.g. adding an explicit "everyone: read" entry
+instead of removing the ACL outright.)
 
 ## 3. Confirm the tailnet name
 
