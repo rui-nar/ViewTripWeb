@@ -24,7 +24,7 @@
         "name": "env",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "$datasource"},
-        "query": {"query": "label_values(viewtrip_http_requests_total, env)", "refId": "EnvVariable"},
+        "query": {"query": "label_values(up{job=\"viewtrip\"}, env)", "refId": "EnvVariable"},
         "current": {"text": "production", "value": "production"},
         "includeAll": false,
         "multi": false,
