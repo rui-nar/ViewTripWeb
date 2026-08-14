@@ -1,0 +1,163 @@
+{
+  "uid": "viewtrip-jobs-db",
+  "title": "ViewTrip / Jobs & Database",
+  "description": "Background job health (APScheduler, docs/METRICS.md) and SQLite pool/file metrics. Counters reset on restart — only ever read rate()/increase(), not absolute totals.",
+  "tags": ["viewtrip"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Time since last successful daily_backup",
+      "description": "Alert threshold from docs/METRICS.md: time() - viewtrip_job_last_success_timestamp_seconds{job=\"daily_backup\"} > 90000 (25h) means it silently stopped.",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "time() - viewtrip_job_last_success_timestamp_seconds{job=\"daily_backup\"}"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 86400},
+            {"color": "red", "value": 90000}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "DB pool in-use / capacity",
+      "description": "Pool exhaustion is the issue #35 hang. Capacity is 60.",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * viewtrip_db_pool_connections{state=\"in_use\"} / viewtrip_db_pool_capacity"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 70},
+            {"color": "red", "value": 90}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Stale writes/sec",
+      "description": "Write contention — see docs/METRICS.md alerts table.",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_stale_writes_total[5m]))"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops", "decimals": 3,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 0.01}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Job runs by result",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_job_runs_total[15m])) by (job, result)", "legendFormat": "{{job}} ({{result}})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": [
+        {"matcher": {"id": "byRegexp", "options": "/error/"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+      ]},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["sum"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Job duration (p95) by job",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_job_duration_seconds_bucket[15m])) by (le, job))", "legendFormat": "{{job}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "DB pool connections vs capacity",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "viewtrip_db_pool_connections{state=\"in_use\"}", "legendFormat": "in use"},
+        {"refId": "B", "expr": "viewtrip_db_pool_connections{state=\"idle\"}", "legendFormat": "idle"},
+        {"refId": "C", "expr": "viewtrip_db_pool_overflow", "legendFormat": "overflow"},
+        {"refId": "D", "expr": "viewtrip_db_pool_capacity", "legendFormat": "capacity"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "custom": {"drawStyle": "line", "fillOpacity": 5}}, "overrides": [
+        {"matcher": {"id": "byName", "options": "capacity"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
+      ]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "DB file size (main vs WAL)",
+      "description": "WAL climbing without ever dropping means checkpointing has stopped (wal_autocheckpoint=0 — only the wal_checkpoint job folds it back).",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "viewtrip_db_file_size_bytes{file=\"main\"}", "legendFormat": "main"},
+        {"refId": "B", "expr": "viewtrip_db_file_size_bytes{file=\"wal\"}", "legendFormat": "wal"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "DB errors by kind",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_db_errors_total[5m])) by (kind)", "legendFormat": "{{kind}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["sum"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "DB query duration (p95) by operation",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_db_query_duration_seconds_bucket[5m])) by (le, operation))", "legendFormat": "{{operation}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

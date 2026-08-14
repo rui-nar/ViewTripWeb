@@ -1,0 +1,146 @@
+{
+  "uid": "viewtrip-http",
+  "title": "ViewTrip / HTTP & Traffic",
+  "description": "Request rate, errors and latency from prometheus-fastapi-instrumentator (docs/METRICS.md). handler is the route template, not the concrete path.",
+  "tags": ["viewtrip"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests/sec",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_http_requests_total[5m]))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 2}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error rate (5xx)",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * sum(rate(viewtrip_http_requests_total{status=~\"5..\"}[5m])) / sum(rate(viewtrip_http_requests_total[5m]))"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 2,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 1},
+            {"color": "red", "value": 5}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "In-progress requests",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "viewtrip_http_requests_inprogress"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "p95 latency (all handlers)",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_http_request_duration_seconds_bucket[5m])) by (le))"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s", "decimals": 3,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 1},
+            {"color": "red", "value": 3}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Request rate by status",
+      "description": "Status codes are not grouped into 2xx/4xx — 409 vs 401 vs 404 are individually actionable.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_http_requests_total[5m])) by (status)", "legendFormat": "{{status}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Request rate by handler (top 10)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "topk(10, sum(rate(viewtrip_http_requests_total[5m])) by (handler))", "legendFormat": "{{handler}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Latency percentiles (all handlers)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.50, sum(rate(viewtrip_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"refId": "C", "expr": "histogram_quantile(0.99, sum(rate(viewtrip_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "p95 latency by handler (top 10 slowest)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "topk(10, histogram_quantile(0.95, sum(rate(viewtrip_http_request_duration_seconds_bucket[5m])) by (le, handler)))", "legendFormat": "{{handler}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Avg request / response size",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "rate(viewtrip_http_request_size_bytes_sum[5m]) / rate(viewtrip_http_request_size_bytes_count[5m])", "legendFormat": "request"},
+        {"refId": "B", "expr": "rate(viewtrip_http_response_size_bytes_sum[5m]) / rate(viewtrip_http_response_size_bytes_count[5m])", "legendFormat": "response"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

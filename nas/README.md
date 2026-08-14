@@ -80,8 +80,18 @@ curl -s http://viewtrip-observability:9090/-/ready  # Prometheus
 Open Grafana at `http://viewtrip-observability:3000` (only reachable from a
 device on the tailnet — that's the point) and confirm the Prometheus and
 Loki datasources (auto-provisioned from
-`grafana/provisioning/datasources/datasources.yaml`) show green in
-Settings → Data sources.
+`grafana/provisioning/datasources/datasources.yaml`, fixed UIDs
+`viewtrip-prometheus`/`viewtrip-loki`) show green in Settings → Data
+sources.
+
+Four dashboards are auto-provisioned too (`grafana/provisioning/dashboards/`,
+read-only — edit the JSON and it picks up the change within 30s, no restart
+needed), in a **ViewTrip** folder: **HTTP & Traffic**, **Jobs & Database**,
+**Integrations & Auth**, and **Logs**. Panels are a direct rendering of the
+metrics/queries already documented in `../docs/METRICS.md` and
+`../docs/OBSERVABILITY.md`'s "Queries an operator actually runs" — nothing
+in them is new, they just save re-typing the same PromQL/LogQL each time.
+Empty until §4 below has data flowing.
 
 ## 4. Point Alloy (VPS side) at this stack
 
