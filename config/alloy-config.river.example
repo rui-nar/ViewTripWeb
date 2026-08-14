@@ -33,30 +33,37 @@ discovery.docker "containers" {
 // which container/environment emitted it, and `env` so prod and val are
 // distinguishable once both land in the same Loki.
 //
-// `service` is gated on the container name (confirmed live: without this
-// gate, a rule with no source_labels sets target_label unconditionally on
-// EVERY discovered container — Redis, the worker, worker-poster, and Alloy
-// itself all end up mislabeled service="viewtripweb" too, polluting the
-// Logs dashboard's "All logs" panel with Alloy's own diagnostics and
-// friends). Docker container names always carry a leading "/" in discovery
-// metadata; "viewtripweb" (prod) and "viewtripweb-val" (val) both match,
-// nothing else in docker-compose.yml.example's container_names does.
-// Containers that don't match get no `service` label at all — their logs
-// still ship to Loki, just outside this label's scope, which matches what
-// this label was ever meant to cover (docs/OBSERVABILITY.md's LogQL
-// examples are all `service="viewtripweb"`-scoped, not "every container").
+// Alloy's own container is dropped before either label is applied — not
+// narrowed to a different label, dropped entirely. Confirmed live: without
+// this, Alloy's own diagnostics ("disabling udev device properties" and
+// friends) show up mislabeled service="viewtripweb" in the Logs dashboard's
+// "All logs" panel, mixed in with the app's actual logs. Alloy is the one
+// container that's structurally unmonitorable through this pipeline anyway
+// — if Alloy itself is broken, it can't ship logs about being broken
+// through the pipe it's responsible for shipping, so there's no version of
+// "give it its own service label instead" that would actually work; a
+// broken Alloy needs `docker compose logs alloy` on the host, not a Loki
+// query. Everything else — Redis, the worker, worker-poster, any future
+// service — deliberately keeps the blanket, ungated rule below and lands
+// under service="viewtripweb" same as the app itself: they're all part of
+// what "the app" means operationally, and a failure in any of them is
+// exactly the kind of thing the Logs dashboard exists to surface. New
+// services need no config change here to be covered, same as discovery
+// itself needs none above.
 //
-// `env` has no such gate — every container's logs and metrics need it to
-// stay distinguishable from the other environment sharing this NAS, so a
-// rule with no source_labels (unconditional replacement) is correct there.
+// `env` has no gate at all — every container, Alloy included, needs it to
+// stay distinguishable from the other environment sharing this NAS.
 discovery.relabel "containers" {
   targets = discovery.docker.containers.targets
 
   rule {
     source_labels = ["__meta_docker_container_name"]
-    regex         = "^/viewtripweb.*"
-    target_label  = "service"
-    replacement   = "viewtripweb"
+    regex         = "^/viewtrip-(val-)?alloy$"
+    action        = "drop"
+  }
+  rule {
+    target_label = "service"
+    replacement  = "viewtripweb"
   }
   rule {
     target_label = "env"
