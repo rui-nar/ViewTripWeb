@@ -1,7 +1,7 @@
 {
   "uid": "viewtrip-host-resources",
   "title": "ViewTrip / Host Resources",
-  "description": "VPS host memory and swap, from Alloy's prometheus.exporter.unix (config/alloy-config.river.example). Added after issue #209: the host livelocked under memory pressure with no swap, and nothing was watching host memory at all, so the incident looked like silence rather than a clean crash.",
+  "description": "VPS host memory, swap, CPU, disk and load, from Alloy's prometheus.exporter.unix (config/alloy-config.river.example). Added after issue #209: the host livelocked under memory pressure with no swap, and nothing was watching host resources at all, so the incident looked like silence rather than a clean crash. Prod and val run on the same physical VPS, so this dashboard reports the same host either way — use the env variable to pick which environment's alloy container is reporting it (a gap in one while the other keeps reporting is itself a useful signal).",
   "tags": ["viewtrip"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -9,6 +9,21 @@
   "editable": false,
   "refresh": "30s",
   "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+        "query": {"query": "label_values(node_memory_MemTotal_bytes, env)", "refId": "EnvVariable"},
+        "current": {"text": "production", "value": "production"},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
   "panels": [
     {
       "id": 1,
@@ -17,7 +32,7 @@
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"}
+        {"refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\"} / node_memory_MemTotal_bytes{env=\"$env\"})"}
       ],
       "fieldConfig": {
         "defaults": {
@@ -40,7 +55,7 @@
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "100 * (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes)"}
+        {"refId": "A", "expr": "100 * (1 - node_memory_SwapFree_bytes{env=\"$env\"} / node_memory_SwapTotal_bytes{env=\"$env\"})"}
       ],
       "fieldConfig": {
         "defaults": {
@@ -63,7 +78,7 @@
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "node_memory_SwapTotal_bytes"}
+        {"refId": "A", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"}"}
       ],
       "fieldConfig": {
         "defaults": {
@@ -84,11 +99,11 @@
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 7},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "node_memory_MemTotal_bytes", "legendFormat": "total"},
-        {"refId": "B", "expr": "node_memory_MemAvailable_bytes", "legendFormat": "available"},
-        {"refId": "C", "expr": "node_memory_MemFree_bytes", "legendFormat": "free"},
-        {"refId": "D", "expr": "node_memory_Cached_bytes", "legendFormat": "cached"},
-        {"refId": "E", "expr": "node_memory_Buffers_bytes", "legendFormat": "buffers"}
+        {"refId": "A", "expr": "node_memory_MemTotal_bytes{env=\"$env\"}", "legendFormat": "total"},
+        {"refId": "B", "expr": "node_memory_MemAvailable_bytes{env=\"$env\"}", "legendFormat": "available"},
+        {"refId": "C", "expr": "node_memory_MemFree_bytes{env=\"$env\"}", "legendFormat": "free"},
+        {"refId": "D", "expr": "node_memory_Cached_bytes{env=\"$env\"}", "legendFormat": "cached"},
+        {"refId": "E", "expr": "node_memory_Buffers_bytes{env=\"$env\"}", "legendFormat": "buffers"}
       ],
       "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 5}}, "overrides": [
         {"matcher": {"id": "byName", "options": "total"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
@@ -102,8 +117,8 @@
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 7},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes", "legendFormat": "swap used"},
-        {"refId": "B", "expr": "node_memory_SwapTotal_bytes", "legendFormat": "swap total"}
+        {"refId": "A", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"} - node_memory_SwapFree_bytes{env=\"$env\"}", "legendFormat": "swap used"},
+        {"refId": "B", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"}", "legendFormat": "swap total"}
       ],
       "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": [
         {"matcher": {"id": "byName", "options": "swap total"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
@@ -118,9 +133,117 @@
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
       "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
       "targets": [
-        {"refId": "A", "expr": "process_resident_memory_bytes{job=\"viewtrip\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "process_resident_memory_bytes{job=\"viewtrip\",env=\"$env\"}", "legendFormat": "{{instance}}"}
       ],
       "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 7,
+      "type": "gauge",
+      "title": "CPU used",
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\",env=\"$env\"}[5m])))"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 80},
+            {"color": "red", "value": 95}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Load average (1m)",
+      "description": "This VPS is 2 vCore — a sustained value above 2 means more is runnable than there is CPU to run it.",
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_load1{env=\"$env\"}"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none", "decimals": 2,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 2},
+            {"color": "red", "value": 4}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "area"}
+    },
+    {
+      "id": 9,
+      "type": "gauge",
+      "title": "Disk used (root filesystem)",
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - node_filesystem_avail_bytes{mountpoint=\"/\",env=\"$env\"} / node_filesystem_size_bytes{mountpoint=\"/\",env=\"$env\"})"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 80},
+            {"color": "red", "value": 92}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "CPU usage by mode",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 31},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "avg(rate(node_cpu_seconds_total{env=\"$env\"}[5m])) by (mode)", "legendFormat": "{{mode}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "custom": {"drawStyle": "line", "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Load average over time",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 31},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_load1{env=\"$env\"}", "legendFormat": "1m"},
+        {"refId": "B", "expr": "node_load5{env=\"$env\"}", "legendFormat": "5m"},
+        {"refId": "C", "expr": "node_load15{env=\"$env\"}", "legendFormat": "15m"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "none", "custom": {"drawStyle": "line", "fillOpacity": 0}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Disk space (root filesystem)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_filesystem_avail_bytes{mountpoint=\"/\",env=\"$env\"}", "legendFormat": "free"},
+        {"refId": "B", "expr": "node_filesystem_size_bytes{mountpoint=\"/\",env=\"$env\"}", "legendFormat": "total"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 5}}, "overrides": [
+        {"matcher": {"id": "byName", "options": "total"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
+      ]},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     }
   ]

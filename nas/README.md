@@ -87,13 +87,18 @@ sources.
 Five dashboards are auto-provisioned too (`grafana/provisioning/dashboards/`,
 read-only — edit the JSON and it picks up the change within 30s, no restart
 needed), in a **ViewTrip** folder: **HTTP & Traffic**, **Jobs & Database**,
-**Integrations & Auth**, **Logs**, and **Host Resources** (VPS memory/swap —
-added after issue #209, see `../docs/DEPLOYMENT_VPS.md`'s Alloy section for
-the host `/proc`/`/sys` mounts it depends on). Panels are a direct rendering
-of the metrics/queries already documented in `../docs/METRICS.md` and
-`../docs/OBSERVABILITY.md`'s "Queries an operator actually runs" — nothing
-in them is new, they just save re-typing the same PromQL/LogQL each time.
-Empty until §4 below has data flowing.
+**Integrations & Auth**, **Logs**, and **Host Resources** (VPS memory,
+swap, CPU, load and disk — added after issue #209, see
+`../docs/DEPLOYMENT_VPS.md`'s Alloy section for the host `/proc`/`/sys`
+mounts it depends on). Panels are a direct rendering of the metrics/queries
+already documented in `../docs/METRICS.md` and `../docs/OBSERVABILITY.md`'s
+"Queries an operator actually runs" — nothing in them is new, they just save
+re-typing the same PromQL/LogQL each time. Empty until §4 below has data
+flowing.
+
+Every dashboard has an `env` variable (top-left) — prod and val push to this
+same Grafana, so pick which one you're looking at. See
+`../docs/OBSERVABILITY.md`'s "Prod and val share this Grafana" section.
 
 ## 4. Point Alloy (VPS side) at this stack
 

@@ -67,7 +67,22 @@ not anything the app itself emits. Added after issue #209 — a VPS
 livelocked under memory pressure with no swap configured, and nothing in
 this stack was watching host memory at all, so the incident looked like
 silence rather than a clean crash. Memory used %, swap used %, and "is swap
-even configured" are the panels that would have shown that coming.
+even configured" are the panels that would have shown that coming, alongside
+CPU, load average and root-filesystem disk usage — all from collectors the
+exporter already enables by default, so no Alloy config change was needed to
+add them.
+
+### Prod and val share this Grafana — the `env` variable
+
+Prod and val run on the same physical VPS and both push to this same NAS
+Loki/Prometheus (`docs/DEPLOYMENT_VPS.md` §5). Every series and log stream
+Alloy ships carries an `env` label (`production` or `validation`), and every
+one of the five dashboards has an `env` template variable (top-left) that
+filters every panel on it — pick which environment you're looking at before
+reading the numbers. `service="viewtripweb"` is likewise a real label on
+every log stream now, set unconditionally by Alloy's static relabel rule
+(`config/alloy-config.river.example`) rather than assumed — the LogQL
+queries below only started actually matching once that rule existed.
 
 ## Queries an operator actually runs
 
