@@ -1,0 +1,21 @@
+# Auto-provisioned Grafana dashboards. Committed as JSON (no secrets, safe to
+# diff) alongside the datasource provisioning in ../datasources/datasources.yaml.
+#
+# Dashboards in this directory are read-only in the UI (editable: false) —
+# editing a provisioned dashboard on the fly is normal for exploration, but
+# the change is lost on the next Grafana restart unless it's saved back here.
+# updateIntervalSeconds picks up an edited JSON file without a restart.
+
+apiVersion: 1
+
+providers:
+  - name: viewtrip
+    orgId: 1
+    folder: ViewTrip
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

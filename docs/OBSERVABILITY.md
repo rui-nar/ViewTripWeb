@@ -45,12 +45,44 @@ Cap it explicitly — "the NAS has disk to spare" is not the same as
 the existing backup-retention convention (`src/backup/backup_service.py`);
 revisit after seeing a few weeks of real volume.
 
-## Grafana datasources
+## Grafana datasources and dashboards
 
 `nas/grafana/provisioning/datasources/datasources.yaml`. Both point at
 `localhost`, not a service name — the sidecar pattern above means Loki,
 Prometheus and Grafana share one network namespace and reach each other
-over loopback, not Docker's usual bridge-network service discovery.
+over loopback, not Docker's usual bridge-network service discovery. Each
+datasource has a fixed `uid` (`viewtrip-prometheus`/`viewtrip-loki`) so the
+provisioned dashboards below can reference them reliably instead of relying
+on whatever UID Grafana would otherwise generate.
+
+Five dashboards are provisioned from `nas/grafana/provisioning/dashboards/`
+(a **ViewTrip** folder, read-only in the UI): **HTTP & Traffic**, **Jobs &
+Database**, **Integrations & Auth**, **Logs**, and **Host Resources**. They
+render the metrics table above and the LogQL queries below directly — see
+`nas/README.md` §3 for where to find them once Grafana is up.
+
+**Host Resources** is the odd one out: it's `node_*` metrics from Alloy's
+`prometheus.exporter.unix` (VPS side, `config/alloy-config.river.example`),
+not anything the app itself emits. Added after issue #209 — a VPS
+livelocked under memory pressure with no swap configured, and nothing in
+this stack was watching host memory at all, so the incident looked like
+silence rather than a clean crash. Memory used %, swap used %, and "is swap
+even configured" are the panels that would have shown that coming, alongside
+CPU, load average and root-filesystem disk usage — all from collectors the
+exporter already enables by default, so no Alloy config change was needed to
+add them.
+
+### Prod and val share this Grafana — the `env` variable
+
+Prod and val run on the same physical VPS and both push to this same NAS
+Loki/Prometheus (`docs/DEPLOYMENT_VPS.md` §5). Every series and log stream
+Alloy ships carries an `env` label (`production` or `validation`), and every
+one of the five dashboards has an `env` template variable (top-left) that
+filters every panel on it — pick which environment you're looking at before
+reading the numbers. `service="viewtripweb"` is likewise a real label on
+every log stream now, set unconditionally by Alloy's static relabel rule
+(`config/alloy-config.river.example`) rather than assumed — the LogQL
+queries below only started actually matching once that rule existed.
 
 ## Queries an operator actually runs
 

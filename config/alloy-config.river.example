@@ -13,6 +13,13 @@
 // treat it as a documented starting point to adapt and test against your own
 // Loki/Prometheus, the same spirit docker-compose.yml.example itself already
 // is for the app containers.
+//
+// PROD AND VAL SHARE THIS FILE, UNCHANGED, ONE PER HOST DIRECTORY. Both push
+// to the same NAS Loki/Prometheus, so every series and log stream carries an
+// `env` label (VIEWTRIP_ENV in .env — "production" or "validation", see
+// docs/DEPLOYMENT_VPS.md §5) or the two deployments' data would be
+// indistinguishable once it lands here. Every dashboard's `env` variable
+// filters on exactly this label.
 
 // Discover every container on this host via the Docker socket (read-only —
 // see the volume mount in docker-compose.yml.example) so new services (a
@@ -21,13 +28,33 @@ discovery.docker "containers" {
   host = "unix:///var/run/docker.sock"
 }
 
+// Static labels every discovered container needs before being tailed:
+// `service` so the app's log stream has a stable name to query regardless of
+// which container/environment emitted it, and `env` so prod and val are
+// distinguishable once both land in the same Loki. Neither comes from Docker
+// discovery metadata — a rule with no source_labels unconditionally sets
+// target_label to the literal replacement, which is the standard relabeling
+// idiom for a static label.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    target_label = "service"
+    replacement  = "viewtripweb"
+  }
+  rule {
+    target_label = "env"
+    replacement  = env("VIEWTRIP_ENV")
+  }
+}
+
 // Tail every discovered container's stdout/stderr and forward to Loki. This
 // is what actually reads the logs — the json-file rotation configured on
 // each service in docker-compose.yml.example is the separate, independent
 // fallback for when this pipeline (or the NAS/tunnel) is down.
 loki.source.docker "containers" {
   host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.containers.targets
+  targets    = discovery.relabel.containers.output
   forward_to = [loki.write.nas.receiver]
 }
 
@@ -48,12 +75,51 @@ loki.write "nas" {
 
 // Scrape the API's /metrics over the compose-internal network by service
 // name — never published to the host or the internet for this to work, only
-// reachable from other containers on this same compose network.
+// reachable from other containers on this same compose network. `env` here
+// is a literal target label (not discovery-derived, unlike the log labels
+// above), since this target list is already hand-written.
 prometheus.scrape "viewtrip" {
   targets = [
-    {"__address__" = "viewtripweb:8000", "job" = "viewtrip"},
+    {"__address__" = "viewtripweb:8000", "job" = "viewtrip", "env" = env("VIEWTRIP_ENV")},
   ]
   metrics_path    = "/metrics"
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.nas.receiver]
+}
+
+// Host memory/swap/CPU/disk — the visibility that was missing during issue
+// #209: the VPS livelocked under memory pressure with no swap, and every log
+// checked in that investigation was silent because nothing on the host was
+// watching memory at all. Same node_exporter collectors, same metric names
+// (node_memory_*, node_load*, ...), pointed at the host's real /proc and /sys
+// via the mounts in docker-compose.yml.example rather than this container's
+// own namespaced view — without those mounts this still runs, it just
+// reports the container's own limited view instead of the host's.
+//
+// Prod and val each run this on the SAME physical VPS, so both push what is
+// genuinely the same host data — deliberately not deduplicated (that would
+// need coordinating which of the two instances is allowed to report, for no
+// real benefit at this scale). The `env` label keeps the two writers from
+// colliding as the same series, and a gap in one environment's host data
+// while the other's keeps reporting is itself a useful signal that that
+// environment's alloy container, specifically, is down.
+prometheus.exporter.unix "host" {
+  procfs_mount_point = "/host/proc"
+  sysfs_mount_point  = "/host/sys"
+  rootfs_mount_point = "/host/root"
+}
+
+discovery.relabel "host" {
+  targets = prometheus.exporter.unix.host.targets
+
+  rule {
+    target_label = "env"
+    replacement  = env("VIEWTRIP_ENV")
+  }
+}
+
+prometheus.scrape "host" {
+  targets         = discovery.relabel.host.output
   scrape_interval = "30s"
   forward_to      = [prometheus.remote_write.nas.receiver]
 }
