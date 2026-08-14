@@ -104,9 +104,9 @@ prometheus.scrape "viewtrip" {
 // while the other's keeps reporting is itself a useful signal that that
 // environment's alloy container, specifically, is down.
 prometheus.exporter.unix "host" {
-  procfs_mount_point = "/host/proc"
-  sysfs_mount_point  = "/host/sys"
-  rootfs_mount_point = "/host/root"
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host/root"
 }
 
 discovery.relabel "host" {
