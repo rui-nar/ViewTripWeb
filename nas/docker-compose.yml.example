@@ -52,6 +52,8 @@ services:
         max-file: "3"
 
   # ── Loki ─────────────────────────────────────────────────────────────────────
+  # Runs as UID 10001, not root — ./loki-data must be chowned to it before the
+  # first `up` or this crash-loops on "permission denied". See README.md §2.
   loki:
     image: grafana/loki:latest
     container_name: observability-loki
@@ -74,6 +76,8 @@ services:
   # here instead of this Prometheus reaching back out over the internet to
   # scrape the VPS — see docs/OBSERVABILITY.md's "Why Loki + Prometheus, not
   # Mimir" for why plain Prometheus in receiver mode is enough at this scale.
+  # Runs as UID 65534 ("nobody") — ./prometheus-data must be chowned to it
+  # before the first `up`, same reasoning as Loki above. See README.md §2.
   prometheus:
     image: prom/prometheus:latest
     container_name: observability-prometheus
@@ -96,6 +100,8 @@ services:
         max-file: "3"
 
   # ── Grafana ──────────────────────────────────────────────────────────────────
+  # Runs as UID 472 — ./grafana-data must be chowned to it before the first
+  # `up`, same reasoning as Loki/Prometheus above. See README.md §2.
   grafana:
     image: grafana/grafana:latest
     container_name: observability-grafana
