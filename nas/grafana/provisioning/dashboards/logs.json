@@ -12,9 +12,18 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
         "name": "env",
         "type": "query",
-        "datasource": {"type": "loki", "uid": "viewtrip-loki"},
+        "datasource": {"type": "loki", "uid": "$datasource"},
         "query": {"query": "label_values(env)", "refId": "EnvVariable"},
         "current": {"text": "production", "value": "production"},
         "includeAll": false,
@@ -31,7 +40,7 @@
       "title": "Error rate",
       "description": "sum(rate({service=\"viewtripweb\", env=\"$env\"} |= \"ERROR\" [5m]))",
       "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
-      "datasource": {"type": "loki", "uid": "viewtrip-loki"},
+      "datasource": {"type": "loki", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate({service=\"viewtripweb\", env=\"$env\"} |= \"ERROR\" [5m]))", "legendFormat": "ERROR lines/sec"}
       ],
@@ -44,7 +53,7 @@
       "title": "External call failures by service",
       "description": "sum(rate({service=\"viewtripweb\", env=\"$env\"} |= \"external call failed\" | logfmt [5m])) by (service) — matches track_external()'s log format, src/utils/metrics.py.",
       "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
-      "datasource": {"type": "loki", "uid": "viewtrip-loki"},
+      "datasource": {"type": "loki", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate({service=\"viewtripweb\", env=\"$env\"} |= \"external call failed\" | logfmt [5m])) by (service)", "legendFormat": "{{service}}"}
       ],
@@ -57,7 +66,7 @@
       "title": "Recent errors",
       "description": "{service=\"viewtripweb\", env=\"$env\"} |= \"ERROR\" — add |= \"request_id=<id>\" or |= \"user_id=<id>\" to narrow to one request/session.",
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 7},
-      "datasource": {"type": "loki", "uid": "viewtrip-loki"},
+      "datasource": {"type": "loki", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "{service=\"viewtripweb\", env=\"$env\"} |= \"ERROR\""}
       ],
@@ -77,7 +86,7 @@
       "title": "All logs (logfmt-parsed)",
       "description": "{service=\"viewtripweb\", env=\"$env\"} | logfmt — the raw firehose. Filter in the query editor by request_id/user_id to reconstruct one request or one user's session across concurrent traffic.",
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 16},
-      "datasource": {"type": "loki", "uid": "viewtrip-loki"},
+      "datasource": {"type": "loki", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "{service=\"viewtripweb\", env=\"$env\"} | logfmt"}
       ],

@@ -50,10 +50,15 @@ revisit after seeing a few weeks of real volume.
 `nas/grafana/provisioning/datasources/datasources.yaml`. Both point at
 `localhost`, not a service name — the sidecar pattern above means Loki,
 Prometheus and Grafana share one network namespace and reach each other
-over loopback, not Docker's usual bridge-network service discovery. Each
-datasource has a fixed `uid` (`viewtrip-prometheus`/`viewtrip-loki`) so the
-provisioned dashboards below can reference them reliably instead of relying
-on whatever UID Grafana would otherwise generate.
+over loopback, not Docker's usual bridge-network service discovery.
+Deliberately no fixed `uid` on either datasource — an earlier version
+pinned one so dashboards could reference it deterministically, but that
+made Grafana's provisioning module fail outright on every start
+(confirmed live against `grafana/grafana:latest`, 13.1.3: `Datasource
+provisioning error: data source not found`, crash-looping the container).
+Each dashboard below instead has a `datasource`-type template variable
+that resolves to whichever Prometheus/Loki datasource actually exists,
+however it got its UID.
 
 Five dashboards are provisioned from `nas/grafana/provisioning/dashboards/`
 (a **ViewTrip** folder, read-only in the UI): **HTTP & Traffic**, **Jobs &
@@ -83,6 +88,11 @@ reading the numbers. `service="viewtripweb"` is likewise a real label on
 every log stream now, set unconditionally by Alloy's static relabel rule
 (`config/alloy-config.river.example`) rather than assumed — the LogQL
 queries below only started actually matching once that rule existed.
+
+Each dashboard also has a `datasource` variable next to `env` — leave it on
+its default. It exists so panels resolve the Prometheus/Loki datasource
+dynamically instead of a fixed UID (see the datasources.yaml note above);
+it isn't meant to be switched.
 
 ## Queries an operator actually runs
 

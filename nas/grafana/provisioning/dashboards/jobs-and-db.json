@@ -12,9 +12,18 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
         "name": "env",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+        "datasource": {"type": "prometheus", "uid": "$datasource"},
         "query": {"query": "label_values(viewtrip_job_runs_total, env)", "refId": "EnvVariable"},
         "current": {"text": "production", "value": "production"},
         "includeAll": false,
@@ -31,7 +40,7 @@
       "title": "Time since last successful daily_backup",
       "description": "Alert threshold from docs/METRICS.md: time() - viewtrip_job_last_success_timestamp_seconds{job=\"daily_backup\"} > 90000 (25h) means it silently stopped.",
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "time() - viewtrip_job_last_success_timestamp_seconds{job=\"daily_backup\",env=\"$env\"}"}
       ],
@@ -54,7 +63,7 @@
       "title": "DB pool in-use / capacity",
       "description": "Pool exhaustion is the issue #35 hang. Capacity is 60.",
       "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * viewtrip_db_pool_connections{state=\"in_use\",env=\"$env\"} / viewtrip_db_pool_capacity{env=\"$env\"}"}
       ],
@@ -77,7 +86,7 @@
       "title": "Stale writes/sec",
       "description": "Write contention — see docs/METRICS.md alerts table.",
       "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_stale_writes_total{env=\"$env\"}[5m]))"}
       ],
@@ -98,7 +107,7 @@
       "type": "timeseries",
       "title": "Job runs by result",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_job_runs_total{env=\"$env\"}[15m])) by (job, result)", "legendFormat": "{{job}} ({{result}})"}
       ],
@@ -112,7 +121,7 @@
       "type": "timeseries",
       "title": "Job duration (p95) by job",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_job_duration_seconds_bucket{env=\"$env\"}[15m])) by (le, job))", "legendFormat": "{{job}}"}
       ],
@@ -124,7 +133,7 @@
       "type": "timeseries",
       "title": "DB pool connections vs capacity",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "viewtrip_db_pool_connections{state=\"in_use\",env=\"$env\"}", "legendFormat": "in use"},
         {"refId": "B", "expr": "viewtrip_db_pool_connections{state=\"idle\",env=\"$env\"}", "legendFormat": "idle"},
@@ -142,7 +151,7 @@
       "title": "DB file size (main vs WAL)",
       "description": "WAL climbing without ever dropping means checkpointing has stopped (wal_autocheckpoint=0 — only the wal_checkpoint job folds it back).",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "viewtrip_db_file_size_bytes{file=\"main\",env=\"$env\"}", "legendFormat": "main"},
         {"refId": "B", "expr": "viewtrip_db_file_size_bytes{file=\"wal\",env=\"$env\"}", "legendFormat": "wal"}
@@ -155,7 +164,7 @@
       "type": "timeseries",
       "title": "DB errors by kind",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_db_errors_total{env=\"$env\"}[5m])) by (kind)", "legendFormat": "{{kind}}"}
       ],
@@ -167,7 +176,7 @@
       "type": "timeseries",
       "title": "DB query duration (p95) by operation",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_db_query_duration_seconds_bucket{env=\"$env\"}[5m])) by (le, operation))", "legendFormat": "{{operation}}"}
       ],
