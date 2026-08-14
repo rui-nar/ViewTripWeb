@@ -31,16 +31,32 @@ discovery.docker "containers" {
 // Static labels every discovered container needs before being tailed:
 // `service` so the app's log stream has a stable name to query regardless of
 // which container/environment emitted it, and `env` so prod and val are
-// distinguishable once both land in the same Loki. Neither comes from Docker
-// discovery metadata — a rule with no source_labels unconditionally sets
-// target_label to the literal replacement, which is the standard relabeling
-// idiom for a static label.
+// distinguishable once both land in the same Loki.
+//
+// `service` is gated on the container name (confirmed live: without this
+// gate, a rule with no source_labels sets target_label unconditionally on
+// EVERY discovered container — Redis, the worker, worker-poster, and Alloy
+// itself all end up mislabeled service="viewtripweb" too, polluting the
+// Logs dashboard's "All logs" panel with Alloy's own diagnostics and
+// friends). Docker container names always carry a leading "/" in discovery
+// metadata; "viewtripweb" (prod) and "viewtripweb-val" (val) both match,
+// nothing else in docker-compose.yml.example's container_names does.
+// Containers that don't match get no `service` label at all — their logs
+// still ship to Loki, just outside this label's scope, which matches what
+// this label was ever meant to cover (docs/OBSERVABILITY.md's LogQL
+// examples are all `service="viewtripweb"`-scoped, not "every container").
+//
+// `env` has no such gate — every container's logs and metrics need it to
+// stay distinguishable from the other environment sharing this NAS, so a
+// rule with no source_labels (unconditional replacement) is correct there.
 discovery.relabel "containers" {
   targets = discovery.docker.containers.targets
 
   rule {
-    target_label = "service"
-    replacement  = "viewtripweb"
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "^/viewtripweb.*"
+    target_label  = "service"
+    replacement   = "viewtripweb"
   }
   rule {
     target_label = "env"
