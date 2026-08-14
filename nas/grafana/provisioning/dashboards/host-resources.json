@@ -1,0 +1,127 @@
+{
+  "uid": "viewtrip-host-resources",
+  "title": "ViewTrip / Host Resources",
+  "description": "VPS host memory and swap, from Alloy's prometheus.exporter.unix (config/alloy-config.river.example). Added after issue #209: the host livelocked under memory pressure with no swap, and nothing was watching host memory at all, so the incident looked like silence rather than a clean crash.",
+  "tags": ["viewtrip"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "gauge",
+      "title": "Memory used",
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 80},
+            {"color": "red", "value": 92}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Swap used",
+      "description": "0/0 (no data) means no swap is configured — the exact state that turned issue #209 into a 43-hour livelock instead of a clean OOM-kill.",
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes)"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 50},
+            {"color": "red", "value": 85}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Swap configured",
+      "description": "node_memory_SwapTotal_bytes > 0. If this reads 0 / red, the host has no cushion for a memory spike — see issue #209.",
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_memory_SwapTotal_bytes"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null},
+            {"color": "green", "value": 1}
+          ]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "graphMode": "none"}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Memory breakdown",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_memory_MemTotal_bytes", "legendFormat": "total"},
+        {"refId": "B", "expr": "node_memory_MemAvailable_bytes", "legendFormat": "available"},
+        {"refId": "C", "expr": "node_memory_MemFree_bytes", "legendFormat": "free"},
+        {"refId": "D", "expr": "node_memory_Cached_bytes", "legendFormat": "cached"},
+        {"refId": "E", "expr": "node_memory_Buffers_bytes", "legendFormat": "buffers"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 5}}, "overrides": [
+        {"matcher": {"id": "byName", "options": "total"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
+      ]},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "min", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Swap used over time",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes", "legendFormat": "swap used"},
+        {"refId": "B", "expr": "node_memory_SwapTotal_bytes", "legendFormat": "swap total"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": [
+        {"matcher": {"id": "byName", "options": "swap total"}, "properties": [{"id": "custom.lineStyle", "value": {"dash": [10, 10]}}]}
+      ]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "ViewTrip API process RSS",
+      "description": "process_resident_memory_bytes for the viewtripweb job — the app's own view of its memory, from prometheus_client's default collector. Empty if PROMETHEUS_MULTIPROC_DIR is set (worker containers running, docs/DEPLOYMENT_VPS.md): multiprocess mode doesn't aggregate this metric across processes. Host memory above is the reliable signal either way.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "process_resident_memory_bytes{job=\"viewtrip\"}", "legendFormat": "{{instance}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

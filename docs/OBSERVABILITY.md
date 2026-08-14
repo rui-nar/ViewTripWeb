@@ -55,11 +55,19 @@ datasource has a fixed `uid` (`viewtrip-prometheus`/`viewtrip-loki`) so the
 provisioned dashboards below can reference them reliably instead of relying
 on whatever UID Grafana would otherwise generate.
 
-Four dashboards are provisioned from `nas/grafana/provisioning/dashboards/`
+Five dashboards are provisioned from `nas/grafana/provisioning/dashboards/`
 (a **ViewTrip** folder, read-only in the UI): **HTTP & Traffic**, **Jobs &
-Database**, **Integrations & Auth**, and **Logs**. They render the metrics
-table above and the LogQL queries below directly — see `nas/README.md` §3
-for where to find them once Grafana is up.
+Database**, **Integrations & Auth**, **Logs**, and **Host Resources**. They
+render the metrics table above and the LogQL queries below directly — see
+`nas/README.md` §3 for where to find them once Grafana is up.
+
+**Host Resources** is the odd one out: it's `node_*` metrics from Alloy's
+`prometheus.exporter.unix` (VPS side, `config/alloy-config.river.example`),
+not anything the app itself emits. Added after issue #209 — a VPS
+livelocked under memory pressure with no swap configured, and nothing in
+this stack was watching host memory at all, so the incident looked like
+silence rather than a clean crash. Memory used %, swap used %, and "is swap
+even configured" are the panels that would have shown that coming.
 
 ## Queries an operator actually runs
 

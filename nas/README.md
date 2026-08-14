@@ -84,11 +84,13 @@ Loki datasources (auto-provisioned from
 `viewtrip-prometheus`/`viewtrip-loki`) show green in Settings → Data
 sources.
 
-Four dashboards are auto-provisioned too (`grafana/provisioning/dashboards/`,
+Five dashboards are auto-provisioned too (`grafana/provisioning/dashboards/`,
 read-only — edit the JSON and it picks up the change within 30s, no restart
 needed), in a **ViewTrip** folder: **HTTP & Traffic**, **Jobs & Database**,
-**Integrations & Auth**, and **Logs**. Panels are a direct rendering of the
-metrics/queries already documented in `../docs/METRICS.md` and
+**Integrations & Auth**, **Logs**, and **Host Resources** (VPS memory/swap —
+added after issue #209, see `../docs/DEPLOYMENT_VPS.md`'s Alloy section for
+the host `/proc`/`/sys` mounts it depends on). Panels are a direct rendering
+of the metrics/queries already documented in `../docs/METRICS.md` and
 `../docs/OBSERVABILITY.md`'s "Queries an operator actually runs" — nothing
 in them is new, they just save re-typing the same PromQL/LogQL each time.
 Empty until §4 below has data flowing.

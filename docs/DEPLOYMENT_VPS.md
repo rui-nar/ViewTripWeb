@@ -397,9 +397,15 @@ IP/MagicDNS name — that's what `LOKI_PUSH_URL` and
 ### Alloy (VPS side)
 
 `docker-compose.yml.example`'s `alloy` service tails every container's logs
-via the Docker socket (read-only) and scrapes `viewtripweb:8000/metrics`
-over the compose-internal network — `/metrics` itself never needs to be
-reachable from outside this host for this to work. Copy the example config
+via the Docker socket (read-only), scrapes `viewtripweb:8000/metrics` over
+the compose-internal network — `/metrics` itself never needs to be reachable
+from outside this host for this to work — and (issue #209) scrapes its own
+`prometheus.exporter.unix` component for host memory/swap/CPU/disk. That
+component reads the host's real `/proc`/`/sys`/`/`, mounted read-only into
+the container (`/host/proc`, `/host/sys`, `/host/root` in the `alloy`
+service's `volumes:`) — without those mounts it still runs, it just reports
+the container's own namespaced view instead of the host's, which for memory
+in particular is not what you want after issue #209. Copy the example config
 and fill in `.env`:
 
 ```bash
@@ -413,8 +419,9 @@ PROMETHEUS_REMOTE_WRITE_URL=http://<nas-tailscale-host>:9090/api/v1/write
 
 **Not verified against a live Alloy binary** — `config/alloy-config.river.example`
 is a documented starting point to adapt, the same spirit
-`docker-compose.yml.example` itself already is. Confirm log lines and the
-`viewtrip_*` metrics actually arrive in Grafana on the NAS before relying
+`docker-compose.yml.example` itself already is. Confirm log lines, the
+`viewtrip_*` metrics, and the `node_*` host metrics actually arrive in
+Grafana on the NAS (`ViewTrip / Host Resources` dashboard) before relying
 on it for an incident.
 
 ### Dropping `/metrics`'s public exposure

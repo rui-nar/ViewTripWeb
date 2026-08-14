@@ -226,6 +226,14 @@ services:
       # about this container listens inward, so this is a read capability
       # leaving the host, not an attack surface being opened on it.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Host /proc, /sys and / for prometheus.exporter.unix (issue #209 — no
+      # visibility into host memory/swap was why that incident looked like
+      # silence instead of a clean crash). Without these, the container's own
+      # namespaced /proc is what gets read instead of the host's, which is
+      # good enough for some fields but not a reliable memory/swap picture.
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
     command:
       - "run"
       - "--server.http.listen-addr=127.0.0.1:12345"
