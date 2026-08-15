@@ -101,12 +101,20 @@ loki.write "nas" {
 // reachable from other containers on this same compose network. `env` here
 // is a literal target label (not discovery-derived, unlike the log labels
 // above), since this target list is already hand-written.
+//
+// /metrics requires Authorization: Bearer <METRICS_TOKEN> unconditionally
+// (docs/METRICS.md) — there's no exemption for same-network requests, so
+// this scrape needs it same as any external one would. Without it, every
+// scrape 401s; confirmed live via up{job="viewtrip"} == 0 with this
+// argument absent. .env already reaches this container (env_file: .env,
+// docker-compose.yml.example), so no separate wiring needed beyond this.
 prometheus.scrape "viewtrip" {
   targets = [
     {"__address__" = "viewtripweb:8000", "job" = "viewtrip", "env" = env("VIEWTRIP_ENV")},
   ]
   metrics_path    = "/metrics"
   scrape_interval = "30s"
+  bearer_token    = env("METRICS_TOKEN")
   forward_to      = [prometheus.remote_write.nas.receiver]
 }
 
