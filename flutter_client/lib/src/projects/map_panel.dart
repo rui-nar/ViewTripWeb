@@ -918,6 +918,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   Map<String, dynamic>? _lastGeo;
   dynamic _lastSelectedId = _sentinel;
   dynamic _lastSelectedSegId = _sentinel;
+  String? _lastSelectedDay = '';   // '' = sentinel (distinct from null)
+  Set<String> _lastSelectedDays = const {};
   dynamic _lastSelectedMemId = _sentinel;
   dynamic _lastSelectedJournalId = _sentinel;
   List<Map<String, dynamic>>? _lastItems;
@@ -988,6 +990,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     List<Map<String, dynamic>> items,
     dynamic selectedMemoryId,
     bool hasSelection,
+    Set<String> effectiveDays,
     BuildContext context,
   ) {
     final markers = <Marker>[];
@@ -1002,10 +1005,13 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       final memId = mem['id']?.toString() ?? '';
       final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
       final isSelected = selectedMemoryId?.toString() == memId;
+      final memDate = mem['date'] as String?;
+      final isDayHighlighted = effectiveDays.isEmpty ||
+          (memDate != null && effectiveDays.contains(memDate));
       final size = isSelected ? 34.0 : 28.0;
       final bgColor = isSelected
           ? const Color(0xFF333333)
-          : hasSelection
+          : (hasSelection && !isDayHighlighted)
               ? const Color(0xA0000000)
               : Colors.black;
       Widget inner;
@@ -1212,6 +1218,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     final geo = notifier.geo;
     final selActId = notifier.selectedActivityId;
     final selSegId = notifier.selectedSegmentId;
+    final selDay = notifier.selectedDay;
+    final selDays = notifier.selectedDays;
     final selMemId = notifier.selectedMemoryId;
     final selJournalId = notifier.selectedJournalId;
     final showJournals = notifier.showJournals;
@@ -1222,6 +1230,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     final alternating = notifier.alternatingTrackColors;
     final selectionChanged = selActId != _lastSelectedId ||
         selSegId?.toString() != _lastSelectedSegId?.toString() ||
+        selDay != _lastSelectedDay ||
+        !ManageMapPanelState.setEquals(selDays, _lastSelectedDays) ||
         selMemId?.toString() != _lastSelectedMemId?.toString() ||
         selJournalId?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged = trackColor != _lastTrackColor ||
@@ -1233,6 +1243,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
+      _lastSelectedDay = selDay;
+      _lastSelectedDays = Set.from(selDays);
       _lastSelectedMemId = selMemId;
       _lastSelectedJournalId = selJournalId;
       _lastItems = items;
@@ -1243,19 +1255,38 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       _lastColorByType = notifier.colorByType;
       _lastTypeStyles = notifier.typeStyles;
       final tilesActive = widget.trackTileUrlTemplate != null;
+      // Multi-select takes priority over single-day selection, mirroring
+      // ManageMapPanel's day-highlighting (issue #199 view-mode carousel).
+      final effectiveDays = selDays.isNotEmpty
+          ? selDays
+          : (selDay != null ? {selDay} : <String>{});
+      final actById = <dynamic, Map<String, dynamic>>{
+        for (final a in notifier.activities) a['id']: a
+      };
+      Set<String>? dayActIds;
+      Set<String>? daySegIds;
+      if (effectiveDays.isNotEmpty) {
+        dayActIds = {};
+        daySegIds = {};
+        for (final dk in effectiveDays) {
+          final r = ManageMapPanelState._dayItemIds(items, actById, dk);
+          dayActIds.addAll(r.actIds);
+          daySegIds.addAll(r.segIds);
+        }
+      }
       _cachedPolylines = geo != null
           ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
               alternating, items,
               selectedOnly: tilesActive, trackSecondaryColor: trackSecondaryColor,
+              dayActIds: dayActIds, daySegIds: daySegIds,
               colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
           : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
-          selMemId != null || selJournalId != null;
-      final dayStartIds = dayStartActivityIds(
-          items, {for (final a in notifier.activities) a['id']: a});
+          effectiveDays.isNotEmpty || selMemId != null || selJournalId != null;
+      final dayStartIds = dayStartActivityIds(items, actById);
       _cachedActivityMarkers = geo != null
           ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
               dayStartActivityIds: dayStartIds,
@@ -1266,7 +1297,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
           : [];
       _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, context);
+          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
           _buildJournalMarkers(items, selJournalId, hasSelection, context);
       _cachedEncounterMarkers = widget.showEncounters
@@ -1280,9 +1311,9 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       // and something is selected do we queue a zoom to that item; with
       // auto-zoom off, selection leaves the viewport untouched.
       if (selectionChanged && widget.autoZoom && geo != null &&
-          (selActId != null || selSegId != null)) {
+          (effectiveDays.isNotEmpty || selActId != null || selSegId != null)) {
         _pendingAutoZoomPts = ManageMapPanelState.extractSelectedPoints(
-            geo, selActId, selSegId, null, null);
+            geo, selActId, selSegId, dayActIds, daySegIds);
       } else if (selectionChanged) {
         _pendingAutoZoomPts = null;
       }

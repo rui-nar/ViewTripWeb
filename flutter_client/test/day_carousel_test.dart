@@ -6,10 +6,11 @@ import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 /// Issue #199: view-mode vertical day carousel. Covers the pure
-/// index→day-key selection mapping, the day-number/distance/climb labels
-/// (sourced from the same `dayTripNumbering`/`dayStats` the manage-mode day
-/// hero and map selection overlay already use), the responsive compact
-/// breakpoint, the rounded-right-corners shape, and the idle dim/retract.
+/// index→day-key selection mapping, the scroll-distance→scale mapping, the
+/// "Day N" + distance/climb label shown only on the highlighted (centered)
+/// card (sourced from the same `dayTripNumbering`/`dayStats` the manage-mode
+/// day hero and map selection overlay already use), the responsive compact
+/// breakpoint, the pill shape, and the idle dim/retract.
 void main() {
   ProjectNotifier notifierWithThreeDays() {
     final n = ProjectNotifier(ProjectService());
@@ -50,8 +51,8 @@ void main() {
         value: notifier,
         child: MaterialApp(
           // SizedBox.expand mirrors the tight height DayCarousel gets in
-          // production from the stretch-aligned Row in view_screen.dart —
-          // ListWheelScrollView needs a bounded height to lay out.
+          // production from the Positioned(top:0, bottom:0) overlay in
+          // view_screen.dart — ListWheelScrollView needs a bounded height.
           home: Scaffold(
               body: SizedBox.expand(child: DayCarousel(notifier: notifier))),
         ),
@@ -75,31 +76,46 @@ void main() {
     });
   });
 
-  testWidgets('wide layout: shows day number, distance and climb per day',
+  group('dayCarouselScale', () {
+    test('is the full magnification at the centered slot', () {
+      expect(dayCarouselScale(0, 2.0), 2.0);
+    });
+
+    test('falls back to 1x a full slot or more away', () {
+      expect(dayCarouselScale(1.0, 2.0), 1.0);
+      expect(dayCarouselScale(3.0, 2.0), 1.0);
+    });
+
+    test('interpolates linearly in between', () {
+      expect(dayCarouselScale(0.5, 2.0), closeTo(1.5, 1e-9));
+    });
+  });
+
+  testWidgets(
+      'wide layout: highlighted day shows "Day N" + stats, others show a bare number',
       (tester) async {
     await pumpCarousel(tester, const Size(1200, 900));
 
-    expect(find.text('1'), findsOneWidget);
+    // Day 1 starts centered/highlighted (nothing pre-selected).
+    expect(find.text('Day 1'), findsOneWidget);
     expect(find.text('10 km'), findsOneWidget);
     expect(find.text('250 m'), findsOneWidget);
 
+    // Neighbors show the bare number, no "Day" prefix or stats.
     expect(find.text('2'), findsOneWidget);
-    // Day 2 has a memory only — no activity distance/climb.
-    expect(find.text('0 km'), findsOneWidget);
-    expect(find.text('0 m'), findsOneWidget);
-
     expect(find.text('3'), findsOneWidget);
-    expect(find.text('5 km'), findsOneWidget);
-    expect(find.text('100 m'), findsOneWidget);
+    expect(find.text('Day 2'), findsNothing);
+    expect(find.text('0 km'), findsNothing);
   });
 
-  testWidgets('narrow layout: compact strip hides distance/climb',
+  testWidgets(
+      'narrow layout: compact strip shows bare numbers only, even when highlighted',
       (tester) async {
     await pumpCarousel(tester, const Size(360, 800));
 
     expect(find.text('1'), findsOneWidget);
+    expect(find.text('Day 1'), findsNothing);
     expect(find.text('10 km'), findsNothing);
-    expect(find.text('250 m'), findsNothing);
   });
 
   testWidgets('dragging the carousel updates the notifier\'s selected day',
@@ -108,14 +124,14 @@ void main() {
     expect(notifier.selectedDays, isEmpty);
 
     // Large drag guarantees landing on the last day regardless of the
-    // wheel's magnification curvature.
+    // wheel's residual curvature.
     await tester.drag(find.byType(ListWheelScrollView), const Offset(0, -1000));
     await tester.pumpAndSettle();
 
     expect(notifier.selectedDays, {'2026-06-03'});
   });
 
-  testWidgets('carousel has rounded top-right/bottom-right corners only',
+  testWidgets('carousel is a pill: only the right edge is rounded, radius = width / 2',
       (tester) async {
     await pumpCarousel(tester, const Size(1200, 900));
 
@@ -126,8 +142,9 @@ void main() {
     ));
     final radius =
         (container.decoration as BoxDecoration).borderRadius as BorderRadius;
-    expect(radius.topRight, const Radius.circular(12));
-    expect(radius.bottomRight, const Radius.circular(12));
+    // width is 120 in the wide layout — radius = width / 2 for a true pill cap.
+    expect(radius.topRight, const Radius.circular(60));
+    expect(radius.bottomRight, const Radius.circular(60));
     expect(radius.topLeft, Radius.zero);
     expect(radius.bottomLeft, Radius.zero);
   });
