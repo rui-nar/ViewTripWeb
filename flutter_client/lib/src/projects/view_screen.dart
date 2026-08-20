@@ -22,6 +22,7 @@ import '../core/project_ref.dart';
 import '../core/stale_shared_ref.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'day_carousel.dart';
 import 'elevation_chart.dart';
 import 'map_panel.dart';
 import 'people_screen.dart';
@@ -610,7 +611,15 @@ class _ViewLayout extends StatelessWidget {
 
     return Column(
       children: [
-        Expanded(child: mapPanel),
+        Expanded(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: mapPanel),
+              DayCarousel(notifier: notifier),
+            ],
+          ),
+        ),
         elevChart,
       ],
     );
