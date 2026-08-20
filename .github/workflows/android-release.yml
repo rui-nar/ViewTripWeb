@@ -2,10 +2,14 @@ name: Build and publish Android APK
 
 # Runs alongside docker-build.yml on every vX.Y.Z tag: that one ships the server
 # image and the web client, this one ships the Android app for the same tag.
+# Also runs on the floating `validation` tag (issue #190) for the same reason
+# docker-build.yml does: 'v*' already glob-matches it literally, but it's
+# listed explicitly so the trigger doesn't rely on that coincidence.
 on:
   push:
     tags:
       - 'v*'
+      - 'validation'
 
 jobs:
   build-apk:
@@ -56,20 +60,53 @@ jobs:
           keyPassword=$KEY_PASSWORD
           EOF
 
+      - name: Resolve build version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ "$TAG" = "validation" ]; then
+            # The `validation` tag is floating (issue #190), so it carries no
+            # vX.Y.Z of its own. android_version_code.py can't map it, and
+            # there's no release to derive one from either — we deliberately
+            # never create a GitHub Release for it (see the upload step
+            # below). Anchor the versionCode one above the latest real
+            # release instead, so a validation build installs over the
+            # currently-shipped app for upgrade-path testing. This can tie
+            # with the very next real release's own code (e.g. a plain patch
+            # bump), which blocks installing over the validation build until
+            # it's uninstalled — acceptable for an internal test artifact.
+            LATEST_TAG=$(gh release list --exclude-drafts -L 1 --json tagName --jq '.[0].tagName' || true)
+            BASE=0
+            if [ -n "$LATEST_TAG" ]; then
+              BASE=$(python3 scripts/android_version_code.py "$LATEST_TAG")
+            fi
+            BUILD_NUMBER=$((BASE + 1))
+            APP_VERSION="validation-$(git rev-parse --short HEAD)"
+            BUILD_NAME="$APP_VERSION"
+          else
+            # versionCode must increase every release or Android refuses the
+            # upgrade; pubspec's +1 never moves, so derive it from the tag.
+            BUILD_NUMBER=$(python3 scripts/android_version_code.py "$TAG")
+            APP_VERSION="$TAG"
+            BUILD_NAME="${TAG#v}"
+          fi
+          echo "versionCode for $TAG: $BUILD_NUMBER"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Build signed APK
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          # versionCode must increase every release or Android refuses the
-          # upgrade; pubspec's +1 never moves, so derive it from the tag.
-          BUILD_NUMBER=$(python3 scripts/android_version_code.py "$TAG")
-          echo "versionCode for $TAG: $BUILD_NUMBER"
           cd flutter_client
           flutter pub get
           flutter build apk --release \
-            --build-number="$BUILD_NUMBER" \
-            --build-name="${TAG#v}" \
-            --dart-define=APP_VERSION="$TAG" \
+            --build-number="${{ steps.version.outputs.build_number }}" \
+            --build-name="${{ steps.version.outputs.build_name }}" \
+            --dart-define=APP_VERSION="${{ steps.version.outputs.app_version }}" \
             --dart-define=MAPBOX_TOKEN="${{ secrets.MAPBOX_TOKEN }}" \
             --dart-define=API_BASE_URL=https://traxjourney.com
           mv build/app/outputs/flutter-apk/app-release.apk \
@@ -91,6 +128,7 @@ jobs:
           fi
 
       - name: Attach the APK to the release
+        if: github.ref_name != 'validation'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -108,3 +146,14 @@ jobs:
             gh release create "$TAG" --title "ViewTripWeb $TAG" --generate-notes
           fi
           gh release upload "$TAG" "$RUNNER_TEMP/traxjourney-$TAG.apk" --clobber
+
+      - name: Upload validation APK as a workflow artifact
+        # `validation` is a floating tag with no release of its own (real v*
+        # tags own the releases page) — publish the APK as a build artifact
+        # instead, downloadable from the workflow run for manual testing.
+        if: github.ref_name == 'validation'
+        uses: actions/upload-artifact@v4
+        with:
+          name: traxjourney-validation-apk
+          path: ${{ runner.temp }}/traxjourney-validation.apk
+          retention-days: 14
