@@ -1231,7 +1231,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     final selectionChanged = selActId != _lastSelectedId ||
         selSegId?.toString() != _lastSelectedSegId?.toString() ||
         selDay != _lastSelectedDay ||
-        !setEquals(selDays, _lastSelectedDays) ||
+        !ManageMapPanelState.setEquals(selDays, _lastSelectedDays) ||
         selMemId?.toString() != _lastSelectedMemId?.toString() ||
         selJournalId?.toString() != _lastSelectedJournalId?.toString();
     final styleChanged = trackColor != _lastTrackColor ||
