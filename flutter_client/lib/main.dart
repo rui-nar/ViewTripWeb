@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
 
+import 'src/api/client.dart';
 import 'src/auth/auth_service.dart';
 import 'src/auth/auth_notifier.dart';
 import 'src/projects/projects_service.dart';
@@ -13,7 +14,9 @@ import 'src/projects/project_service.dart';
 import 'src/projects/project_notifier.dart';
 import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
+import 'src/core/onboarding_notifier.dart';
 import 'src/core/perf_timing.dart';
+import 'src/core/server_config.dart';
 import 'src/core/splash_screen.dart';
 import 'src/core/theme.dart';
 import 'src/core/version_gate.dart';
@@ -24,7 +27,7 @@ import 'src/core/version_gate.dart';
 const _kGoogleServerClientId =
     '544571555396-gj0q3hndadfo00ifotme305jcf4ii5cc.apps.googleusercontent.com';
 
-void main() {
+void main() async {
   if (kIsWeb) usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
   // No-op unless built with --dart-define=PERF_TIMING=true (dev measurement).
@@ -34,6 +37,13 @@ void main() {
   GoogleSignIn.instance.initialize(
     serverClientId: kIsWeb ? null : _kGoogleServerClientId,
   );
+  // A saved self-hosting override (login screen's "Self-hosting?" link) takes
+  // effect on the next cold start — swap the singleton before anything reads
+  // it. Two fast local reads, awaited here rather than gated behind their own
+  // isLoading flags like AuthNotifier's session restore.
+  final customServerUrl = await readCustomServerUrl();
+  if (customServerUrl != null) api = ApiClient(baseUrl: customServerUrl);
+  final hasSeenOnboarding = await readHasSeenOnboarding();
   runApp(
     // MultiProvider lives here — above ViewTripApp — so its providers are
     // never reconstructed by theme changes. Only the Builder inside
@@ -45,6 +55,9 @@ void main() {
         ),
         ChangeNotifierProvider<AuthNotifier>(
           create: (_) => AuthNotifier(AuthService())..init(),
+        ),
+        ChangeNotifierProvider<OnboardingNotifier>(
+          create: (_) => OnboardingNotifier(hasSeenOnboarding),
         ),
         ChangeNotifierProxyProvider<AuthNotifier, ProjectsNotifier>(
           create: (_) => ProjectsNotifier(ProjectsService()),

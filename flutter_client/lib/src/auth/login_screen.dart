@@ -14,7 +14,9 @@ import 'package:provider/provider.dart';
 import 'google_button_stub.dart'
     if (dart.library.html) 'google_button_web.dart';
 
+import '../core/platform.dart';
 import '../core/return_to.dart';
+import '../core/server_config.dart';
 import 'auth_notifier.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -123,6 +125,18 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _showServerConfigDialog() async {
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => const ServerConfigDialog(),
+    );
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Server updated — restart the app to apply it.'),
+      ));
+    }
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────────
@@ -283,6 +297,13 @@ class _LoginScreenState extends State<LoginScreen> {
                               ),
                             ),
 
+                      if (isNativeMobile) ...[
+                        const SizedBox(height: 8),
+                        TextButton(
+                          onPressed: _showServerConfigDialog,
+                          child: const Text('Self-hosting? Click here'),
+                        ),
+                      ],
                       const SizedBox(height: 24),
                       Text(
                         '© ${DateTime.now().year} ViewTrip · ${const String.fromEnvironment('APP_VERSION', defaultValue: 'dev')}',
@@ -299,6 +320,98 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── Self-hosting server override dialog ──────────────────────────────────────
+
+/// Lets the user point the app at a self-hosted server instead of the
+/// built-in default. Pops `true` if a change was saved, so the caller can
+/// tell the user a restart is needed.
+class ServerConfigDialog extends StatefulWidget {
+  const ServerConfigDialog({super.key});
+
+  @override
+  State<ServerConfigDialog> createState() => ServerConfigDialogState();
+}
+
+class ServerConfigDialogState extends State<ServerConfigDialog> {
+  final _urlCtrl = TextEditingController();
+  String? _error;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    readCustomServerUrl().then((url) {
+      if (!mounted) return;
+      setState(() {
+        _urlCtrl.text = url ?? '';
+        _loaded = true;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final url = _urlCtrl.text.trim();
+    if (url.isNotEmpty && !isValidServerUrl(url)) {
+      setState(() => _error = 'Enter a full URL, e.g. https://trax.example.com');
+      return;
+    }
+    await writeCustomServerUrl(url);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Self-hosted server'),
+      content: !_loaded
+          ? const SizedBox(
+              height: 48,
+              child: Center(child: CircularProgressIndicator()),
+            )
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Point this app at your own ViewTrip server instead of '
+                  'the default one. Leave blank to use the default.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _urlCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Server URL',
+                    hintText: 'https://trax.example.com',
+                    errorText: _error,
+                  ),
+                  keyboardType: TextInputType.url,
+                  autocorrect: false,
+                  onChanged: (_) {
+                    if (_error != null) setState(() => _error = null);
+                  },
+                ),
+              ],
+            ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _loaded ? _save : null,
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }
