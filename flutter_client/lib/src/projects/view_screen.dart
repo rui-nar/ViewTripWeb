@@ -612,11 +612,16 @@ class _ViewLayout extends StatelessWidget {
     return Column(
       children: [
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Stack(
+            fit: StackFit.expand,
             children: [
-              Expanded(child: mapPanel),
-              DayCarousel(notifier: notifier),
+              mapPanel,
+              Positioned(
+                top: 0,
+                bottom: 0,
+                right: 0,
+                child: DayCarousel(notifier: notifier),
+              ),
             ],
           ),
         ),
