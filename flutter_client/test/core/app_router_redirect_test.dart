@@ -8,6 +8,7 @@
 // GoRouter end-to-end (see its own comment for why it doesn't import
 // app_router.dart / buildRouter() itself).
 
+import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
@@ -17,6 +18,7 @@ import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
 import 'package:viewtrip_client/src/core/app_router.dart';
 import 'package:viewtrip_client/src/core/last_opened_project.dart';
+import 'package:viewtrip_client/src/core/onboarding_notifier.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/app_screen.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
@@ -140,6 +142,71 @@ void main() {
     });
   });
 
+  // Android launch UX: bare root skips the marketing WelcomeScreen (its
+  // "Sign in" button sits under the status bar there) on a native mobile
+  // build, going to onboarding on first launch and straight to login after.
+  // Web/desktop keep the marketing page unconditionally.
+  group('authRedirectTarget — native-mobile root entry point', () {
+    setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.android);
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    test('unauthenticated + onboarding not yet seen goes to /onboarding',
+        () async {
+      final auth = AuthNotifier(AuthService());
+
+      final target = await authRedirectTarget(auth, Uri.parse('/'),
+          hasSeenOnboarding: false);
+
+      expect(target, '/onboarding');
+    });
+
+    test('unauthenticated + onboarding already seen goes straight to /login',
+        () async {
+      final auth = AuthNotifier(AuthService());
+
+      final target = await authRedirectTarget(auth, Uri.parse('/'),
+          hasSeenOnboarding: true);
+
+      expect(target, '/login');
+    });
+
+    test('logged-in users are unaffected (fall through to the usual root '
+        'redirect)', () async {
+      final auth = _loggedInAuth('user-1');
+
+      final target = await authRedirectTarget(auth, Uri.parse('/'),
+          hasSeenOnboarding: false);
+
+      expect(target, isNot('/onboarding'));
+      expect(target, isNot('/login'));
+    });
+
+    test('/onboarding itself stays public for an unauthenticated visitor',
+        () async {
+      final auth = AuthNotifier(AuthService());
+
+      final target = await authRedirectTarget(auth, Uri.parse('/onboarding'),
+          hasSeenOnboarding: false);
+
+      expect(target, isNull);
+    });
+
+    test('on web, root keeps showing the marketing page regardless of '
+        'onboarding state', () async {
+      debugDefaultTargetPlatformOverride = null; // kIsWeb is what matters
+      // flutter_test always runs on the VM (kIsWeb == false), so this proves
+      // the non-mobile branch is reachable rather than simulating a browser —
+      // the desktop/`TargetPlatform.linux` case below covers the same path.
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      final auth = AuthNotifier(AuthService());
+
+      final target = await authRedirectTarget(auth, Uri.parse('/'),
+          hasSeenOnboarding: false);
+
+      expect(target, isNull);
+    });
+  });
+
   test(
       'resolves to /view?project=<name> when a last-opened project pref is set',
       () async {
@@ -245,6 +312,8 @@ void main() {
         MultiProvider(
           providers: [
             ChangeNotifierProvider<AuthNotifier>.value(value: auth),
+            ChangeNotifierProvider<OnboardingNotifier>(
+                create: (_) => OnboardingNotifier(true)),
             ChangeNotifierProvider<ProjectNotifier>(
                 create: (_) => _TestProjectNotifier(_FakeProjectService())),
             ChangeNotifierProvider<ThemeNotifier>(

@@ -10,12 +10,15 @@ import '../admin/admin_screen.dart';
 import '../auth/auth_notifier.dart';
 import '../auth/forced_change_password_screen.dart';
 import '../auth/login_screen.dart';
+import '../auth/onboarding_screen.dart';
 import '../auth/register_screen.dart';
 import '../auth/verify_email_screen.dart';
 import '../auth/welcome_screen.dart';
 import '../billing/billing_service.dart' show kPlanRoute;
 import '../billing/plan_screen.dart';
 import 'last_opened_project.dart';
+import 'onboarding_notifier.dart';
+import 'platform.dart';
 import 'return_to.dart';
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
@@ -57,7 +60,11 @@ int? _ownerParam(GoRouterState state) =>
 /// location to redirect to, or null to stay. Extracted from buildRouter's
 /// redirect callback so it can be unit-tested directly (like
 /// rootRedirectTarget — see app_router_redirect_test.dart).
-Future<String?> authRedirectTarget(AuthNotifier auth, Uri uri) async {
+Future<String?> authRedirectTarget(
+  AuthNotifier auth,
+  Uri uri, {
+  bool hasSeenOnboarding = true,
+}) async {
   // Wait for restoreSession to complete before making routing decisions.
   if (auth.isLoading) return null;
 
@@ -83,8 +90,18 @@ Future<String?> authRedirectTarget(AuthNotifier auth, Uri uri) async {
     return '/login?return_to=${Uri.encodeComponent(loc)}';
   }
 
+  // On a native Android/iOS build, bare root never shows the marketing
+  // WelcomeScreen (its "Sign in" button sits under the status bar there
+  // anyway — it's built for a browser chrome, not a phone). First launch
+  // gets the onboarding carousel; every launch after gets the login screen
+  // directly. Web/desktop keep the marketing page, untouched below.
+  if (!isLoggedIn && isNativeMobile && loc == '/') {
+    return hasSeenOnboarding ? '/login' : '/onboarding';
+  }
+
   // Redirect unauthenticated users away from protected routes.
-  final isPublicPage = loc == '/' || loc == '/login' || loc == '/register';
+  final isPublicPage =
+      loc == '/' || loc == '/login' || loc == '/register' || loc == '/onboarding';
   if (!isLoggedIn && !isPublicPage) return '/';
 
   // Redirect authenticated users away from public pages. Bare root goes
@@ -116,19 +133,28 @@ Future<String?> authRedirectTarget(AuthNotifier auth, Uri uri) async {
 
 GoRouter buildRouter(BuildContext context) {
   final authNotifier = context.read<AuthNotifier>();
+  final onboardingNotifier = context.read<OnboardingNotifier>();
 
   return GoRouter(
     initialLocation: initialLocationFor(isWeb: kIsWeb, base: Uri.base),
-    // Re-evaluate redirect whenever auth state changes (login / logout / init).
-    refreshListenable: authNotifier,
+    // Re-evaluate redirect whenever auth state or the onboarding flag changes
+    // (login / logout / init / onboarding markSeen()).
+    refreshListenable: Listenable.merge([authNotifier, onboardingNotifier]),
 
-    redirect: (BuildContext ctx, GoRouterState state) =>
-        authRedirectTarget(ctx.read<AuthNotifier>(), state.uri),
+    redirect: (BuildContext ctx, GoRouterState state) => authRedirectTarget(
+      ctx.read<AuthNotifier>(),
+      state.uri,
+      hasSeenOnboarding: ctx.read<OnboardingNotifier>().hasSeenOnboarding,
+    ),
 
     routes: [
       GoRoute(
         path: '/',
         builder: (context, state) => const WelcomeScreen(),
+      ),
+      GoRoute(
+        path: '/onboarding',
+        builder: (context, state) => const OnboardingScreen(),
       ),
       GoRoute(
         path: '/login',

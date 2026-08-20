@@ -121,5 +121,8 @@ class ApiException implements Exception {
   String toString() => 'ApiException($statusCode): $body';
 }
 
-/// Singleton instance shared across the app.
-final api = ApiClient();
+/// Singleton instance shared across the app. Mutable (not `final`) so
+/// main() can swap in a self-hosted server override, read from
+/// core/server_config.dart, once at startup before runApp — every call
+/// site just reads `api` dynamically, so reassigning it there is enough.
+ApiClient api = ApiClient();
