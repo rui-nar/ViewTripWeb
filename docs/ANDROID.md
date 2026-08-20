@@ -10,7 +10,7 @@ APK and attaches it to the same GitHub release.
 |---|---|
 | applicationId | `com.traxjourney.app` — permanent; see below |
 | Launcher label | TraxJourney |
-| Distribution | Signed universal APK on the GitHub release (sideload). No Play Store. |
+| Distribution | Signed arm64-v8a APK on the GitHub release (sideload). No Play Store. |
 | API endpoint | Baked at build time: `--dart-define=API_BASE_URL=https://traxjourney.com` |
 
 ## Running it on an emulator
@@ -153,6 +153,21 @@ Nothing extra: `.\bump_version_and_release.ps1` as usual (see
 [RELEASING.md](RELEASING.md)). The tag triggers the APK build, which attaches
 `traxjourney-vX.Y.Z.apk` to the release once it finishes — a few minutes after
 the release page appears.
+
+The build targets `android-arm64` only (`--target-platform android-arm64` in
+[android-release.yml](../.github/workflows/android-release.yml)) and runs with
+R8 minification and resource shrinking on
+([proguard-rules.pro](../flutter_client/android/app/proguard-rules.pro)). Every
+phone sold since ~2017 is 64-bit, and this app is sideload-only, so there's no
+Play Store to hand a 32-bit or x86_64 slice to anyone who'd need one — bundling
+them would only bloat the one file everyone downloads. A 32-bit-only device
+cannot install this APK.
+
+To sanity-check a build after touching `build.gradle.kts` or
+`proguard-rules.pro` — R8 stripping something it shouldn't is a runtime
+failure, not a build failure — move the `validation` tag to trigger the same
+workflow without cutting a real release, then install and smoke-test the
+result before tagging for real.
 
 `versionCode` comes from the tag via
 [android_version_code.py](../scripts/android_version_code.py) (`v0.48.0` → 4800),

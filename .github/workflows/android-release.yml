@@ -109,7 +109,13 @@ jobs:
         run: |
           cd flutter_client
           flutter pub get
+          # arm64-v8a only: every Android phone sold since ~2017 is 64-bit, and
+          # this app is sideload-only (no Play Store to do per-device splitting
+          # for us), so a single arm64 APK is both the smallest and the simplest
+          # file to hand out. Cuts the release APK roughly 3x versus bundling
+          # armeabi-v7a and x86_64 native libs nobody installing today needs.
           flutter build apk --release \
+            --target-platform android-arm64 \
             --build-number="${{ steps.version.outputs.build_number }}" \
             --build-name="${{ steps.version.outputs.build_name }}" \
             --dart-define=APP_VERSION="${{ steps.version.outputs.app_version }}" \
