@@ -2,6 +2,7 @@
 library;
 
 import 'package:cryptography_plus/cryptography_plus.dart';
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
@@ -299,32 +300,11 @@ class _SharedProjectViewState extends State<_SharedProjectView>
               ),
             ),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(28),
-          child: Container(
-            color: theme.colorScheme.secondaryContainer,
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Row(
-              children: [
-                Icon(Icons.lock_outlined,
-                    size: 14,
-                    color: theme.colorScheme.onSecondaryContainer),
-                const SizedBox(width: 6),
-                Text(
-                  'View only — you are viewing a shared project',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSecondaryContainer,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
       ),
       body: Column(
         children: [
-          if (isAnonymous) _AnonBanner(token: widget.token),
+          const ViewOnlyBanner(),
+          if (isAnonymous) AnonBanner(token: widget.token),
           Expanded(
             child: !notifier.isMetaLoaded
                 ? (notifier.error != null
@@ -406,44 +386,96 @@ class _SharedProjectViewState extends State<_SharedProjectView>
   }
 }
 
-// ── Anonymous visitor banner ──────────────────────────────────────────────────
+// ── View-only visitor banner ──────────────────────────────────────────────────
 
-class _AnonBanner extends StatelessWidget {
-  final String token;
-  const _AnonBanner({required this.token});
+class ViewOnlyBanner extends StatelessWidget {
+  const ViewOnlyBanner({super.key});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    return Container(
+      color: theme.colorScheme.secondaryContainer,
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.lock_outlined,
+              size: 14, color: theme.colorScheme.onSecondaryContainer),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'View only — you are viewing a shared project',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSecondaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Anonymous visitor banner ──────────────────────────────────────────────────
+
+class AnonBanner extends StatefulWidget {
+  final String token;
+  const AnonBanner({super.key, required this.token});
+
+  @override
+  State<AnonBanner> createState() => _AnonBannerState();
+}
+
+class _AnonBannerState extends State<AnonBanner> {
+  late final TapGestureRecognizer _loginRecognizer;
+
+  @override
+  void initState() {
+    super.initState();
+    _loginRecognizer = TapGestureRecognizer()
+      ..onTap = () => context.go('/login?return_to=/share/${widget.token}');
+  }
+
+  @override
+  void dispose() {
+    _loginRecognizer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final textStyle = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onTertiaryContainer,
+    );
     return Material(
       color: theme.colorScheme.tertiaryContainer,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(Icons.person_outline,
                 size: 18, color: theme.colorScheme.onTertiaryContainer),
             const SizedBox(width: 10),
-            Text(
-              'Browsing as a guest — ',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onTertiaryContainer,
-              ),
-            ),
-            InkWell(
-              onTap: () => context.go('/login?return_to=/share/$token'),
-              child: Text(
-                'login/register',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onTertiaryContainer,
-                  decoration: TextDecoration.underline,
+            Expanded(
+              child: Text.rich(
+                TextSpan(
+                  style: textStyle,
+                  children: [
+                    const TextSpan(text: 'Browsing as a guest — '),
+                    TextSpan(
+                      text: 'login/register',
+                      style: textStyle?.copyWith(
+                        decoration: TextDecoration.underline,
+                      ),
+                      recognizer: _loginRecognizer,
+                    ),
+                    const TextSpan(text: ' to enable the full experience'),
+                  ],
                 ),
-              ),
-            ),
-            Text(
-              ' to enable the full experience',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onTertiaryContainer,
               ),
             ),
           ],
