@@ -315,20 +315,37 @@ Future<bool> _guardUnsaved(
     context: context,
     useRootNavigator: true,
     builder: (ctx) => AlertDialog(
-      title: const Text('Unsaved changes'),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      title: Row(
+        children: [
+          Icon(Icons.save_outlined,
+              size: 22, color: Theme.of(ctx).colorScheme.primary),
+          const SizedBox(width: 10),
+          const Text('Unsaved changes'),
+        ],
+      ),
       content: const Text('Save changes to this day before navigating?'),
+      actionsAlignment: MainAxisAlignment.spaceBetween,
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(ctx).pop('cancel'),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
           onPressed: () => Navigator.of(ctx).pop('discard'),
+          style: TextButton.styleFrom(
+              foregroundColor: Theme.of(ctx).colorScheme.error),
           child: const Text('Discard'),
         ),
-        ElevatedButton(
-          onPressed: () => Navigator.of(ctx).pop('save'),
-          child: const Text('Save'),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('cancel'),
+              child: const Text('Cancel'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('save'),
+              child: const Text('Save'),
+            ),
+          ],
         ),
       ],
     ),
