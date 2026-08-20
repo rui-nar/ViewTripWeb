@@ -67,20 +67,21 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if [ "$TAG" = "validation" ]; then
-            # The `validation` tag is floating (issue #190), so it carries no
-            # vX.Y.Z of its own. android_version_code.py can't map it, and
-            # there's no release to derive one from either — we deliberately
-            # never create a GitHub Release for it (see the upload step
-            # below). Anchor the versionCode one above the latest real
-            # release instead, so a validation build installs over the
-            # currently-shipped app for upgrade-path testing. This can tie
-            # with the very next real release's own code (e.g. a plain patch
-            # bump), which blocks installing over the validation build until
-            # it's uninstalled — acceptable for an internal test artifact.
-            # Filter to tags that actually look like vX.Y.Z: a stray non-version
-            # release (e.g. one manually created against the `validation` tag
-            # itself) would otherwise come back as "latest" and feed straight
-            # back into android_version_code.py, reproducing this exact failure.
+            # The `validation` tag/release (issue #190) is the trigger for this
+            # build, not a real version: it's created and moved by hand (there's
+            # no other way to kick this workflow off on demand), so it carries
+            # no vX.Y.Z of its own and android_version_code.py can't map it.
+            # Anchor the versionCode one above the latest real release instead,
+            # so a validation build installs over the currently-shipped app for
+            # upgrade-path testing. This can tie with the very next real
+            # release's own code (e.g. a plain patch bump), which blocks
+            # installing over the validation build until it's uninstalled —
+            # acceptable for an internal test artifact.
+            # Filter to tags that actually look like vX.Y.Z: the `validation`
+            # release itself is more recently published than any real release,
+            # so without this filter it comes back as "latest" and feeds
+            # straight back into android_version_code.py, reproducing this
+            # exact failure.
             LATEST_TAG=$(gh release list --exclude-drafts -L 30 --json tagName \
               --jq '[.[] | select(.tagName | test("^v[0-9]"))][0].tagName' || true)
             BASE=0
@@ -133,7 +134,6 @@ jobs:
           fi
 
       - name: Attach the APK to the release
-        if: github.ref_name != 'validation'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -142,6 +142,8 @@ jobs:
           # pushing the tag, and this job has been building for far longer than
           # that — but a hand-pushed tag may have no release at all, so poll
           # briefly and create one rather than dropping the APK on the floor.
+          # The `validation` release always exists by the time this runs, since
+          # creating it is what triggers this workflow in the first place.
           for _ in $(seq 12); do
             gh release view "$TAG" >/dev/null 2>&1 && break
             echo "waiting for release $TAG ..."
@@ -151,14 +153,3 @@ jobs:
             gh release create "$TAG" --title "ViewTripWeb $TAG" --generate-notes
           fi
           gh release upload "$TAG" "$RUNNER_TEMP/traxjourney-$TAG.apk" --clobber
-
-      - name: Upload validation APK as a workflow artifact
-        # `validation` is a floating tag with no release of its own (real v*
-        # tags own the releases page) — publish the APK as a build artifact
-        # instead, downloadable from the workflow run for manual testing.
-        if: github.ref_name == 'validation'
-        uses: actions/upload-artifact@v4
-        with:
-          name: traxjourney-validation-apk
-          path: ${{ runner.temp }}/traxjourney-validation.apk
-          retention-days: 14
