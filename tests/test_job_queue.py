@@ -12,7 +12,13 @@ import pytest
 
 import src.jobs.queue as queue_mod
 import src.jobs.redis_client as redis_client
-from src.jobs.queue import QUEUE_RESOLVE, enqueue, queue_available
+from src.jobs.queue import (
+    QUEUE_DEFAULT,
+    QUEUE_POSTER,
+    QUEUE_RESOLVE,
+    enqueue,
+    queue_available,
+)
 
 
 _calls: list = []
@@ -95,7 +101,11 @@ class TestWithABroker:
         q = queue_mod.get_queue(QUEUE_RESOLVE)
         assert q.count == 1
         job = q.jobs[0]
-        assert job.args == (42,)
+        # Wrapped in _run_with_level_refresh (issue #208) so the worker
+        # refreshes its log level from the shared store before running the
+        # real job — the queued callable is the wrapper, not _record itself.
+        assert job.func is queue_mod._run_with_level_refresh
+        assert job.args == (_record, 42)
         assert job.retries_left or job.retries_left is None
 
     def test_a_broken_broker_falls_back_instead_of_raising(self, monkeypatch):
@@ -111,3 +121,45 @@ class TestWithABroker:
 
         assert enqueue(QUEUE_RESOLVE, _record, 5, background_tasks=bg) is False
         assert len(bg.tasks) == 1
+
+
+class TestLevelRefreshWrapper:
+    """The live log-level override (issue #208) reaches a worker process by
+    refreshing from the shared store right before each job body runs — at
+    _run_with_level_refresh, the one chokepoint every queued job passes
+    through, so the override applies app-wide rather than to route
+    resolution alone."""
+
+    def test_refreshes_before_running_the_job(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "src.utils.logging.refresh_level_from_store",
+            lambda: calls.append("refresh"),
+        )
+
+        def _job(x):
+            calls.append(("job", x))
+            return x * 2
+
+        result = queue_mod._run_with_level_refresh(_job, 21)
+
+        assert result == 42
+        assert calls == ["refresh", ("job", 21)]
+
+    @pytest.mark.parametrize("queue_name", [QUEUE_RESOLVE, QUEUE_POSTER, QUEUE_DEFAULT])
+    def test_every_queue_wraps_its_job_with_the_refresh(self, broker, queue_name):
+        """Not resolve-specific: poster and default (share tiles, stats) jobs
+        get the same refresh."""
+        enqueue(queue_name, _record, 1)
+        q = queue_mod.get_queue(queue_name)
+        assert q.jobs[0].func is queue_mod._run_with_level_refresh
+        assert q.jobs[0].args == (_record, 1)
+
+    def test_in_process_fallback_does_not_wrap(self, no_broker):
+        """The API process already has the override applied in-memory the
+        moment it's set — the fallback path must not pay for an extra Redis
+        round trip it doesn't need."""
+        bg = _FakeBackgroundTasks()
+        enqueue(QUEUE_RESOLVE, _record, 1, background_tasks=bg)
+        func, _args, _kwargs = bg.tasks[0]
+        assert func is _record

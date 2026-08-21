@@ -2,17 +2,27 @@
 
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
+import src.utils.logging as logging_mod
 from src.utils.logging import (
     _APP_HANDLER_MARK,
     _APP_LOGGER_NAMES,
+    LEVEL_NAMES,
     _context_filter,
+    apply_level,
+    clear_level_override,
     configure_logging,
+    current_level_info,
+    env_level,
     get_logger,
+    publish_level_override,
+    refresh_level_from_store,
     request_id_var,
+    set_level_override,
     setup_logging,
     user_id_var,
 )
@@ -128,6 +138,119 @@ class TestConfigureLogging:
             assert root.handlers == []
         finally:
             root.handlers[:] = saved_root
+
+
+class TestLevelOverride:
+    """Live, process-memory override on top of the LOG_LEVEL baseline (#208)."""
+
+    def setup_method(self):
+        for name in _APP_LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            for h in _app_handlers(logger):
+                logger.removeHandler(h)
+        logging_mod._env_level = logging.INFO
+        clear_level_override()
+
+    teardown_method = setup_method
+
+    def test_env_level_defaults_to_info(self, monkeypatch):
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        assert env_level() == logging.INFO
+
+    def test_env_level_reads_valid_value(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "debug")
+        assert env_level() == logging.DEBUG
+
+    def test_env_level_falls_back_on_unrecognized_value(self, monkeypatch):
+        """A typo'd env var must not crash boot — silently default to INFO."""
+        monkeypatch.setenv("LOG_LEVEL", "not-a-level")
+        assert env_level() == logging.INFO
+
+    def test_apply_level_sets_logger_and_handler_levels(self):
+        configure_logging(level=logging.INFO)
+        apply_level(logging.DEBUG)
+        for name in _APP_LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            assert logger.level == logging.DEBUG
+            for h in _app_handlers(logger):
+                assert h.level == logging.DEBUG
+
+    def test_current_level_info_defaults_to_env(self):
+        configure_logging(level=logging.WARNING)
+        info = current_level_info()
+        assert info.effective_level == logging.WARNING
+        assert info.source == "env"
+        assert info.override_level is None
+
+    def test_set_level_override_takes_effect_immediately(self):
+        configure_logging(level=logging.INFO)
+        set_level_override(logging.DEBUG, expires_at=None)
+        info = current_level_info()
+        assert info.effective_level == logging.DEBUG
+        assert info.source == "override"
+        for name in _APP_LOGGER_NAMES:
+            assert logging.getLogger(name).level == logging.DEBUG
+
+    def test_clear_level_override_reverts_to_env(self):
+        configure_logging(level=logging.INFO)
+        set_level_override(logging.DEBUG, expires_at=None)
+        clear_level_override()
+        info = current_level_info()
+        assert info.effective_level == logging.INFO
+        assert info.source == "env"
+
+    def test_expired_override_is_treated_as_absent(self):
+        """Belt-and-suspenders in case the scheduled revert job hasn't fired
+        yet — an expiry in the past must never be reported as still live."""
+        configure_logging(level=logging.INFO)
+        set_level_override(logging.DEBUG, expires_at=time.time() - 1)
+        info = current_level_info()
+        assert info.source == "env"
+        assert info.effective_level == logging.INFO
+
+    def test_publish_level_override_writes_to_the_shared_store(self, monkeypatch):
+        written = {}
+        monkeypatch.setattr(
+            "src.utils.log_level_store.write",
+            lambda level, expires_at: written.update(
+                level=level, expires_at=expires_at
+            ),
+        )
+        expires_at = time.time() + 3600
+        publish_level_override(logging.DEBUG, expires_at)
+        assert written == {"level": logging.DEBUG, "expires_at": expires_at}
+        assert current_level_info().effective_level == logging.DEBUG
+
+    def test_refresh_level_from_store_applies_a_pending_override(self, monkeypatch):
+        configure_logging(level=logging.INFO)
+        monkeypatch.setattr(
+            "src.utils.log_level_store.read", lambda: (logging.DEBUG, None)
+        )
+        refresh_level_from_store()
+        assert current_level_info().effective_level == logging.DEBUG
+
+    def test_refresh_level_from_store_clears_a_reverted_override(self, monkeypatch):
+        """A worker process picks up an admin's DELETE the same way it picks
+        up a PUT — by re-reading the store, not by being told directly."""
+        configure_logging(level=logging.INFO)
+        set_level_override(logging.DEBUG, expires_at=None)
+        monkeypatch.setattr("src.utils.log_level_store.read", lambda: None)
+        refresh_level_from_store()
+        assert current_level_info().source == "env"
+
+    def test_refresh_level_from_store_treats_an_expired_entry_as_reverted(
+        self, monkeypatch
+    ):
+        configure_logging(level=logging.INFO)
+        monkeypatch.setattr(
+            "src.utils.log_level_store.read",
+            lambda: (logging.DEBUG, time.time() - 1),
+        )
+        refresh_level_from_store()
+        assert current_level_info().source == "env"
+
+    def test_level_names_cover_the_admin_endpoint_choices(self):
+        assert LEVEL_NAMES == ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
 class TestSetupLogging:

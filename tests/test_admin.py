@@ -17,6 +17,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 import api.admin as admin_mod
 import models.db as db_module
 import src.admin.storage as storage_mod
+import src.utils.logging as logging_mod
 from api.admin import router as admin_router
 from api.deps import get_current_user
 from models.billing import Subscription
@@ -93,6 +94,9 @@ _ADMIN_ROUTES = [
     ("post", "/api/admin/users/1/set-admin"),
     ("delete", "/api/admin/users/999999"),
     ("post", "/api/admin/broadcast-email"),
+    ("get", "/api/admin/log-level"),
+    ("put", "/api/admin/log-level"),
+    ("delete", "/api/admin/log-level"),
 ]
 
 
@@ -106,8 +110,12 @@ class TestGating:
             body = {"is_admin": True}
         elif "broadcast-email" in path:
             body = {"subject": "s", "body": "b", "send_to_all": True}
+        elif "log-level" in path:
+            body = {"level": "INFO"}
         else:
             body = {}
+        if method == "put":
+            return client.put(path, json=body)
         return client.post(path, json=body)
 
     @pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
@@ -681,3 +689,119 @@ class TestStripeCustomerUrl:
         monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
         assert admin_mod._stripe_customer_url("cus_1") == \
             "https://dashboard.stripe.com/test/customers/cus_1"
+
+
+# ── 8. Live log-level override (issue #208) ────────────────────────────────────
+
+class TestLogLevel:
+    """GET/PUT/DELETE /api/admin/log-level. The endpoints share the real,
+    process-wide AsyncIOScheduler singleton in api.router (same one the app's
+    backup/WAL/usage-reconcile jobs use), so each test resets both that
+    scheduler's revert job and the logging module's override state rather
+    than relying on test order."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self):
+        from api.router import _scheduler as scheduler
+
+        def _reset():
+            logging_mod.clear_level_override()
+            if scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID):
+                scheduler.remove_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID)
+
+        _reset()
+        yield
+        _reset()
+
+    def test_get_reflects_the_env_default(self, admin_client):
+        client, _ = admin_client
+        resp = client.get("/api/admin/log-level")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["effective_level"] == "INFO"
+        assert body["source"] == "env"
+        assert body["override_level"] is None
+
+    def test_put_applies_a_timed_override(self, admin_client):
+        client, _ = admin_client
+        resp = client.put(
+            "/api/admin/log-level", json={"level": "debug", "duration_minutes": 15}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["effective_level"] == "DEBUG"
+        assert body["source"] == "override"
+        assert body["override_expires_at"] is not None
+
+        # GET reflects the same live state (process-memory, not re-derived).
+        assert client.get("/api/admin/log-level").json()["source"] == "override"
+
+    def test_put_applies_an_indefinite_override(self, admin_client):
+        client, _ = admin_client
+        resp = client.put("/api/admin/log-level", json={"level": "ERROR"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["override_level"] == "ERROR"
+        assert body["override_expires_at"] is None
+
+    def test_put_schedules_an_auto_revert_job(self, admin_client):
+        from api.router import _scheduler as scheduler
+
+        client, _ = admin_client
+        client.put(
+            "/api/admin/log-level", json={"level": "DEBUG", "duration_minutes": 5}
+        )
+        assert scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID) is not None
+
+    def test_put_indefinite_clears_a_pending_revert_job(self, admin_client):
+        """An indefinite override supersedes an earlier timed one — no
+        leftover revert should fire and undo it."""
+        from api.router import _scheduler as scheduler
+
+        client, _ = admin_client
+        client.put(
+            "/api/admin/log-level", json={"level": "DEBUG", "duration_minutes": 5}
+        )
+        assert scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID) is not None
+
+        client.put("/api/admin/log-level", json={"level": "DEBUG"})
+        assert scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID) is None
+
+    def test_put_rejects_an_unknown_level(self, admin_client):
+        client, _ = admin_client
+        resp = client.put("/api/admin/log-level", json={"level": "TRACE"})
+        assert resp.status_code == 422
+        assert logging_mod.current_level_info().source == "env"
+
+    @pytest.mark.parametrize("duration_minutes", [0, -5, 1441])
+    def test_put_rejects_an_out_of_range_duration(self, admin_client, duration_minutes):
+        client, _ = admin_client
+        resp = client.put(
+            "/api/admin/log-level",
+            json={"level": "DEBUG", "duration_minutes": duration_minutes},
+        )
+        assert resp.status_code == 422
+        assert logging_mod.current_level_info().source == "env"
+
+    def test_delete_reverts_to_the_env_baseline(self, admin_client):
+        client, _ = admin_client
+        client.put("/api/admin/log-level", json={"level": "DEBUG"})
+
+        resp = client.delete("/api/admin/log-level")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["source"] == "env"
+        assert body["effective_level"] == "INFO"
+        assert logging_mod.current_level_info().source == "env"
+
+    def test_delete_clears_a_pending_revert_job(self, admin_client):
+        from api.router import _scheduler as scheduler
+
+        client, _ = admin_client
+        client.put(
+            "/api/admin/log-level", json={"level": "DEBUG", "duration_minutes": 5}
+        )
+        assert scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID) is not None
+
+        client.delete("/api/admin/log-level")
+        assert scheduler.get_job(admin_mod._LOG_LEVEL_REVERT_JOB_ID) is None

@@ -18,6 +18,17 @@ class _FakeAdminService extends AdminService {
   bool? emailSentToAll;
   Object? broadcastEmailError;
 
+  Map<String, dynamic> logLevelState = {
+    'effective_level': 'INFO',
+    'source': 'env',
+    'env_level': 'INFO',
+    'override_level': null,
+    'override_expires_at': null,
+  };
+  Map<String, dynamic>? lastSetLogLevelCall;
+  Object? setLogLevelError;
+  bool clearLogLevelCalled = false;
+
   @override
   Future<Map<String, dynamic>> getStats() async => {
         'totals': {
@@ -89,6 +100,39 @@ class _FakeAdminService extends AdminService {
     emailSentToAll = sendToAll;
     return sendToAll ? 2 : userIds.length;
   }
+
+  @override
+  Future<Map<String, dynamic>> getLogLevel() async => logLevelState;
+
+  @override
+  Future<Map<String, dynamic>> setLogLevel(String level,
+      {int? durationMinutes}) async {
+    if (setLogLevelError != null) throw setLogLevelError!;
+    lastSetLogLevelCall = {'level': level, 'durationMinutes': durationMinutes};
+    logLevelState = {
+      'effective_level': level,
+      'source': 'override',
+      'env_level': 'INFO',
+      'override_level': level,
+      'override_expires_at': durationMinutes != null
+          ? DateTime.now().millisecondsSinceEpoch / 1000 + durationMinutes * 60
+          : null,
+    };
+    return logLevelState;
+  }
+
+  @override
+  Future<Map<String, dynamic>> clearLogLevelOverride() async {
+    clearLogLevelCalled = true;
+    logLevelState = {
+      'effective_level': 'INFO',
+      'source': 'env',
+      'env_level': 'INFO',
+      'override_level': null,
+      'override_expires_at': null,
+    };
+    return logLevelState;
+  }
 }
 
 Future<void> _pump(WidgetTester tester, Widget child) async {
@@ -115,6 +159,125 @@ void main() {
       expect(tierColor('high'), kSuccess);
       expect(tierColor('medium'), kWarning);
       expect(tierColor('none'), kColorOther);
+    });
+    test('logLevelColor maps levels', () {
+      expect(logLevelColor('DEBUG'), kColorFlight);
+      expect(logLevelColor('INFO'), kSuccess);
+      expect(logLevelColor('WARNING'), kWarning);
+      expect(logLevelColor('ERROR'), kAccent);
+    });
+  });
+
+  // ── Logging (issue #208) ─────────────────────────────────────────────────────
+
+  group('logging', () {
+    testWidgets('shows the default level and no revert button', (tester) async {
+      await _pump(tester, AdminScreen(service: _FakeAdminService()));
+      expect(find.text('Logging'), findsOneWidget);
+      expect(find.text('Default (INFO)'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Revert to default'),
+          findsNothing);
+    });
+
+    testWidgets(
+        'a short DEBUG override applies without a confirmation dialog',
+        (tester) async {
+      final svc = _FakeAdminService();
+      await _pump(tester, AdminScreen(service: svc));
+
+      // 'DEBUG' is unique before the chip updates (only the level segment).
+      await tester.tap(find.text('DEBUG'));
+      await tester.pumpAndSettle();
+      // Default duration selection (15 min) is left as-is.
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Apply indefinite DEBUG logging?'), findsNothing);
+      expect(svc.lastSetLogLevelCall, {'level': 'DEBUG', 'durationMinutes': 15});
+      expect(find.textContaining('Live override'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Revert to default'),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'an indefinite DEBUG override asks for confirmation; canceling '
+        'leaves state unchanged', (tester) async {
+      final svc = _FakeAdminService();
+      await _pump(tester, AdminScreen(service: svc));
+
+      await tester.tap(find.text('DEBUG'));
+      await tester.pump();
+      await tester.tap(find.text('Indefinite'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Apply indefinite DEBUG logging?'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(svc.lastSetLogLevelCall, isNull);
+      expect(find.text('Default (INFO)'), findsOneWidget);
+    });
+
+    testWidgets('confirming the indefinite DEBUG dialog applies it',
+        (tester) async {
+      final svc = _FakeAdminService();
+      await _pump(tester, AdminScreen(service: svc));
+
+      await tester.tap(find.text('DEBUG'));
+      await tester.pump();
+      await tester.tap(find.text('Indefinite'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply anyway'));
+      await tester.pumpAndSettle();
+
+      expect(svc.lastSetLogLevelCall, {'level': 'DEBUG', 'durationMinutes': null});
+      expect(find.text('Live override — until manually reverted'),
+          findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Revert to default'),
+          findsOneWidget);
+    });
+
+    testWidgets(
+        'revert to default calls the service and drops the revert button',
+        (tester) async {
+      final svc = _FakeAdminService()
+        ..logLevelState = {
+          'effective_level': 'DEBUG',
+          'source': 'override',
+          'env_level': 'INFO',
+          'override_level': 'DEBUG',
+          'override_expires_at': null,
+        };
+      await _pump(tester, AdminScreen(service: svc));
+
+      expect(find.widgetWithText(OutlinedButton, 'Revert to default'),
+          findsOneWidget);
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Revert to default'));
+      await tester.pumpAndSettle();
+
+      expect(svc.clearLogLevelCalled, true);
+      expect(find.text('Default (INFO)'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Revert to default'),
+          findsNothing);
+    });
+
+    testWidgets('an apply failure surfaces a snackbar', (tester) async {
+      final svc = _FakeAdminService()
+        ..setLogLevelError =
+            Exception('duration_minutes must be between 1 and 1440');
+      await _pump(tester, AdminScreen(service: svc));
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('duration_minutes must be between 1 and 1440'),
+          findsOneWidget);
     });
   });
 
@@ -245,6 +408,11 @@ void main() {
     expect(buttons[0].onPressed, isNotNull); // low → enabled
     expect(buttons[1].onPressed, isNull); // high → disabled
 
+    // The Logging card (issue #208) pushes this section below the fixed test
+    // viewport — scroll the target into view before tapping, same reasoning
+    // as the Stripe-link test above.
+    await tester.ensureVisible(
+        find.widgetWithText(OutlinedButton, 'Reset password').first);
     await tester.tap(find.widgetWithText(OutlinedButton, 'Reset password').first);
     await tester.pumpAndSettle();
     expect(svc.resetCalledFor, 10);
@@ -320,6 +488,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.pumpAndSettle();
     expect(find.text('Delete user?'), findsOneWidget);
@@ -343,6 +512,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
@@ -365,6 +535,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.tap(find.widgetWithText(OutlinedButton, 'Delete user'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'Delete'));

@@ -58,4 +58,24 @@ class AdminService {
     }) as Map<String, dynamic>;
     return data['sent_count'] as int;
   }
+
+  /// Current effective log level: `{effective_level, source, env_level,
+  /// override_level, override_expires_at}`.
+  Future<Map<String, dynamic>> getLogLevel() async =>
+      await api.get('/api/admin/log-level') as Map<String, dynamic>;
+
+  /// Apply a live log-level override (no restart required). [durationMinutes]
+  /// null applies it indefinitely — until manually reverted or a restart.
+  /// Throws [ApiException] (422) for an unknown level or an out-of-range
+  /// duration.
+  Future<Map<String, dynamic>> setLogLevel(String level,
+      {int? durationMinutes}) async =>
+      await api.put('/api/admin/log-level', {
+        'level': level,
+        'duration_minutes': durationMinutes,
+      }) as Map<String, dynamic>;
+
+  /// Revert to the env-configured (`LOG_LEVEL`) baseline.
+  Future<Map<String, dynamic>> clearLogLevelOverride() async =>
+      await api.delete('/api/admin/log-level') as Map<String, dynamic>;
 }

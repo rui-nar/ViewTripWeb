@@ -37,6 +37,36 @@ String formatSignup(num createdAt) {
   return '${dt.year}-$m-$d';
 }
 
+/// Relative time until a log-level override auto-reverts, from a Unix-seconds
+/// expiry timestamp (e.g. "reverts in 43m", "reverts in 1h 5m").
+/// Kept top-level so tests can exercise it.
+String formatLogLevelExpiry(num expiresAtSeconds) {
+  final expires = DateTime.fromMillisecondsSinceEpoch(
+      (expiresAtSeconds * 1000).round(),
+      isUtc: true);
+  final diff = expires.difference(DateTime.now().toUtc());
+  if (diff.isNegative) return 'reverting…';
+  final totalMinutes = diff.inMinutes;
+  if (totalMinutes < 60) return 'reverts in ${totalMinutes}m';
+  final hours = totalMinutes ~/ 60;
+  final minutes = totalMinutes % 60;
+  return minutes == 0 ? 'reverts in ${hours}h' : 'reverts in ${hours}h ${minutes}m';
+}
+
+/// Color for a log-level chip — DEBUG through ERROR, low to high severity.
+Color logLevelColor(String level) {
+  switch (level) {
+    case 'DEBUG':
+      return kColorFlight;
+    case 'WARNING':
+      return kWarning;
+    case 'ERROR':
+      return kAccent;
+    default: // INFO
+      return kSuccess;
+  }
+}
+
 /// Color for an encryption-tier chip.
 Color tierColor(String tier) {
   switch (tier) {
@@ -86,6 +116,14 @@ class _AdminScreenState extends State<AdminScreen> {
   String? _error;
   bool _refreshingStorage = false;
 
+  // ── Log level state (issue #208) ────────────────────────────────────────────
+  Map<String, dynamic>? _logLevel;
+  bool _applyingLogLevel = false;
+  String _selectedLevel = 'INFO';
+  // Minutes for the next override to apply; 0 is the "Indefinite" sentinel
+  // (SegmentedButton needs a non-nullable value type).
+  int _selectedDurationMinutes = 15;
+
   // ── Search state ────────────────────────────────────────────────────────────
   final _searchCtrl = TextEditingController();
   List<Map<String, dynamic>> _results = [];
@@ -120,14 +158,85 @@ class _AdminScreenState extends State<AdminScreen> {
       _error = null;
     });
     try {
-      final stats = await widget.service.getStats();
-      if (mounted) setState(() => _stats = stats);
+      final results = await Future.wait([
+        widget.service.getStats(),
+        widget.service.getLogLevel(),
+      ]);
+      if (mounted) {
+        setState(() {
+          _stats = results[0];
+          _logLevel = results[1];
+          _selectedLevel = (_logLevel?['override_level'] ??
+              _logLevel?['env_level'] ??
+              'INFO') as String;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
       }
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _applyLogLevel() async {
+    final indefinite = _selectedDurationMinutes == 0;
+    if (_selectedLevel == 'DEBUG' && indefinite) {
+      final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Apply indefinite DEBUG logging?'),
+              content: const Text(
+                  'This logs verbosely across every request until you '
+                  'revert it or the process restarts. Continue?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Apply anyway'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!confirmed) return;
+    }
+
+    setState(() => _applyingLogLevel = true);
+    try {
+      final result = await widget.service.setLogLevel(
+        _selectedLevel,
+        durationMinutes: indefinite ? null : _selectedDurationMinutes,
+      );
+      if (mounted) setState(() => _logLevel = result);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _applyingLogLevel = false);
+    }
+  }
+
+  Future<void> _revertLogLevel() async {
+    setState(() => _applyingLogLevel = true);
+    try {
+      final result = await widget.service.clearLogLevelOverride();
+      if (mounted) setState(() => _logLevel = result);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _applyingLogLevel = false);
     }
   }
 
@@ -449,6 +558,12 @@ class _AdminScreenState extends State<AdminScreen> {
               ),
               const SizedBox(height: 16),
               _SectionCard(
+                title: 'Logging',
+                icon: Icons.bug_report_outlined,
+                child: _buildLogLevel(context),
+              ),
+              const SizedBox(height: 16),
+              _SectionCard(
                 title: 'Users',
                 icon: Icons.people_outline,
                 child: users.isEmpty
@@ -479,6 +594,88 @@ class _AdminScreenState extends State<AdminScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildLogLevel(BuildContext context) {
+    final theme = Theme.of(context);
+    final logLevel = _logLevel;
+    if (logLevel == null) {
+      return const Text('Unavailable.');
+    }
+    final effective = logLevel['effective_level'] as String? ?? 'INFO';
+    final source = logLevel['source'] as String? ?? 'env';
+    final envLevel = logLevel['env_level'] as String? ?? 'INFO';
+    final expiresAt = logLevel['override_expires_at'] as num?;
+    final hasOverride = source == 'override';
+
+    final subtitle = !hasOverride
+        ? (envLevel == 'INFO'
+            ? 'Default (INFO)'
+            : 'Set via LOG_LEVEL ($envLevel)')
+        : 'Live override — '
+            '${expiresAt != null ? formatLogLevelExpiry(expiresAt) : 'until manually reverted'}';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            _LevelChip(level: effective),
+            const SizedBox(width: 10),
+            Expanded(child: Text(subtitle, style: theme.textTheme.bodySmall)),
+            if (hasOverride)
+              _applyingLogLevel
+                  ? const SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : OutlinedButton(
+                      onPressed: _revertLogLevel,
+                      child: const Text('Revert to default'),
+                    ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Text('Apply a level', style: theme.textTheme.labelMedium),
+        const SizedBox(height: 8),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'DEBUG', label: Text('DEBUG')),
+            ButtonSegment(value: 'INFO', label: Text('INFO')),
+            ButtonSegment(value: 'WARNING', label: Text('WARNING')),
+            ButtonSegment(value: 'ERROR', label: Text('ERROR')),
+          ],
+          selected: {_selectedLevel},
+          onSelectionChanged: (s) => setState(() => _selectedLevel = s.first),
+        ),
+        const SizedBox(height: 12),
+        Text('For', style: theme.textTheme.labelMedium),
+        const SizedBox(height: 8),
+        SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(value: 15, label: Text('15 min')),
+            ButtonSegment(value: 60, label: Text('1 hour')),
+            ButtonSegment(value: 240, label: Text('4 hours')),
+            ButtonSegment(value: 0, label: Text('Indefinite')),
+          ],
+          selected: {_selectedDurationMinutes},
+          onSelectionChanged: (s) =>
+              setState(() => _selectedDurationMinutes = s.first),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerRight,
+          child: FilledButton(
+            onPressed: _applyingLogLevel ? null : _applyLogLevel,
+            child: _applyingLogLevel
+                ? const SizedBox(
+                    width: 16, height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Apply'),
+          ),
+        ),
+      ],
     );
   }
 
@@ -711,6 +908,25 @@ const Map<String, String> _tierExplanations = {
       'password reset would destroy this user\'s encrypted data — resets '
       'are blocked.',
 };
+
+class _LevelChip extends StatelessWidget {
+  final String level;
+  const _LevelChip({required this.level});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = logLevelColor(level);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(level,
+          style: TextStyle(color: c, fontSize: 12, fontWeight: FontWeight.w600)),
+    );
+  }
+}
 
 class _TierChip extends StatelessWidget {
   final String tier;

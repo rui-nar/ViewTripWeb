@@ -46,7 +46,7 @@ from models.project_db import _check_schema_contract
 from src.admin.bootstrap import seed_admin
 from src.backup.backup_service import backup_db
 from src.billing.usage import reconcile_all_usage
-from src.utils.logging import configure_logging, get_logger, request_id_var
+from src.utils.logging import configure_logging, env_level, get_logger, request_id_var
 from src.utils.metrics import (
     JOB_EVENT_MASK,
     STALE_WRITES,
@@ -58,7 +58,9 @@ from src.utils.metrics import (
 # Wire app loggers (api.*, src.*) to a console handler as early as possible —
 # this is the process entry point (uvicorn api.router:app), so configuring here
 # means INFO+ logs surface from import time onward, not just inside the lifespan.
-configure_logging()
+# LOG_LEVEL (issue #208) is the restart-persistent baseline; the admin dashboard
+# can additionally apply a live, process-memory-only override on top of it.
+configure_logging(level=env_level())
 
 _log = get_logger(__name__)
 _scheduler = AsyncIOScheduler()
