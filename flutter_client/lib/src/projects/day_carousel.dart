@@ -58,7 +58,7 @@ class DayCarousel extends StatefulWidget {
     super.key,
     required this.notifier,
     this.magnification = 2.0,
-    this.maxOffset = 26.0,
+    this.maxOffset = 42.0,
   });
 
   @override
@@ -204,7 +204,7 @@ class _DayCarouselState extends State<DayCarousel> {
                       decoration: BoxDecoration(
                         // Transparent overlay (issue #199 feedback), not a
                         // solid card.
-                        color: cs.surface.withValues(alpha: 0.55),
+                        color: cs.surface.withValues(alpha: 0.4),
                         borderRadius: pillRadius,
                         boxShadow: kShadow2(Theme.of(context).brightness),
                       ),
