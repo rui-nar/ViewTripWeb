@@ -6,11 +6,13 @@ import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 /// Issue #199: view-mode vertical day carousel. Covers the pure
-/// index→day-key selection mapping, the scroll-distance→scale mapping, the
-/// "Day N" + distance/climb label shown only on the highlighted (centered)
-/// card (sourced from the same `dayTripNumbering`/`dayStats` the manage-mode
-/// day hero and map selection overlay already use), the responsive compact
-/// breakpoint, the pill shape, and the idle dim/retract.
+/// index→day-key selection mapping, the scroll-distance→scale/offset
+/// mapping, the "Day N" label (shown on the highlighted/centered card in
+/// every layout) + distance/climb stats (highlighted + non-compact only)
+/// (sourced from the same `dayTripNumbering`/`dayStats` the manage-mode day
+/// hero and map selection overlay already use), the responsive compact
+/// breakpoint, the pill shape, the staggered leftward bulge, and the idle
+/// dim/retract.
 void main() {
   ProjectNotifier notifierWithThreeDays() {
     final n = ProjectNotifier(ProjectService());
@@ -91,6 +93,21 @@ void main() {
     });
   });
 
+  group('dayCarouselOffset', () {
+    test('is the full offset at the centered slot', () {
+      expect(dayCarouselOffset(0, 26.0), 26.0);
+    });
+
+    test('falls back to 0 a full slot or more away', () {
+      expect(dayCarouselOffset(1.0, 26.0), 0.0);
+      expect(dayCarouselOffset(3.0, 26.0), 0.0);
+    });
+
+    test('interpolates linearly in between', () {
+      expect(dayCarouselOffset(0.5, 26.0), closeTo(13.0, 1e-9));
+    });
+  });
+
   testWidgets(
       'wide layout: highlighted day shows "Day N" + stats, others show a bare number',
       (tester) async {
@@ -109,13 +126,33 @@ void main() {
   });
 
   testWidgets(
-      'narrow layout: compact strip shows bare numbers only, even when highlighted',
+      'narrow layout: compact strip still shows "Day N" when highlighted, but never stats',
       (tester) async {
     await pumpCarousel(tester, const Size(360, 800));
 
-    expect(find.text('1'), findsOneWidget);
-    expect(find.text('Day 1'), findsNothing);
+    // The leftward bulge gives the highlighted card room for "Day N" even
+    // in the compact strip (issue #199 feedback).
+    expect(find.text('Day 1'), findsOneWidget);
+    expect(find.text('1'), findsNothing);
     expect(find.text('10 km'), findsNothing);
+  });
+
+  testWidgets(
+      "the centered card bulges left past the pill's edge; neighbors stay flush",
+      (tester) async {
+    await pumpCarousel(tester, const Size(1200, 900));
+
+    // One Transform.translate per rendered day card (3 days in the fixture).
+    // Day 1 (index 0) starts centered — offset the full maxOffset (26px,
+    // the DayCarousel default) left; day 3 (two slots away) sits flush
+    // against the pill (0px). Issue #199 feedback: staggered/offset stack.
+    final dxs = tester
+        .widgetList<Transform>(find.byType(Transform))
+        .map((t) => t.transform.getTranslation().x)
+        .toList()
+      ..sort();
+    expect(dxs.first, closeTo(-26.0, 0.5));
+    expect(dxs.last, closeTo(0.0, 0.5));
   });
 
   testWidgets('dragging the carousel updates the notifier\'s selected day',

@@ -32,6 +32,17 @@ double dayCarouselScale(double distanceInSlots, double magnification) {
   return lerpDouble(1.0, magnification, t)!;
 }
 
+/// Leftward pixel offset for a card [distanceInSlots] away from the centered
+/// item — 0 at rest, growing to [maxOffset] at the center, linearly over one
+/// slot. The staggered-stack look from issue #199 feedback: each row nudges
+/// further left the closer it is to center, so the highlighted card bulges
+/// past the pill's edge. Extracted for testing.
+@visibleForTesting
+double dayCarouselOffset(double distanceInSlots, double maxOffset) {
+  final t = (1 - distanceInSlots).clamp(0.0, 1.0);
+  return lerpDouble(0.0, maxOffset, t)!;
+}
+
 class DayCarousel extends StatefulWidget {
   final ProjectNotifier notifier;
 
@@ -39,10 +50,15 @@ class DayCarousel extends StatefulWidget {
   /// neighboring (unselected) card — issue #199 feedback: "2x bigger".
   final double magnification;
 
+  /// How far left (px) the centered card bulges past the pill's edge —
+  /// issue #199 feedback: a staggered/offset stack.
+  final double maxOffset;
+
   const DayCarousel({
     super.key,
     required this.notifier,
     this.magnification = 2.0,
+    this.maxOffset = 26.0,
   });
 
   @override
@@ -132,18 +148,25 @@ class _DayCarouselState extends State<DayCarousel> {
     if (days.isEmpty) return const SizedBox.shrink();
 
     final cs = Theme.of(context).colorScheme;
-    // Compact strip (bare number only, no "Day"/distance/climb) below this
-    // width — issue #199 responsive requirement.
+    // Compact strip (no distance/climb) below this width — issue #199
+    // responsive requirement.
     final compact = MediaQuery.sizeOf(context).width < 720;
-    final itemExtent = compact ? 52.0 : 110.0;
-    // Pill/stadium shape (issue #199 feedback): radius = half the width, so
-    // the right edge is one continuous curve; left edge stays square.
-    final width = compact ? 64.0 : 120.0;
-    final radius = width / 2;
+    // 130 (not the tighter 110 a bare number would fit in) — the highlighted
+    // card's "Day N" + distance/climb stats at 2x scale need the headroom.
+    final itemExtent = compact ? 52.0 : 130.0;
+    // Pill/stadium shape (issue #199 feedback): radius = half the pill's
+    // width, so the right edge is one continuous curve; left edge stays
+    // square. The scrollable layer below is reserved extra width beyond the
+    // pill so the centered card can bulge past its left edge without being
+    // clipped — see the staggered-stack offset (issue #199 feedback).
+    final pillWidth = compact ? 64.0 : 120.0;
+    final radius = pillWidth / 2;
     final pillRadius = BorderRadius.only(
       topRight: Radius.circular(radius),
       bottomRight: Radius.circular(radius),
     );
+    final totalWidth = pillWidth + widget.maxOffset;
+    const verticalInset = EdgeInsets.symmetric(vertical: 24);
 
     return MouseRegion(
       onEnter: (_) => _reveal(),
@@ -161,88 +184,136 @@ class _DayCarouselState extends State<DayCarousel> {
           child: AnimatedOpacity(
             duration: _animDuration,
             opacity: _revealed ? 1.0 : 0.4,
-            child: Container(
-              width: width,
-              margin: const EdgeInsets.symmetric(vertical: 24),
-              decoration: BoxDecoration(
-                // Transparent overlay (issue #199 feedback), not a solid card.
-                color: cs.surface.withValues(alpha: 0.55),
-                borderRadius: pillRadius,
-                boxShadow: kShadow2(Theme.of(context).brightness),
-              ),
-              // Clipping lives on this inner rect, not the Container above —
-              // Container's own clipBehavior would clip its BoxDecoration's
-              // boxShadow away along with the content (the shadow paints
-              // outside the decoration's shape, so it'd be cut by the same
-              // clip path).
-              child: ClipRRect(
-                borderRadius: pillRadius,
-                // Fades the top/bottom 30% to transparent (issue #199
-                // feedback) so the strip recedes into the map at its edges.
-                child: ShaderMask(
-                  blendMode: BlendMode.dstIn,
-                  shaderCallback: (rect) => const LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.transparent, Colors.white,
-                      Colors.white, Colors.transparent,
-                    ],
-                    stops: [0.0, 0.3, 0.7, 1.0],
-                  ).createShader(rect),
-                  child: ListWheelScrollView.useDelegate(
-                    controller: _scrollController,
-                    itemExtent: itemExtent,
-                    diameterRatio: 100,
-                    perspective: 0.0005,
-                    physics: const FixedExtentScrollPhysics(),
-                    onSelectedItemChanged: (i) => _onSelectedItemChanged(i, days),
-                    childDelegate: ListWheelChildBuilderDelegate(
-                      childCount: days.length,
-                      builder: (context, index) {
-                        // dayTripNumbering()/dayStats() iterate the day/items
-                        // lists — computed once per index here (called again
-                        // only when this index re-enters the visible window),
-                        // NOT inside the AnimatedBuilder below, which reruns
-                        // every scroll frame. Only the cheap scale/highlighted
-                        // check needs to track the live offset that often.
-                        final dateKey = days[index];
-                        final n = dayTripNumbering(
-                            dateKey, days, widget.notifier.tripStart);
-                        final stats = widget.notifier.dayStats(dateKey);
-                        return AnimatedBuilder(
-                          // Rebuilds this card every scroll tick so its
-                          // scale/"Day N" state tracks the live offset — the
-                          // hand-rolled replacement for ListWheelScrollView's
-                          // built-in magnifier (issue #199: a true ~2x center
-                          // card without clipping into its fixed-height slot).
-                          animation: _scrollController,
-                          builder: (context, _) {
-                            final offset = _scrollController.hasClients
-                                ? _scrollController.offset
-                                : _activeIndex(days) * itemExtent;
-                            final distance =
-                                (index * itemExtent - offset).abs() / itemExtent;
-                            final scale =
-                                dayCarouselScale(distance, widget.magnification);
-                            return _DayCard(
-                              dayNumber: n.dayNumber,
-                              distanceKm: stats.distanceKm,
-                              elevationM: stats.elevationM,
-                              compact: compact,
-                              scale: scale,
-                              highlighted: distance < 0.5,
+            child: SizedBox(
+              width: totalWidth,
+              child: Stack(
+                children: [
+                  // Background pill — purely decorative. The scrollable
+                  // layer below is deliberately NOT clipped to this shape,
+                  // so the centered card can bulge left past its edge.
+                  // Positioned (not a bare Stack child) so it gets a real
+                  // height under Stack's loose constraints — an unsized
+                  // Container would otherwise collapse to zero height.
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 0,
+                    width: pillWidth,
+                    child: Container(
+                      margin: verticalInset,
+                      decoration: BoxDecoration(
+                        // Transparent overlay (issue #199 feedback), not a
+                        // solid card.
+                        color: cs.surface.withValues(alpha: 0.55),
+                        borderRadius: pillRadius,
+                        boxShadow: kShadow2(Theme.of(context).brightness),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 0,
+                    width: totalWidth,
+                    child: Padding(
+                      padding: verticalInset,
+                      // Only the right/top/bottom corners clip to the pill's
+                      // curve — pillRadius is BorderRadius.only(topRight,
+                      // bottomRight), so this box's extra width on the left
+                      // (totalWidth vs. the pill's own pillWidth) stays
+                      // square/unclipped, letting the centered card bulge
+                      // past the pill's left edge without spilling past its
+                      // rounded right silhouette.
+                      child: ClipRRect(
+                        borderRadius: pillRadius,
+                        // Fades the top/bottom 30% to transparent (issue
+                        // #199 feedback) so the strip recedes into the map
+                        // at its edges.
+                        child: ShaderMask(
+                          blendMode: BlendMode.dstIn,
+                          shaderCallback: (rect) => const LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.transparent, Colors.white,
+                              Colors.white, Colors.transparent,
+                            ],
+                            stops: [0.0, 0.3, 0.7, 1.0],
+                          ).createShader(rect),
+                          child: ListWheelScrollView.useDelegate(
+                          controller: _scrollController,
+                          itemExtent: itemExtent,
+                          diameterRatio: 100,
+                          perspective: 0.0005,
+                          physics: const FixedExtentScrollPhysics(),
+                          onSelectedItemChanged: (i) =>
+                              _onSelectedItemChanged(i, days),
+                          childDelegate: ListWheelChildBuilderDelegate(
+                          childCount: days.length,
+                          builder: (context, index) {
+                            // dayTripNumbering()/dayStats() iterate the
+                            // day/items lists — computed once per index here
+                            // (called again only when this index re-enters
+                            // the visible window), NOT inside the
+                            // AnimatedBuilder below, which reruns every
+                            // scroll frame. Only the cheap scale/offset/
+                            // highlighted check needs to track the live
+                            // offset that often.
+                            final dateKey = days[index];
+                            final n = dayTripNumbering(
+                                dateKey, days, widget.notifier.tripStart);
+                            final stats = widget.notifier.dayStats(dateKey);
+                            return AnimatedBuilder(
+                              // Rebuilds this card every scroll tick so its
+                              // scale/offset/"Day N" state tracks the live
+                              // offset — the hand-rolled replacement for
+                              // ListWheelScrollView's built-in magnifier
+                              // (issue #199: a true ~2x center card without
+                              // clipping into its fixed-height slot, plus the
+                              // staggered leftward bulge).
+                              animation: _scrollController,
+                              builder: (context, _) {
+                                final offset = _scrollController.hasClients
+                                    ? _scrollController.offset
+                                    : _activeIndex(days) * itemExtent;
+                                final distance =
+                                    (index * itemExtent - offset).abs() /
+                                        itemExtent;
+                                final scale = dayCarouselScale(
+                                    distance, widget.magnification);
+                                final dx = dayCarouselOffset(
+                                    distance, widget.maxOffset);
+                                return Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Transform.translate(
+                                    offset: Offset(-dx, 0),
+                                    child: SizedBox(
+                                      width: pillWidth,
+                                      child: _DayCard(
+                                        dayNumber: n.dayNumber,
+                                        distanceKm: stats.distanceKm,
+                                        elevationM: stats.elevationM,
+                                        compact: compact,
+                                        scale: scale,
+                                        highlighted: distance < 0.5,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
                             );
                           },
-                        );
-                      },
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
+                ),
+              ],
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -268,9 +339,10 @@ class _DayCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    // "Day N" only for the highlighted card (space-constrained neighbors —
-    // and in the compact strip — keep the bare number); issue #199 feedback.
-    final label = highlighted && !compact ? 'Day $dayNumber' : '$dayNumber';
+    // "Day N" on the highlighted card, in every layout — the leftward bulge
+    // (dayCarouselOffset) gives it room even in the compact strip; issue
+    // #199 feedback. Neighbors keep the bare number (space-constrained).
+    final label = highlighted ? 'Day $dayNumber' : '$dayNumber';
     final baseFontSize = compact ? 13.0 : 15.0;
     final showStats = highlighted && !compact;
     return Center(
@@ -280,6 +352,15 @@ class _DayCard extends StatelessWidget {
         children: [
           Text(
             label,
+            // "Day N" can be wider than this card's own SizedBox (pillWidth)
+            // — translating the card left (the bulge) repositions it but
+            // doesn't widen its layout box, so without this the text would
+            // wrap to a second line and blow out the fixed-height slot
+            // (itemExtent). softWrap:false + visible keeps it one line,
+            // overflowing horizontally into the reserved bulge space
+            // instead — the outer ClipRRect is sized to allow exactly that.
+            softWrap: false,
+            overflow: TextOverflow.visible,
             style: monoStyle(
               // Same font used by the day-meta editor's hero + the map's
               // selection-stats overlay (both JetBrains Mono via monoStyle).
