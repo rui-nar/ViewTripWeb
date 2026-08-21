@@ -1,14 +1,17 @@
 library;
 
 import 'dart:math' show pow;
+import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show Path, PathFillType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
+import '../core/concurrency_gate.dart';
 import '../core/design_tokens.dart'
     show kAccent, kShadow2, monoStyle, activityTypeBucket, segmentTypeBucket,
         resolveTypeStyle, LineStyleKind;
@@ -1018,14 +1021,10 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       if (photos.isNotEmpty) {
         final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
-          child: Image.network(
-            thumbUrl,
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
+          child: _MarkerThumbImage(
+            url: thumbUrl,
             headers: authHeaders,
-            errorBuilder: (_, __, ___) =>
-                Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white),
+            size: size,
           ),
         );
       } else {
@@ -1811,14 +1810,10 @@ class ManageMapPanelState extends State<ManageMapPanel>
       if (photos.isNotEmpty) {
         final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
-          child: Image.network(
-            thumbUrl,
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
+          child: _MarkerThumbImage(
+            url: thumbUrl,
             headers: authHeaders,
-            errorBuilder: (_, __, ___) => Icon(Icons.photo_camera,
-                size: size * 0.45, color: Colors.white),
+            size: size,
           ),
         );
       } else {
@@ -2609,5 +2604,81 @@ class MobileActivityPanelOverlay extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// One memory marker's photo thumbnail. `flutter_map` builds every marker
+/// up front rather than only the visible ones, so a plain `Image.network`
+/// per marker meant opening the map for a photo-heavy trip fired one HTTP
+/// request per memory simultaneously — enough to repeatedly crash the
+/// production API. Fetches are throttled through [_gate] and cached by URL
+/// so panning/zooming rebuilds don't refetch.
+class _MarkerThumbImage extends StatefulWidget {
+  const _MarkerThumbImage({
+    required this.url,
+    required this.headers,
+    required this.size,
+  });
+
+  final String url;
+  final Map<String, String> headers;
+  final double size;
+
+  static final ConcurrencyGate _gate = ConcurrencyGate(6);
+  static final Map<String, Uint8List> _cache = <String, Uint8List>{};
+
+  @override
+  State<_MarkerThumbImage> createState() => _MarkerThumbImageState();
+}
+
+class _MarkerThumbImageState extends State<_MarkerThumbImage> {
+  Uint8List? _bytes;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MarkerThumbImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _bytes = null;
+      _failed = false;
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    final cached = _MarkerThumbImage._cache[widget.url];
+    if (cached != null) {
+      setState(() => _bytes = cached);
+      return;
+    }
+    try {
+      final bytes = await _MarkerThumbImage._gate.run(() async {
+        final res = await http.get(Uri.parse(widget.url), headers: widget.headers);
+        if (res.statusCode != 200) {
+          throw Exception('thumb fetch failed: ${res.statusCode}');
+        }
+        return res.bodyBytes;
+      });
+      _MarkerThumbImage._cache[widget.url] = bytes;
+      if (mounted) setState(() => _bytes = bytes);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_failed) {
+      return Icon(Icons.photo_camera, size: widget.size * 0.45, color: Colors.white);
+    }
+    final bytes = _bytes;
+    if (bytes == null) return const SizedBox.shrink();
+    return Image.memory(bytes, width: widget.size, height: widget.size, fit: BoxFit.cover);
   }
 }

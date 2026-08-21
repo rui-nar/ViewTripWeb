@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import os
+import threading
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,17 @@ _log = logging.getLogger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
+
+# A burst of concurrent thumbnail requests — e.g. opening the trip map for a
+# photo-heavy project, which fires one request per marker with no throttling
+# on the client — repeatedly OOM-killed the production API container. Sync
+# routes run in FastAPI's thread pool (default capacity 40), so an unbounded
+# burst piles up threads faster than the container's memory limit can
+# absorb. Capping in-flight requests here trades a fast, cheap 503 for that
+# crash; the client-side fix (map_panel.dart's _MarkerThumbImage) is the
+# real throttle — this is a safety net for any other caller.
+_THUMB_MAX_CONCURRENT = 24
+_thumb_semaphore = threading.BoundedSemaphore(_THUMB_MAX_CONCURRENT)
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
@@ -665,22 +677,30 @@ def serve_photo_thumb(
     current_user: Annotated[dict, Depends(get_current_user)],
 ):
     """Return the 400×400 thumbnail JPEG; falls back to full-res if thumb is missing."""
-    user_info_id = int(current_user["sub"])
-    with get_session() as sess:
-        mem_row = _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
-        owner_dir = _owner_dir_id(sess, mem_row)
-        photos: List[str] = json.loads(mem_row.photos_json or "[]")
-        if photo_uuid not in photos:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
+    if not _thumb_semaphore.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server busy, retry shortly",
+        )
+    try:
+        user_info_id = int(current_user["sub"])
+        with get_session() as sess:
+            mem_row = _get_owned_memory(sess, memory_id, user_info_id, min_role="viewer")
+            owner_dir = _owner_dir_id(sess, mem_row)
+            photos: List[str] = json.loads(mem_row.photos_json or "[]")
+            if photo_uuid not in photos:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-    photo_path = Path(_DATA_DIR) / "users" / owner_dir / "memories" / str(memory_id)
-    thumb_path = photo_path / f"{photo_uuid}_thumb.jpg"
-    if not thumb_path.exists():
-        full_path = photo_path / f"{photo_uuid}.jpg"
-        if full_path.exists():
-            return FileResponse(str(full_path), media_type="image/jpeg")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-    return FileResponse(str(thumb_path), media_type="image/jpeg")
+        photo_path = Path(_DATA_DIR) / "users" / owner_dir / "memories" / str(memory_id)
+        thumb_path = photo_path / f"{photo_uuid}_thumb.jpg"
+        if not thumb_path.exists():
+            full_path = photo_path / f"{photo_uuid}.jpg"
+            if full_path.exists():
+                return FileResponse(str(full_path), media_type="image/jpeg")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        return FileResponse(str(thumb_path), media_type="image/jpeg")
+    finally:
+        _thumb_semaphore.release()
 
 
 # ── Comments ──────────────────────────────────────────────────────────────────
