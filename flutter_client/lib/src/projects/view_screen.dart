@@ -616,9 +616,13 @@ class _ViewLayout extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               mapPanel,
+              // Inset top/bottom so the carousel clears MapPanel's own
+              // top-right selection-stats badge and bottom-right locate-me
+              // button (both live inside MapPanel's Stack at the same
+              // right:12 edge) instead of overlapping them.
               Positioned(
-                top: 0,
-                bottom: 0,
+                top: 90,
+                bottom: 80,
                 right: 0,
                 child: DayCarousel(notifier: notifier),
               ),

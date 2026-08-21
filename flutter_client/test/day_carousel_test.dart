@@ -143,7 +143,7 @@ void main() {
     await pumpCarousel(tester, const Size(1200, 900));
 
     // One Transform.translate per rendered day card (3 days in the fixture).
-    // Day 1 (index 0) starts centered — offset the full maxOffset (26px,
+    // Day 1 (index 0) starts centered — offset the full maxOffset (42px,
     // the DayCarousel default) left; day 3 (two slots away) sits flush
     // against the pill (0px). Issue #199 feedback: staggered/offset stack.
     final dxs = tester
@@ -151,7 +151,7 @@ void main() {
         .map((t) => t.transform.getTranslation().x)
         .toList()
       ..sort();
-    expect(dxs.first, closeTo(-26.0, 0.5));
+    expect(dxs.first, closeTo(-42.0, 0.5));
     expect(dxs.last, closeTo(0.0, 0.5));
   });
 
