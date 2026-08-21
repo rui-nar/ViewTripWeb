@@ -24,15 +24,20 @@ bool shouldSyncViewport(MapEvent event) =>
 /// given camera position encoded as query params. No live `MapController`
 /// required, so this is independently unit-testable. [ownerId] (issue #106)
 /// is included so a reload of a shared project's URL still resolves it.
+///
+/// [lat]/[lng]/[zoom] are optional: pass all three when a camera position
+/// was actually available, or omit them (e.g. the map hasn't attached yet —
+/// issue #219) to link to the project without a saved viewport; the
+/// destination screen falls back to its default center/fit-bounds.
 String viewportSyncPath({
   required String basePath,
   required String projectName,
   int? ownerId,
-  required double lat,
-  required double lng,
-  required double zoom,
+  double? lat,
+  double? lng,
+  double? zoom,
 }) {
   return '$basePath?project=${Uri.encodeComponent(projectName)}'
       '${ownerId != null ? '&owner=$ownerId' : ''}'
-      '&lat=$lat&lng=$lng&zoom=$zoom';
+      '${lat != null && lng != null && zoom != null ? '&lat=$lat&lng=$lng&zoom=$zoom' : ''}';
 }
