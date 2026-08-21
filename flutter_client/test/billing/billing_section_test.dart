@@ -10,6 +10,8 @@
 /// test here passed (issue #153).
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/billing/billing_section.dart';
@@ -124,10 +126,108 @@ class _SequenceBilling implements BillingService {
   Future<List<PlanInfo>> plans() async => const [];
 }
 
+/// A [BillingService] whose `status()` call doesn't resolve until
+/// [complete] or [fail] is called — for observing the loading state
+/// (issue #196), which a same-tick fake would resolve too fast to see.
+class _PendingBilling implements BillingService {
+  final _completer = Completer<BillingStatus>();
+
+  void complete(Map<String, dynamic> payload) =>
+      _completer.complete(BillingStatus.fromJson(payload));
+
+  void fail() => _completer.completeError(Exception('network error'));
+
+  @override
+  Future<BillingStatus> status() => _completer.future;
+
+  @override
+  Future<String> checkoutUrl({String? plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/checkout';
+
+  @override
+  Future<String> planChangeUrl(
+          {required String plan, String returnPath = kPlanRoute}) async =>
+      'https://pay.test/change';
+
+  @override
+  Future<String> urlToReach({
+    required String plan,
+    required bool subscribed,
+    String returnPath = kPlanRoute,
+  }) async =>
+      subscribed ? 'https://pay.test/change' : 'https://pay.test/checkout';
+
+  @override
+  Future<String> portalUrl({String returnPath = kPlanRoute}) async =>
+      'https://pay.test/portal';
+
+  @override
+  Future<List<PlanInfo>> plans() async => const [];
+}
+
 void main() {
   group('self-hosted', () {
     testWidgets('renders nothing when billing is disabled', (tester) async {
       await _pump(tester, _FakeBilling({'billing_enabled': false}));
+      expect(find.text('Plan'), findsNothing);
+      expect(find.byType(Card), findsNothing);
+    });
+  });
+
+  group('loading (issue #196)', () {
+    testWidgets('reserves a fixed-position card with a spinner', (tester) async {
+      final billing = _PendingBilling();
+      await tester.pumpWidget(MaterialApp(
+        theme: lightTheme,
+        home: Scaffold(body: BillingSection(service: billing)),
+      ));
+      // A frame with the status request still in flight.
+      await tester.pump();
+
+      expect(find.text('Plan'), findsOneWidget);
+      expect(find.byType(Card), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      // Let the pending future resolve so the test doesn't leak a timer.
+      billing.complete({'billing_enabled': true, 'plan': 'free'});
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('settles into the real card once the status arrives',
+        (tester) async {
+      final billing = _PendingBilling();
+      await tester.pumpWidget(MaterialApp(
+        theme: lightTheme,
+        home: Scaffold(body: BillingSection(service: billing)),
+      ));
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      billing.complete({
+        'billing_enabled': true,
+        'plan': 'free',
+        'plan_name': 'Free',
+        'status': 'none',
+        'limits': {'max_projects': 1},
+        'usage': {'projects': 1},
+      });
+      await tester.pumpAndSettle();
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Free'), findsOneWidget);
+    });
+
+    testWidgets('a failed request hides the section rather than getting stuck',
+        (tester) async {
+      final billing = _PendingBilling();
+      await tester.pumpWidget(MaterialApp(
+        theme: lightTheme,
+        home: Scaffold(body: BillingSection(service: billing)),
+      ));
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      billing.fail();
+      await tester.pumpAndSettle();
       expect(find.text('Plan'), findsNothing);
       expect(find.byType(Card), findsNothing);
     });
