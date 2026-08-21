@@ -151,7 +151,9 @@ class _DayCarouselState extends State<DayCarousel> {
     // Compact strip (no distance/climb) below this width — issue #199
     // responsive requirement.
     final compact = MediaQuery.sizeOf(context).width < 720;
-    final itemExtent = compact ? 52.0 : 110.0;
+    // 130 (not the tighter 110 a bare number would fit in) — the highlighted
+    // card's "Day N" + distance/climb stats at 2x scale need the headroom.
+    final itemExtent = compact ? 52.0 : 130.0;
     // Pill/stadium shape (issue #199 feedback): radius = half the pill's
     // width, so the right edge is one continuous curve; left edge stays
     // square. The scrollable layer below is reserved extra width beyond the
@@ -350,6 +352,15 @@ class _DayCard extends StatelessWidget {
         children: [
           Text(
             label,
+            // "Day N" can be wider than this card's own SizedBox (pillWidth)
+            // — translating the card left (the bulge) repositions it but
+            // doesn't widen its layout box, so without this the text would
+            // wrap to a second line and blow out the fixed-height slot
+            // (itemExtent). softWrap:false + visible keeps it one line,
+            // overflowing horizontally into the reserved bulge space
+            // instead — the outer ClipRRect is sized to allow exactly that.
+            softWrap: false,
+            overflow: TextOverflow.visible,
             style: monoStyle(
               // Same font used by the day-meta editor's hero + the map's
               // selection-stats overlay (both JetBrains Mono via monoStyle).
