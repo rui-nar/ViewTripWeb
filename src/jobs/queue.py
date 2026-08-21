@@ -63,6 +63,26 @@ _RESULT_TTL_S = 3600
 _RETRY_INTERVALS = [10, 30, 60]
 
 
+def _run_with_level_refresh(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Job wrapper actually handed to RQ (issue #208).
+
+    Must be a plain module-level function, not a closure — RQ serializes a
+    job by the importable name of its callable, and *func* travels as a
+    plain argument alongside it (also importable-by-reference, same
+    requirement every queued job already meets).
+
+    Refreshes this worker process's log level from the shared store before
+    running *func*, so a live override an admin applied through the API
+    process reaches whichever job happens to execute next — not just route
+    resolution, since every queue (`resolve`/`poster`/`default`) goes
+    through this same wrapper.
+    """
+    from src.utils.logging import refresh_level_from_store
+
+    refresh_level_from_store()
+    return func(*args, **kwargs)
+
+
 def queue_available() -> bool:
     """Whether jobs will be queued rather than run in-process."""
     return get_redis() is not None
@@ -102,7 +122,7 @@ def enqueue(
             from rq import Retry
 
             queue.enqueue(
-                func, *args,
+                _run_with_level_refresh, func, *args,
                 retry=Retry(max=max_retries, interval=_RETRY_INTERVALS[:max_retries]),
                 result_ttl=_RESULT_TTL_S,
                 **kwargs,

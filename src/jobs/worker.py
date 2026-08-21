@@ -15,7 +15,7 @@ import time
 
 from src.jobs.queue import ALL_QUEUES
 from src.jobs.redis_client import get_redis, redis_url, reset_redis
-from src.utils.logging import configure_logging, get_logger
+from src.utils.logging import configure_logging, env_level, get_logger
 
 _log = get_logger(__name__)
 
@@ -50,7 +50,9 @@ def _connect_with_retry(sleep=time.sleep):
 
 def main(argv: list[str] | None = None) -> int:
     """Consume the named queues (default: all) until killed."""
-    configure_logging()
+    # LOG_LEVEL (issue #208) is the restart-persistent baseline. A live admin
+    # override applies on top of it per-job (see src.jobs.queue.enqueue).
+    configure_logging(level=env_level())
     os.environ.setdefault("VIEWTRIP_ROLE", "worker")
 
     queues = argv if argv else list(ALL_QUEUES)

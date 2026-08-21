@@ -11,9 +11,11 @@ session so a slow walk never pins a pooled connection.
 from __future__ import annotations
 
 import html
+import logging
 import os
 import secrets
 import time
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -32,7 +34,13 @@ from src.billing.entitlements import plan_display_name, plan_from_subscription
 from src.billing.plans import FREE, PLAN_ORDER
 from src.billing.subscriptions import set_admin_override
 from src.email.service import EmailMessage, get_email_service
-from src.utils.logging import get_logger
+from src.utils.logging import (
+    LEVEL_NAMES,
+    current_level_info,
+    get_logger,
+    publish_level_override,
+    revert_log_level_override,
+)
 
 _log = get_logger(__name__)
 
@@ -48,6 +56,15 @@ _RESET_PASSWORD_BYTES = 16
 # zero-knowledge enough that a server-side reset would silently destroy the
 # user's encrypted data, so they are hard-blocked.
 _RESETTABLE_TIERS = frozenset({"none", "low"})
+
+# Longest a live log-level override may run before an admin has to re-apply it
+# (issue #208). Bounds the worst case of a forgotten DEBUG override quietly
+# burning log volume in production for weeks.
+_MAX_LOG_LEVEL_OVERRIDE_MINUTES = 24 * 60
+
+# APScheduler job id for the auto-revert — fixed and reused (replace_existing)
+# so a second PUT reschedules rather than stacking multiple pending reverts.
+_LOG_LEVEL_REVERT_JOB_ID = "log_level_revert"
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
@@ -134,6 +151,25 @@ class BroadcastEmailResponse(BaseModel):
     sent_count: int
 
 
+class LogLevelResponse(BaseModel):
+    effective_level: str = Field(description="The level actually in effect right now")
+    source: str = Field(description='"env" (LOG_LEVEL / default) or "override" (live, admin-set)')
+    env_level: str = Field(description="The restart-persistent baseline (LOG_LEVEL, default INFO)")
+    override_level: str | None = Field(description="The live override's level, if one is active")
+    override_expires_at: float | None = Field(
+        description="Unix timestamp the override auto-reverts at, or null for an indefinite override"
+    )
+
+
+class SetLogLevelRequest(BaseModel):
+    level: str = Field(description='One of "DEBUG", "INFO", "WARNING", "ERROR"')
+    duration_minutes: int | None = Field(
+        default=None,
+        description="Auto-revert after this many minutes; null applies indefinitely "
+                    "(until manually reverted or the process restarts)",
+    )
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _counts_by_user(sess, col, model) -> dict[int, int]:
@@ -186,6 +222,20 @@ def _billing_fields(sub: Subscription | None) -> dict:
         "subscription_status": sub.status or "none",
         "stripe_customer_url": _stripe_customer_url(sub.provider_customer_id),
     }
+
+
+def _log_level_response() -> LogLevelResponse:
+    info = current_level_info()
+    return LogLevelResponse(
+        effective_level=logging.getLevelName(info.effective_level),
+        source=info.source,
+        env_level=logging.getLevelName(info.env_level),
+        override_level=(
+            logging.getLevelName(info.override_level)
+            if info.override_level is not None else None
+        ),
+        override_expires_at=info.override_expires_at,
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -445,6 +495,82 @@ def delete_user(
 
     _log.info("Admin deleted user_info_id=%s", user_info_id)
     return {"ok": True}
+
+
+@router.get("/log-level", response_model=LogLevelResponse,
+            summary="Current effective log level")
+def get_log_level(_admin: Annotated[dict, Depends(require_admin)]):
+    return _log_level_response()
+
+
+@router.put("/log-level", response_model=LogLevelResponse,
+            summary="Apply a live log-level override (no restart required)")
+def set_log_level(
+    body: SetLogLevelRequest,
+    _admin: Annotated[dict, Depends(require_admin)],
+):
+    """Overrides the effective level on this process immediately, and
+    publishes it to Redis (when configured) so the worker process picks it
+    up before its next job (issue #208). Process-memory only: a restart of
+    either process drops back to the ``LOG_LEVEL`` baseline, same as
+    clearing the override via ``DELETE``.
+    """
+    level_name = body.level.strip().upper()
+    if level_name not in LEVEL_NAMES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown level {body.level!r}; must be one of {sorted(LEVEL_NAMES)}",
+        )
+    if body.duration_minutes is not None and not (
+        0 < body.duration_minutes <= _MAX_LOG_LEVEL_OVERRIDE_MINUTES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"duration_minutes must be between 1 and {_MAX_LOG_LEVEL_OVERRIDE_MINUTES}",
+        )
+
+    level = getattr(logging, level_name)
+    expires_at = (
+        time.time() + body.duration_minutes * 60
+        if body.duration_minutes is not None else None
+    )
+    publish_level_override(level, expires_at)
+
+    # Imported here, not at module load: api.router imports this module while
+    # building itself, so importing api.router back at load time would be
+    # circular. By request time api.router has long finished importing.
+    from api.router import _scheduler
+
+    if expires_at is not None:
+        _scheduler.add_job(
+            revert_log_level_override, "date",
+            run_date=datetime.fromtimestamp(expires_at, tz=timezone.utc),
+            id=_LOG_LEVEL_REVERT_JOB_ID, replace_existing=True,
+        )
+    elif _scheduler.get_job(_LOG_LEVEL_REVERT_JOB_ID) is not None:
+        # An earlier finite-duration override left a pending revert behind;
+        # this indefinite one supersedes it.
+        _scheduler.remove_job(_LOG_LEVEL_REVERT_JOB_ID)
+
+    _log.info(
+        "Admin set log level override=%s duration_minutes=%s",
+        level_name, body.duration_minutes,
+    )
+    return _log_level_response()
+
+
+@router.delete("/log-level", response_model=LogLevelResponse,
+               summary="Revert to the env-configured (LOG_LEVEL) baseline")
+def clear_log_level(_admin: Annotated[dict, Depends(require_admin)]):
+    revert_log_level_override()
+
+    from api.router import _scheduler
+
+    if _scheduler.get_job(_LOG_LEVEL_REVERT_JOB_ID) is not None:
+        _scheduler.remove_job(_LOG_LEVEL_REVERT_JOB_ID)
+
+    _log.info("Admin cleared log level override")
+    return _log_level_response()
 
 
 async def _send_broadcast_email(to_email: str, subject: str, text_body: str) -> None:
