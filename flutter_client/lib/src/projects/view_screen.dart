@@ -347,10 +347,25 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
               ],
               selected: const {true},
               onSelectionChanged: (s) {
-                final cam = _mapController.mapController.camera;
-                context.go(widget.projectRef.withOwner(
-                    '/app?project=${Uri.encodeComponent(widget.projectName)}'
-                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}'));
+                // The toggle must win even if the map hasn't attached yet
+                // (e.g. the user taps it before the meta load finishes and
+                // mounts the map) — issue #219. Camera access throws in that
+                // case; fall back to switching modes without a saved
+                // viewport rather than silently dropping the tap.
+                double? lat, lng, zoom;
+                try {
+                  final cam = _mapController.mapController.camera;
+                  lat = cam.center.latitude;
+                  lng = cam.center.longitude;
+                  zoom = cam.zoom;
+                } catch (_) {}
+                context.go(widget.projectRef.withOwner(viewportSyncPath(
+                  basePath: '/app',
+                  projectName: widget.projectName,
+                  lat: lat,
+                  lng: lng,
+                  zoom: zoom,
+                )));
               },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,

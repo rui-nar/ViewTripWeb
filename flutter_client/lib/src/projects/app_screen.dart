@@ -562,10 +562,22 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               ],
               selected: const {false},
               onSelectionChanged: (s) {
-                final cam = _mapController.mapController.camera;
-                context.go(widget.projectRef.withOwner(
-                    '/view?project=${Uri.encodeComponent(widget.projectName)}'
-                    '&lat=${cam.center.latitude}&lng=${cam.center.longitude}&zoom=${cam.zoom}'));
+                // Same guard as view_screen.dart's toggle (issue #219): the
+                // toggle must win even if the map hasn't attached yet.
+                double? lat, lng, zoom;
+                try {
+                  final cam = _mapController.mapController.camera;
+                  lat = cam.center.latitude;
+                  lng = cam.center.longitude;
+                  zoom = cam.zoom;
+                } catch (_) {}
+                context.go(widget.projectRef.withOwner(viewportSyncPath(
+                  basePath: '/view',
+                  projectName: widget.projectName,
+                  lat: lat,
+                  lng: lng,
+                  zoom: zoom,
+                )));
               },
               style: const ButtonStyle(
                   visualDensity: VisualDensity.compact,
