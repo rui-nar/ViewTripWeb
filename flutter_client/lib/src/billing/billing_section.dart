@@ -92,9 +92,23 @@ class _BillingSectionState extends State<BillingSection> {
       future: _future,
       builder: (context, snapshot) {
         final status = snapshot.data;
-        // Hidden while loading, on error, and on self-hosted instances: the
-        // section must never flash a plan the deployment doesn't sell.
-        if (status == null || !status.billingEnabled) {
+        // No response yet (and no prior one to fall back on, e.g. from a
+        // refetch after returning from the plan page): reserve the card's
+        // position and show a spinner in it, like Strava/Polarsteps do,
+        // rather than collapsing to zero height (issue #196).
+        if (status == null) {
+          if (snapshot.hasError) {
+            return const SizedBox.shrink();
+          }
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: _loadingCard(context),
+          );
+        }
+        // Hidden on self-hosted instances, now that the response has
+        // actually come back: the section must never flash a plan the
+        // deployment doesn't sell.
+        if (!status.billingEnabled) {
           return const SizedBox.shrink();
         }
         return Padding(
@@ -102,6 +116,34 @@ class _BillingSectionState extends State<BillingSection> {
           child: _card(context, status),
         );
       },
+    );
+  }
+
+  Widget _loadingCard(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.workspace_premium_outlined,
+                    color: theme.colorScheme.primary, size: 20),
+                const SizedBox(width: 8),
+                Text('Plan', style: theme.textTheme.titleLarge),
+              ],
+            ),
+            const Divider(height: 24),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
