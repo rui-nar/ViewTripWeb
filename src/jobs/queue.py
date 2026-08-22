@@ -131,6 +131,22 @@ def enqueue(
         except Exception as exc:  # noqa: BLE001 — degrade to in-process
             _log.warning("enqueue to %r failed (%s) — running in-process", queue_name, exc)
 
+    if queue_name == QUEUE_POSTER:
+        # Every other queue degrading to in-process just delays that one job.
+        # A poster render degrading this way is worse: it's a CPU-heavy Pillow
+        # composite (up to ~140M pixels) plus blocking sequential Mapbox tile
+        # fetches, run inside the API's own process/threadpool — it starves
+        # every other request for the duration of the render, not just this
+        # job's caller. Louder than the generic warning above on purpose.
+        _log.error(
+            "poster job has no broker to run on (queue_name=%r, REDIS_URL unset "
+            "or Redis unreachable) — rendering in-process, which will block the "
+            "API process for every other request until the render finishes. "
+            "Configure REDIS_URL and the worker-poster service — see "
+            "docs/DEPLOYMENT_VPS.md.",
+            queue_name,
+        )
+
     if background_tasks is not None:
         background_tasks.add_task(func, *args, **kwargs)
     else:

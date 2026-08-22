@@ -163,3 +163,46 @@ class TestLevelRefreshWrapper:
         enqueue(QUEUE_RESOLVE, _record, 1, background_tasks=bg)
         func, _args, _kwargs = bg.tasks[0]
         assert func is _record
+
+
+class TestPosterFallbackIsLoud:
+    """Every queue falls back to in-process the same way, but only a poster
+    render blocks the whole API process while it runs (CPU-heavy Pillow
+    compositing + sequential Mapbox fetches) — that fallback must log louder
+    than the generic warning so it's visible in production without anyone
+    having to go looking for it."""
+
+    def test_no_broker_logs_an_error_for_the_poster_queue(self, no_broker, caplog):
+        bg = _FakeBackgroundTasks()
+        with caplog.at_level("ERROR", logger="src.jobs.queue"):
+            enqueue(QUEUE_POSTER, _record, 1, background_tasks=bg)
+
+        assert len(bg.tasks) == 1, "the poster job must still run in-process"
+        messages = [r.message for r in caplog.records if r.levelname == "ERROR"]
+        assert any("poster" in m and "REDIS_URL" in m for m in messages)
+
+    def test_no_broker_does_not_log_an_error_for_other_queues(self, no_broker, caplog):
+        bg = _FakeBackgroundTasks()
+        with caplog.at_level("ERROR", logger="src.jobs.queue"):
+            enqueue(QUEUE_RESOLVE, _record, 1, background_tasks=bg)
+
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+
+    def test_a_broken_broker_also_logs_the_poster_error(self, monkeypatch, caplog):
+        """The fallback fires for two distinct reasons — no queue at all, or an
+        exception mid-enqueue — and both must be caught."""
+        monkeypatch.setenv("REDIS_URL", "redis://fake")
+
+        class _Exploding:
+            def __getattr__(self, _name):
+                raise RuntimeError("broker went away")
+
+        monkeypatch.setattr(queue_mod, "get_redis", lambda: _Exploding())
+        bg = _FakeBackgroundTasks()
+
+        with caplog.at_level("WARNING", logger="src.jobs.queue"):
+            enqueue(QUEUE_POSTER, _record, 1, background_tasks=bg)
+
+        levels = {r.levelname for r in caplog.records}
+        assert "WARNING" in levels, "the generic enqueue-failed warning still fires"
+        assert "ERROR" in levels, "and the poster-specific error on top of it"

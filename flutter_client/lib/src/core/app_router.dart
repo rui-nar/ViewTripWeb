@@ -20,9 +20,11 @@ import 'last_opened_project.dart';
 import 'onboarding_notifier.dart';
 import 'platform.dart';
 import 'return_to.dart';
+import 'splash_screen.dart' show kSplashBackground;
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/join_trip_screen.dart';
+import '../projects/poster_download_screen.dart';
 import '../projects/view_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
@@ -81,6 +83,10 @@ Future<String?> authRedirectTarget(
   // no session — and a signed-in user must not be bounced to /projects before
   // the token is consumed.
   if (loc.startsWith('/verify-email/')) return null;
+
+  // Poster-ready/failed notification links (issue #14) — same reasoning as
+  // /verify-email/ above: reached from an email, possibly with no session.
+  if (loc.startsWith('/poster/')) return null;
 
   // Invite deep links (issue #106) require login. Send the visitor to
   // the login screen with the invite URL as return_to — the same
@@ -150,7 +156,15 @@ GoRouter buildRouter(BuildContext context) {
     routes: [
       GoRoute(
         path: '/',
-        builder: (context, state) => const WelcomeScreen(),
+        // On native mobile the auth guard always redirects `/` away (see
+        // authRedirectTarget above) — but that redirect is async, so a plain
+        // `WelcomeScreen()` here would still get mounted and painted for a
+        // frame first, flashing the marketing page in between the splash
+        // disappearing and the redirect landing on /login. Painting the
+        // splash's own background instead makes that frame invisible.
+        builder: (context, state) => isNativeMobile
+            ? const ColoredBox(color: kSplashBackground)
+            : const WelcomeScreen(),
       ),
       GoRoute(
         path: '/onboarding',
@@ -270,6 +284,11 @@ GoRouter buildRouter(BuildContext context) {
         path: '/verify-email/:token',
         builder: (context, state) =>
             VerifyEmailScreen(token: state.pathParameters['token']!),
+      ),
+      GoRoute(
+        path: '/poster/:token',
+        builder: (context, state) =>
+            PosterDownloadScreen(token: state.pathParameters['token']!),
       ),
       GoRoute(
         path: '/share/:token',

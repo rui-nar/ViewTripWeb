@@ -6,28 +6,117 @@ status="pending". The actual rendering (basemap + route + memory pins/cards)
 lives in ``src/poster/poster_renderer.py`` (Unit E) — this module owns only
 the job-row lifecycle: marking it "running", invoking the renderer with a
 ``progress`` callback that updates ``job.stage`` between steps, and marking it
-"done"/"failed" with the resulting file paths or error.
+"done"/"failed" with the resulting file paths or error. Once a terminal state
+is committed it also sends a best-effort notification email (issue #14
+follow-up) with a download link — the Flutter client no longer polls for
+completion, so email is the only thing that tells the user their poster is
+ready (or failed).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 from models.db import get_session
 from models.project_db import DBPosterJob
+from models.user import UserInfo
+from src.email.service import EmailMessage, get_email_service
+from src.email.templates import render_poster_failed_email, render_poster_ready_email
 from src.poster.poster_renderer import render_poster
+from src.project.project_repo import ProjectRepo
 
 _log = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+
+_repo = ProjectRepo()
+
+
+def _frontend_origin() -> str:
+    """Base URL for the download link in the notification email.
+
+    Read at call time, not import time, so tests and ops can set it without
+    reimporting the module — same as ``_frontend_origin`` in
+    ``src/auth/email_verification.py``.
+    """
+    return os.environ.get("FRONTEND_ORIGIN", "http://localhost:5500")
 
 
 def _poster_dir(user_id: str, job_id: int) -> Path:
     p = _DATA_DIR / "users" / user_id / "posters" / str(job_id)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _project_name(project_id: int) -> str:
+    """Best-effort display name for the notification email subject/body."""
+    with get_session() as sess:
+        project = _repo.get_project_by_id(sess, project_id)
+    return project.name if project is not None else "your trip"
+
+
+def _notify_poster_ready(job_id: int, user_info_id: int, project_id: int,
+                          download_token: str | None) -> None:
+    """Best-effort email: the poster is ready to download (issue #14).
+
+    Called after the job row's "done" commit, so a slow or failing send never
+    delays the status a polling client — or the token page — would otherwise
+    see. Never raises: an email failure must not turn a successful poster
+    render into a failed job, same rationale as the comment on
+    ``send_verification_email`` in ``src/auth/email_verification.py``.
+    """
+    if not download_token:
+        _log.warning("Poster job %s done with no download_token; skipping "
+                      "ready email", job_id)
+        return
+    try:
+        with get_session() as sess:
+            user = sess.get(UserInfo, user_info_id)
+        if user is None or not user.email:
+            return
+        project_name = _project_name(project_id)
+        text_body, html_body = render_poster_ready_email(
+            project_name=project_name,
+            download_url=f"{_frontend_origin()}/poster/{download_token}",
+        )
+        asyncio.run(get_email_service().send(EmailMessage(
+            to=user.email,
+            subject=f"Your poster for {project_name} is ready",
+            text_body=text_body,
+            html_body=html_body,
+        )))
+    except Exception:
+        _log.exception("Failed to send poster-ready email for job %s", job_id)
+
+
+def _notify_poster_failed(job_id: int, user_info_id: int, project_id: int) -> None:
+    """Best-effort email: poster generation failed (issue #14). See
+    ``_notify_poster_ready`` for why this never raises.
+
+    Deliberately does not forward ``job.error_message`` — it can carry
+    internal detail (e.g. a Mapbox error derived from a stack trace) — the
+    email uses generic "try again" copy instead (see
+    ``render_poster_failed_email``).
+    """
+    try:
+        with get_session() as sess:
+            user = sess.get(UserInfo, user_info_id)
+        if user is None or not user.email:
+            return
+        project_name = _project_name(project_id)
+        text_body, html_body = render_poster_failed_email(project_name=project_name)
+        asyncio.run(get_email_service().send(EmailMessage(
+            to=user.email,
+            subject=f"Your poster for {project_name} could not be generated",
+            text_body=text_body,
+            html_body=html_body,
+        )))
+    except Exception:
+        _log.exception("Failed to send poster-failed email for job %s", job_id)
 
 
 def run_poster_job(job_id: int) -> None:
@@ -49,6 +138,7 @@ def run_poster_job(job_id: int) -> None:
         sess.commit()
         user_info_id = job.user_info_id
         project_id = job.project_id
+        download_token = job.download_token
         request = json.loads(job.request_json or "{}")
 
     def _progress(stage: str) -> None:
@@ -80,6 +170,7 @@ def run_poster_job(job_id: int) -> None:
             job.completed_at = time.time()
             sess.add(job)
             sess.commit()
+        _notify_poster_ready(job_id, user_info_id, project_id, download_token)
     except Exception as exc:
         _log.exception("Poster job %s failed", job_id)
         with get_session() as sess:
@@ -90,3 +181,4 @@ def run_poster_job(job_id: int) -> None:
                 job.completed_at = time.time()
                 sess.add(job)
                 sess.commit()
+        _notify_poster_failed(job_id, user_info_id, project_id)

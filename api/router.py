@@ -32,7 +32,7 @@ from api.metrics import router as metrics_router
 from api.middleware import install_middleware
 from api.people import router as people_router
 from api.polarsteps import router as polarsteps_router
-from api.poster import router as poster_router
+from api.poster import poster_public_router, router as poster_router
 from api.project_items import router as project_items_router
 from api.project_shares import router as project_shares_router
 from api.project_transfer import router as project_transfer_router
@@ -186,6 +186,7 @@ app.include_router(metrics_router)
 app.include_router(people_router)
 app.include_router(polarsteps_router)
 app.include_router(poster_router)
+app.include_router(poster_public_router)
 app.include_router(project_items_router)
 app.include_router(project_shares_router)
 app.include_router(project_transfer_router)
