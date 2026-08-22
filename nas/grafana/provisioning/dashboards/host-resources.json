@@ -12,9 +12,18 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
         "name": "env",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+        "datasource": {"type": "prometheus", "uid": "$datasource"},
         "query": {"query": "label_values(node_memory_MemTotal_bytes, env)", "refId": "EnvVariable"},
         "current": {"text": "production", "value": "production"},
         "includeAll": false,
@@ -30,7 +39,7 @@
       "type": "gauge",
       "title": "Memory used",
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\"} / node_memory_MemTotal_bytes{env=\"$env\"})"}
       ],
@@ -53,7 +62,7 @@
       "title": "Swap used",
       "description": "0/0 (no data) means no swap is configured — the exact state that turned issue #209 into a 43-hour livelock instead of a clean OOM-kill.",
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * (1 - node_memory_SwapFree_bytes{env=\"$env\"} / node_memory_SwapTotal_bytes{env=\"$env\"})"}
       ],
@@ -76,7 +85,7 @@
       "title": "Swap configured",
       "description": "node_memory_SwapTotal_bytes > 0. If this reads 0 / red, the host has no cushion for a memory spike — see issue #209.",
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"}"}
       ],
@@ -97,7 +106,7 @@
       "type": "timeseries",
       "title": "Memory breakdown",
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 7},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_memory_MemTotal_bytes{env=\"$env\"}", "legendFormat": "total"},
         {"refId": "B", "expr": "node_memory_MemAvailable_bytes{env=\"$env\"}", "legendFormat": "available"},
@@ -115,7 +124,7 @@
       "type": "timeseries",
       "title": "Swap used over time",
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 7},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"} - node_memory_SwapFree_bytes{env=\"$env\"}", "legendFormat": "swap used"},
         {"refId": "B", "expr": "node_memory_SwapTotal_bytes{env=\"$env\"}", "legendFormat": "swap total"}
@@ -131,7 +140,7 @@
       "title": "ViewTrip API process RSS",
       "description": "process_resident_memory_bytes for the viewtripweb job — the app's own view of its memory, from prometheus_client's default collector. Empty if PROMETHEUS_MULTIPROC_DIR is set (worker containers running, docs/DEPLOYMENT_VPS.md): multiprocess mode doesn't aggregate this metric across processes. Host memory above is the reliable signal either way.",
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "process_resident_memory_bytes{job=\"viewtrip\",env=\"$env\"}", "legendFormat": "{{instance}}"}
       ],
@@ -143,7 +152,7 @@
       "type": "gauge",
       "title": "CPU used",
       "gridPos": {"h": 7, "w": 8, "x": 0, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\",env=\"$env\"}[5m])))"}
       ],
@@ -166,7 +175,7 @@
       "title": "Load average (1m)",
       "description": "This VPS is 2 vCore — a sustained value above 2 means more is runnable than there is CPU to run it.",
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_load1{env=\"$env\"}"}
       ],
@@ -188,7 +197,7 @@
       "type": "gauge",
       "title": "Disk used (root filesystem)",
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 24},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * (1 - node_filesystem_avail_bytes{mountpoint=\"/\",env=\"$env\"} / node_filesystem_size_bytes{mountpoint=\"/\",env=\"$env\"})"}
       ],
@@ -210,7 +219,7 @@
       "type": "timeseries",
       "title": "CPU usage by mode",
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 31},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "avg(rate(node_cpu_seconds_total{env=\"$env\"}[5m])) by (mode)", "legendFormat": "{{mode}}"}
       ],
@@ -222,7 +231,7 @@
       "type": "timeseries",
       "title": "Load average over time",
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 31},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_load1{env=\"$env\"}", "legendFormat": "1m"},
         {"refId": "B", "expr": "node_load5{env=\"$env\"}", "legendFormat": "5m"},
@@ -236,7 +245,7 @@
       "type": "timeseries",
       "title": "Disk space (root filesystem)",
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "node_filesystem_avail_bytes{mountpoint=\"/\",env=\"$env\"}", "legendFormat": "free"},
         {"refId": "B", "expr": "node_filesystem_size_bytes{mountpoint=\"/\",env=\"$env\"}", "legendFormat": "total"}

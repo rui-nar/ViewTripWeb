@@ -12,10 +12,19 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
         "name": "env",
         "type": "query",
-        "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
-        "query": {"query": "label_values(viewtrip_logins_total, env)", "refId": "EnvVariable"},
+        "datasource": {"type": "prometheus", "uid": "$datasource"},
+        "query": {"query": "label_values(up{job=\"viewtrip\"}, env)", "refId": "EnvVariable"},
         "current": {"text": "production", "value": "production"},
         "includeAll": false,
         "multi": false,
@@ -30,7 +39,7 @@
       "type": "gauge",
       "title": "Strava quota used (15 min window)",
       "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * viewtrip_strava_rate_limit_usage{window=\"15min\",env=\"$env\"} / viewtrip_strava_rate_limit_capacity{window=\"15min\",env=\"$env\"}"}
       ],
@@ -52,7 +61,7 @@
       "type": "gauge",
       "title": "Strava quota used (daily window)",
       "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "100 * viewtrip_strava_rate_limit_usage{window=\"daily\",env=\"$env\"} / viewtrip_strava_rate_limit_capacity{window=\"daily\",env=\"$env\"}"}
       ],
@@ -75,7 +84,7 @@
       "title": "Strava throttled/sec (our limiter)",
       "description": "Calls our own limiter refused before reaching Strava — distinct from outcome=rate_limited, which means Strava itself returned a 429.",
       "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_strava_throttled_total{env=\"$env\"}[15m])) by (window)", "legendFormat": "{{window}}"}
       ],
@@ -88,7 +97,7 @@
       "title": "Login failure rate",
       "description": "Credential stuffing signal — docs/METRICS.md alerts table.",
       "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_logins_total{result=\"failure\",env=\"$env\"}[5m]))"}
       ],
@@ -111,7 +120,7 @@
       "title": "External requests by service & outcome",
       "description": "outcome: success, client_error, auth_error, rate_limited, server_error, exception.",
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_external_requests_total{env=\"$env\"}[5m])) by (service, outcome)", "legendFormat": "{{service}} ({{outcome}})"}
       ],
@@ -123,7 +132,7 @@
       "type": "timeseries",
       "title": "External request duration (p95) by service",
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(viewtrip_external_request_duration_seconds_bucket{env=\"$env\"}[5m])) by (le, service))", "legendFormat": "{{service}}"}
       ],
@@ -135,7 +144,7 @@
       "type": "timeseries",
       "title": "Logins by provider & result",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_logins_total{env=\"$env\"}[15m])) by (provider, result)", "legendFormat": "{{provider}} ({{result}})"}
       ],
@@ -150,7 +159,7 @@
       "title": "Registrations by provider",
       "description": "Google sign-in has no separate sign-up call, so this fires on first sight of a Google account and never again.",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
-      "datasource": {"type": "prometheus", "uid": "viewtrip-prometheus"},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
       "targets": [
         {"refId": "A", "expr": "sum(rate(viewtrip_registrations_total{env=\"$env\"}[1h])) by (provider)", "legendFormat": "{{provider}}"}
       ],

@@ -118,9 +118,8 @@ curl -s http://viewtrip-observability:9090/-/ready  # Prometheus
 Open Grafana at `http://viewtrip-observability:3000` (only reachable from a
 device on the tailnet — that's the point) and confirm the Prometheus and
 Loki datasources (auto-provisioned from
-`grafana/provisioning/datasources/datasources.yaml`, fixed UIDs
-`viewtrip-prometheus`/`viewtrip-loki`) show green in Settings → Data
-sources.
+`grafana/provisioning/datasources/datasources.yaml`) show green in
+Settings → Data sources.
 
 Five dashboards are auto-provisioned too (`grafana/provisioning/dashboards/`,
 read-only — edit the JSON and it picks up the change within 30s, no restart
