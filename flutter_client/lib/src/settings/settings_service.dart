@@ -68,6 +68,26 @@ class SettingsService {
   Future<void> disconnectPolarsteps() async =>
       api.delete('/api/polarsteps/disconnect');
 
+  Future<Map<String, dynamic>> getImmichStatus() async =>
+      await api.get('/api/immich/status') as Map<String, dynamic>;
+
+  Future<void> saveImmichConfig({
+    required String serverUrl,
+    required String apiKey,
+  }) async {
+    try {
+      await api.put('/api/immich/config', {
+        'server_url': serverUrl,
+        'api_key': apiKey,
+      });
+    } on ApiException catch (e) {
+      throw Exception(_detail(e.body));
+    }
+  }
+
+  Future<void> disconnectImmich() async =>
+      api.delete('/api/immich/disconnect');
+
   Future<List<Map<String, dynamic>>> listBackups() async {
     final data = await api.get('/api/backup/') as List<dynamic>;
     return data.cast<Map<String, dynamic>>();
