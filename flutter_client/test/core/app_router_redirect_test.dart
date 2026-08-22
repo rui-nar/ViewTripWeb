@@ -251,38 +251,46 @@ void main() {
       'native mobile: WelcomeScreen never mounts at "/", even mid-redirect',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    // Reset synchronously before this function returns rather than via
+    // addTearDown: flutter_test's post-test invariant check (which asserts
+    // this is back to null) runs before package:test flushes addTearDown
+    // callbacks, so an addTearDown reset lands one beat too late and trips
+    // "The value of a foundation debug variable was changed by the test."
+    try {
+      final auth = AuthNotifier(AuthService());
 
-    final auth = AuthNotifier(AuthService());
-
-    await tester.pumpWidget(
-      MultiProvider(
-        providers: [
-          ChangeNotifierProvider<AuthNotifier>.value(value: auth),
-          ChangeNotifierProvider<OnboardingNotifier>(
-              create: (_) => OnboardingNotifier(true)),
-          ChangeNotifierProvider<ThemeNotifier>(create: (_) => ThemeNotifier()),
-        ],
-        child: Builder(
-          builder: (context) {
-            final router = buildRouter(context);
-            return MaterialApp.router(routerConfig: router);
-          },
+      await tester.pumpWidget(
+        MultiProvider(
+          providers: [
+            ChangeNotifierProvider<AuthNotifier>.value(value: auth),
+            ChangeNotifierProvider<OnboardingNotifier>(
+                create: (_) => OnboardingNotifier(true)),
+            ChangeNotifierProvider<ThemeNotifier>(
+                create: (_) => ThemeNotifier()),
+          ],
+          child: Builder(
+            builder: (context) {
+              final router = buildRouter(context);
+              return MaterialApp.router(routerConfig: router);
+            },
+          ),
         ),
-      ),
-    );
+      );
 
-    // Mirrors main.dart's `..init()` cascade: kicks off session restore
-    // (isLoading/isRestoring true, so the redirect defers and `/` builds)
-    // and lets it settle (isLoading/isRestoring flip false, triggering the
-    // redirect's async re-evaluation) — WelcomeScreen must not appear at
-    // any point in between.
-    unawaited(auth.init());
-    await tester.pump();
-    expect(find.byType(WelcomeScreen), findsNothing);
+      // Mirrors main.dart's `..init()` cascade: kicks off session restore
+      // (isLoading/isRestoring true, so the redirect defers and `/` builds)
+      // and lets it settle (isLoading/isRestoring flip false, triggering the
+      // redirect's async re-evaluation) — WelcomeScreen must not appear at
+      // any point in between.
+      unawaited(auth.init());
+      await tester.pump();
+      expect(find.byType(WelcomeScreen), findsNothing);
 
-    await tester.pumpAndSettle();
-    expect(find.byType(WelcomeScreen), findsNothing);
+      await tester.pumpAndSettle();
+      expect(find.byType(WelcomeScreen), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   // `app_screen.dart` used to import `dart:html` directly, which made it (and
