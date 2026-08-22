@@ -369,5 +369,12 @@ def test_poster_migration_upgrades_and_downgrades_cleanly(tmp_path, monkeypatch)
     cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
 
-    command.upgrade(cfg, "head")
-    command.downgrade(cfg, "-1")
+    # Targets the poster migration by revision id rather than "head"/"-1":
+    # head is now a merge point with two parents (issue #33's ImmichToken
+    # migration branched off the same revision), and a relative "-1" from a
+    # merge point is an ambiguous walk -- alembic can't tell which parent
+    # branch "one step back" means. An explicit revision id has no such
+    # ambiguity and also exercises this migration's own upgrade/downgrade
+    # specifically, regardless of what else later becomes head.
+    command.upgrade(cfg, "604340be73bb")
+    command.downgrade(cfg, "a1f37c2e8b04")
