@@ -40,7 +40,14 @@ Future<void> _pump(WidgetTester tester, MapPanel panel) async {
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(MaterialApp(home: Scaffold(body: panel)));
+  // The activity geo triggers _fitBoundsOnce's animated camera fit (a
+  // post-frame callback): one pump to run the build + callback, a second so
+  // the ticker takes its zero-elapsed first tick, then the animation's own
+  // duration — otherwise its Ticker is still running when the test ends
+  // (see map_panel_fit_bounds_test.dart's _settleFit).
   await tester.pump();
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
 }
 
 /// Guards issue #215 (an Activities toggle, alongside Memories/Encounters,

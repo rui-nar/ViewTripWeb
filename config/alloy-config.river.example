@@ -31,13 +31,36 @@ discovery.docker "containers" {
 // Static labels every discovered container needs before being tailed:
 // `service` so the app's log stream has a stable name to query regardless of
 // which container/environment emitted it, and `env` so prod and val are
-// distinguishable once both land in the same Loki. Neither comes from Docker
-// discovery metadata — a rule with no source_labels unconditionally sets
-// target_label to the literal replacement, which is the standard relabeling
-// idiom for a static label.
+// distinguishable once both land in the same Loki.
+//
+// Alloy's own container is dropped before either label is applied — not
+// narrowed to a different label, dropped entirely. Confirmed live: without
+// this, Alloy's own diagnostics ("disabling udev device properties" and
+// friends) show up mislabeled service="viewtripweb" in the Logs dashboard's
+// "All logs" panel, mixed in with the app's actual logs. Alloy is the one
+// container that's structurally unmonitorable through this pipeline anyway
+// — if Alloy itself is broken, it can't ship logs about being broken
+// through the pipe it's responsible for shipping, so there's no version of
+// "give it its own service label instead" that would actually work; a
+// broken Alloy needs `docker compose logs alloy` on the host, not a Loki
+// query. Everything else — Redis, the worker, worker-poster, any future
+// service — deliberately keeps the blanket, ungated rule below and lands
+// under service="viewtripweb" same as the app itself: they're all part of
+// what "the app" means operationally, and a failure in any of them is
+// exactly the kind of thing the Logs dashboard exists to surface. New
+// services need no config change here to be covered, same as discovery
+// itself needs none above.
+//
+// `env` has no gate at all — every container, Alloy included, needs it to
+// stay distinguishable from the other environment sharing this NAS.
 discovery.relabel "containers" {
   targets = discovery.docker.containers.targets
 
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "^/viewtrip-(val-)?alloy$"
+    action        = "drop"
+  }
   rule {
     target_label = "service"
     replacement  = "viewtripweb"
@@ -78,12 +101,20 @@ loki.write "nas" {
 // reachable from other containers on this same compose network. `env` here
 // is a literal target label (not discovery-derived, unlike the log labels
 // above), since this target list is already hand-written.
+//
+// /metrics requires Authorization: Bearer <METRICS_TOKEN> unconditionally
+// (docs/METRICS.md) — there's no exemption for same-network requests, so
+// this scrape needs it same as any external one would. Without it, every
+// scrape 401s; confirmed live via up{job="viewtrip"} == 0 with this
+// argument absent. .env already reaches this container (env_file: .env,
+// docker-compose.yml.example), so no separate wiring needed beyond this.
 prometheus.scrape "viewtrip" {
   targets = [
     {"__address__" = "viewtripweb:8000", "job" = "viewtrip", "env" = env("VIEWTRIP_ENV")},
   ]
   metrics_path    = "/metrics"
   scrape_interval = "30s"
+  bearer_token    = env("METRICS_TOKEN")
   forward_to      = [prometheus.remote_write.nas.receiver]
 }
 
@@ -104,9 +135,9 @@ prometheus.scrape "viewtrip" {
 // while the other's keeps reporting is itself a useful signal that that
 // environment's alloy container, specifically, is down.
 prometheus.exporter.unix "host" {
-  procfs_mount_point = "/host/proc"
-  sysfs_mount_point  = "/host/sys"
-  rootfs_mount_point = "/host/root"
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host/root"
 }
 
 discovery.relabel "host" {
