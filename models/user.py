@@ -80,6 +80,17 @@ class PolarstepsToken(sqlmodel.SQLModel, table=True):
     polarsteps_username: str = sqlmodel.Field(default="")
 
 
+class ImmichToken(sqlmodel.SQLModel, table=True):
+    """Stores per-user Immich server URL + API key (self-hosted photo library)."""
+
+    id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
+    user_info_id: int = sqlmodel.Field(
+        foreign_key="userinfo.id", unique=True, index=True
+    )
+    server_url: str = sqlmodel.Field(default="")
+    api_key: str = sqlmodel.Field(default="")
+
+
 class EmailVerification(sqlmodel.SQLModel, table=True):
     """A live email-verification token (issue #110).
 
