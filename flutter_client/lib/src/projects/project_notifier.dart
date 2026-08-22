@@ -1110,6 +1110,37 @@ class ProjectNotifier extends ChangeNotifier
     return token != null ? {'Authorization': 'Bearer $token'} : {};
   }
 
+  // ── Immich (photo-upgrade source, issue #33) ────────────────────────────────
+
+  DateTime? _immichConnectedCheckedAt;
+  bool _immichConnectedCached = false;
+
+  /// How long [immichConnected]'s result is reused before re-checking the
+  /// server — screens may call this on every rebuild, and the connection
+  /// state rarely changes mid-session.
+  @visibleForTesting
+  Duration immichStatusCacheTtl = const Duration(seconds: 30);
+
+  /// Whether this server has Immich configured and reachable — backs the
+  /// photo-upgrade dialog's "browse Immich library" entry point. Cached
+  /// briefly per instance (see [immichStatusCacheTtl]); a check failure is
+  /// treated as "not connected" rather than thrown.
+  Future<bool> immichConnected() async {
+    final checkedAt = _immichConnectedCheckedAt;
+    if (checkedAt != null &&
+        DateTime.now().difference(checkedAt) < immichStatusCacheTtl) {
+      return _immichConnectedCached;
+    }
+    try {
+      final data = await api.get('/api/immich/status') as Map<String, dynamic>;
+      _immichConnectedCached = data['connected'] == true;
+    } catch (_) {
+      _immichConnectedCached = false;
+    }
+    _immichConnectedCheckedAt = DateTime.now();
+    return _immichConnectedCached;
+  }
+
   // ── Auto-sync ─────────────────────────────────────────────────────────────
 
   Future<void> _loadSyncMeta(ProjectRef ref) async {

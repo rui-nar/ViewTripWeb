@@ -19,14 +19,15 @@ import 'strava_oauth_popup_stub.dart'
 import 'theme_notifier.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  final SettingsService? service; // injectable for tests
+  const SettingsScreen({super.key, this.service});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final _service = SettingsService();
+  late final SettingsService _service = widget.service ?? SettingsService();
 
   // ── Strava state ──────────────────────────────────────────────────────────
   bool _stravaConnected = false;
@@ -40,6 +41,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _polarstepsConnecting = false;
   bool _polarstepsUpdating = false; // reveal token field while already connected
   final _polarstepsTokenCtrl = TextEditingController();
+
+  // ── Immich state ─────────────────────────────────────────────────────────
+  bool _immichConnected = false;
+  String? _immichServerUrl;
+  bool _immichLoading = false;
+  bool _immichSaving = false;
+  final _immichServerUrlCtrl = TextEditingController();
+  final _immichApiKeyCtrl = TextEditingController();
 
   // ── Backup state ──────────────────────────────────────────────────────────
   List<Map<String, dynamic>> _backups = [];
@@ -66,6 +75,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStravaStatus();
       _loadPolarstepsStatus();
+      _loadImmichStatus();
       _loadProfile();
       _loadBackups();
     });
@@ -79,6 +89,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _newPwCtrl.dispose();
     _confirmPwCtrl.dispose();
     _polarstepsTokenCtrl.dispose();
+    _immichServerUrlCtrl.dispose();
+    _immichApiKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -312,6 +324,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
         setState(() {
           _polarstepsConnected = false;
           _polarstepsUsername = null;
+        });
+      }
+    } catch (_) {}
+  }
+
+  // ── Immich ────────────────────────────────────────────────────────────────
+
+  Future<void> _loadImmichStatus() async {
+    if (!mounted) return;
+    setState(() => _immichLoading = true);
+    try {
+      final data = await _service.getImmichStatus();
+      if (mounted) {
+        setState(() {
+          _immichConnected = data['connected'] == true;
+          _immichServerUrl = data['server_url'] as String?;
+        });
+      }
+    } catch (_) {
+      // status not critical
+    } finally {
+      if (mounted) setState(() => _immichLoading = false);
+    }
+  }
+
+  Future<void> _saveImmichConfig() async {
+    final serverUrl = _immichServerUrlCtrl.text.trim();
+    final apiKey = _immichApiKeyCtrl.text.trim();
+    if (serverUrl.isEmpty || apiKey.isEmpty) return;
+    setState(() => _immichSaving = true);
+    try {
+      await _service.saveImmichConfig(serverUrl: serverUrl, apiKey: apiKey);
+      _immichServerUrlCtrl.clear();
+      _immichApiKeyCtrl.clear();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Immich connected!')),
+        );
+      }
+      await _loadImmichStatus();
+    } on Exception catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _immichSaving = false);
+    }
+  }
+
+  Future<void> _disconnectImmich() async {
+    try {
+      await _service.disconnectImmich();
+      if (mounted) {
+        setState(() {
+          _immichConnected = false;
+          _immichServerUrl = null;
         });
       }
     } catch (_) {}
@@ -724,6 +794,84 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                             color: Colors.white),
                                       )
                                     : const Text('Connect Polarsteps'),
+                              ),
+                            ],
+                          ],
+                        ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // ── Immich ─────────────────────────────────────────────
+                _SectionCard(
+                  title: 'Immich',
+                  icon: Icons.photo_library_outlined,
+                  child: _immichLoading
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_immichConnected) ...[
+                              Row(
+                                children: [
+                                  Icon(Icons.check_circle,
+                                      color: theme.colorScheme.primary,
+                                      size: 18),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _immichServerUrl != null
+                                          ? 'Connected to $_immichServerUrl'
+                                          : 'Connected',
+                                      style: theme.textTheme.bodyMedium,
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: _disconnectImmich,
+                                    child: const Text('Disconnect'),
+                                  ),
+                                ],
+                              ),
+                            ] else ...[
+                              Text(
+                                'Connect your self-hosted Immich server to pull higher-quality photos when upgrading trip photos.',
+                                style: theme.textTheme.bodySmall,
+                              ),
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: _immichServerUrlCtrl,
+                                decoration: const InputDecoration(
+                                  labelText: 'Server URL',
+                                  hintText: 'https://photos.example.com',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: _immichApiKeyCtrl,
+                                decoration: const InputDecoration(
+                                  labelText: 'API key',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                obscureText: true,
+                              ),
+                              const SizedBox(height: 12),
+                              FilledButton(
+                                onPressed: _immichSaving ? null : _saveImmichConfig,
+                                child: _immichSaving
+                                    ? const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white),
+                                      )
+                                    : const Text('Save'),
                               ),
                             ],
                           ],

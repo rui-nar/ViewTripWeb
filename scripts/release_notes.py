@@ -48,6 +48,7 @@ AREAS: dict[str, tuple[str, str]] = {
     "groups": ("People & encounters", APP),
     "poster": ("Posters", APP),
     "photos": ("Photos", APP),
+    "immich": ("Immich", APP),
     "admin": ("Admin dashboard", APP),
     "editor": ("Track editor", APP),
     "track-edit": ("Track editor", APP),

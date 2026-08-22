@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/design_tokens.dart';
 import 'package:viewtrip_client/src/core/theme.dart';
+import 'package:viewtrip_client/src/photos/immich_source.dart';
 import 'package:viewtrip_client/src/photos/photo_match.dart';
 import 'package:viewtrip_client/src/photos/photo_source.dart';
 import 'package:viewtrip_client/src/photos/photo_upgrade_screen.dart';
@@ -62,6 +63,16 @@ final _memory = <String, dynamic>{
   'lon': null,
 };
 
+/// Single-photo memory, used by the Immich-suggestion tests so a shared
+/// day's candidate list only ever gets compared against one row.
+final _singleMemory = <String, dynamic>{
+  'id': 1,
+  'date': '2026-07-10',
+  'photos': ['thumb-high-uuid'],
+  'lat': null,
+  'lon': null,
+};
+
 /// Bounded settle: while a pick/compare is running, an indeterminate
 /// `CircularProgressIndicator` is showing, so `pumpAndSettle` would hang.
 /// Pump a fixed number of frames instead (mirrors encounter_dialog_test.dart).
@@ -80,6 +91,10 @@ Future<_FakeNotifier> _openDialog(
   WidgetTester tester, {
   required Future<PickedPhoto?> Function() pickSinglePhoto,
   Map<String, dynamic>? memory,
+  Future<bool> Function()? checkImmichConnected,
+  Future<List<ImmichCandidate>> Function()? fetchImmichCandidates,
+  Future<int?> Function(ImmichCandidate candidate)? fetchImmichThumbnailHash,
+  Future<PickedPhoto> Function(ImmichCandidate candidate)? downloadImmichCandidate,
 }) async {
   final notifier = _FakeNotifier();
   await tester.pumpWidget(MaterialApp(
@@ -94,6 +109,12 @@ Future<_FakeNotifier> _openDialog(
               memory ?? _memory,
               pickSinglePhotoOverride: pickSinglePhoto,
               fetchThumbnailHashOverride: _fakeThumbnailHash,
+              // Defaults to "not connected" so the pre-existing tests above, which
+              // don't pass any Immich args, see no Immich UI (non-regression).
+              checkImmichConnectedOverride: checkImmichConnected ?? (() async => false),
+              fetchImmichCandidatesOverride: fetchImmichCandidates,
+              fetchImmichThumbnailHashOverride: fetchImmichThumbnailHash,
+              downloadImmichCandidateOverride: downloadImmichCandidate,
             ),
             child: const Text('open'),
           ),
@@ -267,5 +288,131 @@ void main() {
       find.descendant(of: _row('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
       findsNothing,
     );
+  });
+
+  testWidgets('the Immich suggest button is hidden when Immich is not connected', (tester) async {
+    await _openDialog(tester, pickSinglePhoto: () async => null);
+
+    expect(find.text('Suggest from Immich'), findsNothing);
+  });
+
+  testWidgets('a confident single Immich match auto-fills the row', (tester) async {
+    final candidate = ImmichCandidate(
+      id: 'c1',
+      takenAt: _day,
+      lat: null,
+      lon: null,
+      thumbUrl: 'https://immich.example/c1/thumb',
+    );
+    final downloaded = PickedPhoto(
+      bytes: Uint8List.fromList([9]),
+      filename: 'immich-match.jpg',
+      candidate: PhotoCandidate(capturedAt: _day, pHash: _clearJpgHash),
+    );
+
+    await _openDialog(
+      tester,
+      memory: _singleMemory,
+      pickSinglePhoto: () async => null,
+      checkImmichConnected: () async => true,
+      fetchImmichCandidates: () async => [candidate],
+      fetchImmichThumbnailHash: (c) async => _clearJpgHash, // distance 1 from thumb-high-uuid's hash
+      downloadImmichCandidate: (c) async => downloaded,
+    );
+
+    await tester.tap(find.text('Suggest from Immich'));
+    await _settle(tester);
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('immich-match.jpg')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.widgetWithText(ElevatedButton, 'Confirm')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+      'an ambiguous Immich match shows a chooser, and picking from it fills the row',
+      (tester) async {
+    final candidateA = ImmichCandidate(
+      id: 'a',
+      takenAt: _day,
+      lat: null,
+      lon: null,
+      thumbUrl: 'https://immich.example/a/thumb',
+    );
+    final candidateB = ImmichCandidate(
+      id: 'b',
+      takenAt: _day,
+      lat: null,
+      lon: null,
+      thumbUrl: 'https://immich.example/b/thumb',
+    );
+    final pickedB = PickedPhoto(
+      bytes: Uint8List.fromList([10]),
+      filename: 'chosen-b.jpg',
+      candidate: PhotoCandidate(capturedAt: _day, pHash: _clearJpgHash),
+    );
+
+    await _openDialog(
+      tester,
+      memory: _singleMemory,
+      pickSinglePhoto: () async => null,
+      checkImmichConnected: () async => true,
+      fetchImmichCandidates: () async => [candidateA, candidateB],
+      fetchImmichThumbnailHash: (c) async => _clearJpgHash, // both candidates look like a match
+      downloadImmichCandidate: (c) async {
+        expect(c.id, 'b');
+        return pickedB;
+      },
+    );
+
+    await tester.tap(find.text('Suggest from Immich'));
+    await _settle(tester);
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('Choose match')),
+      findsOneWidget,
+    );
+    // Ambiguous doesn't block the existing manual picker.
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('Select picture')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Choose match'));
+    await _settle(tester);
+
+    expect(find.byKey(const ValueKey('immich-candidate-a')), findsOneWidget);
+    expect(find.byKey(const ValueKey('immich-candidate-b')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('immich-candidate-b')));
+    await _settle(tester);
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('chosen-b.jpg')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('zero Immich candidates leaves the manual picker as the only option', (tester) async {
+    await _openDialog(
+      tester,
+      memory: _singleMemory,
+      pickSinglePhoto: () async => null,
+      checkImmichConnected: () async => true,
+      fetchImmichCandidates: () async => [],
+    );
+
+    await tester.tap(find.text('Suggest from Immich'));
+    await _settle(tester);
+
+    expect(
+      find.descendant(of: _row('thumb-high-uuid'), matching: find.text('Select picture')),
+      findsOneWidget,
+    );
+    expect(find.text('Choose match'), findsNothing);
   });
 }
