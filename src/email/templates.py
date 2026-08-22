@@ -46,3 +46,27 @@ def render_verification_email(
     text_body = _env.get_template("verify.txt.jinja2").render(ctx)
     html_body = _env.get_template("verify.html.jinja2").render(ctx)
     return text_body, html_body
+
+
+def render_poster_ready_email(
+    *, project_name: str, download_url: str
+) -> tuple[str, str]:
+    """Render the "your poster is ready" email (issue #14). Returns (text, html)."""
+    ctx = {"project_name": project_name, "download_url": download_url}
+    text_body = _env.get_template("poster_ready.txt.jinja2").render(ctx)
+    html_body = _env.get_template("poster_ready.html.jinja2").render(ctx)
+    return text_body, html_body
+
+
+def render_poster_failed_email(*, project_name: str) -> tuple[str, str]:
+    """Render the "poster generation failed" email (issue #14). Returns (text, html).
+
+    Deliberately takes no ``error_message`` — the job's internal error can
+    carry implementation detail (e.g. a Mapbox error derived from a
+    stack trace) that must not be forwarded to the user verbatim; the copy is
+    a generic "try again" rather than echoing it.
+    """
+    ctx = {"project_name": project_name}
+    text_body = _env.get_template("poster_failed.txt.jinja2").render(ctx)
+    html_body = _env.get_template("poster_failed.html.jinja2").render(ctx)
+    return text_body, html_body

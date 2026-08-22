@@ -20,7 +20,11 @@ from src.email.service import (
     SmtpEmailService,
     get_email_service,
 )
-from src.email.templates import render_invite_email
+from src.email.templates import (
+    render_invite_email,
+    render_poster_failed_email,
+    render_poster_ready_email,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -121,3 +125,33 @@ class TestRenderInviteEmail:
         # The link itself is not escaped — it must remain a working href.
         assert 'href="http://x/join/abc"' in html
         assert "viewer" in html
+
+
+class TestRenderPosterReadyEmail:
+    def test_text_body_carries_project_name_and_download_url(self):
+        text, _ = render_poster_ready_email(
+            project_name="Trip & Co", download_url="http://x/poster/abc")
+
+        assert "Trip & Co" in text
+        assert "http://x/poster/abc" in text
+
+    def test_html_body_is_escaped_and_links_to_the_download_url(self):
+        _, html = render_poster_ready_email(
+            project_name="Trip & Co", download_url="http://x/poster/abc")
+
+        assert "Trip &amp; Co" in html
+        assert 'href="http://x/poster/abc"' in html
+
+
+class TestRenderPosterFailedEmail:
+    def test_text_body_carries_project_name_and_is_generic(self):
+        text, _ = render_poster_failed_email(project_name="Trip & Co")
+
+        assert "Trip & Co" in text
+        # Generic copy, not an echo of any internal error_message.
+        assert "went wrong" in text
+
+    def test_html_body_is_escaped(self):
+        _, html = render_poster_failed_email(project_name="Trip & Co")
+
+        assert "Trip &amp; Co" in html

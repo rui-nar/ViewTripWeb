@@ -2,7 +2,7 @@
 // ignore_for_file: deprecated_member_use
 library;
 
-import 'dart:async' show unawaited, Timer, StreamSubscription;
+import 'dart:async' show Timer, StreamSubscription;
 import 'dart:typed_data' show Uint8List;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart' show LatLngBounds, MapEvent;
@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'basemaps.dart';
 import 'download_stub.dart' if (dart.library.html) 'download_web.dart';
 import 'elevation_chart.dart';
+import '../api/client.dart' show ApiException;
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/design_tokens.dart' show kWarning, kWarningDark;
@@ -397,7 +398,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   // ── Poster generation flow (issue #14, unit F) ────────────────────────────
   // Frame picker (region + orientation) -> config dialog (which sections to
-  // include) -> job dialog (progress, then Download PNG/PDF).
+  // include) -> preview -> job kicked off, user notified by email when ready.
 
   void _cancelFramePicker() {
     if (!mounted) return;
@@ -443,28 +444,35 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     );
   }
 
+  /// Kicks off the poster job and hands control straight back to the user
+  /// (issue #14 feedback): a blocking, undismissable dialog polling for up to
+  /// 120s used to report a false "timed out" failure on real A0 renders that
+  /// legitimately run longer, even though the server kept working. Now the
+  /// client only needs to confirm the job was *created* — the render happens
+  /// server-side and the user is emailed a download link when it's ready.
   Future<void> _startPosterJob(LatLngBounds bounds, String orientation,
       PosterConfigOptions opts, List<Map<String, dynamic>> memories) async {
     if (!mounted) return;
-
-    final job = PosterJobNotifier(ref: widget.projectRef);
-    unawaited(showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => ChangeNotifierProvider.value(
-        value: job,
-        child: _PosterJobDialog(
-          projectName: widget.projectName,
-          onDownload: _downloadFile,
-        ),
-      ),
-    ));
-    await job.start(
-      bounds: posterBoundsFromLatLngBounds(bounds),
-      orientation: orientation,
-      config: opts.toJson(),
-      memories: memories,
-    );
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await createPosterJob(
+        ref: widget.projectRef,
+        bounds: posterBoundsFromLatLngBounds(bounds),
+        orientation: orientation,
+        config: opts.toJson(),
+        memories: memories,
+      );
+      messenger.showSnackBar(const SnackBar(
+          content: Text("Generating your poster — we'll email you a "
+              "download link when it's ready.")));
+    } on ApiException catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('Could not start poster generation: ${e.body}')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text(
+              'Could not start poster generation: ${e.toString().replaceFirst('Exception: ', '')}')));
+    }
   }
 
   void _openSyncDialog(BuildContext context) {
@@ -1053,77 +1061,6 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       )),
         ],
       ),
-    );
-  }
-}
-
-/// Progress/result dialog for a poster generation job (issue #14, unit F).
-/// Shows a [LinearProgressIndicator] + stage label while the job is pending/
-/// running (styled like `sync_import_dialog.dart`'s `_BottomBar`), an error
-/// message on failure, or "Download PNG"/"Download PDF" buttons once done.
-class _PosterJobDialog extends StatelessWidget {
-  final String projectName;
-  final void Function(String apiPath, String fallbackFilename) onDownload;
-
-  const _PosterJobDialog({required this.projectName, required this.onDownload});
-
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<PosterJobNotifier>(
-      builder: (context, n, __) {
-        return AlertDialog(
-          title: const Text('Generate poster'),
-          content: SizedBox(
-            width: 360,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (n.isBusy) ...[
-                  const LinearProgressIndicator(),
-                  const SizedBox(height: 8),
-                  Text(
-                    n.stage ?? 'Starting…',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ] else if (n.isFailed) ...[
-                  Text(
-                    n.error ?? 'Poster generation failed.',
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
-                    textAlign: TextAlign.center,
-                  ),
-                ] else if (n.isDone) ...[
-                  const Text('Your poster is ready.'),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      OutlinedButton(
-                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
-                        onPressed: () => onDownload(
-                            n.downloadPath('png'), '$projectName-poster.png'),
-                        child: const Text('Download PNG'),
-                      ),
-                      const SizedBox(width: 12),
-                      OutlinedButton(
-                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
-                        onPressed: () => onDownload(
-                            n.downloadPath('pdf'), '$projectName-poster.pdf'),
-                        child: const Text('Download PDF'),
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        );
-      },
     );
   }
 }

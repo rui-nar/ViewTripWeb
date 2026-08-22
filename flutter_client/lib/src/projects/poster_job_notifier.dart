@@ -1,10 +1,14 @@
-/// Job notifier for async server-side A0 poster generation (issue #14, unit F).
+/// Job creation for async server-side A0 poster generation (issue #14, unit F).
 ///
 /// Talks to the frozen contract in `api/poster.py`:
-///   POST /api/projects/{name}/poster                  -> {job_id}
-///   GET  /api/projects/{name}/poster/{job_id}          -> {status, stage, error_message}
-///   GET  /api/projects/{name}/poster/{job_id}/download  -> file bytes
-///   POST /api/projects/{name}/poster/preview           -> PNG bytes (fast, no job)
+///   POST /api/projects/{name}/poster           -> {job_id}
+///   POST /api/projects/{name}/poster/preview   -> PNG bytes (fast, no job)
+///
+/// The render itself runs in a queued background worker and the user is
+/// emailed a download link once it finishes (a parallel workstream), so the
+/// client's job is only to kick the job off — it no longer polls
+/// `GET .../poster/{job_id}` for status, and there is no client-side notion
+/// of a job being "busy"/"done"/"failed" to track.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -43,9 +47,9 @@ class PosterPreview {
 const kPosterWarningHeader = 'x-poster-warning';
 
 /// Fetches a fast, low-resolution preview of the real poster — same request
-/// shape as [PosterJobNotifier.start], but synchronous (no job created, no
-/// polling). The preview renders the same basemap, cards and placement as the
-/// full job, just small, so what it shows is what the poster will look like.
+/// shape as [createPosterJob], but synchronous (no job created). The preview
+/// renders the same basemap, cards and placement as the full job, just
+/// small, so what it shows is what the poster will look like.
 Future<PosterPreview> fetchPosterPreview({
   required ProjectRef ref,
   required Map<String, double> bounds,
@@ -53,10 +57,16 @@ Future<PosterPreview> fetchPosterPreview({
   required Map<String, bool> config,
   required List<Map<String, dynamic>> memories,
   ApiClient? client,
+  // The server caps its own basemap fetch at an 8s wall-clock budget
+  // (poster_renderer._PREVIEW_BASEMAP_BUDGET_S) and degrades to a warning
+  // past that, but card layout/measurement on top of it still needs more
+  // headroom than the API client's 30s default gives it in practice.
+  Duration timeout = const Duration(seconds: 20),
 }) async {
   final res = await (client ?? api).postRaw(
     ref.path('/poster/preview'),
     {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
+    timeout: timeout,
   );
   // Dart's http package lower-cases response header names.
   return PosterPreview(
@@ -65,110 +75,31 @@ Future<PosterPreview> fetchPosterPreview({
   );
 }
 
-/// Creates a poster job, then polls its status on a bounded interval until it
-/// reaches a terminal state ('done'/'failed') or [maxPollAttempts] is
-/// exhausted (treated as a failure). Consumers (a `Consumer`/
-/// `ChangeNotifierProvider` widget) read [status]/[stage]/[error] and call
-/// [downloadPath] once [status] is 'done'.
-class PosterJobNotifier extends ChangeNotifier {
-  final ApiClient _api;
-  final ProjectRef ref;
-  final Duration pollInterval;
-  final int maxPollAttempts;
-
-  PosterJobNotifier({
-    required this.ref,
-    ApiClient? client,
-    this.pollInterval = const Duration(seconds: 2),
-    this.maxPollAttempts = 60,
-  }) : _api = client ?? api;
-
-  /// Display-only convenience — filenames etc still key off the plain name.
-  String get projectName => ref.name;
-
-  int? jobId;
-
-  /// 'idle' | 'pending' | 'running' | 'done' | 'failed'
-  String status = 'idle';
-  String? stage;
-  String? error;
-
-  bool get isBusy => status == 'pending' || status == 'running';
-  bool get isDone => status == 'done';
-  bool get isFailed => status == 'failed';
-
-  /// Starts a poster job for the given request body and polls it to
-  /// completion. [bounds] is `{north, south, east, west}`; [config] matches
-  /// `PosterConfigIn`'s field names (see [PosterConfigOptions.toJson]).
-  Future<void> start({
-    required Map<String, double> bounds,
-    required String orientation,
-    required Map<String, bool> config,
-    required List<Map<String, dynamic>> memories,
-  }) async {
-    status = 'pending';
-    error = null;
-    notifyListeners();
-    try {
-      final result = await _api.post(ref.path('/poster'), {
-        'bounds': bounds,
-        'orientation': orientation,
-        'config': config,
-        'memories': memories,
-      }) as Map<String, dynamic>;
-      jobId = result['job_id'] as int?;
-    } on ApiException catch (e) {
-      status = 'failed';
-      error = e.body;
-      notifyListeners();
-      return;
-    } catch (e) {
-      status = 'failed';
-      error = e.toString();
-      notifyListeners();
-      return;
-    }
-    await _poll();
-  }
-
-  Future<void> _poll() async {
-    final id = jobId;
-    if (id == null) return;
-    for (var i = 0; i < maxPollAttempts; i++) {
-      try {
-        final result =
-            await _api.get(ref.path('/poster/$id')) as Map<String, dynamic>;
-        status = result['status'] as String? ?? status;
-        stage = result['stage'] as String?;
-        if (status == 'done') {
-          notifyListeners();
-          return;
-        }
-        if (status == 'failed') {
-          error = result['error_message'] as String?;
-          notifyListeners();
-          return;
-        }
-        notifyListeners();
-      } on ApiException catch (e) {
-        status = 'failed';
-        error = e.body;
-        notifyListeners();
-        return;
-      } catch (e) {
-        status = 'failed';
-        error = e.toString();
-        notifyListeners();
-        return;
-      }
-      await Future.delayed(pollInterval);
-    }
-    status = 'failed';
-    error = 'Poster generation timed out.';
-    notifyListeners();
-  }
-
-  /// API path for downloading the rendered poster once [status] is 'done'.
-  String downloadPath(String format) =>
-      ref.path('/poster/$jobId/download?format=$format');
+/// Kicks off a poster job and returns its id. [bounds] is
+/// `{north, south, east, west}`; [config] matches `PosterConfigIn`'s field
+/// names (see `PosterConfigOptions.toJson`).
+///
+/// Returns as soon as the server has queued the job — it does not wait for
+/// (or poll for) the render to finish. A blocking, undismissable "wait up to
+/// 120s" dialog built on top of this used to time out on real A0 renders that
+/// legitimately take longer, reporting a false failure while the server kept
+/// working (issue #14 feedback). The user is emailed a download link when
+/// the render actually completes, so there is nothing left to wait for here;
+/// callers should treat a thrown [ApiException] (or any other error) as a
+/// failure to *create* the job, not a failure of the render itself.
+Future<int> createPosterJob({
+  required ProjectRef ref,
+  required Map<String, double> bounds,
+  required String orientation,
+  required Map<String, bool> config,
+  required List<Map<String, dynamic>> memories,
+  ApiClient? client,
+}) async {
+  final result = await (client ?? api).post(ref.path('/poster'), {
+    'bounds': bounds,
+    'orientation': orientation,
+    'config': config,
+    'memories': memories,
+  }) as Map<String, dynamic>;
+  return result['job_id'] as int;
 }
