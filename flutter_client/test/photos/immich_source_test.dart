@@ -156,18 +156,21 @@ void main() {
   });
 
   group('filterImmichCandidatesForDay', () {
+    // Close to farAway's memory location (48.0, 2.0) below, unlike farAway
+    // itself -- the geo test needs one candidate inside tolerance and one
+    // outside.
     final onDay = ImmichCandidate(
       id: 'on-day',
       takenAt: DateTime.utc(2026, 7, 10, 12, 0),
-      lat: 48.85,
-      lon: 2.35,
+      lat: 48.01,
+      lon: 2.01,
       thumbUrl: '/thumb/on-day',
     );
     final otherDay = ImmichCandidate(
       id: 'other-day',
       takenAt: DateTime.utc(2026, 6, 1, 12, 0),
-      lat: 48.85,
-      lon: 2.35,
+      lat: 48.01,
+      lon: 2.01,
       thumbUrl: '/thumb/other-day',
     );
     final farAway = ImmichCandidate(

@@ -557,44 +557,55 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
               ),
               if (applied)
                 const Icon(Icons.check_circle, color: kSuccess)
-              else if (!hasPick)
-                row.immichBusy
-                    ? const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (_immichConnected)
-                            IconButton(
-                              icon: const Icon(Icons.auto_awesome, size: 18),
-                              tooltip: 'Suggest from Immich',
-                              onPressed: busy ? null : () => _suggestForRow(row),
-                            ),
-                          if (row.immichMatches.isNotEmpty) ...[
-                            OutlinedButton.icon(
-                              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
-                              icon: const Icon(Icons.auto_awesome, size: 18),
-                              label: const Text('Choose match'),
-                              onPressed: busy ? null : () => _chooseImmichMatch(row),
-                            ),
-                            const SizedBox(width: 6),
-                          ],
-                          OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
-                            icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
-                            label: const Text('Select picture'),
-                            onPressed: busy ? null : () => _pickForRow(row),
-                          ),
-                        ],
-                      ),
+              else if (!hasPick && row.immichBusy)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
             ],
           ),
+          // A second row for actions (rather than cramming them into the
+          // thumbnail row above) is also what the hasPick branch below does —
+          // with the Immich buttons added, up to three actions need more
+          // width than fits next to a 56px thumbnail + filename column. Wrap
+          // (not Row) because even on their own line, three icon+label
+          // buttons can still exceed the dialog's width at some font/text
+          // scales -- it drops to a second line instead of overflowing.
+          if (!hasPick && !applied && !row.immichBusy)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  if (row.immichMatches.isNotEmpty)
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                      label: const Text('Choose match'),
+                      onPressed: busy ? null : () => _chooseImmichMatch(row),
+                    ),
+                  if (_immichConnected)
+                    IconButton(
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                      tooltip: 'Suggest from Immich',
+                      onPressed: busy ? null : () => _suggestForRow(row),
+                    ),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                    icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
+                    label: const Text('Select picture'),
+                    onPressed: busy ? null : () => _pickForRow(row),
+                  ),
+                ],
+              ),
+            ),
           if (hasPick && !applied)
             Padding(
               padding: const EdgeInsets.only(top: 6),

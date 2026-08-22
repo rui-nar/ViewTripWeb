@@ -142,10 +142,15 @@ void main() {
         find.widgetWithText(TextField, 'API key'),
         'secret-key',
       );
-      await tester.tap(find.descendant(
+      final saveButton = find.descendant(
         of: immichCard(),
         matching: find.widgetWithText(FilledButton, 'Save'),
-      ));
+      );
+      // The settings page is a single long scrollable, taller than the
+      // default test viewport -- scroll the button into view before tapping,
+      // or the tap silently misses (off-screen) instead of throwing.
+      await tester.ensureVisible(saveButton);
+      await tester.tap(saveButton);
       await tester.pumpAndSettle();
 
       expect(svc.saveCalled, isTrue);
@@ -181,10 +186,12 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.descendant(
+      final disconnectButton = find.descendant(
         of: immichCard(),
         matching: find.widgetWithText(TextButton, 'Disconnect'),
-      ));
+      );
+      await tester.ensureVisible(disconnectButton);
+      await tester.tap(disconnectButton);
       await tester.pumpAndSettle();
 
       expect(svc.disconnectCalled, isTrue);
@@ -217,10 +224,12 @@ void main() {
         find.widgetWithText(TextField, 'API key'),
         'wrong-key',
       );
-      await tester.tap(find.descendant(
+      final saveButton = find.descendant(
         of: immichCard(),
         matching: find.widgetWithText(FilledButton, 'Save'),
-      ));
+      );
+      await tester.ensureVisible(saveButton);
+      await tester.tap(saveButton);
       await tester.pumpAndSettle();
 
       expect(svc.saveCalled, isTrue);
