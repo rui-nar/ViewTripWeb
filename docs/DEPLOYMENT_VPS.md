@@ -115,6 +115,15 @@ The API serves fine on its own: with `REDIS_URL` unset, every background job
 process via FastAPI `BackgroundTasks`. That is the original behaviour and a
 reasonable setup for this instance's load.
 
+**For the poster feature specifically, treat this as strongly recommended,
+not merely optional.** An A0 render is CPU-heavy (Pillow compositing up to
+~140M pixels) and does blocking sequential Mapbox tile fetches; run without
+`REDIS_URL` and that work executes inside the API process itself, so it
+starves every other request on the host for the duration of the render —
+not just the poster job's own caller. `enqueue()` logs an `_log.error(...)`
+each time this fallback is used for the poster queue, so check the API logs
+if posters feel like they're stalling the rest of the app.
+
 Adding the `redis` + worker services buys two things:
 
 - **Durability.** A job survives an API restart. Previously a restart mid-resolve
