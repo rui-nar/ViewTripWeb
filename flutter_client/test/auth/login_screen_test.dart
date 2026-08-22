@@ -1,11 +1,13 @@
-// Widget tests for ServerConfigDialog (login_screen.dart's "Self-hosting?
-// Click here" link): prefill from a saved override, validation, save/cancel
-// round-trip through core/server_config.dart.
+// Widget tests for ServerConfigDialog and SelfHostingLink (login_screen.dart's
+// "Self-hosting?" affordance): prefill from a saved override, validation,
+// save/cancel round-trip through core/server_config.dart, and that the
+// configured server URL stays visible on the login screen rather than only
+// inside the dialog.
 //
 // LoginScreen itself isn't pumped here — it wires up GoogleSignIn in
-// initState, which no existing test in this suite exercises either; the
-// dialog is exposed as a standalone public widget precisely so this new
-// logic can be tested in isolation from that.
+// initState, which no existing test in this suite exercises either; both
+// widgets are exposed standalone precisely so this logic can be tested in
+// isolation from that.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -106,5 +108,51 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await readCustomServerUrl(), isNull);
+  });
+
+  group('SelfHostingLink', () {
+    testWidgets('shows the plain link when no server override is saved',
+        (tester) async {
+      await tester.pumpWidget(
+          const MaterialApp(home: Scaffold(body: SelfHostingLink())));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Self-hosting? Click here'), findsOneWidget);
+    });
+
+    testWidgets('always shows the configured server URL on the login screen',
+        (tester) async {
+      await writeCustomServerUrl('https://trax.example.com');
+
+      await tester.pumpWidget(
+          const MaterialApp(home: Scaffold(body: SelfHostingLink())));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('https://trax.example.com'), findsOneWidget);
+      expect(find.text('Self-hosting? Click here'), findsNothing);
+    });
+
+    testWidgets('tapping the URL reopens the dialog to change it',
+        (tester) async {
+      await writeCustomServerUrl('https://trax.example.com');
+
+      await tester.pumpWidget(
+          const MaterialApp(home: Scaffold(body: SelfHostingLink())));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.textContaining('https://trax.example.com'));
+      await tester.pumpAndSettle();
+
+      final field = find.widgetWithText(TextField, 'Server URL');
+      expect(field, findsOneWidget);
+      expect(tester.widget<TextField>(field).controller!.text,
+          'https://trax.example.com');
+
+      await tester.enterText(field, 'https://new.example.com');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('https://new.example.com'), findsOneWidget);
+    });
   });
 }
