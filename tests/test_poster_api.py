@@ -13,11 +13,12 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import api.poster as poster_module
 import models.db as db_module
+import src.poster.poster_job_runner as job_runner_module
 import src.poster.poster_renderer as renderer_module
 import src.poster.tile_stitcher as tile_stitcher
 from PIL import Image
 from api.deps import get_current_user
-from api.poster import router as poster_router
+from api.poster import poster_public_router, router as poster_router
 from models.project_db import DBPosterJob, DBProject
 from models.user import UserInfo
 
@@ -63,6 +64,7 @@ def env(monkeypatch):
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid), "email": "a@e.com"}
     app.include_router(poster_router)
+    app.include_router(poster_public_router)
     return TestClient(app), engine, uid, other_uid
 
 
@@ -179,6 +181,132 @@ def test_create_job_404_for_unknown_project(env):
     client, _, _, _ = env
     r = client.post("/api/projects/Nonexistent/poster", json=_BODY)
     assert r.status_code == 404
+
+
+def test_create_job_sets_a_download_token(env, monkeypatch):
+    """The token backing the unauthenticated email download link is set at
+    creation time, not left to the runner."""
+    client, engine, uid, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+    with Session(engine) as sess:
+        job = sess.get(DBPosterJob, job_id)
+        assert job.download_token
+
+
+# ── Public (token-based) routes — reached from the notification email ───────
+
+def _create_and_finish_job(client, engine, monkeypatch):
+    """POST a job, let it run to completion (basemap faked out, same as
+    test_full_run_produces_downloadable_png_and_pdf), and return
+    (job_id, download_token)."""
+    monkeypatch.setattr(
+        renderer_module, "render_basemap",
+        lambda bounds, w, h, tile_fetcher=None: Image.new("RGB", (w, h), (120, 140, 160)),
+    )
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+    with Session(engine) as sess:
+        token = sess.get(DBPosterJob, job_id).download_token
+    return job_id, token
+
+
+def test_status_by_token_for_done_job(env, monkeypatch):
+    client, engine, _, _ = env
+    _job_id, token = _create_and_finish_job(client, engine, monkeypatch)
+
+    r = client.get(f"/api/poster/{token}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "done"
+    assert body["stage"] == "complete"
+    assert body["error_message"] is None
+
+
+def test_download_by_token_returns_png_and_pdf(env, monkeypatch):
+    client, engine, _, _ = env
+    _job_id, token = _create_and_finish_job(client, engine, monkeypatch)
+
+    png = client.get(f"/api/poster/{token}/download", params={"format": "png"})
+    assert png.status_code == 200
+    assert png.headers["content-type"] == "image/png"
+    assert png.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    pdf = client.get(f"/api/poster/{token}/download", params={"format": "pdf"})
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content[:5] == b"%PDF-"
+
+
+def test_download_by_token_404_when_job_not_done(env, monkeypatch):
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+    with Session(engine) as sess:
+        token = sess.get(DBPosterJob, job_id).download_token
+
+    r = client.get(f"/api/poster/{token}/download", params={"format": "png"})
+    assert r.status_code == 404
+
+
+def test_status_by_token_404_for_unknown_token(env):
+    """A wrong/missing token 404s the same as an unknown job — no leak of
+    which job/user it would have belonged to."""
+    client, _, _, _ = env
+    r = client.get("/api/poster/not-a-real-token")
+    assert r.status_code == 404
+
+
+def test_download_by_token_404_for_unknown_token(env):
+    client, _, _, _ = env
+    r = client.get("/api/poster/not-a-real-token/download", params={"format": "png"})
+    assert r.status_code == 404
+
+
+# ── Notification email (issue #14 follow-up) ─────────────────────────────────
+
+class _FakeEmailService:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(message)
+
+
+def test_run_poster_job_sends_ready_email_on_success(env, monkeypatch):
+    client, engine, uid, _ = env
+    monkeypatch.setattr(
+        renderer_module, "render_basemap",
+        lambda bounds, w, h, tile_fetcher=None: Image.new("RGB", (w, h), (120, 140, 160)),
+    )
+    fake = _FakeEmailService()
+    monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+
+    assert len(fake.sent) == 1
+    assert fake.sent[0].to == "a@e.com"
+    with Session(engine) as sess:
+        token = sess.get(DBPosterJob, job_id).download_token
+    assert token in fake.sent[0].text_body
+    assert f"/poster/{token}" in fake.sent[0].text_body
+
+
+def test_run_poster_job_sends_failed_email_on_failure(env, monkeypatch):
+    """The failure email is sent exactly once, and never carries the raw
+    internal error_message (issue #14 constraint — it can contain internal
+    detail like a stack-trace-derived Mapbox error)."""
+    client, _, _, _ = env
+    monkeypatch.setattr(tile_stitcher, "_mapbox_token", lambda: "")
+    fake = _FakeEmailService()
+    monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+
+    client.post("/api/projects/My Trip/poster", json=_BODY)
+
+    assert len(fake.sent) == 1
+    assert fake.sent[0].to == "a@e.com"
+    assert "MAPBOX_TOKEN" not in fake.sent[0].text_body
 
 
 # ── Preview (fast, synchronous, no job row) ──────────────────────────────────

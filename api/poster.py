@@ -6,16 +6,30 @@ Routes:
     GET  /api/projects/{name}/poster/{job_id}/download   — download the rendered file
     POST /api/projects/{name}/poster/preview             — fast low-res layout preview
 
+    GET  /api/poster/{token}                             — poll job status (unauthenticated)
+    GET  /api/poster/{token}/download                     — download the rendered file (unauthenticated)
+
 This is Unit A of the poster feature: it owns the job row, the API contract,
 and a placeholder renderer (src/poster/poster_job_runner.py). Later units
 replace what happens inside ``run_poster_job`` (real tile-fetching, card
 placement, day metrics, rendering) without changing this contract.
+
+The two ``/api/poster/{token}`` routes are a follow-up (issue #14, email
+notification): the client no longer polls for completion, instead the
+finished job's owner gets an email with a download link, and that link is
+opened from an inbox — possibly on a different device/browser with no active
+session. They live on a separate router (``poster_public_router``, mounted at
+``/api/poster`` rather than under ``/api/projects/{name}``) precisely so they
+can skip ``Depends(get_current_user)``; the token itself (a UUID stored on
+the job row, see ``DBPosterJob.download_token``) is the only credential,
+mirroring the existing share-link pattern in ``api/project_shares.py``.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Annotated, List, Optional
 
@@ -23,6 +37,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import FileResponse
 from models.db import get_session
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
@@ -32,6 +47,7 @@ from src.jobs.queue import QUEUE_POSTER, enqueue
 from src.poster.poster_renderer import render_poster_preview
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
+poster_public_router = APIRouter(prefix="/api/poster", tags=["poster"])
 
 _log = logging.getLogger(__name__)
 
@@ -101,6 +117,21 @@ def _get_owned_job(sess, job_id: int, user_info_id: int) -> DBPosterJob:
     return job
 
 
+def _get_job_by_token(sess, token: str) -> DBPosterJob:
+    """Return the DBPosterJob row for the unauthenticated email download link.
+
+    A wrong or missing token 404s with the exact same message as an unknown
+    job id — never leaking whether a token merely doesn't exist versus
+    belonging to someone else, mirroring ``_get_owned_job`` above.
+    """
+    job = sess.exec(
+        select(DBPosterJob).where(DBPosterJob.download_token == token)
+    ).first()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster job not found")
+    return job
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/{name}/poster", status_code=status.HTTP_201_CREATED,
@@ -121,6 +152,7 @@ def create_poster_job(
             user_info_id=user_info_id,
             status="pending",
             request_json=json.dumps(body.model_dump()),
+            download_token=str(uuid.uuid4()),
         )
         sess.add(job)
         sess.commit()
@@ -169,6 +201,48 @@ def download_poster(
     with get_session() as sess:
         resolve_project(sess, user_info_id, name, owner)
         job = _get_owned_job(sess, job_id, user_info_id)
+        if job.status != "done":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not ready")
+        path_str = job.result_png_path if format == "png" else job.result_pdf_path
+
+    if not path_str or not Path(path_str).exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    media_type = "image/png" if format == "png" else "application/pdf"
+    return FileResponse(path_str, media_type=media_type)
+
+
+# ── Public (token-based) routes ──────────────────────────────────────────────
+# Reached from the "your poster is ready/failed" email (issue #14) — no
+# active session is assumed, so these use the job's ``download_token`` as the
+# sole credential instead of ``Depends(get_current_user)``. Logic mirrors
+# ``get_poster_job_status``/``download_poster`` above exactly, just looked up
+# by token instead of by (job_id, JWT, project ownership).
+
+@poster_public_router.get("/{token}", response_model=JobStatusOut,
+                           summary="Get poster job status (unauthenticated, by download token)")
+def get_poster_job_status_by_token(token: str):
+    """Poll the status of a poster job via its unguessable email download token."""
+    with get_session() as sess:
+        job = _get_job_by_token(sess, token)
+        return {
+            "status": job.status,
+            "stage": job.stage,
+            "error_message": job.error_message,
+        }
+
+
+@poster_public_router.get("/{token}/download",
+                           summary="Download the rendered poster (unauthenticated, by download token)")
+def download_poster_by_token(token: str, format: str = Query("png", pattern="^(png|pdf)$")):
+    """Return the rendered poster file once the job is done.
+
+    404s if the token doesn't match any job, the job isn't done yet, or the
+    requested file is missing on disk — same behavior as ``download_poster``,
+    just reached without a JWT.
+    """
+    with get_session() as sess:
+        job = _get_job_by_token(sess, token)
         if job.status != "done":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Poster not ready")
         path_str = job.result_png_path if format == "png" else job.result_pdf_path

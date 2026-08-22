@@ -547,6 +547,11 @@ class DBPosterJob(sqlmodel.SQLModel, table=True):
     completed_at: Optional[float] = sqlmodel.Field(default=None)
     result_png_path: Optional[str] = sqlmodel.Field(default=None)
     result_pdf_path: Optional[str] = sqlmodel.Field(default=None)
+    # Unguessable token for the unauthenticated email download link (issue #14
+    # notification email): the poster's files are otherwise owner-only behind a
+    # JWT, but the email opening this link may be read on a device with no
+    # active session. Same pattern as DBProject.share_token.
+    download_token: Optional[str] = sqlmodel.Field(default=None, index=True)
 
 
 class DBRouteJob(sqlmodel.SQLModel, table=True):

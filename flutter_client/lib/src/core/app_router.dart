@@ -24,6 +24,7 @@ import 'splash_screen.dart' show kSplashBackground;
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/join_trip_screen.dart';
+import '../projects/poster_download_screen.dart';
 import '../projects/view_screen.dart';
 import '../projects/strava_import_screen.dart';
 import '../projects/strava_import_notifier.dart';
@@ -82,6 +83,10 @@ Future<String?> authRedirectTarget(
   // no session — and a signed-in user must not be bounced to /projects before
   // the token is consumed.
   if (loc.startsWith('/verify-email/')) return null;
+
+  // Poster-ready/failed notification links (issue #14) — same reasoning as
+  // /verify-email/ above: reached from an email, possibly with no session.
+  if (loc.startsWith('/poster/')) return null;
 
   // Invite deep links (issue #106) require login. Send the visitor to
   // the login screen with the invite URL as return_to — the same
@@ -279,6 +284,11 @@ GoRouter buildRouter(BuildContext context) {
         path: '/verify-email/:token',
         builder: (context, state) =>
             VerifyEmailScreen(token: state.pathParameters['token']!),
+      ),
+      GoRoute(
+        path: '/poster/:token',
+        builder: (context, state) =>
+            PosterDownloadScreen(token: state.pathParameters['token']!),
       ),
       GoRoute(
         path: '/share/:token',
