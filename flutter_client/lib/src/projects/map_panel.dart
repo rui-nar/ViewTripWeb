@@ -941,6 +941,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   List<Marker> _cachedEncounterMarkers = [];
   bool _showMemories = true;
   bool _showEncounters = true;
+  bool _showActivities = true;
   NetworkTileProvider? _tileProvider;
   Style? _vectorStyle;
 
@@ -1421,7 +1422,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
                 // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
                 simplificationTolerance: 0.5,
               ),
-            if (_cachedActivityMarkers.isNotEmpty)
+            if (_showActivities && _cachedActivityMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedActivityMarkers),
             if (_cachedSegmentMarkers.isNotEmpty)
               MarkerLayer(markers: _cachedSegmentMarkers),
@@ -1485,49 +1486,38 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
         if (showPolarstepsBanner) polarstepsOverlayBanner(notifier),
-        if (_cachedMemoryMarkers.isNotEmpty ||
+        if (_cachedActivityMarkers.isNotEmpty ||
+            _cachedMemoryMarkers.isNotEmpty ||
             (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty))
           Positioned(
             // Drop below the full-width Polarsteps trip banner so the two
             // never overlap on a narrow screen.
             top: showPolarstepsBanner ? 64 : 12,
             left: 12,
-            child: Row(
+            // Stacked in a column, not a row (issue #215) — three toggles side
+            // by side ran out of horizontal room on narrow/mobile screens.
+            child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (_cachedMemoryMarkers.isNotEmpty) ...[
-                  Text(
-                    'Memories',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Colors.white,
-                    ),
+                if (_cachedActivityMarkers.isNotEmpty)
+                  _MapToggleRow(
+                    label: 'Activities',
+                    value: _showActivities,
+                    onChanged: (v) => setState(() => _showActivities = v),
                   ),
-                  Transform.scale(
-                    scale: 0.7, // Adjust this value to set the size
-                    child: Switch(
-                      value: _showMemories,
-                      onChanged: (v) => setState(() => _showMemories = v),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
+                if (_cachedMemoryMarkers.isNotEmpty)
+                  _MapToggleRow(
+                    label: 'Memories',
+                    value: _showMemories,
+                    onChanged: (v) => setState(() => _showMemories = v),
                   ),
-                ],
-                if (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty) ...[
-                  if (_cachedMemoryMarkers.isNotEmpty) const SizedBox(width: 12),
-                  Text(
-                    'Encounters',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Colors.white,
-                    ),
+                if (widget.showEncounters && _cachedEncounterMarkers.isNotEmpty)
+                  _MapToggleRow(
+                    label: 'Encounters',
+                    value: _showEncounters,
+                    onChanged: (v) => setState(() => _showEncounters = v),
                   ),
-                  Transform.scale(
-                    scale: 0.7,
-                    child: Switch(
-                      value: _showEncounters,
-                      onChanged: (v) => setState(() => _showEncounters = v),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -1545,6 +1535,43 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               onPressed: widget.onLocateMe!,
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// One label+switch row for the map's layer-visibility toggles (issue #215).
+class _MapToggleRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _MapToggleRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: Colors.white),
+        ),
+        Transform.scale(
+          scale: 0.7, // Adjust this value to set the size
+          child: Switch(
+            value: value,
+            onChanged: onChanged,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ),
       ],
     );
   }
