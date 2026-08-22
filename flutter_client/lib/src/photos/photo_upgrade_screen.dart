@@ -17,6 +17,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/design_tokens.dart';
 import '../projects/project_notifier.dart';
+import 'immich_source.dart';
 import 'photo_match.dart';
 import 'photo_source.dart';
 
@@ -25,13 +26,22 @@ import 'photo_source.dart';
 /// [pickSinglePhotoOverride] and [fetchThumbnailHashOverride] exist only so
 /// widget tests can feed in known candidates/hashes without touching the
 /// platform file picker or making real network calls — production callers
-/// should never pass them.
+/// should never pass them. Same for the Immich-suggestion overrides
+/// ([checkImmichConnectedOverride], [fetchImmichCandidatesOverride],
+/// [fetchImmichThumbnailHashOverride], [downloadImmichCandidateOverride]),
+/// added for the Immich auto-suggestion flow (issue #33).
 void showPhotoUpgradeDialog(
   BuildContext context,
   ProjectNotifier notifier,
   Map<String, dynamic> memory, {
   @visibleForTesting Future<PickedPhoto?> Function()? pickSinglePhotoOverride,
   @visibleForTesting Future<int?> Function(String uuid)? fetchThumbnailHashOverride,
+  @visibleForTesting Future<bool> Function()? checkImmichConnectedOverride,
+  @visibleForTesting Future<List<ImmichCandidate>> Function()? fetchImmichCandidatesOverride,
+  @visibleForTesting
+  Future<int?> Function(ImmichCandidate candidate)? fetchImmichThumbnailHashOverride,
+  @visibleForTesting
+  Future<PickedPhoto> Function(ImmichCandidate candidate)? downloadImmichCandidateOverride,
 }) {
   showDialog(
     context: context,
@@ -41,6 +51,10 @@ void showPhotoUpgradeDialog(
       memory: memory,
       pickSinglePhoto: pickSinglePhotoOverride ?? pickSinglePhotoForUpgrade,
       fetchThumbnailHash: fetchThumbnailHashOverride,
+      checkImmichConnected: checkImmichConnectedOverride,
+      fetchImmichCandidates: fetchImmichCandidatesOverride,
+      fetchImmichThumbnailHash: fetchImmichThumbnailHashOverride,
+      downloadImmichCandidate: downloadImmichCandidateOverride,
     ),
   );
 }
@@ -57,6 +71,17 @@ class _UpgradeRow {
   bool comparing = false;
   _RowStatus status = _RowStatus.empty;
 
+  /// Immich candidates that looked like a plausible match for this row's
+  /// thumbnail but weren't confident enough to auto-fill (issue #33) —
+  /// non-empty only while the "Choose match" chooser is on offer.
+  List<ImmichCandidate> immichMatches = [];
+
+  /// True while this row's Immich candidates are being fetched/compared or
+  /// a chosen candidate is being downloaded — separate from [comparing]
+  /// (the manual file-picker's busy flag) so the two flows don't share
+  /// state.
+  bool immichBusy = false;
+
   _UpgradeRow(this.oldUuid);
 }
 
@@ -65,12 +90,20 @@ class _PhotoUpgradeDialog extends StatefulWidget {
   final Map<String, dynamic> memory;
   final Future<PickedPhoto?> Function() pickSinglePhoto;
   final Future<int?> Function(String uuid)? fetchThumbnailHash;
+  final Future<bool> Function()? checkImmichConnected;
+  final Future<List<ImmichCandidate>> Function()? fetchImmichCandidates;
+  final Future<int?> Function(ImmichCandidate candidate)? fetchImmichThumbnailHash;
+  final Future<PickedPhoto> Function(ImmichCandidate candidate)? downloadImmichCandidate;
 
   const _PhotoUpgradeDialog({
     required this.notifier,
     required this.memory,
     required this.pickSinglePhoto,
     this.fetchThumbnailHash,
+    this.checkImmichConnected,
+    this.fetchImmichCandidates,
+    this.fetchImmichThumbnailHash,
+    this.downloadImmichCandidate,
   });
 
   @override
@@ -80,6 +113,10 @@ class _PhotoUpgradeDialog extends StatefulWidget {
 class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
   late final List<_UpgradeRow> _rows;
   String? _error;
+  bool _immichConnected = false;
+  bool _suggestingAll = false;
+  List<ImmichCandidate>? _dayCandidatesCache;
+  final Map<String, int?> _immichHashCache = {};
 
   String get _memoryId => widget.memory['id']?.toString() ?? '';
 
@@ -88,6 +125,200 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
     super.initState();
     final existingUuids = (widget.memory['photos'] as List?)?.cast<String>() ?? [];
     _rows = [for (final uuid in existingUuids) _UpgradeRow(uuid)];
+    _loadImmichConnected();
+  }
+
+  Future<void> _loadImmichConnected() async {
+    final connected = await _checkImmichConnected();
+    if (!mounted) return;
+    setState(() => _immichConnected = connected);
+  }
+
+  Future<bool> _checkImmichConnected() {
+    if (widget.checkImmichConnected != null) return widget.checkImmichConnected!();
+    // Assuming ProjectNotifier exposes immichConnected() — signature may need adjusting at integration.
+    return widget.notifier.immichConnected();
+  }
+
+  Future<List<ImmichCandidate>> _fetchImmichCandidatesForDay() {
+    if (widget.fetchImmichCandidates != null) return widget.fetchImmichCandidates!();
+    final date = widget.memory['date'] as String?;
+    if (date == null) return Future.value(const []);
+    // Assuming ProjectNotifier exposes fetchImmichCandidatesForDay(date, lat, lon) — signature may need adjusting at integration.
+    return widget.notifier.fetchImmichCandidatesForDay(
+      date: date,
+      lat: (widget.memory['lat'] as num?)?.toDouble(),
+      lon: (widget.memory['lon'] as num?)?.toDouble(),
+    );
+  }
+
+  Future<List<ImmichCandidate>> _dayImmichCandidates() async {
+    if (_dayCandidatesCache != null) return _dayCandidatesCache!;
+    final fetched = await _fetchImmichCandidatesForDay();
+    _dayCandidatesCache = fetched;
+    return fetched;
+  }
+
+  /// Downloads an Immich candidate's thumbnail and computes its pHash, for
+  /// comparing against a row's *existing* thumbnail hash (fetched via
+  /// [_fetchThumbnailHash]). Cached per candidate id since the same day's
+  /// candidates are compared against every row.
+  Future<int?> _immichCandidateHash(ImmichCandidate candidate) async {
+    if (_immichHashCache.containsKey(candidate.id)) return _immichHashCache[candidate.id];
+    final hash = await _fetchImmichThumbnailHash(candidate);
+    _immichHashCache[candidate.id] = hash;
+    return hash;
+  }
+
+  Future<int?> _fetchImmichThumbnailHash(ImmichCandidate candidate) async {
+    if (widget.fetchImmichThumbnailHash != null) {
+      return widget.fetchImmichThumbnailHash!(candidate);
+    }
+    try {
+      // Assuming candidate.thumbUrl is reachable with the same auth headers as this app's own photo thumbnails.
+      final res =
+          await http.get(Uri.parse(candidate.thumbUrl), headers: widget.notifier.photoAuthHeaders);
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      return computeAverageHash(res.bodyBytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<PickedPhoto> _downloadImmichCandidate(ImmichCandidate candidate) {
+    if (widget.downloadImmichCandidate != null) {
+      return widget.downloadImmichCandidate!(candidate);
+    }
+    // Assuming immich_source.dart exposes downloadImmichPhoto(candidate, notifier) to download+build a PickedPhoto — signature may need adjusting at integration.
+    return downloadImmichPhoto(candidate, widget.notifier);
+  }
+
+  /// Runs the Immich suggestion flow for every row that doesn't already
+  /// have a pick — used by the top-of-dialog "Suggest from Immich" button.
+  /// Sequential (not `Future.wait`) so the day's candidates are only
+  /// fetched once and so only one row shows its busy indicator at a time.
+  Future<void> _suggestAllRows() async {
+    setState(() => _suggestingAll = true);
+    for (final row in _rows) {
+      if (row.picked != null) continue;
+      await _suggestForRow(row);
+    }
+    if (!mounted) return;
+    setState(() => _suggestingAll = false);
+  }
+
+  /// Fetches the day's Immich candidates (once, cached) and pHash-compares
+  /// each against [row]'s existing thumbnail, exactly the day/geo-then-pHash
+  /// logic a manual pick uses ([classifyDayGeoMatch] + [looksLikeSamePhoto])
+  /// but run per-candidate against this row's one fixed target thumbnail.
+  /// A single confident match auto-fills the row; more than one shows the
+  /// "Choose match" chooser instead of guessing; zero leaves the row as-is.
+  Future<void> _suggestForRow(_UpgradeRow row) async {
+    setState(() {
+      row.immichBusy = true;
+      row.immichMatches = [];
+      _error = null;
+    });
+    try {
+      final candidates = await _dayImmichCandidates();
+      if (!row.thumbHashChecked) {
+        row.thumbHash = await _fetchThumbnailHash(row.oldUuid);
+        row.thumbHashChecked = true;
+      }
+
+      final matches = <ImmichCandidate>[];
+      for (final candidate in candidates) {
+        final hash = await _immichCandidateHash(candidate);
+        if (looksLikeSamePhoto(hash, row.thumbHash) == true) matches.add(candidate);
+      }
+
+      if (matches.isEmpty) {
+        setState(() => row.immichBusy = false);
+      } else if (matches.length == 1) {
+        await _applyImmichCandidate(row, matches.single);
+      } else {
+        setState(() {
+          row.immichMatches = matches;
+          row.immichBusy = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        row.immichBusy = false;
+        _error = 'Could not fetch Immich suggestions.';
+      });
+    }
+  }
+
+  /// Opens the "Choose match" bottom sheet for [row]'s ambiguous
+  /// [_UpgradeRow.immichMatches] and applies whichever thumbnail is tapped.
+  Future<void> _chooseImmichMatch(_UpgradeRow row) async {
+    final selected = await showModalBottomSheet<ImmichCandidate>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final candidate in row.immichMatches)
+              InkWell(
+                key: ValueKey('immich-candidate-${candidate.id}'),
+                borderRadius: BorderRadius.circular(6),
+                onTap: () => Navigator.of(sheetContext).pop(candidate),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Image.network(
+                    candidate.thumbUrl,
+                    width: 72,
+                    height: 72,
+                    fit: BoxFit.cover,
+                    headers: widget.notifier.photoAuthHeaders,
+                    errorBuilder: (_, __, ___) => Container(
+                      width: 72,
+                      height: 72,
+                      color: Theme.of(sheetContext).colorScheme.surfaceContainerHighest,
+                      child: const Icon(Icons.photo_outlined, size: 20),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null) return;
+    setState(() => row.immichBusy = true);
+    await _applyImmichCandidate(row, selected);
+  }
+
+  /// Fills [row.picked] from an Immich [candidate] — same fields, same
+  /// day/geo-then-pHash computation, as a confirmed manual pick in
+  /// [_pickForRow]. Only ever fills the row; [_confirm] still gates the
+  /// actual upload.
+  Future<void> _applyImmichCandidate(_UpgradeRow row, ImmichCandidate candidate) async {
+    final picked = await _downloadImmichCandidate(candidate);
+    final date = widget.memory['date'] as String?;
+    final photoCandidate = picked.candidate;
+    final dayGeoMismatch = (date == null || photoCandidate == null)
+        ? DayGeoMismatch.none
+        : classifyDayGeoMatch(
+            date: date,
+            localOffset: Duration.zero,
+            candidate: photoCandidate,
+            memoryLat: (widget.memory['lat'] as num?)?.toDouble(),
+            memoryLon: (widget.memory['lon'] as num?)?.toDouble(),
+          );
+
+    setState(() {
+      row.picked = picked;
+      row.dayGeoMismatch = dayGeoMismatch;
+      row.looksSame = looksLikeSamePhoto(photoCandidate?.pHash, row.thumbHash);
+      row.status = _RowStatus.picked;
+      row.immichBusy = false;
+      row.immichMatches = [];
+    });
   }
 
   Future<int?> _fetchThumbnailHash(String uuid) async {
@@ -178,6 +409,20 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
                 style: theme.textTheme.bodyMedium,
               ),
               const SizedBox(height: 16),
+              if (_immichConnected && _rows.isNotEmpty) ...[
+                OutlinedButton.icon(
+                  icon: _suggestingAll
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.auto_awesome, size: 18),
+                  label: const Text('Suggest from Immich'),
+                  onPressed: _suggestingAll ? null : _suggestAllRows,
+                ),
+                const SizedBox(height: 12),
+              ],
               if (_error != null) ...[
                 Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
                 const SizedBox(height: 8),
@@ -203,7 +448,7 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
     final hasPick = row.picked != null;
     final applied = row.status == _RowStatus.applied;
     final failed = row.status == _RowStatus.failed;
-    final busy = row.status == _RowStatus.applying || row.comparing;
+    final busy = row.status == _RowStatus.applying || row.comparing || row.immichBusy;
 
     final warnings = [
       if (hasPick && row.picked!.candidate == null) 'No date info found in this photo.',
@@ -283,12 +528,41 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
               if (applied)
                 const Icon(Icons.check_circle, color: kSuccess)
               else if (!hasPick)
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
-                  label: const Text('Select picture'),
-                  onPressed: busy ? null : () => _pickForRow(row),
-                ),
+                row.immichBusy
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_immichConnected)
+                            IconButton(
+                              icon: const Icon(Icons.auto_awesome, size: 18),
+                              tooltip: 'Suggest from Immich',
+                              onPressed: busy ? null : () => _suggestForRow(row),
+                            ),
+                          if (row.immichMatches.isNotEmpty) ...[
+                            OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                              icon: const Icon(Icons.auto_awesome, size: 18),
+                              label: const Text('Choose match'),
+                              onPressed: busy ? null : () => _chooseImmichMatch(row),
+                            ),
+                            const SizedBox(width: 6),
+                          ],
+                          OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                            icon: const Icon(Icons.add_photo_alternate_outlined, size: 18),
+                            label: const Text('Select picture'),
+                            onPressed: busy ? null : () => _pickForRow(row),
+                          ),
+                        ],
+                      ),
             ],
           ),
           if (hasPick && !applied)
@@ -297,6 +571,21 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
+                  if (row.immichMatches.isNotEmpty) ...[
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36)),
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                      label: const Text('Choose match'),
+                      onPressed: busy ? null : () => _chooseImmichMatch(row),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  if (_immichConnected)
+                    IconButton(
+                      icon: const Icon(Icons.auto_awesome, size: 18),
+                      tooltip: 'Suggest from Immich',
+                      onPressed: busy ? null : () => _suggestForRow(row),
+                    ),
                   TextButton(
                     onPressed: busy ? null : () => _pickForRow(row),
                     child: const Text('Change picture'),
