@@ -127,18 +127,6 @@ class _LoginScreenState extends State<LoginScreen> {
         .showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  Future<void> _showServerConfigDialog() async {
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (_) => const ServerConfigDialog(),
-    );
-    if (saved == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Server updated — restart the app to apply it.'),
-      ));
-    }
-  }
-
   // ── Build ─────────────────────────────────────────────────────────────────────
 
   @override
@@ -299,10 +287,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                       if (isNativeMobile) ...[
                         const SizedBox(height: 8),
-                        TextButton(
-                          onPressed: _showServerConfigDialog,
-                          child: const Text('Self-hosting? Click here'),
-                        ),
+                        const SelfHostingLink(),
                       ],
                       const SizedBox(height: 24),
                       Text(
@@ -318,6 +303,84 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Self-hosting link / current server indicator ─────────────────────────────
+
+/// Shows the currently configured self-hosted server URL, so the user can
+/// see which server they're about to sign in to, or — when none is set — a
+/// link to configure one. Kept as its own widget (rather than inline in
+/// LoginScreen) so it can be pumped in tests without LoginScreen's
+/// GoogleSignIn initState wiring (see login_screen_test.dart).
+class SelfHostingLink extends StatefulWidget {
+  const SelfHostingLink({super.key});
+
+  @override
+  State<SelfHostingLink> createState() => SelfHostingLinkState();
+}
+
+class SelfHostingLinkState extends State<SelfHostingLink> {
+  String? _url;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final url = await readCustomServerUrl();
+    if (mounted) setState(() => _url = url);
+  }
+
+  Future<void> _openDialog() async {
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (_) => const ServerConfigDialog(),
+    );
+    if (saved != true) return;
+    await _load();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Server updated — restart the app to apply it.'),
+      ));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final url = _url;
+    if (url == null) {
+      return TextButton(
+        onPressed: _openDialog,
+        child: const Text('Self-hosting? Click here'),
+      );
+    }
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: _openDialog,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.dns_outlined,
+                size: 16, color: theme.colorScheme.primary),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                'Signing in to $url',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.primary),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
       ),
     );

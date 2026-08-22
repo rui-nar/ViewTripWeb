@@ -108,17 +108,31 @@ class ApiClient {
       if (res.body.isEmpty) return null;
       return jsonDecode(res.body);
     }
-    throw ApiException(res.statusCode, res.body);
+    throw ApiException(res.statusCode, res.body,
+        location: res.headers['location']);
   }
 }
 
 class ApiException implements Exception {
   final int statusCode;
   final String body;
-  ApiException(this.statusCode, this.body);
+
+  /// The `Location` header, when the server responded with a redirect
+  /// (3xx). Redirects reach here as errors rather than being followed
+  /// transparently to a JSON response, which usually means the configured
+  /// server URL uses the wrong scheme (http vs https) or host.
+  final String? location;
+
+  ApiException(this.statusCode, this.body, {this.location});
 
   @override
-  String toString() => 'ApiException($statusCode): $body';
+  String toString() {
+    if (statusCode >= 300 && statusCode < 400 && location != null) {
+      return 'ApiException($statusCode): server redirected to $location — '
+          'check your server URL is correct (e.g. http vs https)';
+    }
+    return 'ApiException($statusCode): $body';
+  }
 }
 
 /// Singleton instance shared across the app. Mutable (not `final`) so
