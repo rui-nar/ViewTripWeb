@@ -20,6 +20,7 @@ import 'last_opened_project.dart';
 import 'onboarding_notifier.dart';
 import 'platform.dart';
 import 'return_to.dart';
+import 'splash_screen.dart' show kSplashBackground;
 import '../projects/projects_screen.dart';
 import '../projects/app_screen.dart';
 import '../projects/join_trip_screen.dart';
@@ -150,7 +151,15 @@ GoRouter buildRouter(BuildContext context) {
     routes: [
       GoRoute(
         path: '/',
-        builder: (context, state) => const WelcomeScreen(),
+        // On native mobile the auth guard always redirects `/` away (see
+        // authRedirectTarget above) — but that redirect is async, so a plain
+        // `WelcomeScreen()` here would still get mounted and painted for a
+        // frame first, flashing the marketing page in between the splash
+        // disappearing and the redirect landing on /login. Painting the
+        // splash's own background instead makes that frame invisible.
+        builder: (context, state) => isNativeMobile
+            ? const ColoredBox(color: kSplashBackground)
+            : const WelcomeScreen(),
       ),
       GoRoute(
         path: '/onboarding',

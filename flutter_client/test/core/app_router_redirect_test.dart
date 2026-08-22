@@ -8,6 +8,8 @@
 // GoRouter end-to-end (see its own comment for why it doesn't import
 // app_router.dart / buildRouter() itself).
 
+import 'dart:async' show unawaited;
+
 import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +18,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
+import 'package:viewtrip_client/src/auth/welcome_screen.dart';
 import 'package:viewtrip_client/src/core/app_router.dart';
 import 'package:viewtrip_client/src/core/last_opened_project.dart';
 import 'package:viewtrip_client/src/core/onboarding_notifier.dart';
@@ -236,6 +239,50 @@ void main() {
     final target = await rootRedirectTarget(otherUser.user?.id);
 
     expect(target, '/projects');
+  });
+
+  // Regression for the Android "website flash" bug: the `/` route's redirect
+  // is async, so between the splash disappearing (auth.isRestoring flips
+  // false) and the redirect actually landing on /login, the router is
+  // briefly still parked on `/` and its builder runs. On native mobile that
+  // builder must never construct the marketing WelcomeScreen — see the
+  // `isNativeMobile` branch in app_router.dart's `/` GoRoute.
+  testWidgets(
+      'native mobile: WelcomeScreen never mounts at "/", even mid-redirect',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    final auth = AuthNotifier(AuthService());
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<AuthNotifier>.value(value: auth),
+          ChangeNotifierProvider<OnboardingNotifier>(
+              create: (_) => OnboardingNotifier(true)),
+          ChangeNotifierProvider<ThemeNotifier>(create: (_) => ThemeNotifier()),
+        ],
+        child: Builder(
+          builder: (context) {
+            final router = buildRouter(context);
+            return MaterialApp.router(routerConfig: router);
+          },
+        ),
+      ),
+    );
+
+    // Mirrors main.dart's `..init()` cascade: kicks off session restore
+    // (isLoading/isRestoring true, so the redirect defers and `/` builds)
+    // and lets it settle (isLoading/isRestoring flip false, triggering the
+    // redirect's async re-evaluation) — WelcomeScreen must not appear at
+    // any point in between.
+    unawaited(auth.init());
+    await tester.pump();
+    expect(find.byType(WelcomeScreen), findsNothing);
+
+    await tester.pumpAndSettle();
+    expect(find.byType(WelcomeScreen), findsNothing);
   });
 
   // `app_screen.dart` used to import `dart:html` directly, which made it (and
