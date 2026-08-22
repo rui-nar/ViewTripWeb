@@ -25,6 +25,7 @@ from models.user import UserInfo
 from src.exceptions.errors import APIError
 from src.poster.poster_renderer import (
     _PIN_COLOR,
+    _PREVIEW_BASEMAP_BUDGET_S,
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
     _Projector,
@@ -413,6 +414,32 @@ def test_preview_degrades_with_a_warning_when_the_basemap_fails(project_id):
         assert img.size[0] > 0
     assert warning is not None
     assert "MAPBOX_TOKEN" in warning
+
+
+def test_preview_degrades_with_a_warning_when_the_basemap_is_too_slow(
+    project_id, monkeypatch
+):
+    """A tile fetch that never errors but runs past the preview's wall-clock
+    budget must degrade the same way an outright failure does, rather than
+    running until the *client's* HTTP timeout kills the connection (issue
+    #14: "the preview failed with a timeout 30s")."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        "src.poster.tile_stitcher.time.monotonic", lambda: clock["t"]
+    )
+
+    def slow_but_successful(z, x, y):
+        clock["t"] += _PREVIEW_BASEMAP_BUDGET_S + 1.0
+        return _solid_tile()
+
+    png_bytes, warning = render_poster_preview(
+        project_id, 1, _BODY, tile_fetcher=slow_but_successful
+    )
+
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        assert img.size[0] > 0
+    assert warning is not None
+    assert "time budget" in warning
 
 
 def test_full_render_still_fails_hard_when_the_basemap_fails(project_id, tmp_path):

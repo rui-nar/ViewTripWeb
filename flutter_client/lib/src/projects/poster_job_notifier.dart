@@ -53,10 +53,16 @@ Future<PosterPreview> fetchPosterPreview({
   required Map<String, bool> config,
   required List<Map<String, dynamic>> memories,
   ApiClient? client,
+  // The server caps its own basemap fetch at an 8s wall-clock budget
+  // (poster_renderer._PREVIEW_BASEMAP_BUDGET_S) and degrades to a warning
+  // past that, but card layout/measurement on top of it still needs more
+  // headroom than the API client's 30s default gives it in practice.
+  Duration timeout = const Duration(seconds: 20),
 }) async {
   final res = await (client ?? api).postRaw(
     ref.path('/poster/preview'),
     {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
+    timeout: timeout,
   );
   // Dart's http package lower-cases response header names.
   return PosterPreview(

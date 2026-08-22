@@ -238,7 +238,9 @@ class MapboxTileClient:
 
 
 def _default_tile_fetcher(
-    tile_size: int = DEFAULT_TILE_SIZE, pixel_ratio: int = DEFAULT_PIXEL_RATIO
+    tile_size: int = DEFAULT_TILE_SIZE,
+    pixel_ratio: int = DEFAULT_PIXEL_RATIO,
+    timeout: float = 15.0,
 ) -> TileFetcher:
     """Build the default network tile_fetcher from the configured MAPBOX_TOKEN.
 
@@ -247,7 +249,7 @@ def _default_tile_fetcher(
     pure-math / injected-fetcher tests never requires a token or network
     access.
     """
-    client = MapboxTileClient(_mapbox_token(), tile_size=tile_size, pixel_ratio=pixel_ratio)
+    client = MapboxTileClient(_mapbox_token(), tile_size=tile_size, pixel_ratio=pixel_ratio, timeout=timeout)
     return client.fetch_tile
 
 
@@ -263,6 +265,8 @@ def render_basemap(
     pixel_ratio: int = DEFAULT_PIXEL_RATIO,
     max_zoom: int = DEFAULT_MAX_ZOOM,
     max_tiles: int = DEFAULT_MAX_TILES,
+    deadline: Optional[float] = None,
+    tile_timeout: float = 15.0,
 ) -> Image.Image:
     """Render a stitched Mapbox raster basemap covering *bounds* at exactly
     (*target_width*, *target_height*) pixels.
@@ -293,6 +297,16 @@ def render_basemap(
     geographic extent — but a bbox that is much wider than it is tall (or
     vice versa) can force a zoom high enough to blow up the other dimension's
     tile count, which this cap catches.
+
+    ``deadline`` (a ``time.monotonic()`` timestamp) is an optional wall-clock
+    budget for the whole fetch loop: tiles are fetched one at a time, so a
+    tile count under *max_tiles* can still run long if each fetch is merely
+    slow rather than failing outright — a cap on *count* alone doesn't catch
+    that. Past the deadline, ``TimeoutError`` is raised immediately rather
+    than continuing to fetch the remaining tiles. ``None`` (the default,
+    used by the full-resolution render) means no budget. *tile_timeout* is
+    the per-request timeout passed to the default ``MapboxTileClient`` when
+    *tile_fetcher* is not injected.
     """
     zoom = zoom_for_target_size(bounds, target_width, target_height, tile_size, max_zoom)
     x_min, x_max, y_min, y_max = tile_range_for_bounds(bounds, zoom, tile_size)
@@ -305,7 +319,7 @@ def render_basemap(
             "oblong or oversized extent"
         )
 
-    fetcher = tile_fetcher or _default_tile_fetcher(tile_size, pixel_ratio)
+    fetcher = tile_fetcher or _default_tile_fetcher(tile_size, pixel_ratio, timeout=tile_timeout)
 
     # The stitch stride is the tiles' *actual* pixel width, which is only
     # known once the first tile is decoded — a `@2x` request returns
@@ -315,9 +329,17 @@ def render_basemap(
     # never silently reintroduce the overlapping-paste corruption.
     canvas: Optional[Image.Image] = None
     stride = tile_size * pixel_ratio
+    fetched = 0
+    total = tiles_x * tiles_y
     for ty in range(y_min, y_max + 1):
         for tx in range(x_min, x_max + 1):
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Basemap tile fetch exceeded its time budget after "
+                    f"{fetched} of {total} tiles"
+                )
             tile_bytes = fetcher(zoom, tx, ty)
+            fetched += 1
             tile_img = Image.open(io.BytesIO(tile_bytes)).convert("RGB")
             if canvas is None:
                 stride = tile_img.width

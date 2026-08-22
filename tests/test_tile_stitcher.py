@@ -263,6 +263,35 @@ def test_render_basemap_respects_custom_max_tiles():
                         tile_fetcher=fake_fetcher, tile_size=256, max_tiles=10)
 
 
+def test_render_basemap_raises_timeout_once_deadline_elapses(monkeypatch):
+    """A tile count under max_tiles doesn't bound *time* — each fetch is
+    sequential, so a merely-slow (not failing) connection must still be cut
+    off by a wall-clock deadline rather than running unbounded (issue #14:
+    "preview failed with a timeout")."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        "src.poster.tile_stitcher.time.monotonic", lambda: clock["t"]
+    )
+
+    def slow_fetcher(z, x, y):
+        clock["t"] += 100.0  # every fetch "takes" longer than the budget
+        return _solid_png(size=(256, 256))
+
+    with pytest.raises(TimeoutError, match="time budget"):
+        render_basemap(_PARIS_BOUNDS, target_width=800, target_height=600,
+                        tile_fetcher=slow_fetcher, tile_size=256,
+                        deadline=10.0)
+
+
+def test_render_basemap_ignores_deadline_when_not_given():
+    """Deadline is opt-in — the full-resolution render passes none, and must
+    not be time-bounded regardless of how long fetching takes."""
+    img = render_basemap(_PARIS_BOUNDS, target_width=800, target_height=600,
+                          tile_fetcher=lambda z, x, y: _solid_png(size=(256, 256)),
+                          tile_size=256, deadline=None)
+    assert img.size == (800, 600)
+
+
 # ---------------------------------------------------------------------------
 # MapboxTileClient
 # ---------------------------------------------------------------------------

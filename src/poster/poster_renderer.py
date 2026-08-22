@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -86,6 +87,15 @@ _PREVIEW_MAX_DIMENSION = 900
 # it must stay fast and cheap. If the fetch fails it degrades to a flat colour
 # and reports a warning rather than pretending the poster will look like that.
 _PREVIEW_MAX_TILES = 24
+
+# A tile count under the budget above doesn't bound *time* — each fetch is
+# sequential, so a merely-slow (not failing) connection can still run past
+# what a client is willing to wait on (issue #14: "preview failed with a
+# timeout"). These cap the preview's basemap fetch to a wall-clock budget,
+# same degrade-to-warning path as an outright fetch failure, rather than
+# letting it run until the client's own HTTP timeout kills the connection.
+_PREVIEW_BASEMAP_BUDGET_S = 8.0
+_PREVIEW_TILE_TIMEOUT_S = 5.0
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 _CARD_BG = (255, 255, 255)
@@ -539,6 +549,9 @@ def _compose_poster_image(
     kwargs = {"tile_fetcher": tile_fetcher}
     if max_tiles is not None:
         kwargs["max_tiles"] = max_tiles
+    if basemap_optional:
+        kwargs["deadline"] = time.monotonic() + _PREVIEW_BASEMAP_BUDGET_S
+        kwargs["tile_timeout"] = _PREVIEW_TILE_TIMEOUT_S
     try:
         canvas = render_basemap(bounds, target_w, target_h, **kwargs)
     except Exception as exc:
