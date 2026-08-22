@@ -120,6 +120,14 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
 
   String get _memoryId => widget.memory['id']?.toString() ?? '';
 
+  /// `ImmichCandidate.thumbUrl` is a same-origin-relative path (e.g.
+  /// `/api/immich/assets/{id}/thumbnail`) — resolve it against the API base
+  /// URL the same way [ProjectNotifier.photoThumbUrl] builds its own
+  /// absolute thumbnail URLs, so it works on native platforms too (not just
+  /// web, where a relative path happens to resolve against the page origin).
+  String _immichThumbUrl(ImmichCandidate candidate) =>
+      '${widget.notifier.apiBaseUrl}${candidate.thumbUrl}';
+
   @override
   void initState() {
     super.initState();
@@ -136,19 +144,37 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
 
   Future<bool> _checkImmichConnected() {
     if (widget.checkImmichConnected != null) return widget.checkImmichConnected!();
-    // Assuming ProjectNotifier exposes immichConnected() — signature may need adjusting at integration.
     return widget.notifier.immichConnected();
   }
 
-  Future<List<ImmichCandidate>> _fetchImmichCandidatesForDay() {
+  Future<List<ImmichCandidate>> _fetchImmichCandidatesForDay() async {
     if (widget.fetchImmichCandidates != null) return widget.fetchImmichCandidates!();
     final date = widget.memory['date'] as String?;
-    if (date == null) return Future.value(const []);
-    // Assuming ProjectNotifier exposes fetchImmichCandidatesForDay(date, lat, lon) — signature may need adjusting at integration.
-    return widget.notifier.fetchImmichCandidatesForDay(
+    if (date == null) return const [];
+
+    // EXIF-as-UTC convention (see photo_source.dart's _parseExifDateTime):
+    // the trip's local day is treated as a UTC day, matching classifyDayGeoMatch's
+    // localOffset: Duration.zero elsewhere in this file.
+    final parts = date.split('-');
+    final dayStartUtc = DateTime.utc(
+      int.parse(parts[0]),
+      int.parse(parts[1]),
+      int.parse(parts[2]),
+    );
+    final dayEndUtc = dayStartUtc.add(const Duration(days: 1));
+
+    final raw = await fetchImmichCandidatesForDay(
+      baseUrl: widget.notifier.apiBaseUrl,
+      authHeaders: widget.notifier.photoAuthHeaders,
+      dayStartUtc: dayStartUtc,
+      dayEndUtc: dayEndUtc,
+    );
+    return filterImmichCandidatesForDay(
       date: date,
-      lat: (widget.memory['lat'] as num?)?.toDouble(),
-      lon: (widget.memory['lon'] as num?)?.toDouble(),
+      localOffset: Duration.zero,
+      candidates: raw,
+      memoryLat: (widget.memory['lat'] as num?)?.toDouble(),
+      memoryLon: (widget.memory['lon'] as num?)?.toDouble(),
     );
   }
 
@@ -175,9 +201,10 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
       return widget.fetchImmichThumbnailHash!(candidate);
     }
     try {
-      // Assuming candidate.thumbUrl is reachable with the same auth headers as this app's own photo thumbnails.
-      final res =
-          await http.get(Uri.parse(candidate.thumbUrl), headers: widget.notifier.photoAuthHeaders);
+      final res = await http.get(
+        Uri.parse(_immichThumbUrl(candidate)),
+        headers: widget.notifier.photoAuthHeaders,
+      );
       if (res.statusCode < 200 || res.statusCode >= 300) return null;
       return computeAverageHash(res.bodyBytes);
     } catch (_) {
@@ -189,8 +216,11 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
     if (widget.downloadImmichCandidate != null) {
       return widget.downloadImmichCandidate!(candidate);
     }
-    // Assuming immich_source.dart exposes downloadImmichPhoto(candidate, notifier) to download+build a PickedPhoto — signature may need adjusting at integration.
-    return downloadImmichPhoto(candidate, widget.notifier);
+    return downloadImmichCandidate(
+      baseUrl: widget.notifier.apiBaseUrl,
+      authHeaders: widget.notifier.photoAuthHeaders,
+      candidate: candidate,
+    );
   }
 
   /// Runs the Immich suggestion flow for every row that doesn't already
@@ -270,7 +300,7 @@ class _PhotoUpgradeDialogState extends State<_PhotoUpgradeDialog> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(6),
                   child: Image.network(
-                    candidate.thumbUrl,
+                    _immichThumbUrl(candidate),
                     width: 72,
                     height: 72,
                     fit: BoxFit.cover,

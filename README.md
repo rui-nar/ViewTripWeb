@@ -19,6 +19,7 @@ Self-hosted via Docker · Flutter web/mobile frontend + FastAPI backend. The run
 | Auth | Google OAuth + local email/password · JWT (PyJWT) |
 | Strava | OAuth 2.0 · per-user token storage in DB |
 | Polarsteps | per-user token storage · trip/step import |
+| Immich | per-user server URL + API key, proxied server-side · optional higher-quality photo source |
 | Maps | flutter_map · Mapbox / Esri raster + vector tiles |
 | Routing | OSM Overpass (rail/ferry/bus geometry) · HAFAS / digitraffic (train schedules) |
 | Translation | Google Translate v2 (optional, memory translations) |
@@ -108,6 +109,7 @@ release. See [docs/ANDROID.md](docs/ANDROID.md).
 
 - Register a Strava application at <https://www.strava.com/settings/api>. Set the **Authorization Callback Domain** to your server's hostname.
 - Register a Google OAuth app at <https://console.developers.google.com>. Add your origin to the allowed origins.
+- Immich needs no server-side registration: each user pastes their own Immich server URL and an API key (Immich → Account Settings → API Keys) into the app's Settings screen. The backend proxies every Immich call — image bytes are streamed through and never persisted — so no CORS configuration is needed on the Immich side either.
 
 ### Environment variables
 
@@ -148,7 +150,7 @@ image with a Dockerfile `ENV`; the published image is public.
 ## Features
 
 - **Projects** — assemble trips from Strava/Polarsteps activities; reorder, sort chronologically, add flight/train/bus/boat connecting segments with real-world route geometry resolved from OSM/HAFAS.
-- **Memories** — photo + text annotations per day, with likes, threaded comments, and optional translation.
+- **Memories** — photo + text annotations per day, with likes, threaded comments, and optional translation. Photos imported at thumbnail quality (e.g. from Polarsteps) can be upgraded in place: pick a higher-quality original from your device, or connect a self-hosted [Immich](https://immich.app) library in Settings so the app can suggest matches by day, GPS, and visual similarity — every swap still requires your confirmation.
 - **Journals** — private day notes with photos.
 - **Encounters & Groups** — a per-project directory of people (and groups of people) you meet — name, social links, nationalities, residence city, avatar — and where/when you met them, shown inline on their day and as owner-only map pins. People, groups, and encounters are never included in shared views.
 - **Statistics** — distance/elevation/time totals, per-mode and per-tag breakdowns, ride time-series charts.

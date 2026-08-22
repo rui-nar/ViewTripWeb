@@ -297,7 +297,6 @@ void main() {
   });
 
   testWidgets('a confident single Immich match auto-fills the row', (tester) async {
-    // Assuming ImmichCandidate({id, takenAt, lat, lon, thumbUrl}) — signature may need adjusting at integration.
     final candidate = ImmichCandidate(
       id: 'c1',
       takenAt: _day,
