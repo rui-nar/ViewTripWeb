@@ -77,7 +77,7 @@ void main() {
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 1);
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 2);
-      await pumpEventQueue(times: 10, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 10);
 
       expect(polledIds, isNotEmpty);
       expect(polledIds.toSet(), {'2'}, reason: 'job 1s timer was cancelled by the second start()');
@@ -100,13 +100,13 @@ void main() {
       final n = PosterStatusNotifier(client: client, pollInterval: Duration.zero);
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 1);
-      await pumpEventQueue(times: 30, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 30);
 
       expect(n.state, PosterCardState.done);
       expect(pollCount, 2);
 
       final callsAtDone = pollCount;
-      await pumpEventQueue(times: 20, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 20);
       expect(pollCount, callsAtDone, reason: 'no more polling once terminal');
 
       final prefs = await SharedPreferences.getInstance();
@@ -125,11 +125,11 @@ void main() {
       final n = PosterStatusNotifier(client: client, pollInterval: Duration.zero);
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 2);
-      await pumpEventQueue(times: 30, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 30);
 
       expect(n.state, PosterCardState.failed);
       final callsAtFailed = pollCount;
-      await pumpEventQueue(times: 20, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 20);
       expect(pollCount, callsAtFailed, reason: 'no more polling once terminal');
 
       final prefs = await SharedPreferences.getInstance();
@@ -148,7 +148,7 @@ void main() {
       final n = PosterStatusNotifier(client: client, pollInterval: Duration.zero);
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 3);
-      await pumpEventQueue(times: 30, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 30);
 
       expect(n.state, PosterCardState.done);
       expect(pollCount, greaterThanOrEqualTo(2));
@@ -167,14 +167,14 @@ void main() {
       final n = PosterStatusNotifier(client: client, pollInterval: Duration.zero);
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 4);
-      await pumpEventQueue(times: 5, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 5);
       final callsBeforeDismiss = getCalls;
       expect(callsBeforeDismiss, greaterThan(0));
 
       await n.dismiss();
       expect(n.state, PosterCardState.hidden);
 
-      await pumpEventQueue(times: 20, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 20);
       expect(getCalls, callsBeforeDismiss, reason: 'no more polling after dismiss');
 
       final prefs = await SharedPreferences.getInstance();
@@ -201,14 +201,14 @@ void main() {
       );
 
       await n.start(ref: const ProjectRef(name: 'Trip'), jobId: 5);
-      await pumpEventQueue(times: 5, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 5);
       expect(getCalls, greaterThan(0), reason: 'polling was actually active');
       expect(n.state, PosterCardState.generating);
 
       // Jump the fake clock past the give-up threshold.
       fakeNow = fakeNow.add(const Duration(minutes: 21));
       final callsBeforeGiveUp = getCalls;
-      await pumpEventQueue(times: 20, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 20);
 
       expect(getCalls, callsBeforeGiveUp,
           reason: 'give-up stops polling instead of one more failing check');
@@ -273,7 +273,7 @@ void main() {
       expect(n.state, PosterCardState.generating);
       expect(n.stage, 'Placing pins');
 
-      await pumpEventQueue(times: 30, duration: const Duration(milliseconds: 1));
+      await pumpEventQueue(times: 30);
       expect(n.state, PosterCardState.done);
       expect(pollCount, 2);
     });
