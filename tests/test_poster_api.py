@@ -111,6 +111,31 @@ def test_config_theme_defaults_to_dark_and_is_stored_on_the_job(env, monkeypatch
         assert json.loads(sess.get(DBPosterJob, job_id).request_json)["config"]["theme"] == "light"
 
 
+def test_config_layout_defaults_to_radial_and_is_stored_on_the_job(env, monkeypatch):
+    """The perimeter layout (src/poster/perimeter_placement.py) is an opt-in
+    prototype: a request that doesn't ask for it keeps the radial placement."""
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    r = client.post("/api/projects/My Trip/poster", json=_BODY)  # no layout given
+    job_id = r.json()["job_id"]
+    with Session(engine) as sess:
+        assert json.loads(sess.get(DBPosterJob, job_id).request_json)["config"]["layout"] == "radial"
+
+    body = {**_BODY, "config": {**_BODY["config"], "layout": "perimeter"}}
+    r = client.post("/api/projects/My Trip/poster", json=body)
+    job_id = r.json()["job_id"]
+    with Session(engine) as sess:
+        assert json.loads(sess.get(DBPosterJob, job_id).request_json)["config"]["layout"] == "perimeter"
+
+
+def test_config_layout_rejects_an_unknown_value(env, monkeypatch):
+    client, _, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+    body = {**_BODY, "config": {**_BODY["config"], "layout": "spiral"}}
+    assert client.post("/api/projects/My Trip/poster", json=body).status_code == 422
+
+
 def test_config_theme_rejects_an_unknown_value(env, monkeypatch):
     client, _, _, _ = env
     monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)

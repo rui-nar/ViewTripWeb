@@ -76,6 +76,11 @@ class PosterConfigIn(BaseModel):
     # (src/poster/theme.py). Dark by default: a poster is composed over
     # satellite imagery, which dark cards sit on far more comfortably.
     theme: Literal["light", "dark"] = "dark"
+    # Card placement algorithm. "radial" (src/poster/card_placement.py) searches
+    # outwards from each pin and is the default; "perimeter"
+    # (src/poster/perimeter_placement.py) is an opt-in prototype that lays every
+    # card along the page border instead, leaving the map area to the track.
+    layout: Literal["radial", "perimeter"] = "radial"
 
 
 class PosterMemoryIn(BaseModel):
