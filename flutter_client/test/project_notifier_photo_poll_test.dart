@@ -6,8 +6,6 @@
 // the poller found. Fixed by giving `items` a new list identity whenever the
 // poller actually changes something.
 
-import 'dart:async';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
