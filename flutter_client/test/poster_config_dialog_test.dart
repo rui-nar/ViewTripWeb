@@ -52,7 +52,14 @@ Future<PosterConfigOptions?> _openAndConfirm(
   }
 
   for (final title in toggleTitles) {
-    await tester.tap(find.widgetWithText(CheckboxListTile, title));
+    // The dialog's option list scrolls (SingleChildScrollView) and now runs
+    // longer than the test surface's height since the theme picker was
+    // added above it, so a later checkbox can be off-screen — scroll it
+    // into view before tapping rather than assuming it's already visible.
+    final finder = find.widgetWithText(CheckboxListTile, title);
+    await tester.ensureVisible(finder);
+    await tester.pumpAndSettle();
+    await tester.tap(finder);
     await tester.pump();
   }
 
