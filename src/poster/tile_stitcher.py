@@ -274,11 +274,32 @@ def render_basemap(
     ``bounds`` is a dict shaped like ``api/poster.py``'s ``BoundsIn``
     (``north``/``south``/``east``/``west`` floats, in degrees). Picks the
     smallest zoom whose native resolution covers the target size (see
-    ``zoom_for_target_size``), fetches every tile in the covering range via
-    *tile_fetcher*, pastes them into one canvas, crops to the exact
-    bounding-box rect, and resizes to the exact requested pixel size (the
-    crop is at native tile resolution, which is >= the target but rarely an
-    exact pixel match).
+    ``zoom_for_target_size``), then for each tile in the covering range:
+    downscales it directly to its footprint in the *final* (target_width,
+    target_height) output and pastes it there. The output canvas is the only
+    full-size allocation this function makes — memory scales with the
+    *poster's* output size, not with how many source tiles the bounding box
+    happens to need.
+
+    This matters because a large-but-legitimate bounding box (e.g. a
+    multi-country trip) can need hundreds of tiles even though the final
+    poster is a fixed, modest size: an earlier version of this function built
+    one giant canvas at *native tile resolution* across the whole tile range
+    first and only cropped/resized it down at the very end. For a
+    Toulouse-to-Nordkapp trip that pre-crop canvas was ~757M pixels (~2.3GB
+    just for the RGB buffer, before the RGBA conversion and card-rendering
+    memory on top) — which is what OOM-killed a real production job (issue
+    #14 follow-up) despite the request needing "only" 722 tiles, well under
+    the existing tile-count sanity cap. Downscaling per-tile instead avoids
+    that intermediate no matter how large the bounding box is.
+
+    Trade-off: resizing each tile independently, rather than resizing one
+    fully-assembled mosaic, can leave very faint seam differences at tile
+    boundaries compared to the old approach (a LANCZOS filter's support
+    window no longer sees a neighboring tile's pixels at the edge). This is
+    imperceptible in practice — Mapbox tile boundaries already exist in the
+    source imagery — and is a firmly better trade than the render OOM-killing
+    the whole worker process.
 
     ``tile_fetcher`` is ``(z, x, y) -> bytes`` (raw tile image bytes, e.g.
     PNG, sized ``tile_size * pixel_ratio`` square — see
@@ -290,13 +311,14 @@ def render_basemap(
     against the default 2x production setting.
 
     Raises ``ValueError`` if the tile range at the chosen zoom would exceed
-    *max_tiles* — a sanity guard against pathological inputs. A legitimate
-    A0-sized request needs on the order of a few hundred tiles regardless of
-    the bounding box's real-world size, because ``zoom_for_target_size``
-    always picks resolution to match the *output* pixel size, not the bbox's
-    geographic extent — but a bbox that is much wider than it is tall (or
-    vice versa) can force a zoom high enough to blow up the other dimension's
-    tile count, which this cap catches.
+    *max_tiles* — a sanity guard against pathological inputs (now mostly a
+    network/time bound, since memory no longer scales with tile count). A
+    legitimate A0-sized request needs on the order of a few hundred tiles
+    regardless of the bounding box's real-world size, because
+    ``zoom_for_target_size`` always picks resolution to match the *output*
+    pixel size, not the bbox's geographic extent — but a bbox that is much
+    wider than it is tall (or vice versa) can force a zoom high enough to
+    blow up the other dimension's tile count, which this cap catches.
 
     ``deadline`` (a ``time.monotonic()`` timestamp) is an optional wall-clock
     budget for the whole fetch loop: tiles are fetched one at a time, so a
@@ -321,14 +343,18 @@ def render_basemap(
 
     fetcher = tile_fetcher or _default_tile_fetcher(tile_size, pixel_ratio, timeout=tile_timeout)
 
+    left, top, right, bottom = crop_rect_for_bounds(bounds, zoom, tile_size)
+    canvas = Image.new("RGB", (target_width, target_height))
+
     # The stitch stride is the tiles' *actual* pixel width, which is only
     # known once the first tile is decoded — a `@2x` request returns
     # tile_size*2 px. Deriving it from the image rather than trusting
     # ``pixel_ratio`` keeps injected 1x test fetchers working against the 2x
     # production default, and means a change in Mapbox's response size can
-    # never silently reintroduce the overlapping-paste corruption.
-    canvas: Optional[Image.Image] = None
-    stride = tile_size * pixel_ratio
+    # never silently reintroduce the overlapping-paste corruption. The scale
+    # factors below depend on it, so they're computed lazily on the first
+    # tile too.
+    scale_x = scale_y = crop_left_real = crop_top_real = None
     fetched = 0
     total = tiles_x * tiles_y
     for ty in range(y_min, y_max + 1):
@@ -341,22 +367,45 @@ def render_basemap(
             tile_bytes = fetcher(zoom, tx, ty)
             fetched += 1
             tile_img = Image.open(io.BytesIO(tile_bytes)).convert("RGB")
-            if canvas is None:
-                stride = tile_img.width
-                canvas = Image.new("RGB", (tiles_x * stride, tiles_y * stride))
-            canvas.paste(tile_img, ((tx - x_min) * stride, (ty - y_min) * stride))
+            stride = tile_img.width
 
-    if canvas is None:  # no tiles in range — degenerate bounds
+            if scale_x is None:
+                ratio = stride / tile_size
+                crop_left_real = left * ratio
+                crop_top_real = top * ratio
+                crop_w_real = (right - left) * ratio
+                crop_h_real = (bottom - top) * ratio
+                scale_x = target_width / crop_w_real
+                scale_y = target_height / crop_h_real
+
+            # This tile's footprint in the stitched-canvas's real pixel space
+            # (the giant intermediate the old algorithm actually allocated),
+            # translated into the final output's pixel space without ever
+            # allocating that intermediate.
+            rel_left = (tx - x_min) * stride - crop_left_real
+            rel_top = (ty - y_min) * stride - crop_top_real
+            # round(), not int()/floor(), on every edge: two tiles sharing a
+            # geometric boundary compute that boundary from the same rel_*
+            # value, so rounding it the same way both times leaves no gap or
+            # overlap between them in the output.
+            dst_left = round(rel_left * scale_x)
+            dst_top = round(rel_top * scale_y)
+            dst_right = round((rel_left + stride) * scale_x)
+            dst_bottom = round((rel_top + stride) * scale_y)
+            dst_w = dst_right - dst_left
+            dst_h = dst_bottom - dst_top
+            if dst_w < 1 or dst_h < 1:
+                continue  # this tile's content rounds away to nothing in the output
+
+            if (dst_w, dst_h) != (stride, stride):
+                tile_img = tile_img.resize((dst_w, dst_h), Image.LANCZOS)
+            # Pillow clips automatically when part (or all) of the pasted
+            # image falls outside the canvas — expected at the fetch range's
+            # edges, where a tile's real footprint only partially overlaps
+            # the requested bounds.
+            canvas.paste(tile_img, (dst_left, dst_top))
+
+    if scale_x is None:  # no tiles in range — degenerate bounds
         raise ValueError("Basemap render produced an empty tile range")
 
-    # crop_rect_for_bounds works in logical grid units; scale into the
-    # stitched canvas's real pixel space.
-    ratio = stride / tile_size
-    left, top, right, bottom = crop_rect_for_bounds(bounds, zoom, tile_size)
-    cropped = canvas.crop((
-        round(left * ratio), round(top * ratio),
-        round(right * ratio), round(bottom * ratio),
-    ))
-    if cropped.size != (target_width, target_height):
-        cropped = cropped.resize((target_width, target_height), Image.LANCZOS)
-    return cropped
+    return canvas
