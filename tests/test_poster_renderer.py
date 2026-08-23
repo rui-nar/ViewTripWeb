@@ -527,6 +527,41 @@ def test_preview_shows_pins_scaled_down_but_still_visible(project_id):
         ), "no pin-colored pixel found anywhere in the preview"
 
 
+# ── config.layout dispatch ───────────────────────────────────────────────────
+# The perimeter layout (src/poster/perimeter_placement.py) has its own unit
+# tests; all that is checked here is that the config flag reaches the right
+# function and that leaving it out keeps today's radial placement.
+
+def _record_placement_calls(monkeypatch):
+    """Wrap both placement functions so we can see which one the renderer used."""
+    calls: list[str] = []
+
+    def wrap(name, fn):
+        def wrapped(*args, **kwargs):
+            calls.append(name)
+            return fn(*args, **kwargs)
+        return wrapped
+
+    import src.poster.poster_renderer as renderer
+    monkeypatch.setattr(renderer, "place_cards", wrap("radial", renderer.place_cards))
+    monkeypatch.setattr(renderer, "place_cards_perimeter",
+                        wrap("perimeter", renderer.place_cards_perimeter))
+    return calls
+
+
+def test_layout_defaults_to_the_radial_placement(project_id, monkeypatch):
+    calls = _record_placement_calls(monkeypatch)
+    render_poster_preview(project_id, 1, _BODY)  # config carries no "layout"
+    assert calls == ["radial"]
+
+
+def test_layout_perimeter_dispatches_to_the_perimeter_placement(project_id, monkeypatch):
+    calls = _record_placement_calls(monkeypatch)
+    body = {**_BODY, "config": {**_BODY["config"], "layout": "perimeter"}}
+    render_poster_preview(project_id, 1, body)
+    assert calls == ["perimeter"]
+
+
 # ── _paste_cover failure logging (issue #205, Unit D) ────────────────────────
 # _paste_cover used to swallow a failed photo open/decode with a bare
 # `except Exception: return`, leaving a blank card slot with nothing in the

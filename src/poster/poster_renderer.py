@@ -44,6 +44,7 @@ from src.poster.card_layout import (
 )
 from src.poster.card_placement import PinSpec, Rect, place_cards
 from src.poster.day_metrics import compute_day_metrics
+from src.poster.perimeter_placement import place_cards_perimeter
 from src.poster.route_index import RouteIndex
 from src.poster.theme import PosterTheme, get_theme
 from src.poster.tile_stitcher import (
@@ -633,7 +634,11 @@ def _compose_poster_image(
                             size=(layout.width, layout.height)))
 
     _notify(progress, "placing cards")
-    placements = place_cards(
+    # "perimeter" is an opt-in prototype (src/poster/perimeter_placement.py);
+    # anything else keeps the radial search that has always been the default.
+    place = (place_cards_perimeter if config.get("layout") == "perimeter"
+             else place_cards)
+    placements = place(
         pins, (target_w, target_h), route=route,
         margin=mm_to_px(_PAGE_MARGIN_MM, dpi),
         gutter=mm_to_px(_CARD_GUTTER_MM, dpi),
