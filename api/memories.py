@@ -44,6 +44,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
+from api.photo_locks import photo_lock
 from api.project_shared import bust_project_payloads, project_cache_ref
 from api.translations import translate_text
 from models.project_db import DBMemory, DBMemoryComment, DBMemoryLike, DBMemoryTranslation, DBProject, DBProjectItem
@@ -198,7 +199,9 @@ def _row_to_memory(row: DBMemory) -> Memory:
         date=row.date,
         time=row.time,
         description=row.description,
-        photos=json.loads(row.photos_json or "[]"),
+        # Falsy entries are unfilled placeholders for a from-url download that
+        # hasn't landed yet (or never will) — see _write_memory_photo.
+        photos=[p for p in json.loads(row.photos_json or "[]") if p],
         geo_mode=row.geo_mode,
         lat=row.lat,
         lon=row.lon,
@@ -502,21 +505,41 @@ def _clear_memory_photos(sess, user_id: str, mem_row: DBMemory) -> None:
     mem_row.photos_json = "[]"
 
 
-def _append_photo_to_memory(memory_id: int, uuid_str: str) -> None:
-    with get_session() as sess:
-        mem_row = sess.get(DBMemory, memory_id)
-        if mem_row is None:
-            return
-        photos: List[str] = json.loads(mem_row.photos_json or "[]")
-        photos.append(uuid_str)
-        mem_row.photos_json = json.dumps(photos)
-        sess.add(mem_row)
-        cache_ref = project_cache_ref(sess, mem_row.project_id)
-        sess.commit()
-        bust_project_payloads(cache_ref)
+def _write_memory_photo(memory_id: int, uuid_str: str, order: Optional[int] = None) -> None:
+    """Add *uuid_str* to a memory's photo list, at *order* if given, else appended.
+
+    Guarded by a per-memory lock (issue #237): Polarsteps import fires many
+    of these concurrently as background downloads complete, so without
+    synchronizing this read-modify-write of ``photos_json`` two overlapping
+    calls could clobber each other's update. *order* is the photo's intended
+    position (e.g. its index in the source album) — placing it there instead
+    of always appending means the final list reflects that intended order
+    even when downloads complete out of order. A gap left by a
+    still-in-flight or failed slot is a falsy placeholder, filtered out
+    wherever photos_json is read back for a client.
+    """
+    with photo_lock("memory", memory_id):
+        with get_session() as sess:
+            mem_row = sess.get(DBMemory, memory_id)
+            if mem_row is None:
+                return
+            photos: List[Optional[str]] = json.loads(mem_row.photos_json or "[]")
+            if order is None:
+                photos.append(uuid_str)
+            else:
+                if len(photos) <= order:
+                    photos.extend([None] * (order + 1 - len(photos)))
+                photos[order] = uuid_str
+            mem_row.photos_json = json.dumps(photos)
+            sess.add(mem_row)
+            cache_ref = project_cache_ref(sess, mem_row.project_id)
+            sess.commit()
+            bust_project_payloads(cache_ref)
 
 
-def _download_photo_from_url(memory_id: int, url: str, user_id: str, project_id: Optional[int] = None) -> None:
+def _download_photo_from_url(
+    memory_id: int, url: str, user_id: str, project_id: Optional[int] = None, order: Optional[int] = None,
+) -> None:
     import requests as _req
     try:
         resp = _req.get(url, timeout=30)
@@ -537,11 +560,16 @@ def _download_photo_from_url(memory_id: int, url: str, user_id: str, project_id:
         return
     uuid_str = str(uuid_lib.uuid4())
     _save_photo_files(user_id, memory_id, uuid_str, resp.content)
-    _append_photo_to_memory(memory_id, uuid_str)
+    _write_memory_photo(memory_id, uuid_str, order)
 
 
 class PhotoFromUrlIn(BaseModel):
     url: str = Field(description="Public URL of the image to download")
+    order: Optional[int] = Field(
+        None, description="Intended position of this photo within the memory's photo list "
+                           "(e.g. its index in a Polarsteps step); preserved even if concurrent "
+                           "downloads complete out of order. Omit to append.",
+    )
 
 
 @router.post("/{memory_id}/photos", status_code=status.HTTP_201_CREATED,
@@ -563,7 +591,7 @@ async def upload_photo(
         ensure_storage_quota(sess, int(owner_dir), len(raw))
     photo_uuid = str(uuid_lib.uuid4())
     _save_photo_files(owner_dir, memory_id, photo_uuid, raw)
-    _append_photo_to_memory(memory_id, photo_uuid)
+    _write_memory_photo(memory_id, photo_uuid)
     return {"uuid": photo_uuid}
 
 
@@ -581,7 +609,9 @@ async def queue_photo_from_url(
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         owner_dir = _owner_dir_id(sess, mem_row)
         project_id = mem_row.project_id
-    background_tasks.add_task(_download_photo_from_url, memory_id, body.url, owner_dir, project_id)
+    background_tasks.add_task(
+        _download_photo_from_url, memory_id, body.url, owner_dir, project_id, body.order,
+    )
     return {"queued": True}
 
 
@@ -594,7 +624,7 @@ def delete_photo(
 ):
     """Remove a photo from a memory and delete its files from disk."""
     user_info_id = int(current_user["sub"])
-    with get_session() as sess:
+    with photo_lock("memory", memory_id), get_session() as sess:
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         if photo_uuid not in photos:
@@ -633,7 +663,7 @@ async def replace_photo(
     new_uuid = str(uuid_lib.uuid4())
     _save_photo_files(owner_dir, memory_id, new_uuid, raw)
 
-    with get_session() as sess:
+    with photo_lock("memory", memory_id), get_session() as sess:
         mem_row = sess.get(DBMemory, memory_id)
         photos: List[str] = json.loads(mem_row.photos_json or "[]")
         # In-place index replacement, not remove+append: photos_json order is display order.

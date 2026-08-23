@@ -280,13 +280,15 @@ class PolarstepsImportNotifier extends ChangeNotifier {
       final memId = result['id']?.toString();
       if (memId != null) {
         // Photo uploads return 202 immediately (background download on server).
-        // Fire all in parallel — no need to await sequentially.
+        // Fire all in parallel — no need to await sequentially. Each photo's
+        // index in the step is sent as its `order`, so the server can place
+        // it correctly even when downloads complete out of order.
         final photos =
             (step['photos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
         await Future.wait([
-          for (final photo in photos)
-            if ((photo['url'] as String?)?.isNotEmpty == true)
-              _uploadPhotoFromUrl(memId, photo['url'] as String)
+          for (final entry in photos.asMap().entries)
+            if ((entry.value['url'] as String?)?.isNotEmpty == true)
+              _uploadPhotoFromUrl(memId, entry.value['url'] as String, entry.key)
                   .catchError((_) {}),
         ]);
       }
@@ -296,8 +298,11 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     }
   }
 
-  Future<void> _uploadPhotoFromUrl(String memId, String photoUrl) async {
-    await _api.post('/api/memories/$memId/photos/from-url', {'url': photoUrl});
+  Future<void> _uploadPhotoFromUrl(String memId, String photoUrl, int order) async {
+    await _api.post(
+      '/api/memories/$memId/photos/from-url',
+      {'url': photoUrl, 'order': order},
+    );
   }
 
   /// POST with automatic retry on 5xx — handles transient server errors

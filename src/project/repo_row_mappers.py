@@ -28,7 +28,9 @@ class RowMappersMixin:
             date=row.date,
             time=row.time,
             description=row.description,
-            photos=json.loads(row.photos_json or "[]"),
+            # Falsy entries are unfilled placeholders for a from-url download
+            # that hasn't landed yet (or never will) — see api/photo_locks.py.
+            photos=[p for p in json.loads(row.photos_json or "[]") if p],
             geo_mode=row.geo_mode,
             lat=row.lat,
             lon=row.lon,
@@ -86,7 +88,9 @@ class RowMappersMixin:
             date=row.date,
             time=row.time,
             description=row.description,
-            photos=json.loads(row.photos_json or "[]"),
+            # Falsy entries are unfilled placeholders for a from-url download
+            # that hasn't landed yet (or never will) — see api/photo_locks.py.
+            photos=[p for p in json.loads(row.photos_json or "[]") if p],
             geo_mode=row.geo_mode,
             lat=row.lat,
             lon=row.lon,
