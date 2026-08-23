@@ -1,6 +1,7 @@
 """API tests for the poster job endpoints (issue #14, Unit A)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -89,6 +90,32 @@ def test_create_job_returns_id_and_stays_pending_until_run(env, monkeypatch):
         job = sess.get(DBPosterJob, job_id)
         assert job.user_info_id == uid
         assert job.status == "pending"
+
+
+def test_config_theme_defaults_to_dark_and_is_stored_on_the_job(env, monkeypatch):
+    """The poster's colour scheme travels in the request config, so the
+    background runner replays exactly what the client asked for. Dark is the
+    default: a poster is composed over satellite imagery."""
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    r = client.post("/api/projects/My Trip/poster", json=_BODY)  # no theme given
+    job_id = r.json()["job_id"]
+    with Session(engine) as sess:
+        assert json.loads(sess.get(DBPosterJob, job_id).request_json)["config"]["theme"] == "dark"
+
+    body = {**_BODY, "config": {**_BODY["config"], "theme": "light"}}
+    r = client.post("/api/projects/My Trip/poster", json=body)
+    job_id = r.json()["job_id"]
+    with Session(engine) as sess:
+        assert json.loads(sess.get(DBPosterJob, job_id).request_json)["config"]["theme"] == "light"
+
+
+def test_config_theme_rejects_an_unknown_value(env, monkeypatch):
+    client, _, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+    body = {**_BODY, "config": {**_BODY["config"], "theme": "sepia"}}
+    assert client.post("/api/projects/My Trip/poster", json=body).status_code == 422
 
 
 def test_full_run_produces_downloadable_png_and_pdf(env, monkeypatch):

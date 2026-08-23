@@ -45,6 +45,7 @@ from src.poster.card_layout import (
 from src.poster.card_placement import PinSpec, Rect, place_cards
 from src.poster.day_metrics import compute_day_metrics
 from src.poster.route_index import RouteIndex
+from src.poster.theme import PosterTheme, get_theme
 from src.poster.tile_stitcher import (
     DEFAULT_MAX_ZOOM,
     DEFAULT_TILE_SIZE,
@@ -102,11 +103,10 @@ _PREVIEW_TOTAL_BUDGET_S = 10.0
 _PREVIEW_TILE_TIMEOUT_S = 5.0
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-_CARD_BG = (255, 255, 255)
-_CARD_BORDER = (214, 218, 224)
-_CARD_SHADOW = (0, 0, 0, 46)
-_RULE_COLOR = (222, 226, 232)
-
+# Card/legend surfaces, text and divider colours come from the active
+# ``PosterTheme`` (src/poster/theme.py); what remains here is the map furniture,
+# which reads over satellite imagery rather than over a card and is therefore
+# the same in both themes.
 _PIN_COLOR = (188, 60, 44)
 _PIN_OUTLINE = (255, 255, 255)
 _LEADER_COLOR = (72, 78, 88)
@@ -121,10 +121,7 @@ _PIN_OUTLINE_MM = 0.45
 _LEADER_WIDTH_MM = 0.28
 _ROUTE_WIDTH_MM = 0.85
 _ROUTE_CASING_MM = 1.5
-_CARD_RADIUS_MM = 1.6
 _CARD_BORDER_MM = 0.22
-_CARD_SHADOW_OFFSET_MM = 0.7
-_CARD_SHADOW_BLUR_MM = 1.1
 _CARD_GUTTER_MM = 3.0
 _PAGE_MARGIN_MM = 8.0
 _LEGEND_GAP_MM = 2.0
@@ -372,46 +369,59 @@ def _paste_cover(canvas: Image.Image, path: Path, box: Tuple[int, int, int, int]
     canvas.paste(photo.crop((left, top, left + w, top + h)), (x, y))
 
 
-def _draw_card_chrome(canvas: Image.Image, rect: Rect, dpi: float) -> None:
-    """Rounded white card with a hairline border and a soft drop shadow.
+def _draw_card_chrome(
+    canvas: Image.Image, rect: Rect, dpi: float, theme: PosterTheme
+) -> None:
+    """The app's floating-card treatment: a rounded translucent surface with a
+    hairline border and one soft shadow dropped downwards.
 
-    The shadow is composited through a layer only as large as the card plus its
-    blur radius. Allocating a full-canvas RGBA layer per card instead would
-    cost ~139MB *per card* at A0/150 DPI (and be blurred at that size), which
-    is ruinous for both memory and time on a real poster.
+    Surface, border and shadow colours all come from *theme*; the geometry
+    (radius, blur, drop) is shared by both themes — see ``theme.py``.
+
+    Both the shadow and the surface are composited through a layer only as
+    large as the card plus its blur radius. Allocating a full-canvas RGBA layer
+    per card instead would cost ~139MB *per card* at A0/150 DPI (and be blurred
+    at that size), which is ruinous for both memory and time on a real poster.
+    The surface is composited rather than drawn straight onto the canvas
+    because it is deliberately translucent (94%): ``ImageDraw`` would replace
+    those pixels outright, so the basemap would not show through at all.
     """
-    radius = mm_to_px(_CARD_RADIUS_MM, dpi)
-    offset = mm_to_px(_CARD_SHADOW_OFFSET_MM, dpi)
-    blur = mm_to_px(_CARD_SHADOW_BLUR_MM, dpi)
+    radius = mm_to_px(theme.radius_mm, dpi)
+    offset = mm_to_px(theme.shadow_offset_mm, dpi)
+    blur = mm_to_px(theme.shadow_blur_mm, dpi)
     pad = blur * 3 + offset  # enough room for the blur to fall off to nothing
 
+    card_w = rect.right - rect.left
+    card_h = rect.bottom - rect.top
     tile_x = int(rect.left) - pad
     tile_y = int(rect.top) - pad
-    tile_w = int(rect.right - rect.left) + 2 * pad
-    tile_h = int(rect.bottom - rect.top) + 2 * pad
+    tile_w = int(card_w) + 2 * pad
+    tile_h = int(card_h) + 2 * pad
 
-    shadow = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle(
-        [pad + offset, pad + offset, pad + offset + (rect.right - rect.left),
-         pad + offset + (rect.bottom - rect.top)],
-        radius=radius, fill=_CARD_SHADOW,
+    tile = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).rounded_rectangle(
+        [pad + offset, pad + offset, pad + offset + card_w, pad + offset + card_h],
+        radius=radius, fill=theme.shadow_fill,
     )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
+    tile = tile.filter(ImageFilter.GaussianBlur(blur))
+
+    surface = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
+    ImageDraw.Draw(surface).rounded_rectangle(
+        [pad, pad, pad + card_w, pad + card_h],
+        radius=radius, fill=theme.card_fill, outline=theme.border_fill,
+        width=max(1, mm_to_px(_CARD_BORDER_MM, dpi)),
+    )
+    tile = Image.alpha_composite(tile, surface)
+
     # alpha_composite needs the destination box fully inside the canvas; cards
     # sit within the page margin but the padded shadow tile can hang off it.
     canvas.alpha_composite(
-        shadow.crop((
+        tile.crop((
             max(0, -tile_x), max(0, -tile_y),
             tile_w - max(0, tile_x + tile_w - canvas.width),
             tile_h - max(0, tile_y + tile_h - canvas.height),
         )),
         (max(0, tile_x), max(0, tile_y)),
-    )
-
-    ImageDraw.Draw(canvas).rounded_rectangle(
-        [rect.left, rect.top, rect.right, rect.bottom],
-        radius=radius, fill=_CARD_BG, outline=_CARD_BORDER,
-        width=max(1, mm_to_px(_CARD_BORDER_MM, dpi)),
     )
 
 
@@ -453,9 +463,15 @@ def _draw_scaled_run(
         _log.warning("Could not draw emoji run %r", op.text, exc_info=True)
 
 
-def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale) -> None:
-    """Execute one card's measured layout ops at its placed position."""
-    _draw_card_chrome(canvas, rect, scale.dpi)
+def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale,
+               theme: PosterTheme) -> None:
+    """Execute one card's measured layout ops at its placed position.
+
+    Text colours are resolved through *theme* by each style's semantic role
+    (see ``typography.TextStyle.role``), and the stat panels' separating rules
+    use the theme's divider colour.
+    """
+    _draw_card_chrome(canvas, rect, scale.dpi, theme)
     draw = ImageDraw.Draw(canvas)
     ox, oy = int(rect.left), int(rect.top)
 
@@ -466,12 +482,12 @@ def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale) -> Non
                 _draw_scaled_run(canvas, op, scale, ox, oy)
             else:
                 draw.text((ox + op.x, oy + op.y), op.text,
-                          font=scale.font(op.style), fill=style.color)
+                          font=scale.font(op.style), fill=theme.text_color(style))
         elif isinstance(op, PhotoOp):
             _paste_cover(canvas, op.path, (ox + op.x, oy + op.y, op.w, op.h))
         elif isinstance(op, RuleOp):
             draw.line([(ox + op.x, oy + op.y), (ox + op.x + op.w, oy + op.y)],
-                      fill=_RULE_COLOR, width=1)
+                      fill=theme.divider, width=1)
 
 
 def _draw_legend(
@@ -481,11 +497,14 @@ def _draw_legend(
     scale: TypeScale,
     target_w: int,
     target_h: int,
+    theme: PosterTheme,
 ) -> None:
     """Number the overflowed pins on the map and list them bottom-left.
 
     ``entries`` is the memory dicts, in placement order, whose card could not
-    be placed (see ``card_placement.CardPlacement``).
+    be placed (see ``card_placement.CardPlacement``). The legend box is drawn
+    with the same themed chrome as a card, so it reads as part of the same
+    family rather than as a separate white panel.
     """
     draw = ImageDraw.Draw(canvas)
     dpi = scale.dpi
@@ -499,19 +518,19 @@ def _draw_legend(
 
     box_h = len(entries) * line_h + 2 * gap
     top = max(margin, target_h - margin - box_h)
-    draw.rounded_rectangle(
-        [margin, top, margin + width, top + box_h],
-        radius=mm_to_px(_CARD_RADIUS_MM, dpi), fill=_CARD_BG, outline=_CARD_BORDER, width=1,
-    )
+    _draw_card_chrome(
+        canvas, Rect(margin, top, margin + width, top + box_h), dpi, theme)
 
+    index_color = theme.text_color(scale.style("legend_index"))
+    text_color = theme.text_color(scale.style("legend"))
     y = top + gap
     for i, memory in enumerate(entries, start=1):
         px, py = pin_xy[memory["id"]]
         draw.text((px + pin_r + gap / 2, py - pin_r), str(i),
-                  font=index_font, fill=scale.style("legend_index").color)
+                  font=index_font, fill=index_color)
         label = memory.get("name") or _format_date(memory.get("date", ""))
         text = strip_unsupported(f"{i}. {label}", font)
-        draw.text((margin + gap, y), text, font=font, fill=scale.style("legend").color)
+        draw.text((margin + gap, y), text, font=font, fill=text_color)
         y += line_h
 
 
@@ -557,6 +576,7 @@ def _compose_poster_image(
     memories: List[Dict[str, Any]] = request.get("memories", [])
     user_id = str(user_info_id)
     scale = TypeScale(dpi)
+    theme = get_theme(config.get("theme"))
     warning: Optional[str] = None
     deadline = time.monotonic() + _PREVIEW_TOTAL_BUDGET_S if basemap_optional else None
 
@@ -637,7 +657,8 @@ def _compose_poster_image(
         over_budget = deadline is not None and time.monotonic() > deadline
         if placement.placed and placement.card_rect is not None and not over_budget:
             _draw_leader(draw, *pin_xy[placement.pin_id], placement.anchor, dpi)
-            _draw_card(canvas, placement.card_rect, layouts[placement.pin_id], scale)
+            _draw_card(canvas, placement.card_rect, layouts[placement.pin_id],
+                       scale, theme)
         else:
             legend_entries.append(memory)
             if placement.placed and over_budget:
@@ -648,7 +669,7 @@ def _compose_poster_image(
         _draw_pin(ImageDraw.Draw(canvas), x, y, dpi)
 
     if legend_entries:
-        _draw_legend(canvas, legend_entries, pin_xy, scale, target_w, target_h)
+        _draw_legend(canvas, legend_entries, pin_xy, scale, target_w, target_h, theme)
 
     if budget_skipped:
         budget_note = (

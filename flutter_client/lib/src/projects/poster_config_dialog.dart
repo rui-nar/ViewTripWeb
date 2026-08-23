@@ -19,6 +19,7 @@ class PosterConfigOptions {
   final bool counters;
   final bool tagPie;
   final bool encounters;
+  final String theme;
 
   const PosterConfigOptions({
     required this.distance,
@@ -29,10 +30,11 @@ class PosterConfigOptions {
     required this.counters,
     required this.tagPie,
     required this.encounters,
+    this.theme = 'dark',
   });
 
   /// Matches `PosterConfigIn`'s field names in `api/poster.py`.
-  Map<String, bool> toJson() => {
+  Map<String, dynamic> toJson() => {
         'distance': distance,
         'elevation': elevation,
         'hero_photo': heroPhoto,
@@ -41,6 +43,7 @@ class PosterConfigOptions {
         'counters': counters,
         'tag_pie': tagPie,
         'encounters': encounters,
+        'theme': theme,
       };
 }
 
@@ -53,6 +56,7 @@ class PosterConfigDialog extends StatefulWidget {
 }
 
 class _PosterConfigDialogState extends State<PosterConfigDialog> {
+  String _theme = 'dark';
   bool _distance = true;
   bool _elevation = true;
   bool _heroPhoto = true;
@@ -71,6 +75,18 @@ class _PosterConfigDialogState extends State<PosterConfigDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text('Theme', style: Theme.of(context).textTheme.labelMedium),
+            const SizedBox(height: 6),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'light', label: Text('Light')),
+                ButtonSegment(value: 'dark', label: Text('Dark')),
+              ],
+              selected: {_theme},
+              onSelectionChanged: (s) => setState(() => _theme = s.first),
+              multiSelectionEnabled: false,
+            ),
+            const Divider(),
             CheckboxListTile(
               title: const Text('Distance'),
               value: _distance,
@@ -146,6 +162,7 @@ class _PosterConfigDialogState extends State<PosterConfigDialog> {
               counters: _counters,
               tagPie: _tagPie,
               encounters: _encounters,
+              theme: _theme,
             );
             Navigator.of(context).pop();
             widget.onConfirm(opts);

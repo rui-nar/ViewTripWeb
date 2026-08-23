@@ -182,6 +182,10 @@ class TextStyle:
     size_pt: float
     weight: str
     color: Tuple[int, int, int]
+    # Semantic colour role — "primary", "muted" or "accent". The active
+    # PosterTheme (see theme.py) resolves it to an actual colour at draw time;
+    # ``color`` above is the unthemed fallback for anything it doesn't know.
+    role: str = "primary"
     # Multiplied by the font size to get baseline-to-baseline spacing.
     line_height: float = 1.32
     # Extra space (in points) after a block in this style.
@@ -192,7 +196,9 @@ class TextStyle:
 
 _INK = (24, 26, 30)
 _MUTED = (108, 114, 124)
-_ACCENT = (188, 60, 44)
+# The app's brand orange (kStrava in design_tokens.dart), used for the date
+# label and the legend's index numbers in both themes.
+_ACCENT = (252, 76, 2)
 
 # One place to change the poster's voice. `hero_title` is deliberately much
 # larger than everything else so a card has a single obvious entry point;
@@ -201,14 +207,16 @@ _ACCENT = (188, 60, 44)
 TYPE_SCALE: Dict[str, TextStyle] = {
     "hero_title": TextStyle(16.0, "bold", _INK, line_height=1.18, space_after_pt=1.0),
     "title": TextStyle(11.0, "bold", _INK, line_height=1.22, space_after_pt=1.0),
-    "date": TextStyle(7.0, "medium", _MUTED, space_after_pt=3.0,
+    "date": TextStyle(7.0, "medium", _ACCENT, role="accent", space_after_pt=3.0,
                       tracking_pt=0.4, uppercase=True),
     "body": TextStyle(8.0, "regular", _INK, line_height=1.42, space_after_pt=3.0),
-    "label": TextStyle(6.5, "medium", _MUTED, tracking_pt=0.5, uppercase=True),
+    "label": TextStyle(6.5, "medium", _MUTED, role="muted",
+                       tracking_pt=0.5, uppercase=True),
     "stat_value": TextStyle(13.0, "bold", _INK, line_height=1.1, space_after_pt=1.0),
     "legend": TextStyle(8.0, "regular", _INK, line_height=1.3),
-    "legend_index": TextStyle(7.5, "bold", _ACCENT),
-    "pin_index": TextStyle(8.0, "bold", (255, 255, 255)),
+    "legend_index": TextStyle(7.5, "bold", _ACCENT, role="accent"),
+    # Drawn over a pin, so its colour is fixed rather than theme-resolved.
+    "pin_index": TextStyle(8.0, "bold", (255, 255, 255), role="fixed"),
 }
 
 

@@ -58,7 +58,7 @@ Future<PosterPreview> fetchPosterPreview({
   required ProjectRef ref,
   required Map<String, double> bounds,
   required String orientation,
-  required Map<String, bool> config,
+  required Map<String, dynamic> config,
   required List<Map<String, dynamic>> memories,
   ApiClient? client,
   // The server caps its own basemap fetch at an 8s wall-clock budget
@@ -95,7 +95,7 @@ Future<int> createPosterJob({
   required ProjectRef ref,
   required Map<String, double> bounds,
   required String orientation,
-  required Map<String, bool> config,
+  required Map<String, dynamic> config,
   required List<Map<String, dynamic>> memories,
   ApiClient? client,
 }) async {

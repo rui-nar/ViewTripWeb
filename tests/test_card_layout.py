@@ -15,11 +15,12 @@ import pytest
 
 from src.poster.card_layout import (
     CARD_MAX_HEIGHT_MM,
-    CARD_MIN_HEIGHT_MM,
+    CARD_PADDING_MM,
     MAX_DESCRIPTION_LINES,
     PhotoOp,
     RuleOp,
     TextOp,
+    card_min_height_px,
     card_width_px,
     layout_card,
     mm_to_px,
@@ -74,9 +75,33 @@ class TestContentDrivenHeight:
         assert a.width == b.width == card_width_px(scale.dpi)
 
     def test_empty_content_still_yields_a_minimum_sized_card(self, scale):
+        """The degenerate case — every content flag off — must still be a real,
+        positively-sized rectangle rather than a zero/negative one."""
         layout = layout_card([], scale)
-        assert layout.height == mm_to_px(CARD_MIN_HEIGHT_MM, scale.dpi)
+        assert layout.height == card_min_height_px(scale)
+        assert layout.height > 0
         assert layout.ops == []
+
+    def test_the_minimum_height_is_padding_plus_one_line_of_text(self, scale):
+        """The floor is derived from the layout's own metrics, not a fixed
+        number: two paddings plus one line of the smallest text role."""
+        assert card_min_height_px(scale) == (
+            2 * mm_to_px(CARD_PADDING_MM, scale.dpi) + scale.line_height("label")
+        )
+
+    def test_a_sparse_card_is_far_shorter_than_the_old_26mm_floor(self, scale):
+        """Regression coverage for "shrink to content": a card carrying only a
+        date used to be padded out to a flat 26mm, which is about four lines of
+        body copy, so every sparse card looked deliberately boxy."""
+        old_floor = mm_to_px(26.0, scale.dpi)
+        assert layout_card([_date()], scale).height < old_floor
+        assert layout_card([], scale).height < old_floor
+
+    def test_a_date_only_card_is_shorter_than_a_date_plus_name_card(self, scale):
+        """Sparse content genuinely shrinks now instead of hitting a floor that
+        made both cards identical."""
+        assert layout_card([_date()], scale).height < layout_card(
+            [_name(), _date()], scale).height
 
     def test_height_is_capped_so_one_memory_cannot_dominate_the_poster(self, scale):
         huge = layout_card(

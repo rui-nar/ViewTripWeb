@@ -15,11 +15,13 @@ const _defaults = PosterConfigOptions(
   counters: true,
   tagPie: false,
   encounters: false,
+  theme: 'dark',
 );
 
 Future<PosterConfigOptions?> _openAndConfirm(
   WidgetTester tester, {
   List<String> toggleTitles = const [],
+  String? selectTheme,
   bool cancel = false,
 }) async {
   PosterConfigOptions? result;
@@ -44,8 +46,20 @@ Future<PosterConfigOptions?> _openAndConfirm(
   await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
 
+  if (selectTheme != null) {
+    await tester.tap(find.text(selectTheme));
+    await tester.pump();
+  }
+
   for (final title in toggleTitles) {
-    await tester.tap(find.widgetWithText(CheckboxListTile, title));
+    // The dialog's option list scrolls (SingleChildScrollView) and now runs
+    // longer than the test surface's height since the theme picker was
+    // added above it, so a later checkbox can be off-screen — scroll it
+    // into view before tapping rather than assuming it's already visible.
+    final finder = find.widgetWithText(CheckboxListTile, title);
+    await tester.ensureVisible(finder);
+    await tester.pumpAndSettle();
+    await tester.tap(finder);
     await tester.pump();
   }
 
@@ -82,6 +96,33 @@ void main() {
     // Untouched fields keep their defaults.
     expect(result.elevation, _defaults.elevation);
     expect(result.heroPhoto, _defaults.heroPhoto);
+    expect(result.memoryText, _defaults.memoryText);
+    expect(result.counters, _defaults.counters);
+    expect(result.tagPie, _defaults.tagPie);
+    expect(result.encounters, _defaults.encounters);
+    expect(result.theme, _defaults.theme);
+  });
+
+  testWidgets('theme defaults to dark', (tester) async {
+    final result = await _openAndConfirm(tester);
+
+    expect(result, isNotNull);
+    expect(result!.theme, 'dark');
+    expect(result.toJson()['theme'], 'dark');
+  });
+
+  testWidgets('selecting "Light" updates the theme field and toJson',
+      (tester) async {
+    final result = await _openAndConfirm(tester, selectTheme: 'Light');
+
+    expect(result, isNotNull);
+    expect(result!.theme, 'light');
+    expect(result.toJson()['theme'], 'light');
+    // Other fields keep their defaults.
+    expect(result.distance, _defaults.distance);
+    expect(result.elevation, _defaults.elevation);
+    expect(result.heroPhoto, _defaults.heroPhoto);
+    expect(result.allPhotos, _defaults.allPhotos);
     expect(result.memoryText, _defaults.memoryText);
     expect(result.counters, _defaults.counters);
     expect(result.tagPie, _defaults.tagPie);
