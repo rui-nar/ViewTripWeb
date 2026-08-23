@@ -31,7 +31,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
@@ -72,6 +72,10 @@ class PosterConfigIn(BaseModel):
     counters: bool = False
     tag_pie: bool = False
     encounters: bool = False
+    # Colour scheme for the poster's cards, legend and stat panels
+    # (src/poster/theme.py). Dark by default: a poster is composed over
+    # satellite imagery, which dark cards sit on far more comfortably.
+    theme: Literal["light", "dark"] = "dark"
 
 
 class PosterMemoryIn(BaseModel):

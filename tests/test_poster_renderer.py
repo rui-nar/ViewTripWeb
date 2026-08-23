@@ -23,12 +23,18 @@ import src.poster.tile_stitcher as tile_stitcher
 from models.project_db import DBProject
 from models.user import UserInfo
 from src.exceptions.errors import APIError
+from src.poster.card_layout import layout_card
+from src.poster.card_placement import Rect
 from src.poster.poster_renderer import (
+    _MISSING_BASEMAP_COLOR,
     _PIN_COLOR,
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
     _PREVIEW_TOTAL_BUDGET_S,
     _Projector,
+    _draw_card,
+    _draw_card_chrome,
+    _draw_legend,
     _paste_cover,
     _pdf_resolution,
     _target_size,
@@ -36,6 +42,8 @@ from src.poster.poster_renderer import (
     render_poster,
     render_poster_preview,
 )
+from src.poster.theme import ACCENT, DARK_THEME, LIGHT_THEME, get_theme
+from src.poster.typography import TYPE_SCALE, TypeScale
 
 _PARIS_BOUNDS = {"north": 48.9, "south": 48.8, "east": 2.4, "west": 2.3}
 
@@ -542,3 +550,201 @@ def test_paste_cover_logs_warning_and_leaves_blank_slot_on_corrupt_photo(tmp_pat
     assert any(str(bad_photo) in r.getMessage() for r in warnings)
     # .exception()-style call: traceback must be captured, not just the message.
     assert warnings[0].exc_info is not None
+
+
+# ── Theming (light/dark card chrome) ─────────────────────────────────────────
+# The poster's cards, legend and stat panels follow the app's own floating-card
+# treatment (SelectionStatsOverlay in map_panel.dart) rather than being
+# hard-coded white. These cover the token values themselves, the role-based
+# text colours, and that the theme actually reaches every drawing function.
+
+def _nearest(pixel, *candidates):
+    """Which of *candidates* the (r, g, b) *pixel* is closest to."""
+    return min(candidates,
+               key=lambda c: sum((a - b) ** 2 for a, b in zip(pixel[:3], c)))
+
+
+class TestThemeSelection:
+    def test_light_and_dark_are_selected_by_name(self):
+        assert get_theme("light") is LIGHT_THEME
+        assert get_theme("dark") is DARK_THEME
+
+    def test_missing_or_unknown_theme_falls_back_to_dark(self):
+        """The renderer replays a stored request JSON that may predate the
+        field, so an absent/garbage value must not raise."""
+        assert get_theme(None) is DARK_THEME
+        assert get_theme("") is DARK_THEME
+        assert get_theme("sepia") is DARK_THEME
+
+    def test_token_values_match_the_app_surfaces(self):
+        assert LIGHT_THEME.card_bg == (0xFF, 0xFF, 0xFF)
+        assert DARK_THEME.card_bg == (0x1B, 0x28, 0x38)
+        assert LIGHT_THEME.primary_text == (0x33, 0x41, 0x55)   # slate-700
+        assert LIGHT_THEME.muted_text == (0x94, 0xA3, 0xB8)     # slate-400
+        assert DARK_THEME.primary_text == (0xCB, 0xD5, 0xE1)    # slate-300
+        assert DARK_THEME.muted_text == (0x64, 0x74, 0x8B)      # slate-500
+
+    def test_surfaces_are_translucent_over_the_basemap(self):
+        for theme in (LIGHT_THEME, DARK_THEME):
+            assert theme.card_fill == (*theme.card_bg, 240)  # ~94%
+
+    def test_shadow_drops_downwards_and_is_softer_in_light_mode(self):
+        assert LIGHT_THEME.shadow_fill == (0x0F, 0x22, 0x36, 0x2E)
+        assert DARK_THEME.shadow_fill == (0x00, 0x00, 0x00, 0x99)
+        for theme in (LIGHT_THEME, DARK_THEME):
+            assert theme.shadow_offset_mm > 0  # downwards, like kShadow2's (0, 8)
+            assert theme.shadow_blur_mm > theme.shadow_offset_mm
+
+    def test_geometry_is_identical_in_both_themes(self):
+        """Only colour is theme-dependent; a card is the same shape either way."""
+        assert LIGHT_THEME.radius_mm == DARK_THEME.radius_mm
+        assert LIGHT_THEME.shadow_blur_mm == DARK_THEME.shadow_blur_mm
+        assert LIGHT_THEME.shadow_offset_mm == DARK_THEME.shadow_offset_mm
+
+
+class TestThemedTextColors:
+    def test_roles_resolve_to_the_theme_s_own_colors(self):
+        for theme in (LIGHT_THEME, DARK_THEME):
+            assert theme.text_color(TYPE_SCALE["body"]) == theme.primary_text
+            assert theme.text_color(TYPE_SCALE["stat_value"]) == theme.primary_text
+            assert theme.text_color(TYPE_SCALE["label"]) == theme.muted_text
+
+    def test_the_date_accent_is_the_brand_orange_in_both_themes(self):
+        """The accent is a brand colour, not a surface-dependent one."""
+        assert ACCENT == (0xFC, 0x4C, 0x02)
+        assert LIGHT_THEME.text_color(TYPE_SCALE["date"]) == ACCENT
+        assert DARK_THEME.text_color(TYPE_SCALE["date"]) == ACCENT
+        assert DARK_THEME.text_color(TYPE_SCALE["legend_index"]) == ACCENT
+
+    def test_a_style_with_no_theme_role_keeps_its_own_color(self):
+        """The pin index is drawn over a pin, not over a card surface."""
+        assert DARK_THEME.text_color(TYPE_SCALE["pin_index"]) == (255, 255, 255)
+        assert LIGHT_THEME.text_color(TYPE_SCALE["pin_index"]) == (255, 255, 255)
+
+
+class TestThemedDrawing:
+    BACKGROUND = (200, 60, 140)  # deliberately unlike either card surface
+
+    def _canvas(self, size=(520, 340)):
+        return Image.new("RGBA", size, (*self.BACKGROUND, 255))
+
+    @pytest.mark.parametrize("theme", [LIGHT_THEME, DARK_THEME])
+    def test_card_chrome_paints_the_theme_s_surface(self, theme):
+        canvas = self._canvas()
+        _draw_card_chrome(canvas, Rect(60, 50, 460, 290), 150.0, theme)
+        centre = canvas.load()[260, 170]
+        assert _nearest(centre, theme.card_bg, self.BACKGROUND) == theme.card_bg
+
+    @pytest.mark.parametrize("theme", [LIGHT_THEME, DARK_THEME])
+    def test_the_surface_lets_the_basemap_show_through(self, theme):
+        """94%, not 100% — a fully opaque rounded_rectangle would replace the
+        pixels outright and the map would vanish under every card."""
+        canvas = self._canvas()
+        _draw_card_chrome(canvas, Rect(60, 50, 460, 290), 150.0, theme)
+        assert canvas.load()[260, 170][:3] != theme.card_bg
+
+    def test_the_two_themes_produce_different_chrome(self):
+        images = []
+        for theme in (LIGHT_THEME, DARK_THEME):
+            canvas = self._canvas()
+            _draw_card_chrome(canvas, Rect(60, 50, 460, 290), 150.0, theme)
+            images.append(canvas.tobytes())
+        assert images[0] != images[1]
+
+    def test_card_chrome_survives_a_card_at_the_canvas_edge(self):
+        """The blurred shadow tile hangs off the canvas; compositing it must
+        still work (it is cropped, not clamped)."""
+        canvas = self._canvas()
+        _draw_card_chrome(canvas, Rect(0, 0, 120, 90), 150.0, DARK_THEME)
+        assert _nearest(canvas.load()[60, 45], DARK_THEME.card_bg,
+                        self.BACKGROUND) == DARK_THEME.card_bg
+
+    @pytest.mark.parametrize("theme", [LIGHT_THEME, DARK_THEME])
+    def test_card_text_is_drawn_in_the_theme_s_primary_color(self, theme):
+        scale = TypeScale(150.0)
+        layout = layout_card([{"kind": "name", "text": "Day 1"}], scale)
+        canvas = self._canvas((layout.width + 200, layout.height + 200))
+        _draw_card(canvas, Rect(100, 100, 100 + layout.width, 100 + layout.height),
+                   layout, scale, theme)
+
+        pixels = canvas.load()
+        w, h = canvas.size
+        assert any(pixels[x, y][:3] == theme.primary_text
+                   for x in range(w) for y in range(h)), (
+            "no pixel of the theme's primary text colour found on the card")
+
+    def test_stat_panel_rules_use_the_theme_s_divider(self):
+        scale = TypeScale(150.0)
+        blocks = [{"kind": "name", "text": "Day 1"},
+                  {"kind": "distance", "value_m": 84_210.0}]
+        layout = layout_card(blocks, scale)
+        found = {}
+        for theme in (LIGHT_THEME, DARK_THEME):
+            canvas = self._canvas((layout.width + 200, layout.height + 200))
+            _draw_card(canvas, Rect(100, 100, 100 + layout.width, 100 + layout.height),
+                       layout, scale, theme)
+            pixels = canvas.load()
+            w, h = canvas.size
+            found[theme.name] = any(pixels[x, y][:3] == theme.divider
+                                    for x in range(w) for y in range(h))
+        assert found == {"light": True, "dark": True}
+
+    @pytest.mark.parametrize("theme", [LIGHT_THEME, DARK_THEME])
+    def test_the_legend_uses_the_same_themed_chrome_as_a_card(self, theme):
+        canvas = self._canvas((900, 600))
+        entries = [{"id": 7, "name": "Overflowed day", "date": "2024-06-01"}]
+        _draw_legend(canvas, entries, {7: (400.0, 300.0)},
+                     TypeScale(150.0), 900, 600, theme)
+
+        pixels = canvas.load()
+        # Bottom-left corner, where the legend box is anchored.
+        assert any(
+            _nearest(pixels[x, y], theme.card_bg, self.BACKGROUND) == theme.card_bg
+            for x in range(60, 400) for y in range(400, 600)
+        ), "the legend box was not painted in the theme's surface colour"
+
+    def test_the_legend_index_is_drawn_in_the_brand_accent(self):
+        canvas = self._canvas((900, 600))
+        entries = [{"id": 7, "name": "Overflowed day", "date": "2024-06-01"}]
+        _draw_legend(canvas, entries, {7: (400.0, 300.0)},
+                     TypeScale(150.0), 900, 600, DARK_THEME)
+        pixels = canvas.load()
+        assert any(pixels[x, y][:3] == ACCENT
+                   for x in range(900) for y in range(600))
+
+
+class TestThemeThreadedThroughTheRender:
+    """The theme has to survive the whole path: request config -> renderer ->
+    every drawing function. These render the real (small) preview rather than
+    poking at internals."""
+
+    def _preview(self, project_id, theme_name):
+        body = {**_BODY, "config": {**_BODY["config"], "theme": theme_name}}
+        png_bytes, _ = render_poster_preview(project_id, 1, body)
+        return Image.open(io.BytesIO(png_bytes)).convert("RGB")
+
+    def test_light_and_dark_requests_render_differently(self, project_id):
+        light = self._preview(project_id, "light")
+        dark = self._preview(project_id, "dark")
+        assert light.tobytes() != dark.tobytes()
+
+    @pytest.mark.parametrize("theme", [LIGHT_THEME, DARK_THEME])
+    def test_cards_are_painted_in_the_requested_theme(self, project_id, theme):
+        image = self._preview(project_id, theme.name)
+        pixels = image.load()
+        w, h = image.size
+        other = LIGHT_THEME if theme is DARK_THEME else DARK_THEME
+        assert any(
+            _nearest(pixels[x, y], theme.card_bg, other.card_bg,
+                     _MISSING_BASEMAP_COLOR) == theme.card_bg
+            for x in range(w) for y in range(h)
+        ), f"no {theme.name} card surface found in the rendered poster"
+
+    def test_a_request_without_a_theme_still_renders_dark(self, project_id):
+        """Defaulting happens in the renderer as well as in the API model, so
+        an older stored job request keeps working."""
+        config = {k: v for k, v in _BODY["config"].items() if k != "theme"}
+        png_bytes, _ = render_poster_preview(
+            project_id, 1, {**_BODY, "config": config})
+        default = Image.open(io.BytesIO(png_bytes)).convert("RGB").tobytes()
+        assert default == self._preview(project_id, "dark").tobytes()

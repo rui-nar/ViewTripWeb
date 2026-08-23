@@ -90,8 +90,11 @@ class CardLayout:
 
 CARD_WIDTH_MM = 62.0
 CARD_PADDING_MM = 4.0
-CARD_MIN_HEIGHT_MM = 26.0
 CARD_MAX_HEIGHT_MM = 150.0
+# The type role a card's minimum height is measured from — the smallest one in
+# the scale, so the floor is genuinely "one line of text" and not a disguised
+# fixed size. See ``card_min_height_px``.
+MIN_HEIGHT_ROLE = "label"
 HERO_ASPECT = 4 / 3          # width : height of the hero image
 PHOTO_GRID_COLUMNS = 3
 PHOTO_GAP_MM = 1.4
@@ -108,6 +111,21 @@ def mm_to_px(mm: float, dpi: float) -> int:
 
 def card_width_px(dpi: float) -> int:
     return mm_to_px(CARD_WIDTH_MM, dpi)
+
+
+def card_min_height_px(scale: TypeScale) -> int:
+    """The shortest a card may be: its padding plus one line of the smallest
+    text role.
+
+    This used to be a flat ``CARD_MIN_HEIGHT_MM = 26.0``, which is about four
+    lines of body copy — so a card carrying only a date was padded out to look
+    like a card carrying a paragraph, and "shrink to content" only really
+    applied above that floor. Deriving the floor from the layout's own metrics
+    means a sparse card is actually sparse, while still guaranteeing a card
+    with no content at all is a real (small) rectangle rather than a zero- or
+    negative-sized one.
+    """
+    return 2 * mm_to_px(CARD_PADDING_MM, scale.dpi) + scale.line_height(MIN_HEIGHT_ROLE)
 
 
 class _Cursor:
@@ -223,7 +241,7 @@ def layout_card(
         uuids = [u for u in photos["uuids"] if u != hero_uuid]
         cur.ops.extend(_photo_grid(cur, uuids, scale, photo_path))
 
-    height = max(cur.y + pad, mm_to_px(CARD_MIN_HEIGHT_MM, dpi))
+    height = max(cur.y + pad, card_min_height_px(scale))
     return CardLayout(width=width, height=min(height, max_h), ops=cur.ops)
 
 
