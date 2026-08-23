@@ -1567,11 +1567,13 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Polls memory photos every 3 s for up to 60 s after a Polarsteps import.
   /// Updates only the `photos` list inside each memory item so map markers
-  /// refresh without a full reload.
-  void startPhotoPolling(ProjectRef ref) {
+  /// refresh without a full reload. [interval]/[maxTicks] are overridable for
+  /// tests; production callers use the 3 s × 20 default.
+  void startPhotoPolling(ProjectRef ref,
+      {Duration interval = const Duration(seconds: 3), int maxTicks = 20}) {
     _stopPhotoPolling();
-    var remainingTicks = 20; // 3 s × 20 = 60 s
-    _photoPollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+    var remainingTicks = maxTicks;
+    _photoPollingTimer = Timer.periodic(interval, (_) async {
       if (remainingTicks <= 0 || this.ref != ref) {
         _stopPhotoPolling();
         return;
@@ -1618,6 +1620,10 @@ class ProjectNotifier extends ChangeNotifier
         }
       }
       if (changed) {
+        // New list identity: MapPanel's marker cache invalidates via
+        // `identical(items, _lastItems)`, which a same-object in-place
+        // mutation would never trip.
+        items = List.of(items);
         await _revealItems(items);
         notifyListeners();
       }

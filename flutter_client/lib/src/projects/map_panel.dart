@@ -1023,6 +1023,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
         final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
           child: _MarkerThumbImage(
+            key: ValueKey(thumbUrl),
             url: thumbUrl,
             headers: authHeaders,
             size: size,
@@ -1032,6 +1033,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
         inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
       }
       markers.add(Marker(
+        key: ValueKey('memory-$memId'),
         point: LatLng(lat, lon),
         width: size,
         height: size,
@@ -1838,6 +1840,7 @@ class ManageMapPanelState extends State<ManageMapPanel>
         final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
         inner = ClipOval(
           child: _MarkerThumbImage(
+            key: ValueKey(thumbUrl),
             url: thumbUrl,
             headers: authHeaders,
             size: size,
@@ -1848,6 +1851,7 @@ class ManageMapPanelState extends State<ManageMapPanel>
       }
 
       markers.add(Marker(
+        key: ValueKey('memory-$memId'),
         point: LatLng(lat, lon),
         width: size,
         height: size,
@@ -2642,6 +2646,7 @@ class MobileActivityPanelOverlay extends StatelessWidget {
 /// so panning/zooming rebuilds don't refetch.
 class _MarkerThumbImage extends StatefulWidget {
   const _MarkerThumbImage({
+    super.key,
     required this.url,
     required this.headers,
     required this.size,
