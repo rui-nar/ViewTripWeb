@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../api/client.dart';
 import '../core/project_ref.dart';
 import '../map/polyline_decoder.dart';
+import 'project_data_cache.dart';
 
 class ProjectService {
   /// Fetches the full project dict for [ref] including elevation_profile data.
@@ -13,9 +14,23 @@ class ProjectService {
   ///
   /// The heaviest endpoint in the app (~12 MB on a large trip), so it gets the
   /// most generous budget rather than the 30 s default it used to inherit.
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
-    final data = await api.get(ref.path(), timeout: const Duration(minutes: 2));
-    return data as Map<String, dynamic>;
+  ///
+  /// Served from [projectDataCache] when a prior fetch (in this session or,
+  /// on native platforms, a previous app run) is still current — see that
+  /// class for how staleness is detected. Pass [bypassCache] true for any
+  /// reload that follows a mutation *this client just made*: the cache can
+  /// only be validated against a `/meta` response, and a reload right after
+  /// a local write needs the server's actual post-write state, not whatever
+  /// was last confirmed valid.
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async {
+    if (!bypassCache) {
+      final cached = await projectDataCache.readFullDetails(ref);
+      if (cached != null) return cached;
+    }
+    final data = await api.get(ref.path(), timeout: const Duration(minutes: 2))
+        as Map<String, dynamic>;
+    projectDataCache.writeFullDetails(ref, data);
+    return data;
   }
 
   /// Lightweight project dict — no elevation_profile or summary_polyline.
@@ -26,9 +41,14 @@ class ProjectService {
   /// 60 s, not the 30 s default: a cold load of a large project measured 11-13 s
   /// server-side before a byte of the body moved, so the default left almost no
   /// headroom for the transfer — see issue #178.
+  ///
+  /// Always live — this is the response [projectDataCache] uses to decide
+  /// whether the heavier payloads it may be holding are still valid, so it
+  /// would be circular for this call itself to skip the network.
   Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
-    final data = await api.get(ref.path('/meta'), timeout: _kLoadTimeout);
-    return data as Map<String, dynamic>;
+    final data = await api.get(ref.path('/meta'), timeout: _kLoadTimeout) as Map<String, dynamic>;
+    projectDataCache.onMetaFetched(ref, data);
+    return data;
   }
 
   /// Budget for the two requests the activity panel blocks on (see
@@ -44,7 +64,13 @@ class ProjectService {
   /// small; [_expandEncodedActivities] decodes them back to `coordinates` so
   /// the rest of the app sees standard GeoJSON. The timeout is generous because
   /// a cold-cache build of a large trip can take a while on NAS storage.
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async {
+  /// See [getDetails] for [bypassCache] — a post-mutation reload must always
+  /// hit the network.
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async {
+    if (!bypassCache) {
+      final cached = await projectDataCache.readFullGeo(ref);
+      if (cached != null) return cached;
+    }
     final encoded = Uri.encodeComponent(ref.name);
     // Compact payload: activity tracks as Google-encoded polylines, decoded by
     // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
@@ -55,7 +81,9 @@ class ProjectService {
     final data = await api.get(
         ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
         timeout: const Duration(seconds: 90));
-    return expandEncodedActivities(data as Map<String, dynamic>);
+    final expanded = expandEncodedActivities(data as Map<String, dynamic>);
+    projectDataCache.writeFullGeo(ref, expanded);
+    return expanded;
   }
 
   /// Expand any activity feature carrying a Google-encoded `polyline` property
@@ -96,11 +124,14 @@ class ProjectService {
   /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [ref].
   /// GET /api/geo/project/low-res?name={name}
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async {
+    final cached = await projectDataCache.readLowResGeo(ref);
+    if (cached != null) return cached;
     final encoded = Uri.encodeComponent(ref.name);
     final data = await api.get(
         ref.withOwner('/api/geo/project/low-res?name=$encoded'),
-        timeout: _kLoadTimeout);
-    return data as Map<String, dynamic>;
+        timeout: _kLoadTimeout) as Map<String, dynamic>;
+    projectDataCache.writeLowResGeo(ref, data);
+    return data;
   }
 
   /// Fetches pre-computed project statistics for [ref].

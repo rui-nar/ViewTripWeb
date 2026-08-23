@@ -41,7 +41,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     if (e is! ApiException || e.statusCode != 409) return false;
     try {
       await reloadDetailsOnly(ref);
-      geo = await service.getGeo(ref);
+      geo = await service.getGeo(ref, bypassCache: true);
     } catch (_) {
       // Best-effort resync; the next load will reconcile regardless.
     }

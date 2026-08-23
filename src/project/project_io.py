@@ -164,6 +164,10 @@ class ProjectIO:
 
         return {
             "version": project.version,
+            # Optimistic-lock counter (DBProject.lock_version), surfaced read-only
+            # so clients can tell whether a previously cached geo/elevation
+            # payload for this project is still valid without re-downloading it.
+            "lock_version": project.lock_version,
             "name": project.name,
             "trip_start": project.trip_start,
             "trip_end": project.trip_end,

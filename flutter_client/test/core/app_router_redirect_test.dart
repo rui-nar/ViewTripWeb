@@ -60,7 +60,7 @@ class _FakeProjectService extends ProjectService {
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   // load() unconditionally kicks off a background elevation-data fetch via
@@ -68,7 +68,7 @@ class _FakeProjectService extends ProjectService {
   // falls through to a real, unmocked api.get() call (see
   // project_stats_screen_test.dart for the same precedent).
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async =>
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async =>
       getDetailsMeta(ref);
 }
 

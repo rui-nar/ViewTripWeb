@@ -129,7 +129,7 @@ class _RecordingService extends ProjectService {
       };
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async => {
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async => {
         'type': 'FeatureCollection',
         'features': const [],
       };

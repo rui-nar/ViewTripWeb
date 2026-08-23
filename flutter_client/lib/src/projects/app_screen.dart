@@ -813,6 +813,35 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               );
             },
           ),
+          // ── Offline / stale-cache banner ──────────────────────────────────
+          Selector<ProjectNotifier, bool>(
+            selector: (_, n) => n.offlineFromCache,
+            builder: (context, offline, __) {
+              if (!offline) return const SizedBox.shrink();
+              final n = context.read<ProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  "Showing the last saved version of this trip — couldn't "
+                  'reach the server.',
+                ),
+                leading: const Icon(Icons.cloud_off, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissOfflineBanner,
+                    child: const Text('Dismiss'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      final ref = n.ref;
+                      if (ref != null) n.load(ref);
+                    },
+                    child: const Text('Retry'),
+                  ),
+                ],
+              );
+            },
+          ),
           // ── Degraded-route upgrade banner (issue #207) ───────────────────
           Selector<ProjectNotifier, bool>(
             selector: (_, n) => n.degradedRouteUpgradeAvailable,

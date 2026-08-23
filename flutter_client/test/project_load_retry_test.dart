@@ -86,7 +86,7 @@ class _FlakyService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async {
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async {
     geoCalls++;
     if (_shouldFail(ref, geoCalls, geoFailures)) throw error;
     events.add('geo:start');
@@ -96,7 +96,7 @@ class _FlakyService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async {
     detailsCalls++;
     events.add('details:start');
     return _details(ref.name);

@@ -27,6 +27,7 @@ import 'elevation_chart.dart';
 import 'map_panel.dart';
 import 'people_screen.dart';
 import 'project_add_fab.dart';
+import 'project_data_cache.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
 import 'sync_import_dialog.dart';
@@ -40,16 +41,24 @@ class _ViewProjectService extends ProjectService {
   /// Full details are fetched separately via fetchFullDetails() after load()
   /// returns, giving meta exclusive NAS uplink bandwidth.
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async {
     final meta = await api.get(ref.path('/meta')) as Map<String, dynamic>;
     return meta;
   }
 
   /// Fetches the full ~3 MB response (elevation_profile included).
   /// Called by ViewProjectNotifier.loadView() after load() has returned.
+  ///
+  /// Shares [projectDataCache]'s "fullDetails" slot with the base
+  /// ProjectService.getDetails() (manage mode's equivalent full fetch) — so
+  /// whichever mode the trip was opened in first warms the cache for a
+  /// same-session toggle into the other one.
   Future<Map<String, dynamic>> fetchFullDetails(ProjectRef ref) async {
-    final data = await api.get(ref.path());
-    return data as Map<String, dynamic>;
+    final cached = await projectDataCache.readFullDetails(ref);
+    if (cached != null) return cached;
+    final data = await api.get(ref.path()) as Map<String, dynamic>;
+    projectDataCache.writeFullDetails(ref, data);
+    return data;
   }
 }
 
@@ -478,6 +487,35 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
                   TextButton(
                     onPressed: () => _openSyncDialog(context),
                     child: const Text('Import'),
+                  ),
+                ],
+              );
+            },
+          ),
+          // ── Offline / stale-cache banner ──────────────────────────────────
+          Selector<ViewProjectNotifier, bool>(
+            selector: (_, n) => n.offlineFromCache,
+            builder: (context, offline, __) {
+              if (!offline) return const SizedBox.shrink();
+              final n = context.read<ViewProjectNotifier>();
+              return MaterialBanner(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                content: const Text(
+                  "Showing the last saved version of this trip — couldn't "
+                  'reach the server.',
+                ),
+                leading: const Icon(Icons.cloud_off, size: 20),
+                actions: [
+                  TextButton(
+                    onPressed: n.dismissOfflineBanner,
+                    child: const Text('Dismiss'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      final ref = n.ref;
+                      if (ref != null) n.loadView(ref);
+                    },
+                    child: const Text('Retry'),
                   ),
                 ],
               );

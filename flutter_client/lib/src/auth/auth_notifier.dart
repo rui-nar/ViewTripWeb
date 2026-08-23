@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 import '../crypto/encryption.dart';
+import '../projects/project_data_cache.dart';
 import 'auth_service.dart';
 
 // ── User model ─────────────────────────────────────────────────────────────────
@@ -65,6 +66,19 @@ class AuthNotifier extends ChangeNotifier {
 
   User? get user => _user;
   bool get isLoading => _isLoading;
+
+  /// Keeps [projectDataCache] scoped to whoever is currently signed in —
+  /// every codepath that changes [_user] eventually calls [notifyListeners],
+  /// so hooking it here covers login/restore/register/profile-refresh
+  /// without a separate call at each of those sites. Idempotent/cheap when
+  /// the user hasn't actually changed.
+  @override
+  void notifyListeners() {
+    final idStr = _user?.id;
+    projectDataCache.setCurrentUser(
+        (idStr == null || idStr.isEmpty) ? null : int.tryParse(idStr));
+    super.notifyListeners();
+  }
 
   /// True only while [init] restores a persisted session at app start.
   ///
@@ -176,6 +190,9 @@ class AuthNotifier extends ChangeNotifier {
     encryption.lock();
     _user = null;
     _error = null;
+    // Full wipe, not just a rescope: a signed-out device must not keep
+    // another account's cached trip data sitting on disk.
+    await projectDataCache.clearAll();
     notifyListeners();
   }
 

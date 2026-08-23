@@ -94,14 +94,14 @@ class _PollService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async {
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async {
     detailsCalls++;
     if (detailsError != null) throw detailsError!;
     return _payload(detailsActivities ?? const []);
   }
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async {
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async {
     geoCalls++;
     return {'type': 'FeatureCollection', 'features': <dynamic>[]};
   }

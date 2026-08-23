@@ -1,0 +1,211 @@
+/// Shared project-data cache — the fix for two related costs:
+///
+/// 1. Switching between view mode and manage mode re-downloaded everything
+///    from scratch even though the other mode had just fetched the same
+///    project seconds earlier (each screen owned its own notifier instance
+///    with no way to hand data to the other).
+/// 2. On Android/iOS, reopening a project after the app was fully closed
+///    re-downloaded the same multi-MB geo/elevation payloads every time,
+///    even when nothing about the trip had changed.
+///
+/// This cache sits underneath [ProjectService] (see its call sites), not
+/// inside the notifiers — both `ProjectNotifier` and the view-mode/shared
+/// subclasses go through the same `ProjectService` methods, so caching there
+/// benefits every screen for free without touching their loading logic.
+///
+/// Two layers:
+///  - L1: an in-memory map, live for the app process. This alone fixes (1).
+///  - L2: an sqflite-backed store, native platforms only (web has no
+///    filesystem — see the conditional import below). This is what fixes (2).
+///
+/// Freshness is driven by `lock_version`, the project's optimistic-lock
+/// counter (bumped server-side by content-mutating writes, now echoed in the
+/// `/meta` and full-details responses — see `ProjectIO.to_dict`). `/meta` is
+/// cheap and already fetched on every load, mutation-reload and background
+/// poll in this app, so it doubles as the freshness oracle for free: every
+/// time it's fetched, [onMetaFetched] compares the lock_version it carries
+/// against what this cache has on file for the project and drops the heavy
+/// entries (low-res geo, full-res geo, full details/elevation) the moment
+/// they no longer match. Nothing here ever *invents* a lock_version or trusts
+/// elapsed time — a stale entry is only ever detected by comparing against a
+/// live server response.
+///
+/// One accepted race: `ProjectNotifier.load()` fires `getDetailsMeta` and
+/// `getLowResGeo` in parallel (issue #178 — sequencing them would slow down
+/// every fresh load to save a rare edge case). So a low-res-geo read can, in
+/// the narrow window before the concurrent meta call lands, return an entry
+/// that meta is about to invalidate. This is judged acceptable because the
+/// low-res geo is *already* a disposable placeholder in this app's design —
+/// every load unconditionally replaces it with full-res geometry moments
+/// later — and that full-res fetch always runs *after* meta has resolved, so
+/// it never inherits the race. Worst case: one low-res paint briefly shows a
+/// trip's previous shape before the usual progressive upgrade corrects it,
+/// exactly like an ordinary cold load already looks while full-res geometry
+/// streams in.
+library;
+
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
+import '../core/project_ref.dart';
+import 'project_cache_store_stub.dart'
+    if (dart.library.io) 'project_cache_store_native.dart' as store;
+
+/// Bump when the cached JSON shapes change in a way an old cached row can't
+/// safely be replayed through the current parsing code — this makes every
+/// existing on-disk row a miss instead of trying to migrate it.
+const _kSchemaVersion = 1;
+
+class _Entry {
+  int lockVersion;
+  Map<String, dynamic>? meta;
+  Map<String, dynamic>? lowResGeo;
+  Map<String, dynamic>? fullGeo;
+  Map<String, dynamic>? fullDetails;
+
+  _Entry(this.lockVersion);
+}
+
+class ProjectDataCache {
+  ProjectDataCache._();
+
+  final Map<String, _Entry> _mem = {};
+  int? _currentUserId;
+  bool _initialized = false;
+
+  Future<void> init() async {
+    if (_initialized) return;
+    _initialized = true;
+    await store.cacheStoreInit();
+  }
+
+  /// `projectDataCache` is a bare process-wide singleton (like `api` and
+  /// `encryption`), so multiple `test()` cases in one file share its L1 state
+  /// unless a test that depends on a fresh/empty cache resets it first — the
+  /// disk side (L2) never needs a matching reset since it degrades to a
+  /// harmless no-op whenever there's no real sqflite plugin backing it (e.g.
+  /// any plain `flutter test` run).
+  @visibleForTesting
+  void resetForTest() {
+    _mem.clear();
+    _currentUserId = null;
+  }
+
+  /// Scopes the cache to the signed-in user — call on sign-in/session-restore
+  /// (mirrors `ApiClient.setToken`). Own-project entries are keyed by name
+  /// alone server-side, so without this, switching accounts on one device
+  /// could read another account's cached trip data.
+  void setCurrentUser(int? userId) {
+    if (_currentUserId == userId) return;
+    _currentUserId = userId;
+    _mem.clear(); // a fresh session starts with no assumptions in memory
+  }
+
+  /// Drops every cached entry, in memory and on disk — call on sign-out, and
+  /// expose it as a "Clear cached trip data" settings action.
+  Future<void> clearAll() async {
+    _mem.clear();
+    await store.cacheStoreClearAll();
+  }
+
+  String _key(ProjectRef ref) => '${_currentUserId ?? 0}:${ref.ownerId ?? 0}:${ref.name}';
+
+  /// Records a just-fetched `/meta` (or full-details) response. Always call
+  /// this after any successful `getDetailsMeta`/`getDetails` network fetch —
+  /// it is the only place staleness is ever detected, since every other
+  /// method here just answers "what do we have on file", it never itself
+  /// checks whether that's still current.
+  void onMetaFetched(ProjectRef ref, Map<String, dynamic> meta) {
+    final lockVersion = (meta['lock_version'] as num?)?.toInt();
+    if (lockVersion == null) return; // older server build — no freshness signal, caching stays off for this project
+    final key = _key(ref);
+    final prev = _mem[key];
+    final changed = prev == null || prev.lockVersion != lockVersion;
+    final entry = changed ? (_mem[key] = _Entry(lockVersion)) : prev;
+    entry.meta = meta;
+    // Fire-and-forget: disk persistence must never add latency to the
+    // request the whole app blocks on loading.
+    store.cacheStoreWrite(key, {
+      'lockVersion': lockVersion,
+      'schemaVersion': _kSchemaVersion,
+      'meta': meta,
+      if (changed) 'lowResGeo': null,
+      if (changed) 'fullGeo': null,
+      if (changed) 'fullDetails': null,
+    });
+  }
+
+  /// Last known `/meta` response for [ref], used only as an offline fallback
+  /// when a live fetch fails outright (see `ProjectNotifier.load`) — not part
+  /// of the normal load path, so this always checks disk directly rather than
+  /// trusting L1 (which may simply never have been touched this session).
+  Future<Map<String, dynamic>?> readMetaForOfflineFallback(ProjectRef ref) async {
+    final key = _key(ref);
+    final mem = _mem[key]?.meta;
+    if (mem != null) return mem;
+    final disk = await _readDisk(key);
+    return disk?.meta;
+  }
+
+  Future<Map<String, dynamic>?> readLowResGeo(ProjectRef ref) =>
+      _readHeavy(ref, (e) => e.lowResGeo);
+  Future<Map<String, dynamic>?> readFullGeo(ProjectRef ref) =>
+      _readHeavy(ref, (e) => e.fullGeo);
+  Future<Map<String, dynamic>?> readFullDetails(ProjectRef ref) =>
+      _readHeavy(ref, (e) => e.fullDetails);
+
+  void writeLowResGeo(ProjectRef ref, Map<String, dynamic> data) =>
+      _writeHeavy(ref, 'lowResGeo', data);
+  void writeFullGeo(ProjectRef ref, Map<String, dynamic> data) =>
+      _writeHeavy(ref, 'fullGeo', data);
+  void writeFullDetails(ProjectRef ref, Map<String, dynamic> data) =>
+      _writeHeavy(ref, 'fullDetails', data);
+
+  Future<Map<String, dynamic>?> _readHeavy(
+      ProjectRef ref, Map<String, dynamic>? Function(_Entry) pick) async {
+    final key = _key(ref);
+    final mem = _mem[key];
+    // L1 is authoritative for the rest of this session once established —
+    // whatever onMetaFetched has (or hasn't) invalidated is the live answer.
+    if (mem != null) return pick(mem);
+    // Cold path (nothing touched this ref yet this session): fall back to
+    // disk so a reopened app can paint from what was cached last time,
+    // pending the next onMetaFetched confirming or correcting it.
+    final disk = await _readDisk(key);
+    return disk == null ? null : pick(disk);
+  }
+
+  void _writeHeavy(ProjectRef ref, String field, Map<String, dynamic> data) {
+    final key = _key(ref);
+    final entry = _mem.putIfAbsent(key, () => _Entry(0));
+    switch (field) {
+      case 'lowResGeo':
+        entry.lowResGeo = data;
+        break;
+      case 'fullGeo':
+        entry.fullGeo = data;
+        break;
+      case 'fullDetails':
+        entry.fullDetails = data;
+        break;
+    }
+    store.cacheStoreWrite(key, {
+      'lockVersion': entry.lockVersion,
+      'schemaVersion': _kSchemaVersion,
+      field: data,
+    });
+  }
+
+  Future<_Entry?> _readDisk(String key) async {
+    final row = await store.cacheStoreRead(key);
+    if (row == null || row['schemaVersion'] != _kSchemaVersion) return null;
+    final entry = _Entry(row['lockVersion'] as int)
+      ..meta = row['meta'] as Map<String, dynamic>?
+      ..lowResGeo = row['lowResGeo'] as Map<String, dynamic>?
+      ..fullGeo = row['fullGeo'] as Map<String, dynamic>?
+      ..fullDetails = row['fullDetails'] as Map<String, dynamic>?;
+    _mem[key] = entry; // promote so this session doesn't hit disk again
+    return entry;
+  }
+}
+
+final ProjectDataCache projectDataCache = ProjectDataCache._();

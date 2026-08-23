@@ -28,11 +28,11 @@ class _OrphanRiskService extends ProjectService {
   // stub them out so this test only exercises the getLowResGeo/getDetailsMeta
   // race, not real (host-less, in-test) HTTP calls.
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async => {};
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async => {};
 }
 
 void main() {

@@ -25,11 +25,11 @@ class _FakeProjectService extends ProjectService {
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef ref) async =>
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async =>
       {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref) async => details;
+  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async => details;
 }
 
 /// Skips owner-only network calls (sync-meta/share-info/background-sync

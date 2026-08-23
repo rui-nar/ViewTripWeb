@@ -17,6 +17,7 @@ import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
 import 'client_geo_builder.dart' as client_geo;
 import 'members_service.dart';
+import 'project_data_cache.dart';
 import 'project_filter_mixin.dart';
 import 'project_filters.dart';
 import 'project_journal_crud_mixin.dart';
@@ -163,6 +164,14 @@ class ProjectNotifier extends ChangeNotifier
   /// distinguish a 404 (stale shared-project ref after an owner rename —
   /// issue #111) from other errors.
   int? loadErrorStatus;
+
+  /// True when the current [activities]/[items]/[geo] came from
+  /// [projectDataCache]'s on-device store rather than a live server
+  /// response — set only when the initial `/meta` fetch in [load] fails
+  /// outright (offline / server unreachable) and a previously cached copy of
+  /// this project exists. Screens show a "showing last saved version" banner
+  /// while this is true; the next successful [load] clears it.
+  bool offlineFromCache = false;
 
   /// Progressive-loading flags — default true so manage-mode screens that use
   /// the base load() see no behaviour change.  Set to false at the start of
@@ -557,6 +566,7 @@ class ProjectNotifier extends ChangeNotifier
     isLoading = true;
     error = null;
     loadErrorStatus = null;
+    offlineFromCache = false;
     activities = [];
     items = [];
     geo = null;
@@ -603,11 +613,28 @@ class ProjectNotifier extends ChangeNotifier
       lowResFuture?.ignore();
 
       if (lowResFuture != null) {
-        geo = await lowResFuture;
+        try {
+          geo = await lowResFuture;
+        } on Object catch (_) {
+          // Non-fatal: fall back to whatever low-res geo is on file (may be
+          // null, e.g. a project never opened on this device before) and let
+          // the /meta fallback below decide whether this load can proceed at
+          // all — a bare map with no track is still better than an error
+          // screen when offline and a fuller cache entry exists.
+          geo = await projectDataCache.readLowResGeo(ref);
+        }
         if (_loadKey == ref) notifyListeners(); // map visible at ~2.2s
       }
 
-      final details = await detailsFuture;
+      Map<String, dynamic> details;
+      try {
+        details = await detailsFuture;
+      } on Object catch (_) {
+        final cachedMeta = await projectDataCache.readMetaForOfflineFallback(ref);
+        if (cachedMeta == null) rethrow; // no cache to fall back to — surface the real error
+        details = cachedMeta;
+        offlineFromCache = true;
+      }
       if (_loadKey != ref) return;
 
       // caller_role (issue #109) is the server's authoritative answer to
@@ -1256,6 +1283,13 @@ class ProjectNotifier extends ChangeNotifier
     notifyListeners();
   }
 
+  /// Hides the "showing last saved version" banner without retrying —
+  /// [offlineFromCache] itself only ever clears via a fresh [load].
+  void dismissOfflineBanner() {
+    offlineFromCache = false;
+    notifyListeners();
+  }
+
   /// "Reload" — the only path that ever applies the fresher data.
   Future<void> reloadForDegradedUpgrade() async {
     final r = ref;
@@ -1554,7 +1588,7 @@ class ProjectNotifier extends ChangeNotifier
 
   Future<void> _refreshMemoryPhotos(ProjectRef ref) async {
     try {
-      final details = await _service.getDetails(ref);
+      final details = await _service.getDetails(ref, bypassCache: true);
       if (this.ref != ref) return;
       final rawItems = details['items'];
       if (rawItems is! List) return;
@@ -1711,7 +1745,7 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _applyRefreshedProject(ProjectRef ref) async {
     final Map<String, dynamic> details;
     try {
-      details = await _service.getDetails(ref);
+      details = await _service.getDetails(ref, bypassCache: true);
     } on Exception catch (e) {
       error = _loadErrorMessage(e);
       notifyListeners();
@@ -1733,7 +1767,7 @@ class ProjectNotifier extends ChangeNotifier
     // Refresh GeoJSON so the map polylines reflect the updated track.
     geo = encryption.isUnlocked
         ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
-        : await _service.getGeo(ref);
+        : await _service.getGeo(ref, bypassCache: true);
     notifyListeners();
   }
 
@@ -1960,7 +1994,7 @@ class ProjectNotifier extends ChangeNotifier
       } else {
         final results = await Future.wait([
           _service.getDetailsMeta(ref),
-          _service.getGeo(ref),
+          _service.getGeo(ref, bypassCache: true),
         ]);
         final details = results[0];
         await _applyDetails(details, ref);
