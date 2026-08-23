@@ -20,6 +20,7 @@ class PosterConfigOptions {
   final bool tagPie;
   final bool encounters;
   final String theme;
+  final String layout;
 
   const PosterConfigOptions({
     required this.distance,
@@ -31,6 +32,7 @@ class PosterConfigOptions {
     required this.tagPie,
     required this.encounters,
     this.theme = 'dark',
+    this.layout = 'radial',
   });
 
   /// Matches `PosterConfigIn`'s field names in `api/poster.py`.
@@ -44,6 +46,7 @@ class PosterConfigOptions {
         'tag_pie': tagPie,
         'encounters': encounters,
         'theme': theme,
+        'layout': layout,
       };
 }
 
@@ -57,6 +60,7 @@ class PosterConfigDialog extends StatefulWidget {
 
 class _PosterConfigDialogState extends State<PosterConfigDialog> {
   String _theme = 'dark';
+  String _layout = 'radial';
   bool _distance = true;
   bool _elevation = true;
   bool _heroPhoto = true;
@@ -85,6 +89,28 @@ class _PosterConfigDialogState extends State<PosterConfigDialog> {
               selected: {_theme},
               onSelectionChanged: (s) => setState(() => _theme = s.first),
               multiSelectionEnabled: false,
+            ),
+            const SizedBox(height: 12),
+            Text('Layout', style: Theme.of(context).textTheme.labelMedium),
+            const SizedBox(height: 6),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'radial', label: Text('Radial')),
+                ButtonSegment(value: 'perimeter', label: Text('Perimeter')),
+              ],
+              selected: {_layout},
+              onSelectionChanged: (s) => setState(() => _layout = s.first),
+              multiSelectionEnabled: false,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Perimeter placement is experimental: cards are arranged '
+              'around the poster\'s border instead of near their pins.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurface
+                      .withValues(alpha: 0.6)),
             ),
             const Divider(),
             CheckboxListTile(
@@ -163,6 +189,7 @@ class _PosterConfigDialogState extends State<PosterConfigDialog> {
               tagPie: _tagPie,
               encounters: _encounters,
               theme: _theme,
+              layout: _layout,
             );
             Navigator.of(context).pop();
             widget.onConfirm(opts);

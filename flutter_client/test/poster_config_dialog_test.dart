@@ -16,12 +16,14 @@ const _defaults = PosterConfigOptions(
   tagPie: false,
   encounters: false,
   theme: 'dark',
+  layout: 'radial',
 );
 
 Future<PosterConfigOptions?> _openAndConfirm(
   WidgetTester tester, {
   List<String> toggleTitles = const [],
   String? selectTheme,
+  String? selectLayout,
   bool cancel = false,
 }) async {
   PosterConfigOptions? result;
@@ -48,6 +50,11 @@ Future<PosterConfigOptions?> _openAndConfirm(
 
   if (selectTheme != null) {
     await tester.tap(find.text(selectTheme));
+    await tester.pump();
+  }
+
+  if (selectLayout != null) {
+    await tester.tap(find.text(selectLayout));
     await tester.pump();
   }
 
@@ -101,6 +108,7 @@ void main() {
     expect(result.tagPie, _defaults.tagPie);
     expect(result.encounters, _defaults.encounters);
     expect(result.theme, _defaults.theme);
+    expect(result.layout, _defaults.layout);
   });
 
   testWidgets('theme defaults to dark', (tester) async {
@@ -127,6 +135,34 @@ void main() {
     expect(result.counters, _defaults.counters);
     expect(result.tagPie, _defaults.tagPie);
     expect(result.encounters, _defaults.encounters);
+    expect(result.layout, _defaults.layout);
+  });
+
+  testWidgets('layout defaults to radial', (tester) async {
+    final result = await _openAndConfirm(tester);
+
+    expect(result, isNotNull);
+    expect(result!.layout, 'radial');
+    expect(result.toJson()['layout'], 'radial');
+  });
+
+  testWidgets('selecting "Perimeter" updates the layout field and toJson',
+      (tester) async {
+    final result = await _openAndConfirm(tester, selectLayout: 'Perimeter');
+
+    expect(result, isNotNull);
+    expect(result!.layout, 'perimeter');
+    expect(result.toJson()['layout'], 'perimeter');
+    // Other fields keep their defaults.
+    expect(result.distance, _defaults.distance);
+    expect(result.elevation, _defaults.elevation);
+    expect(result.heroPhoto, _defaults.heroPhoto);
+    expect(result.allPhotos, _defaults.allPhotos);
+    expect(result.memoryText, _defaults.memoryText);
+    expect(result.counters, _defaults.counters);
+    expect(result.tagPie, _defaults.tagPie);
+    expect(result.encounters, _defaults.encounters);
+    expect(result.theme, _defaults.theme);
   });
 
   // Every checkbox title maps 1:1 to a PosterConfigOptions.toJson() key.
