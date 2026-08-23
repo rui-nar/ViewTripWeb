@@ -39,6 +39,7 @@ from api.project_access import (
     resolve_project,
     translate_insert_after,
 )
+from api.photo_locks import photo_lock
 from api.project_shared import bust_project_payloads, project_cache_ref
 from models.project_db import DBJournalEntry, DBProject, DBProjectItem
 from src.project.project_repo import bump_lock_version
@@ -146,21 +147,35 @@ def _save_photo_files(user_id: str, journal_id: int, uuid_str: str, raw: bytes) 
     record_written(user_id, full, thumb)
 
 
-def _append_photo(journal_id: int, uuid_str: str) -> None:
-    with get_session() as sess:
-        row = sess.get(DBJournalEntry, journal_id)
-        if row is None:
-            return
-        photos: List[str] = json.loads(row.photos_json or "[]")
-        photos.append(uuid_str)
-        row.photos_json = json.dumps(photos)
-        sess.add(row)
-        cache_ref = project_cache_ref(sess, row.project_id)
-        sess.commit()
-        bust_project_payloads(cache_ref)
+def _write_journal_photo(journal_id: int, uuid_str: str, order: Optional[int] = None) -> None:
+    """Add *uuid_str* to a journal entry's photo list, at *order* if given, else appended.
+
+    Guarded by a per-entry lock (issue #237) — see api/memories.py's
+    _write_memory_photo for why this read-modify-write of photos_json can't
+    be left unsynchronized.
+    """
+    with photo_lock("journal", journal_id):
+        with get_session() as sess:
+            row = sess.get(DBJournalEntry, journal_id)
+            if row is None:
+                return
+            photos: List[Optional[str]] = json.loads(row.photos_json or "[]")
+            if order is None:
+                photos.append(uuid_str)
+            else:
+                if len(photos) <= order:
+                    photos.extend([None] * (order + 1 - len(photos)))
+                photos[order] = uuid_str
+            row.photos_json = json.dumps(photos)
+            sess.add(row)
+            cache_ref = project_cache_ref(sess, row.project_id)
+            sess.commit()
+            bust_project_payloads(cache_ref)
 
 
-def _download_photo_from_url(journal_id: int, url: str, user_id: str, project_id: Optional[int] = None) -> None:
+def _download_photo_from_url(
+    journal_id: int, url: str, user_id: str, project_id: Optional[int] = None, order: Optional[int] = None,
+) -> None:
     import requests as _req
     try:
         resp = _req.get(url, timeout=30)
@@ -180,7 +195,7 @@ def _download_photo_from_url(journal_id: int, url: str, user_id: str, project_id
         return
     uuid_str = str(uuid_lib.uuid4())
     _save_photo_files(user_id, journal_id, uuid_str, resp.content)
-    _append_photo(journal_id, uuid_str)
+    _write_journal_photo(journal_id, uuid_str, order)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -207,6 +222,10 @@ class JournalUpdateBody(BaseModel):
 
 class PhotoFromUrlIn(BaseModel):
     url: str = Field(description="Public URL of the image to download")
+    order: Optional[int] = Field(
+        None, description="Intended position of this photo within the entry's photo list; "
+                           "preserved even if concurrent downloads complete out of order. Omit to append.",
+    )
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
@@ -367,7 +386,7 @@ async def upload_photo(
         ensure_storage_quota(sess, user_info_id, len(raw))
     photo_uuid = str(uuid_lib.uuid4())
     _save_photo_files(current_user["sub"], journal_id, photo_uuid, raw)
-    _append_photo(journal_id, photo_uuid)
+    _write_journal_photo(journal_id, photo_uuid)
     return {"uuid": photo_uuid}
 
 
@@ -384,7 +403,9 @@ async def queue_photo_from_url(
     with get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
         project_id = row.project_id
-    background_tasks.add_task(_download_photo_from_url, journal_id, body.url, current_user["sub"], project_id)
+    background_tasks.add_task(
+        _download_photo_from_url, journal_id, body.url, current_user["sub"], project_id, body.order,
+    )
     return {"queued": True}
 
 
@@ -397,7 +418,7 @@ def delete_photo(
 ):
     """Remove a photo from a journal entry and delete its files from disk."""
     user_info_id = int(current_user["sub"])
-    with get_session() as sess:
+    with photo_lock("journal", journal_id), get_session() as sess:
         row = _get_owned_journal(sess, journal_id, user_info_id)
         photos: List[str] = json.loads(row.photos_json or "[]")
         if photo_uuid not in photos:
@@ -438,7 +459,7 @@ async def replace_photo(
     new_uuid = str(uuid_lib.uuid4())
     _save_photo_files(current_user["sub"], journal_id, new_uuid, raw)
 
-    with get_session() as sess:
+    with photo_lock("journal", journal_id), get_session() as sess:
         row = sess.get(DBJournalEntry, journal_id)
         photos: List[str] = json.loads(row.photos_json or "[]")
         # In-place index replacement, not remove+append: photos_json order is display order.
