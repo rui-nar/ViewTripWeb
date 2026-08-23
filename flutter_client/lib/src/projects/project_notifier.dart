@@ -769,6 +769,34 @@ class ProjectNotifier extends ChangeNotifier
       return;
     }
 
+    // A trip already opened in the other mode this session (or restored from
+    // the on-device cache) has its full-res geo sitting in memory already —
+    // nothing is actually "progressively arriving" in that case, so replaying
+    // the batched reveal below would just repaint the whole map (every marker
+    // + polyline) up to ~8 extra times, 80ms apart, for a payload that was
+    // already complete. On a large trip each of those repaints is itself
+    // "tens-to-hundreds of ms" (see progressiveGeoBatchSize), and toggling
+    // between view/manage mode re-ran this on every switch — several seconds
+    // of back-to-back main-thread rebuilds was enough to trip Android's ANR
+    // watchdog. Apply the cached geo in one shot instead, exactly like the
+    // final pass below does for a real fetch.
+    final cachedFullGeo = await projectDataCache.readFullGeo(ref);
+    if (cachedFullGeo != null) {
+      if (_loadKey != ref) return;
+      try {
+        reconcileSegmentOverlay(cachedFullGeo);
+        final features = mergePendingSegmentPatches(
+            List<dynamic>.from(cachedFullGeo['features'] as List? ?? []));
+        geo = {'type': 'FeatureCollection', 'features': features};
+        _buildFullTrack();
+        isGeoLoaded = true;
+      } catch (e) {
+        error = _loadErrorMessage(e);
+      }
+      notifyListeners();
+      return;
+    }
+
     // Fetch the full-res geo with one retry. A cold-cache miss can be slow
     // enough to time out, but the server finishes computing and caches the
     // result regardless — so a brief pause then retry usually lands on the now
