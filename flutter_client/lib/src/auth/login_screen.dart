@@ -41,7 +41,14 @@ class _LoginScreenState extends State<LoginScreen> {
       _handleAuthEvent,
       onError: _handleAuthError,
     );
-    GoogleSignIn.instance.attemptLightweightAuthentication();
+    // Best-effort: if the platform isn't ready (initialize() never ran —
+    // e.g. a widget test that doesn't run main(), or a misconfigured client
+    // ID on a real device) this throws synchronously rather than rejecting a
+    // Future, so a plain catchError wouldn't cover it. Either way, the user
+    // still has the manual email/password form.
+    try {
+      GoogleSignIn.instance.attemptLightweightAuthentication();
+    } catch (_) {}
   }
 
   @override
@@ -244,8 +251,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Text("Don't have an account?",
-                              style: theme.textTheme.bodySmall),
+                          Flexible(
+                            child: Text("Don't have an account?",
+                                style: theme.textTheme.bodySmall),
+                          ),
                           TextButton(
                             onPressed: () {
                               final ret = _returnTo;

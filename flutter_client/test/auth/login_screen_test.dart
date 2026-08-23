@@ -2,16 +2,14 @@
 // "Self-hosting?" affordance): prefill from a saved override, validation,
 // save/cancel round-trip through core/server_config.dart, and that the
 // configured server URL stays visible on the login screen rather than only
-// inside the dialog.
-//
-// LoginScreen itself isn't pumped here — it wires up GoogleSignIn in
-// initState, which no existing test in this suite exercises either; both
-// widgets are exposed standalone precisely so this logic can be tested in
-// isolation from that.
+// inside the dialog. A separate group below pumps LoginScreen itself.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:viewtrip_client/src/auth/auth_notifier.dart';
+import 'package:viewtrip_client/src/auth/auth_service.dart';
 import 'package:viewtrip_client/src/auth/login_screen.dart';
 import 'package:viewtrip_client/src/core/server_config.dart';
 
@@ -153,6 +151,33 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('https://new.example.com'), findsOneWidget);
+    });
+  });
+
+  group('LoginScreen', () {
+    // Regression test: initState() called GoogleSignIn.instance's lightweight-
+    // authentication attempt unconditionally, on the assumption that main()
+    // already called GoogleSignIn.instance.initialize() (real app startup). A
+    // widget test never runs main(), so the platform interface has no
+    // implementation registered and the call threw synchronously, crashing
+    // LoginScreen's first build — this is what app_router_redirect_test.dart's
+    // "native mobile: WelcomeScreen never mounts" test hit once its redirect
+    // reached /login. Also covers the "Don't have an account?" row, which
+    // overflowed at the login card's 420px max width once it actually got a
+    // layout pass.
+    testWidgets(
+        'mounts without throwing even though GoogleSignIn was never initialized',
+        (tester) async {
+      await tester.pumpWidget(
+        ChangeNotifierProvider<AuthNotifier>(
+          create: (_) => AuthNotifier(AuthService()),
+          child: const MaterialApp(home: LoginScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(LoginScreen), findsOneWidget);
     });
   });
 }
