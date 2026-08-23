@@ -37,7 +37,7 @@ class _SharedProjectService extends ProjectService {
   /// the UI quickly.  Full details are fetched separately via fetchFullDetails()
   /// after load() returns, giving meta exclusive NAS uplink bandwidth.
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef _) async {
+  Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) async {
     final meta =
         await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
     ownerName = (meta['owner_name'] as String?) ?? '';
@@ -55,7 +55,7 @@ class _SharedProjectService extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef _) async {
+  Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) async {
     final data = await api.get('/api/share/$token/geo$_aidParam');
     return data as Map<String, dynamic>;
   }

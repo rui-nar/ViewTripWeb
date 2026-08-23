@@ -11,6 +11,7 @@ import 'src/auth/auth_notifier.dart';
 import 'src/projects/projects_service.dart';
 import 'src/projects/projects_notifier.dart';
 import 'src/projects/project_service.dart';
+import 'src/projects/project_data_cache.dart';
 import 'src/projects/project_notifier.dart';
 import 'src/settings/theme_notifier.dart';
 import 'src/core/app_router.dart';
@@ -44,6 +45,7 @@ void main() async {
   final customServerUrl = await readCustomServerUrl();
   if (customServerUrl != null) api = ApiClient(baseUrl: customServerUrl);
   final hasSeenOnboarding = await readHasSeenOnboarding();
+  await projectDataCache.init();
   runApp(
     // MultiProvider lives here — above ViewTripApp — so its providers are
     // never reconstructed by theme changes. Only the Builder inside

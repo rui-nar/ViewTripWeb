@@ -13,6 +13,7 @@ import '../crypto/enable_encryption_screen.dart';
 import '../crypto/encryption.dart';
 import '../crypto/manage_devices_screen.dart';
 import '../crypto/recover_screen.dart';
+import '../projects/project_data_cache.dart';
 import 'settings_service.dart';
 import 'strava_oauth_popup_stub.dart'
     if (dart.library.js_interop) 'strava_oauth_popup_web.dart';
@@ -208,6 +209,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
       }
     }
+  }
+
+  Future<void> _clearCachedTripData() async {
+    final messenger = ScaffoldMessenger.of(context);
+    await projectDataCache.clearAll();
+    if (!mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Cached trip data cleared')),
+    );
   }
 
   // ── Strava ────────────────────────────────────────────────────────────────
@@ -1011,6 +1021,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onPressed: () => context.push('/admin'),
                           icon: const Icon(Icons.dashboard_outlined),
                           label: const Text('Open admin dashboard'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+
+                // ── Storage (on-device cache — native only, no local
+                // filesystem to cache to on web) ────────────────────────
+                if (!kIsWeb) ...[
+                  _SectionCard(
+                    title: 'Storage',
+                    icon: Icons.storage_outlined,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Trips you\'ve opened are cached on this device so '
+                          'reopening them doesn\'t re-download the map and '
+                          'elevation data every time.',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 16),
+                        OutlinedButton(
+                          onPressed: _clearCachedTripData,
+                          child: const Text('Clear cached trip data'),
                         ),
                       ],
                     ),

@@ -151,6 +151,28 @@ def test_a_content_write_invalidates_it_too(env):
     assert "a new page" in _descriptions(fresh)
 
 
+def test_lock_version_is_exposed_and_bumps_on_content_write(env):
+    """The client cache (flutter_client's ProjectDataCache) uses lock_version
+    to decide whether a previously downloaded geo/elevation payload is still
+    valid, so it must be present and must actually change when project
+    content changes."""
+    client, *_ = env
+    before = _meta(client).json()
+    assert isinstance(before["lock_version"], int)
+
+    resp = client.post("/api/journal/", json={
+        "project_name": "Trip",
+        "date": "2026-06-02",
+        "geo_mode": "custom",
+        "description": "a new page",
+    })
+    assert resp.status_code == 201, resp.text
+
+    after = _meta(client).json()
+    assert after["lock_version"] != before["lock_version"], \
+        "a content write must bump lock_version so cached clients invalidate"
+
+
 def test_each_caller_gets_their_own_journal_and_role(env):
     """The cache key includes the caller: journals are per-user (#106) and
     caller_role is baked into the body (#109)."""
