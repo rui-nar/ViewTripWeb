@@ -43,11 +43,12 @@ class _LoginScreenState extends State<LoginScreen> {
     );
     // Best-effort: if the platform isn't ready (initialize() never ran —
     // e.g. a widget test that doesn't run main(), or a misconfigured client
-    // ID on a real device) this throws synchronously rather than rejecting a
-    // Future, so a plain catchError wouldn't cover it. Either way, the user
-    // still has the manual email/password form.
+    // ID on a real device), this can fail either as a synchronous throw or
+    // as a rejected Future depending on how the platform call is wrapped —
+    // cover both, since the user still has the manual email/password form
+    // either way.
     try {
-      GoogleSignIn.instance.attemptLightweightAuthentication();
+      GoogleSignIn.instance.attemptLightweightAuthentication().catchError((_) => null);
     } catch (_) {}
   }
 
