@@ -2656,7 +2656,7 @@ class _MarkerThumbImage extends StatefulWidget {
   final Map<String, String> headers;
   final double size;
 
-  static final ConcurrencyGate _gate = ConcurrencyGate(6);
+  static final ConcurrencyGate _gate = ConcurrencyGate(8);
   static final Map<String, Uint8List> _cache = <String, Uint8List>{};
 
   @override
