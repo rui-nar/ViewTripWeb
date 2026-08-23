@@ -7,6 +7,8 @@ that bucketing doesn't lose segments.
 """
 from __future__ import annotations
 
+import time
+
 from src.poster.route_index import RouteIndex, _segment_intersects_rect, _segments_cross
 
 
@@ -100,3 +102,68 @@ class TestRouteIndex:
             rect = (left, top, left + rng.uniform(5, 90), top + rng.uniform(5, 90))
             brute = any(_segment_intersects_rect(seg, *rect) for seg in index.segments)
             assert index.intersects_rect(*rect) == brute, f"disagreement on {rect}"
+
+
+class TestDenseRevisitedLocationCluster:
+    """A real production poster job (a continent-spanning trip that revisited
+    several cities) timed out inside card placement: the uniform grid's cell
+    size was tied to the canvas, so the cities' dense, revisited-location
+    clusters landed in a handful of catastrophically overloaded cells —
+    ~8,500 segments scanned per query on average, one cell holding over 7,000.
+    The index must stay fast and correct even when the route is mostly sparse
+    but has a few small, extremely dense clusters."""
+
+    @staticmethod
+    def _dense_route(rng):
+        canvas = (9933, 7016)
+        sparse = []
+        x, y = 500.0, 6500.0
+        for _ in range(6000):
+            x += rng.uniform(-40, 60)
+            y += rng.uniform(-60, 40)
+            x = max(50.0, min(canvas[0] - 50.0, x))
+            y = max(50.0, min(canvas[1] - 50.0, y))
+            sparse.append((x, y))
+        lines = [sparse]
+        for cx, cy in [(2000, 5500), (4200, 3100), (6100, 4800), (7300, 2200)]:
+            cluster = []
+            px, py = float(cx), float(cy)
+            for _ in range(1500):
+                px += rng.uniform(-1.5, 1.5)
+                py += rng.uniform(-1.5, 1.5)
+                px = max(cx - 25, min(cx + 25, px))
+                py = max(cy - 25, min(cy + 25, py))
+                cluster.append((px, py))
+            lines.append(cluster)
+        return lines, canvas
+
+    def test_builds_and_queries_a_dense_cluster_route_quickly(self):
+        import random
+
+        rng = random.Random(20260823)
+        lines, canvas = self._dense_route(rng)
+
+        t0 = time.time()
+        index = RouteIndex(lines, canvas)
+        build_elapsed = time.time() - t0
+        assert build_elapsed < 5.0, f"index build took {build_elapsed:.2f}s"
+
+        t0 = time.time()
+        for cx, cy in [(2000, 5500), (4200, 3100), (6100, 4800), (7300, 2200)] * 20:
+            index.intersects_rect(cx - 160, cy - 110, cx + 160, cy + 110)
+            index.crosses_segment(cx, cy, cx + 400, cy + 300)
+        query_elapsed = time.time() - t0
+        assert query_elapsed < 5.0, f"160 queries near dense clusters took {query_elapsed:.2f}s"
+
+    def test_dense_cluster_results_match_a_brute_force_scan(self):
+        import random
+
+        rng = random.Random(20260823)
+        lines, canvas = self._dense_route(rng)
+        index = RouteIndex(lines, canvas)
+
+        for cx, cy in [(2000, 5500), (4200, 3100), (6100, 4800), (7300, 2200)]:
+            for dx, dy in [(-160, -110), (0, 0), (500, 300)]:
+                rect = (cx + dx - 160, cy + dy - 110, cx + dx + 160, cy + dy + 110)
+                brute = any(_segment_intersects_rect(seg, *rect) for seg in index.segments)
+                assert index.intersects_rect(*rect) == brute, f"disagreement on {rect}"
