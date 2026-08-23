@@ -91,10 +91,14 @@ _PREVIEW_MAX_TILES = 24
 # A tile count under the budget above doesn't bound *time* — each fetch is
 # sequential, so a merely-slow (not failing) connection can still run past
 # what a client is willing to wait on (issue #14: "preview failed with a
-# timeout"). These cap the preview's basemap fetch to a wall-clock budget,
-# same degrade-to-warning path as an outright fetch failure, rather than
-# letting it run until the client's own HTTP timeout kills the connection.
-_PREVIEW_BASEMAP_BUDGET_S = 8.0
+# timeout"). _PREVIEW_TOTAL_BUDGET_S is a single wall-clock deadline for the
+# *whole* preview compose (basemap fetch AND card rendering — see
+# _compose_poster_image's docstring for why card rendering needs one too),
+# well under the client's own ~20s HTTP timeout so the server always gives up
+# first, in a way that degrades to a warning/legend rather than the request
+# just being killed with nothing to show for it. _PREVIEW_TILE_TIMEOUT_S is
+# the per-request timeout for an individual tile fetch within that budget.
+_PREVIEW_TOTAL_BUDGET_S = 10.0
 _PREVIEW_TILE_TIMEOUT_S = 5.0
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -537,6 +541,16 @@ def _compose_poster_image(
     the underlying error rather than silently rendering on grey (issue #14
     feedback). With ``basemap_optional`` (the preview), the failure is caught
     and returned as *warning* so the client can say so plainly.
+
+    ``basemap_optional`` also puts a single wall-clock *deadline* on the
+    whole call, not just the basemap fetch: card rendering (drop-shadow
+    blur, photo decode — see ``_draw_card_chrome``/``_paste_cover``) is real
+    CPU/IO work too, and a preview canvas at low DPI can fit far more tiny
+    cards than a first look at "the tile budget is small" suggests. Past the
+    deadline, remaining cards are pushed to the legend instead of drawn
+    (issue #14: a preview that quietly ran past the client's own timeout,
+    even after the basemap alone was capped, left the user with no way to
+    tell running from hung from failed).
     """
     bounds = request["bounds"]
     config = request.get("config", {})
@@ -544,13 +558,14 @@ def _compose_poster_image(
     user_id = str(user_info_id)
     scale = TypeScale(dpi)
     warning: Optional[str] = None
+    deadline = time.monotonic() + _PREVIEW_TOTAL_BUDGET_S if basemap_optional else None
 
     _notify(progress, "fetching basemap")
     kwargs = {"tile_fetcher": tile_fetcher}
     if max_tiles is not None:
         kwargs["max_tiles"] = max_tiles
     if basemap_optional:
-        kwargs["deadline"] = time.monotonic() + _PREVIEW_BASEMAP_BUDGET_S
+        kwargs["deadline"] = deadline
         kwargs["tile_timeout"] = _PREVIEW_TILE_TIMEOUT_S
     try:
         canvas = render_basemap(bounds, target_w, target_h, **kwargs)
@@ -607,16 +622,26 @@ def _compose_poster_image(
     _notify(progress, "rendering cards")
     memories_by_id = {m["id"]: m for m in memories}
     legend_entries: List[Dict[str, Any]] = []
+    budget_skipped = 0
 
     for placement in placements:
         memory = memories_by_id.get(placement.pin_id)
         if memory is None:
             continue
-        if placement.placed and placement.card_rect is not None:
+        # Drop-shadow blur + photo decode (_draw_card_chrome/_paste_cover) are
+        # real per-card CPU/IO cost — a low-DPI preview canvas fits far more
+        # tiny cards than that sounds like it should allow, and dozens of them
+        # is exactly what ran the preview past the client's own timeout even
+        # with the basemap alone capped (issue #14). Once the deadline is
+        # gone, remaining cards degrade to legend rows instead.
+        over_budget = deadline is not None and time.monotonic() > deadline
+        if placement.placed and placement.card_rect is not None and not over_budget:
             _draw_leader(draw, *pin_xy[placement.pin_id], placement.anchor, dpi)
             _draw_card(canvas, placement.card_rect, layouts[placement.pin_id], scale)
         else:
             legend_entries.append(memory)
+            if placement.placed and over_budget:
+                budget_skipped += 1
 
     # Pins last, so a leader line never runs over the pin it points from.
     for pin_id, (x, y) in pin_xy.items():
@@ -624,6 +649,13 @@ def _compose_poster_image(
 
     if legend_entries:
         _draw_legend(canvas, legend_entries, pin_xy, scale, target_w, target_h)
+
+    if budget_skipped:
+        budget_note = (
+            f"Preview simplified: {budget_skipped} card(s) shown in the "
+            "legend instead of on the map (time budget)."
+        )
+        warning = f"{warning}; {budget_note}" if warning else budget_note
 
     return canvas.convert("RGB"), warning
 
@@ -692,6 +724,14 @@ def render_poster_preview(
     only a handful of tiles anyway. If the basemap can't be fetched, the
     preview still renders (on flat grey) and returns a warning describing why,
     rather than failing outright or quietly implying the poster will be grey.
+
+    The whole call — basemap fetch AND card rendering — also carries a single
+    wall-clock deadline (``_PREVIEW_TOTAL_BUDGET_S``, see
+    ``_compose_poster_image``): a low-DPI preview canvas can fit far more tiny
+    cards than "the tile budget is small" suggests, and each one's drop-shadow
+    blur/photo decode is real work, so a tile-count cap alone didn't stop a
+    real preview from running past the client's own timeout (issue #14).
+    Past the deadline, cards degrade to legend rows instead of being drawn.
 
     Returns ``(png_bytes, warning_or_None)``.
     """

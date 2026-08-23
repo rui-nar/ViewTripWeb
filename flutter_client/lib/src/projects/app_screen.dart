@@ -2,7 +2,7 @@
 // ignore_for_file: deprecated_member_use
 library;
 
-import 'dart:async' show Timer, StreamSubscription;
+import 'dart:async' show TimeoutException, Timer, StreamSubscription;
 import 'dart:typed_data' show Uint8List;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart' show LatLngBounds, MapEvent;
@@ -1121,6 +1121,18 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
         _bytes = preview.bytes;
         _warning = preview.hasWarning ? preview.warning : null;
       });
+    } on TimeoutException {
+      if (!mounted) return;
+      // A raw "TimeoutException after 0:00:20.000000: ..." told the user
+      // nothing about *what* had happened — not whether the server was
+      // still working, hung, or had genuinely failed (issue #14 feedback).
+      // It hadn't: the server itself now gives up well inside this timeout
+      // and reports why (see the warning-banner path above), so reaching
+      // this catch means the connection itself is the problem, not the
+      // render — state that plainly instead of dumping the exception.
+      setState(() => _error =
+          'The preview took too long to reach the server. Check your '
+          'connection and try again.');
     } catch (e) {
       if (!mounted) return;
       // Surface the real reason: "Could not load the preview" gave the user
