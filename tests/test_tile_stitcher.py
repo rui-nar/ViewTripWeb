@@ -16,6 +16,9 @@ from PIL import Image
 
 from src.exceptions.errors import APIError
 from src.poster.tile_stitcher import (
+    DEFAULT_MAX_ZOOM,
+    DEFAULT_PIXEL_RATIO,
+    DEFAULT_TILE_SIZE,
     MapboxTileClient,
     crop_rect_for_bounds,
     lonlat_to_pixel,
@@ -252,6 +255,54 @@ def test_render_basemap_raises_on_oblong_bounds_exceeding_tile_cap():
     with pytest.raises(ValueError, match="exceeding the cap"):
         render_basemap(oblong_bounds, target_width=1000, target_height=1000,
                         tile_fetcher=fake_fetcher, tile_size=256)
+
+
+def test_render_basemap_never_allocates_a_canvas_bigger_than_the_output(monkeypatch):
+    """Regression for a real production OOM (issue #14 follow-up): a
+    Toulouse-to-Nordkapp trip's bounds needed 722 tiles at zoom 7 — well
+    under DEFAULT_MAX_TILES, but the old algorithm pasted all 722 into one
+    canvas at *native tile resolution* (~757M px, ~2.3GB RGB) before cropping
+    it down to the ~35M px final target, and that intermediate is what
+    OOM-killed the worker. Every Image.new(...) call must now be sized at or
+    under the final output, never at the pre-crop tile-grid size."""
+    real_bounds = {
+        "north": 77.99885689576553, "south": 23.409510750792926,
+        "east": 42.17284836188753, "west": -10.724279708594967,
+    }
+    target_w, target_h = 4967, 7022  # the real job's A0-portrait-at-150dpi size
+
+    zoom = zoom_for_target_size(real_bounds, target_w, target_h, DEFAULT_TILE_SIZE, DEFAULT_MAX_ZOOM)
+    x_min, x_max, y_min, y_max = tile_range_for_bounds(real_bounds, zoom, DEFAULT_TILE_SIZE)
+    tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+    assert tile_count > 700, (
+        f"only {tile_count} tiles at zoom {zoom} — this bounds fixture no "
+        "longer reproduces the real large-canvas scenario"
+    )
+
+    sizes_allocated = []
+    real_new = Image.new
+
+    def _tracking_new(mode, size, *a, **k):
+        sizes_allocated.append(size)
+        return real_new(mode, size, *a, **k)
+
+    monkeypatch.setattr(Image, "new", _tracking_new)
+
+    def fake_fetcher(z, x, y):
+        return _solid_png(size=(DEFAULT_TILE_SIZE * DEFAULT_PIXEL_RATIO,) * 2)
+
+    img = render_basemap(
+        real_bounds, target_width=target_w, target_height=target_h,
+        tile_fetcher=fake_fetcher, max_tiles=tile_count + 10,
+    )
+
+    assert img.size == (target_w, target_h)
+    max_area_allocated = max(w * h for w, h in sizes_allocated)
+    assert max_area_allocated <= target_w * target_h, (
+        f"allocated a canvas up to {max_area_allocated} px "
+        f"(output is only {target_w * target_h} px) — the pre-crop giant "
+        "intermediate is back"
+    )
 
 
 def test_render_basemap_respects_custom_max_tiles():
