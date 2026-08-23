@@ -48,7 +48,7 @@ class _LoginScreenState extends State<LoginScreen> {
     // cover both, since the user still has the manual email/password form
     // either way.
     try {
-      GoogleSignIn.instance.attemptLightweightAuthentication().catchError((_) => null);
+      GoogleSignIn.instance.attemptLightweightAuthentication()?.catchError((_) => null);
     } catch (_) {}
   }
 
