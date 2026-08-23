@@ -22,6 +22,7 @@ import 'basemaps.dart';
 import 'memory_detail_modal.dart';
 import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
 import 'people_search.dart' show classifyEncounterPin;
+import 'photo_thumb_cache.dart';
 import 'project_notifier.dart';
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
@@ -2689,6 +2690,15 @@ class _MarkerThumbImageState extends State<_MarkerThumbImage> {
       setState(() => _bytes = cached);
       return;
     }
+    // On-disk L2 (photo_thumb_cache.dart): survives an app restart, unlike
+    // the in-memory _cache above, which is why marker thumbnails used to
+    // refetch from scratch on every cold start.
+    final onDisk = await photoThumbCache.read(widget.url);
+    if (onDisk != null) {
+      _MarkerThumbImage._cache[widget.url] = onDisk;
+      if (mounted) setState(() => _bytes = onDisk);
+      return;
+    }
     try {
       final bytes = await _MarkerThumbImage._gate.run(() async {
         final res = await http.get(Uri.parse(widget.url), headers: widget.headers);
@@ -2698,6 +2708,7 @@ class _MarkerThumbImageState extends State<_MarkerThumbImage> {
         return res.bodyBytes;
       });
       _MarkerThumbImage._cache[widget.url] = bytes;
+      photoThumbCache.write(widget.url, bytes);
       if (mounted) setState(() => _bytes = bytes);
     } catch (_) {
       if (mounted) setState(() => _failed = true);

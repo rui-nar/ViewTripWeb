@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 import '../crypto/encryption.dart';
+import '../projects/photo_thumb_cache.dart';
 import '../projects/project_data_cache.dart';
 import 'auth_service.dart';
 
@@ -193,6 +194,7 @@ class AuthNotifier extends ChangeNotifier {
     // Full wipe, not just a rescope: a signed-out device must not keep
     // another account's cached trip data sitting on disk.
     await projectDataCache.clearAll();
+    await photoThumbCache.clearAll();
     notifyListeners();
   }
 

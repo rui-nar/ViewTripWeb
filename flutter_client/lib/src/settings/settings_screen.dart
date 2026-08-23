@@ -13,6 +13,7 @@ import '../crypto/enable_encryption_screen.dart';
 import '../crypto/encryption.dart';
 import '../crypto/manage_devices_screen.dart';
 import '../crypto/recover_screen.dart';
+import '../projects/photo_thumb_cache.dart';
 import '../projects/project_data_cache.dart';
 import 'settings_service.dart';
 import 'strava_oauth_popup_stub.dart'
@@ -214,6 +215,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _clearCachedTripData() async {
     final messenger = ScaffoldMessenger.of(context);
     await projectDataCache.clearAll();
+    await photoThumbCache.clearAll();
     if (!mounted) return;
     messenger.showSnackBar(
       const SnackBar(content: Text('Cached trip data cleared')),
