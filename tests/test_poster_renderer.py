@@ -25,9 +25,9 @@ from models.user import UserInfo
 from src.exceptions.errors import APIError
 from src.poster.poster_renderer import (
     _PIN_COLOR,
-    _PREVIEW_BASEMAP_BUDGET_S,
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
+    _PREVIEW_TOTAL_BUDGET_S,
     _Projector,
     _paste_cover,
     _pdf_resolution,
@@ -429,7 +429,7 @@ def test_preview_degrades_with_a_warning_when_the_basemap_is_too_slow(
     )
 
     def slow_but_successful(z, x, y):
-        clock["t"] += _PREVIEW_BASEMAP_BUDGET_S + 1.0
+        clock["t"] += _PREVIEW_TOTAL_BUDGET_S + 1.0
         return _solid_tile()
 
     png_bytes, warning = render_poster_preview(
@@ -440,6 +440,56 @@ def test_preview_degrades_with_a_warning_when_the_basemap_is_too_slow(
         assert img.size[0] > 0
     assert warning is not None
     assert "time budget" in warning
+
+
+def test_preview_degrades_cards_to_legend_when_over_time_budget(
+    project_id, monkeypatch
+):
+    """A tile-count/basemap budget alone isn't enough: drop-shadow blur and
+    photo decode (_draw_card_chrome/_paste_cover) are real per-card cost, and
+    a low-DPI preview canvas fits far more tiny cards than that sounds like
+    it should allow. That's what actually ran a real preview past the
+    client's own timeout even with the basemap alone capped (issue #14
+    follow-up) — the wall-clock budget must cover card rendering too, same
+    degrade-to-legend behaviour as an outright failure."""
+    import src.poster.poster_renderer as renderer_module
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        "src.poster.tile_stitcher.time.monotonic", lambda: clock["t"]
+    )
+
+    real_place_cards = renderer_module.place_cards
+
+    def place_cards_then_blow_the_budget(*args, **kwargs):
+        # Real placement runs on the un-mocked clock (basemap fetch didn't
+        # advance it), so this captures a normal placement — then the clock
+        # jumps past budget right before card rendering starts, so every
+        # card that *would* have drawn is deterministically over budget
+        # regardless of how many placement geometry happens to produce.
+        result = real_place_cards(*args, **kwargs)
+        clock["t"] += _PREVIEW_TOTAL_BUDGET_S + 1.0
+        return result
+
+    monkeypatch.setattr(renderer_module, "place_cards", place_cards_then_blow_the_budget)
+
+    calls = []
+    real_draw_card = renderer_module._draw_card
+    monkeypatch.setattr(
+        renderer_module, "_draw_card",
+        lambda *a, **k: (calls.append(1), real_draw_card(*a, **k))[-1],
+    )
+
+    png_bytes, warning = render_poster_preview(
+        project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher
+    )
+
+    with Image.open(io.BytesIO(png_bytes)) as img:  # still a valid image
+        assert img.size[0] > 0
+    assert calls == [], "a card was drawn after the budget was already spent"
+    assert warning is not None
+    assert "time budget" in warning
+    assert "legend" in warning
 
 
 def test_full_render_still_fails_hard_when_the_basemap_fails(project_id, tmp_path):
