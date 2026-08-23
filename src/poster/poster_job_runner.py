@@ -11,6 +11,18 @@ is committed it also sends a best-effort notification email (issue #14
 follow-up) with a download link — the Flutter client no longer polls for
 completion, so email is the only thing that tells the user their poster is
 ready (or failed).
+
+``mark_job_interrupted``/``sweep_orphaned_poster_jobs`` cover the case
+``run_poster_job``'s own try/except cannot: a poster render is memory-heavy
+enough that the RQ work-horse running it can be OOM-killed outright (SIGKILL)
+rather than raising a catchable Python exception — the process is just gone,
+mid-render, with nothing left to run the ``except`` block or send the email.
+Left alone the job row stays "running" forever and the user — who was
+explicitly told "we'll email you when it's ready" — never hears anything at
+all. Unlike a route job's transient network hiccup, a poster OOM is a
+deterministic property of that job's own inputs (bounds size, photo count),
+so neither path retries; both go straight to "failed" plus the same
+notification email a normal failure would send.
 """
 from __future__ import annotations
 
@@ -20,6 +32,8 @@ import logging
 import os
 import time
 from pathlib import Path
+
+from sqlmodel import select
 
 from models.db import get_session
 from models.project_db import DBPosterJob
@@ -34,6 +48,8 @@ _log = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 _repo = ProjectRepo()
+
+TERMINAL = ("done", "failed")
 
 
 def _frontend_origin() -> str:
@@ -182,3 +198,70 @@ def run_poster_job(job_id: int) -> None:
                 sess.add(job)
                 sess.commit()
         _notify_poster_failed(job_id, user_info_id, project_id)
+
+
+def mark_job_interrupted(job_id: int, reason: str) -> None:
+    """Force a non-terminal job straight to "failed" and send the failure
+    email — for a job whose worker died without ever reaching
+    ``run_poster_job``'s own except block (see module docstring).
+
+    No-ops on an already-terminal job (a race against the job actually
+    finishing/failing on its own must never overwrite that outcome, and must
+    never send a second email for the same job).
+    """
+    with get_session() as sess:
+        job = sess.get(DBPosterJob, job_id)
+        if job is None or job.status in TERMINAL:
+            return
+        job.status = "failed"
+        job.error_message = reason
+        job.completed_at = time.time()
+        sess.add(job)
+        sess.commit()
+        user_info_id = job.user_info_id
+        project_id = job.project_id
+    _notify_poster_failed(job_id, user_info_id, project_id)
+
+
+def sweep_orphaned_poster_jobs() -> int:
+    """Fail every non-terminal poster job. Returns how many were failed.
+
+    Called once at API startup (backstop for a worker *container* dying
+    outright, not just its work-horse — see ``mark_job_interrupted`` for the
+    more immediate path that covers a lone work-horse OOM-kill). Anything
+    still "pending"/"running" when the process starts is by definition
+    orphaned: nothing was executing it a moment ago, because nothing was
+    running at all — same reasoning as ``route_jobs.sweep_orphaned_jobs``.
+
+    Unlike that route-job sweep, this never re-queues: a poster job that died
+    mid-render almost always did so because of its own inputs (bounds size,
+    photo count), so re-running the identical render would just repeat the
+    failure. Telling the user plainly and letting them retry — possibly with
+    a smaller region — is both simpler and more honest.
+    """
+    try:
+        with get_session() as sess:
+            orphan_ids = [
+                j.id for j in sess.exec(
+                    select(DBPosterJob).where(DBPosterJob.status.notin_(TERMINAL))
+                ).all()
+            ]
+    except Exception:  # noqa: BLE001 — a broken sweep must not stop the app booting
+        _log.exception("poster job sweep failed to read orphans")
+        return 0
+
+    failed = 0
+    for job_id in orphan_ids:
+        try:
+            mark_job_interrupted(
+                job_id,
+                "The poster generation process did not survive a server "
+                "restart — please try again.",
+            )
+            failed += 1
+        except Exception:  # noqa: BLE001
+            _log.exception("could not fail orphaned poster job %s", job_id)
+
+    if failed:
+        _log.info("failed %d orphaned poster job(s) at startup", failed)
+    return failed

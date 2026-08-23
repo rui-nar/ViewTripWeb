@@ -309,6 +309,113 @@ def test_run_poster_job_sends_failed_email_on_failure(env, monkeypatch):
     assert "MAPBOX_TOKEN" not in fake.sent[0].text_body
 
 
+# ── Interrupted-job recovery (issue #14 follow-up) ───────────────────────────
+# A poster render is memory-heavy enough that its work-horse can be
+# OOM-killed outright — no Python exception for run_poster_job's own
+# try/except to catch, so the job row is stuck "running" and the user (who
+# was promised an email) hears nothing at all unless something else notices.
+
+def _project_id(engine, name="My Trip"):
+    with Session(engine) as sess:
+        return sess.exec(select(DBProject).where(DBProject.name == name)).first().id
+
+
+def test_mark_job_interrupted_fails_the_job_and_sends_the_email(env, monkeypatch):
+    client, engine, uid, _ = env
+    fake = _FakeEmailService()
+    monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+
+    with Session(engine) as sess:
+        job = DBPosterJob(project_id=_project_id(engine), user_info_id=uid, status="running")
+        sess.add(job); sess.commit(); sess.refresh(job)
+        job_id = job.id
+
+    job_runner_module.mark_job_interrupted(job_id, "work-horse killed (signal 9)")
+
+    with Session(engine) as sess:
+        row = sess.get(DBPosterJob, job_id)
+    assert row.status == "failed"
+    assert row.error_message == "work-horse killed (signal 9)"
+    assert row.completed_at is not None
+    assert len(fake.sent) == 1
+    assert fake.sent[0].to == "a@e.com"
+
+
+def test_mark_job_interrupted_is_a_noop_on_an_already_terminal_job(env, monkeypatch):
+    """A race against the job actually finishing on its own must never
+    overwrite that outcome or send a second, contradictory email."""
+    client, engine, uid, _ = env
+    fake = _FakeEmailService()
+    monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+
+    with Session(engine) as sess:
+        job = DBPosterJob(
+            project_id=_project_id(engine), user_info_id=uid, status="done",
+            result_png_path="/tmp/x.png",
+        )
+        sess.add(job); sess.commit(); sess.refresh(job)
+        job_id = job.id
+
+    job_runner_module.mark_job_interrupted(job_id, "should never apply")
+
+    with Session(engine) as sess:
+        row = sess.get(DBPosterJob, job_id)
+    assert row.status == "done"
+    assert row.error_message is None
+    assert fake.sent == []
+
+
+def test_mark_job_interrupted_never_raises_on_a_missing_job(env):
+    client, engine, _, _ = env
+    job_runner_module.mark_job_interrupted(999999, "x")  # must not raise
+
+
+class TestSweepOrphanedPosterJobs:
+    """Backstop for the API-startup case — mirrors
+    src/jobs/route_jobs.py's sweep_orphaned_jobs, but never re-queues: a
+    poster job that died mid-render almost always did so because of its own
+    inputs, so re-running the identical render would just repeat the
+    failure."""
+
+    def test_pending_and_running_jobs_are_both_failed(self, env, monkeypatch):
+        client, engine, uid, _ = env
+        fake = _FakeEmailService()
+        monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+        pid = _project_id(engine)
+
+        with Session(engine) as sess:
+            sess.add(DBPosterJob(project_id=pid, user_info_id=uid, status="pending"))
+            sess.add(DBPosterJob(project_id=pid, user_info_id=uid, status="running"))
+            sess.commit()
+
+        assert job_runner_module.sweep_orphaned_poster_jobs() == 2
+        with Session(engine) as sess:
+            statuses = {j.status for j in sess.exec(select(DBPosterJob)).all()}
+        assert statuses == {"failed"}
+        assert len(fake.sent) == 2
+
+    def test_terminal_jobs_are_left_alone(self, env, monkeypatch):
+        client, engine, uid, _ = env
+        fake = _FakeEmailService()
+        monkeypatch.setattr(job_runner_module, "get_email_service", lambda: fake)
+        pid = _project_id(engine)
+
+        with Session(engine) as sess:
+            sess.add(DBPosterJob(project_id=pid, user_info_id=uid, status="done"))
+            sess.add(DBPosterJob(project_id=pid, user_info_id=uid, status="failed"))
+            sess.commit()
+
+        assert job_runner_module.sweep_orphaned_poster_jobs() == 0
+        assert fake.sent == []
+
+    def test_a_broken_sweep_does_not_stop_the_app_booting(self, env, monkeypatch):
+        def _boom(*_a, **_kw):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(job_runner_module, "get_session", _boom)
+        assert job_runner_module.sweep_orphaned_poster_jobs() == 0  # logged, not raised
+
+
 # ── Preview (fast, synchronous, no job row) ──────────────────────────────────
 
 def test_preview_returns_png_without_creating_a_job(env):

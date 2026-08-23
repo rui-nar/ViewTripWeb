@@ -34,6 +34,41 @@ _log = get_logger(__name__)
 _RECONNECT_INTERVALS_S = [2, 5, 10, 30, 60]
 
 
+def _work_horse_killed_handler(job, retpid, ret_val, rusage) -> None:
+    """RQ callback for a work-horse that died without raising a catchable
+    exception — a SIGKILL (almost always the OOM killer) is the common case
+    for the memory-heavy ``poster`` queue. Called synchronously by the still-
+    alive parent worker process the moment the death is detected, which is
+    what makes this the fast path: a poster render is otherwise left
+    "running" forever until the next API restart's orphan sweep (see
+    ``src.poster.poster_job_runner.sweep_orphaned_poster_jobs``), and the
+    user who was promised an email hears nothing in the meantime.
+
+    ``job.args`` is ``(func, *args)`` — every queued job goes through
+    ``src.jobs.queue._run_with_level_refresh(func, *args)``, so *func* is the
+    real callable regardless of which queue it came from. Only a poster job
+    (``run_poster_job``) is handled here: a route job's own resolve failure
+    is already recoverable losslessly by the next resolve trigger, and the
+    default queue's jobs (share tiles, stats) aren't user-facing durable work.
+    Never raises — a broken handler must not take the worker process down.
+    """
+    try:
+        from src.poster.poster_job_runner import mark_job_interrupted, run_poster_job
+
+        func = job.args[0] if job.args else None
+        if func is not run_poster_job:
+            return
+        job_id = job.args[1]
+        mark_job_interrupted(
+            job_id,
+            "The poster generation process was terminated unexpectedly "
+            "(likely out of memory) — try a smaller region or fewer "
+            "photos, or try again.",
+        )
+    except Exception:
+        _log.exception("work_horse_killed_handler failed for job %s", getattr(job, "id", "?"))
+
+
 def _connect_with_retry(sleep=time.sleep):
     """Block until Redis answers, retrying with backoff instead of giving up."""
     attempt = 0
@@ -69,7 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     from rq import Worker
 
     _log.info("worker starting on queues: %s", ", ".join(queues))
-    Worker(queues, connection=client).work(with_scheduler=False)
+    Worker(
+        queues, connection=client,
+        work_horse_killed_handler=_work_horse_killed_handler,
+    ).work(with_scheduler=False)
     return 0
 
 
