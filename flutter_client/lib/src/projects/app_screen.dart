@@ -33,6 +33,7 @@ import 'image_export.dart';
 import 'image_download.dart';
 import 'poster_config_dialog.dart';
 import 'poster_job_notifier.dart';
+import 'poster_status_card.dart';
 import 'social_share_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
@@ -100,6 +101,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   // Poster generation flow (issue #14, unit F) — frame-picker overlay toggle.
   bool _framePickerActive = false;
+
+  // Poster status card (issue #14, unit G) — small ambient overlay tracking
+  // the poster job's real server-side state; see poster_status_card.dart.
+  // Owned here (not via Provider) so its lifetime matches this screen's, the
+  // same reasoning as _mapController/_mapFitted above.
+  final PosterStatusNotifier _posterStatusNotifier = PosterStatusNotifier();
 
   // Highlighted point set when the user taps an encounter's place icon
   // (issue #72); cleared on the next unrelated map tap/selection.
@@ -224,6 +231,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     });
     _mapEventSub =
         _mapController.mapController.mapEventStream.listen(_onMapEvent);
+    // Resumes tracking a poster job started before the user navigated away
+    // and back within this session (issue #14 rule 5) — a one-shot check,
+    // not a poll loop of its own; see PosterStatusNotifier.resume.
+    _posterStatusNotifier.resume(widget.projectRef);
   }
 
   @override
@@ -234,6 +245,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     _mapFitted.dispose();
     _activityScrollController.dispose();
     _mobileActivityScrollController.dispose();
+    _posterStatusNotifier.dispose();
     _degradedRouteWatchNotifier?.stopDegradedRouteWatch();
     super.dispose();
   }
@@ -455,13 +467,17 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await createPosterJob(
+      final jobId = await createPosterJob(
         ref: widget.projectRef,
         bounds: posterBoundsFromLatLngBounds(bounds),
         orientation: orientation,
         config: opts.toJson(),
         memories: memories,
       );
+      // Ambient status card (issue #14, unit G) picks up from here — the
+      // SnackBar below is a one-off confirmation, the card is what actually
+      // reflects real server state (generating/done/failed) afterwards.
+      _posterStatusNotifier.start(ref: widget.projectRef, jobId: jobId);
       messenger.showSnackBar(const SnackBar(
           content: Text("Generating your poster — we'll email you a "
               "download link when it's ready.")));
@@ -950,6 +966,15 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                           onNext: _onFrameConfirmed,
                           onCancel: _cancelFramePicker,
                         ),
+                      // Poster status card (issue #14, unit G) — fixed offset
+                      // from the top-right, below where SelectionStatsOverlay
+                      // renders inside ManageMapPanel's own Stack (that
+                      // widget's runtime position isn't visible from here).
+                      Positioned(
+                        top: 90,
+                        right: 12,
+                        child: PosterStatusCard(notifier: _posterStatusNotifier),
+                      ),
                     ],
                   ),
                 ),
@@ -1053,6 +1078,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                     onNext: _onFrameConfirmed,
                     onCancel: _cancelFramePicker,
                   ),
+
+                // Poster status card (issue #14, unit G) — see the wide-layout
+                // Stack above for why this fixed offset was chosen.
+                Positioned(
+                  top: 90,
+                  right: 12,
+                  child: PosterStatusCard(notifier: _posterStatusNotifier),
+                ),
 
               ],
             );

@@ -3,12 +3,16 @@
 /// Talks to the frozen contract in `api/poster.py`:
 ///   POST /api/projects/{name}/poster           -> {job_id}
 ///   POST /api/projects/{name}/poster/preview   -> PNG bytes (fast, no job)
+///   GET  /api/projects/{name}/poster/{job_id}  -> {status, stage, error_message}
 ///
 /// The render itself runs in a queued background worker and the user is
 /// emailed a download link once it finishes (a parallel workstream), so the
-/// client's job is only to kick the job off — it no longer polls
-/// `GET .../poster/{job_id}` for status, and there is no client-side notion
-/// of a job being "busy"/"done"/"failed" to track.
+/// client's job is only to kick the job off — this file itself does not
+/// poll or block on the render. [fetchPosterJobStatus] below is a one-shot
+/// status fetch re-added for the small ambient status card (issue #14, unit
+/// G, `poster_status_card.dart`), which owns the actual poll loop; this is
+/// deliberately not a resurrection of the old blocking-modal `PosterJobNotifier`
+/// polling class that was deleted here — no state machine lives in this file.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -102,4 +106,45 @@ Future<int> createPosterJob({
     'memories': memories,
   }) as Map<String, dynamic>;
   return result['job_id'] as int;
+}
+
+/// A poster job's server-side status, as returned by
+/// `GET /api/projects/{name}/poster/{job_id}` (`PosterJobStatusOut` in
+/// `api/poster.py`).
+class PosterJobStatus {
+  /// 'pending' | 'running' | 'done' | 'failed'.
+  final String status;
+
+  /// Human-readable progress label (e.g. "Rendering basemap…"), or null.
+  final String? stage;
+
+  /// Set when [status] is 'failed'. Carries internal detail (e.g. a Mapbox
+  /// error) — callers should not surface this verbatim to the user, the same
+  /// restraint the failure email applies (see `_notify_poster_failed` in
+  /// `src/poster/poster_job_runner.py`).
+  final String? errorMessage;
+
+  const PosterJobStatus({required this.status, this.stage, this.errorMessage});
+
+  bool get isDone => status == 'done';
+  bool get isFailed => status == 'failed';
+  bool get isTerminal => isDone || isFailed;
+}
+
+/// Fetches a poster job's current status. A one-shot check, not a poll loop —
+/// the small ambient status card (issue #14, unit G, `poster_status_card.dart`)
+/// calls this on a timer and owns the actual polling/give-up logic; this
+/// function only knows how to ask the server once.
+Future<PosterJobStatus> fetchPosterJobStatus({
+  required ProjectRef ref,
+  required int jobId,
+  ApiClient? client,
+}) async {
+  final result =
+      await (client ?? api).get(ref.path('/poster/$jobId')) as Map<String, dynamic>;
+  return PosterJobStatus(
+    status: result['status'] as String,
+    stage: result['stage'] as String?,
+    errorMessage: result['error_message'] as String?,
+  );
 }

@@ -173,4 +173,82 @@ void main() {
       expect(preview.hasWarning, isFalse);
     });
   });
+
+  group('fetchPosterJobStatus', () {
+    test('GETs the job status endpoint and returns the parsed fields',
+        () async {
+      final mock = MockClient((req) async {
+        expect(req.method, 'GET');
+        expect(req.url.path, '/api/projects/Trip/poster/42');
+        return _json(200, {
+          'status': 'running',
+          'stage': 'Rendering basemap…',
+          'error_message': null,
+        });
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final status = await fetchPosterJobStatus(
+        ref: const ProjectRef(name: 'Trip'),
+        jobId: 42,
+        client: client,
+      );
+
+      expect(status.status, 'running');
+      expect(status.stage, 'Rendering basemap…');
+      expect(status.errorMessage, isNull);
+      expect(status.isDone, isFalse);
+      expect(status.isFailed, isFalse);
+      expect(status.isTerminal, isFalse);
+    });
+
+    test('a done status reports isDone/isTerminal', () async {
+      final mock = MockClient((req) async =>
+          _json(200, {'status': 'done', 'stage': null, 'error_message': null}));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final status = await fetchPosterJobStatus(
+        ref: const ProjectRef(name: 'Trip'),
+        jobId: 1,
+        client: client,
+      );
+
+      expect(status.isDone, isTrue);
+      expect(status.isTerminal, isTrue);
+    });
+
+    test('a failed status carries the error message and reports '
+        'isFailed/isTerminal', () async {
+      final mock = MockClient((req) async => _json(200, {
+            'status': 'failed',
+            'stage': null,
+            'error_message': 'internal: mapbox 500',
+          }));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      final status = await fetchPosterJobStatus(
+        ref: const ProjectRef(name: 'Trip'),
+        jobId: 1,
+        client: client,
+      );
+
+      expect(status.isFailed, isTrue);
+      expect(status.isTerminal, isTrue);
+      expect(status.errorMessage, 'internal: mapbox 500');
+    });
+
+    test('a non-2xx response throws ApiException', () async {
+      final mock = MockClient((req) async => http.Response('boom', 500));
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      expect(
+        () => fetchPosterJobStatus(
+          ref: const ProjectRef(name: 'Trip'),
+          jobId: 1,
+          client: client,
+        ),
+        throwsA(isA<ApiException>()),
+      );
+    });
+  });
 }
