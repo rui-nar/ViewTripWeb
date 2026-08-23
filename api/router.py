@@ -12,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
 from src.jobs.route_jobs import sweep_degraded_segments, sweep_orphaned_jobs
+from src.poster.poster_job_runner import sweep_orphaned_poster_jobs
 from src.project.project_repo import StaleWriteError
 
 from api.activities import router as activities_router, activity_fields_router
@@ -110,6 +111,11 @@ async def lifespan(_app: FastAPI):
     # a server-side crash is now recovered by the server, whether or not anyone
     # reopens the project.
     sweep_orphaned_jobs()
+    # A poster work-horse OOM-kill is normally caught the instant it happens
+    # (src.jobs.worker's work_horse_killed_handler) — this is the backstop for
+    # the rarer case where the whole worker container went down with it, so
+    # nothing was left alive to run that handler (issue #14 follow-up).
+    sweep_orphaned_poster_jobs()
     _scheduler.add_job(backup_db, "cron", hour=2, minute=0, id="daily_backup", replace_existing=True)
     _scheduler.add_job(checkpoint_wal, "interval", seconds=60, id="wal_checkpoint", replace_existing=True)
     # Correct any drift between the per-user storage counters used for quota

@@ -83,9 +83,10 @@ class TestMain:
         started = {}
 
         class _FakeWorker:
-            def __init__(self, queues, connection):
+            def __init__(self, queues, connection, work_horse_killed_handler=None):
                 started["queues"] = queues
                 started["connection"] = connection
+                started["work_horse_killed_handler"] = work_horse_killed_handler
 
             def work(self, with_scheduler):
                 started["with_scheduler"] = with_scheduler
@@ -97,4 +98,63 @@ class TestMain:
             "queues": ["resolve"],
             "connection": sentinel_client,
             "with_scheduler": False,
+            "work_horse_killed_handler": worker_mod._work_horse_killed_handler,
         }
+
+
+class TestWorkHorseKilledHandler:
+    """A poster render is memory-heavy enough to get its work-horse
+    SIGKILLed (OOM) outright, with no Python exception for run_poster_job's
+    own try/except to catch (issue #14 follow-up). This handler is the fast
+    path that notices anyway, straight from the still-alive parent worker."""
+
+    class _FakeJob:
+        def __init__(self, args, id="job-1"):
+            self.args = args
+            self.id = id
+
+    def test_a_killed_poster_job_is_marked_interrupted(self, monkeypatch):
+        import src.poster.poster_job_runner as job_runner_mod
+
+        calls = []
+        monkeypatch.setattr(
+            job_runner_mod, "mark_job_interrupted",
+            lambda job_id, reason: calls.append((job_id, reason)),
+        )
+
+        job = self._FakeJob(args=(job_runner_mod.run_poster_job, 42))
+        worker_mod._work_horse_killed_handler(job, 123, 9, None)
+
+        assert len(calls) == 1
+        job_id, reason = calls[0]
+        assert job_id == 42
+        assert "memory" in reason.lower()
+
+    def test_a_killed_non_poster_job_is_ignored(self, monkeypatch):
+        import src.poster.poster_job_runner as job_runner_mod
+
+        calls = []
+        monkeypatch.setattr(
+            job_runner_mod, "mark_job_interrupted",
+            lambda job_id, reason: calls.append((job_id, reason)),
+        )
+
+        def _some_other_job(x):
+            return x
+
+        job = self._FakeJob(args=(_some_other_job, 42))
+        worker_mod._work_horse_killed_handler(job, 123, 9, None)
+
+        assert calls == []
+
+    def test_a_broken_handler_does_not_raise(self, monkeypatch):
+        """Must never take the still-running worker process down with it."""
+        import src.poster.poster_job_runner as job_runner_mod
+
+        def _boom(job_id, reason):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(job_runner_mod, "mark_job_interrupted", _boom)
+
+        job = self._FakeJob(args=(job_runner_mod.run_poster_job, 42))
+        worker_mod._work_horse_killed_handler(job, 123, 9, None)  # must not raise
