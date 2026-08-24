@@ -49,17 +49,13 @@ class _ViewProjectService extends ProjectService {
   /// Fetches the full ~3 MB response (elevation_profile included).
   /// Called by ViewProjectNotifier.loadView() after load() has returned.
   ///
-  /// Shares [projectDataCache]'s "fullDetails" slot with the base
-  /// ProjectService.getDetails() (manage mode's equivalent full fetch) — so
-  /// whichever mode the trip was opened in first warms the cache for a
-  /// same-session toggle into the other one.
-  Future<Map<String, dynamic>> fetchFullDetails(ProjectRef ref) async {
-    final cached = await projectDataCache.readFullDetails(ref);
-    if (cached != null) return cached;
-    final data = await api.get(ref.path()) as Map<String, dynamic>;
-    projectDataCache.writeFullDetails(ref, data);
-    return data;
-  }
+  /// Delegates to the base ProjectService.getDetails() — not just for the
+  /// cache slot it already shared with manage mode's equivalent full fetch,
+  /// but for the in-flight-fetch dedup that lives there too: toggling into
+  /// manage mode while this is still running used to let both hit the same
+  /// ~12 MB endpoint at once, landing two synchronous jsonDecodes back to
+  /// back on the UI isolate and ANR-ing the app. See ProjectService.getDetails.
+  Future<Map<String, dynamic>> fetchFullDetails(ProjectRef ref) => super.getDetails(ref);
 }
 
 // ── Notifier — progressive two-phase load ────────────────────────────────────
