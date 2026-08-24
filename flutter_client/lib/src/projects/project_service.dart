@@ -32,8 +32,13 @@ Future<Map<String, dynamic>> _dedupFetch(
   _inFlightFetches[key] = future;
   // Whatever the outcome, the next caller after this one settles should be
   // free to start a fresh fetch rather than replay a failure or a now-stale
-  // response.
-  future.whenComplete(() => _inFlightFetches.remove(key));
+  // response. whenComplete() returns its own derived Future carrying the same
+  // outcome as `future` — since `future` itself is already returned below for
+  // every real caller to observe, this second one would otherwise go
+  // unlistened-to and surface a failed fetch as an unhandled async error the
+  // moment `future` rejects. .ignore() marks that deliberate (see the same
+  // pattern in ProjectNotifier.load()).
+  future.whenComplete(() => _inFlightFetches.remove(key)).ignore();
   return future;
 }
 
