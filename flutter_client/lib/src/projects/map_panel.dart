@@ -343,6 +343,7 @@ List<Marker> _buildActivityMarkersFromGeo(
             : baseColor;
 
     markers.add(Marker(
+      key: actId != null ? ValueKey('activity-$actId') : null,
       point: point,
       width: 22,
       height: 22,
@@ -418,6 +419,7 @@ List<Marker> _buildSegmentMarkers(
             : baseColor;
 
     markers.add(Marker(
+      key: segId != null ? ValueKey('segment-$segId') : null,
       point: point,
       width: 22,
       height: 22,
@@ -427,6 +429,55 @@ List<Marker> _buildSegmentMarkers(
           _iconForSegmentType(segType),
           color: Colors.white,
           size: 13,
+        ),
+      ),
+    ));
+  }
+  return markers;
+}
+
+// Shared by _MapPanelState and ManageMapPanelState — unlike memory markers,
+// journal-marker rendering (including the tap handler) has no mode-specific
+// affordance, so this stayed byte-for-byte identical between the two classes
+// and is hoisted here rather than duplicated.
+List<Marker> _buildJournalMarkers(
+  List<Map<String, dynamic>> items,
+  dynamic selectedJournalId,
+  bool hasSelection,
+  ProjectNotifier notifier,
+) {
+  final markers = <Marker>[];
+  for (final item in items) {
+    if (item['item_type'] != 'journal') continue;
+    final j = item['journal'] as Map<String, dynamic>?;
+    if (j == null) continue;
+    final lat = (j['lat'] as num?)?.toDouble();
+    final lon = (j['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) continue;
+    final jId = j['id']?.toString() ?? '';
+    final isSelected = selectedJournalId?.toString() == jId;
+    const size = 22.0;
+    final bgColor = isSelected
+        ? const Color(0xFF44AAFF)
+        : hasSelection
+            ? const Color(0xA064748B)
+            : const Color(0xFF64748B);
+    markers.add(Marker(
+      key: ValueKey('journal-$jId'),
+      point: LatLng(lat, lon),
+      width: size,
+      height: size,
+      child: GestureDetector(
+        onTap: () => notifier.selectJournal(j['id']),
+        child: Container(
+          decoration: BoxDecoration(
+            color: bgColor,
+            shape: BoxShape.circle,
+            border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+          ),
+          child: const Center(
+            child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
+          ),
         ),
       ),
     ));
@@ -478,7 +529,9 @@ List<Marker> buildEncounterMarkers(
             Navigator.of(context).pop();
             onLocationTap(lat2, lon2);
           };
+    final encId = e['id']?.toString();
     markers.add(Marker(
+      key: encId != null ? ValueKey('encounter-$encId') : null,
       point: LatLng(lat, lon),
       width: 22,
       height: 22,
@@ -813,6 +866,17 @@ class SelectionStatsOverlay extends StatelessWidget {
   }
 }
 
+// Shared by _MapPanelState and ManageMapPanelState: a keyed MarkerLayer for
+// [markers], built only when [visible] and non-empty, else omitted entirely.
+// The key is what stops the marker-storm ANR (see the fix this refactor
+// follows) — every one of the five marker layers in both classes needs it, so
+// it's centralised here rather than left as five copy-pasted `if` blocks per
+// class that could silently drift back to unkeyed.
+List<Widget> _keyedMarkerLayer(String key, bool visible, List<Marker> markers) =>
+    visible && markers.isNotEmpty
+        ? [MarkerLayer(key: ValueKey(key), markers: markers)]
+        : const [];
+
 // ── MapPanel ──────────────────────────────────────────────────────────────────
 
 class MapPanel extends StatefulWidget {
@@ -1058,50 +1122,6 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     return markers;
   }
 
-  List<Marker> _buildJournalMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedJournalId,
-    bool hasSelection,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    for (final item in items) {
-      if (item['item_type'] != 'journal') continue;
-      final j = item['journal'] as Map<String, dynamic>?;
-      if (j == null) continue;
-      final lat = (j['lat'] as num?)?.toDouble();
-      final lon = (j['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final jId = j['id']?.toString() ?? '';
-      final isSelected = selectedJournalId?.toString() == jId;
-      const size = 22.0;
-      final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
-          : hasSelection
-              ? const Color(0xA064748B)
-              : const Color(0xFF64748B);
-      markers.add(Marker(
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () => widget.notifier.selectJournal(j['id']),
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: const Center(
-              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
-            ),
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
-
   List<LatLng> _allPoints(List<Polyline> polylines) {
     return polylines.expand((p) => p.points).toList();
   }
@@ -1302,7 +1322,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId, hasSelection, context);
+          _buildJournalMarkers(items, selJournalId, hasSelection, notifier);
       _cachedEncounterMarkers = widget.showEncounters
           ? buildEncounterMarkers(items, context, notifier,
               onLocationTap: widget.onLocationTap)
@@ -1425,17 +1445,17 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
                 // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
                 simplificationTolerance: 0.5,
               ),
-            if (_showActivities && _cachedActivityMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedActivityMarkers),
-            if (_cachedSegmentMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedSegmentMarkers),
-            if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedMemoryMarkers),
-            if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedJournalMarkers),
-            if (widget.showEncounters && _showEncounters &&
-                _cachedEncounterMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedEncounterMarkers),
+            ..._keyedMarkerLayer(
+                'activities-layer', _showActivities, _cachedActivityMarkers),
+            ..._keyedMarkerLayer('segment-layer', true, _cachedSegmentMarkers),
+            ..._keyedMarkerLayer(
+                'memories-layer', _showMemories, _cachedMemoryMarkers),
+            ..._keyedMarkerLayer('journal-layer', notifier.showJournals,
+                _cachedJournalMarkers),
+            ..._keyedMarkerLayer(
+                'encounters-layer',
+                widget.showEncounters && _showEncounters,
+                _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             if (widget.hereLatLng != null)
@@ -1877,50 +1897,6 @@ class ManageMapPanelState extends State<ManageMapPanel>
     return markers;
   }
 
-  List<Marker> _buildJournalMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedJournalId,
-    bool hasSelection,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    for (final item in items) {
-      if (item['item_type'] != 'journal') continue;
-      final j = item['journal'] as Map<String, dynamic>?;
-      if (j == null) continue;
-      final lat = (j['lat'] as num?)?.toDouble();
-      final lon = (j['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final jId = j['id']?.toString() ?? '';
-      final isSelected = selectedJournalId?.toString() == jId;
-      const size = 22.0;
-      final bgColor = isSelected
-          ? const Color(0xFF44AAFF)
-          : hasSelection
-              ? const Color(0xA064748B)
-              : const Color(0xFF64748B);
-      markers.add(Marker(
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () => widget.notifier.selectJournal(j['id']),
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: const Center(
-              child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
-            ),
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
-
   @override
   void initState() {
     super.initState();
@@ -2203,7 +2179,7 @@ class ManageMapPanelState extends State<ManageMapPanel>
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId2, hasSelection, context);
+          _buildJournalMarkers(items, selJournalId2, hasSelection, notifier);
       _cachedEncounterMarkers = buildEncounterMarkers(items, context,
           widget.notifier, onLocationTap: widget.onLocationTap);
 
@@ -2292,16 +2268,15 @@ class ManageMapPanelState extends State<ManageMapPanel>
                 polylines: _cachedPolylines,
                 simplificationTolerance: 0.5,
               ),
-            if (_cachedActivityMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedActivityMarkers),
-            if (_cachedSegmentMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedSegmentMarkers),
-            if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedMemoryMarkers),
-            if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedJournalMarkers),
-            if (_cachedEncounterMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedEncounterMarkers),
+            ..._keyedMarkerLayer(
+                'activities-layer', true, _cachedActivityMarkers),
+            ..._keyedMarkerLayer('segment-layer', true, _cachedSegmentMarkers),
+            ..._keyedMarkerLayer(
+                'memories-layer', _showMemories, _cachedMemoryMarkers),
+            ..._keyedMarkerLayer('journal-layer', notifier.showJournals,
+                _cachedJournalMarkers),
+            ..._keyedMarkerLayer(
+                'encounters-layer', true, _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             if (widget.hereLatLng != null)
