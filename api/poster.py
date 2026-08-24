@@ -72,6 +72,10 @@ class PosterConfigIn(BaseModel):
     counters: bool = False
     tag_pie: bool = False
     encounters: bool = False
+    # One card for the whole trip (title, period, total distance, total climb),
+    # pinned to the poster's top-left corner. On by default: it is what makes a
+    # poster readable as a trip rather than as a set of unrelated pins.
+    trip_summary: bool = True
     # Colour scheme for the poster's cards, legend and stat panels
     # (src/poster/theme.py). Dark by default: a poster is composed over
     # satellite imagery, which dark cards sit on far more comfortably.

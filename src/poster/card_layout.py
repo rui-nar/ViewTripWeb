@@ -193,7 +193,16 @@ def layout_card(
             cur.ops.append(PhotoOp(cur.x, cur.y, inner_w, hero_h, path))
             cur.y += hero_h + mm_to_px(RULE_GAP_MM, dpi)
 
-    # ── Name + date ──────────────────────────────────────────────────────────
+    # ── Day badge + name + date ─────────────────────────────────────────────
+    # The badge leads the text column (under a hero photo, if there is one) so
+    # every card says which day of the trip it belongs to before it says
+    # anything else.
+    badge = by_kind.get("day_badge")
+    if badge is not None:
+        cur.ops.extend(
+            _text_block(cur, f"Day {badge['day_number']}", "day_badge", scale)
+        )
+
     name = by_kind.get("name")
     if name is not None:
         # A card led by a hero image already has a strong focal point, so its
