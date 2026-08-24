@@ -19,7 +19,6 @@
 // authenticated, owner-scoped endpoint) instead of /api/share/{token}/meta,
 // and failed on every shared-project load.
 
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
