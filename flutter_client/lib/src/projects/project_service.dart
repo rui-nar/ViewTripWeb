@@ -8,6 +8,40 @@ import '../core/project_ref.dart';
 import '../map/polyline_decoder.dart';
 import 'project_data_cache.dart';
 
+/// Deduplicates concurrent identical heavy fetches across *all* [ProjectService]
+/// instances (module-level, not a field, because view mode constructs a fresh
+/// [ProjectService] subclass on every mode toggle while manage mode keeps one
+/// long-lived instance — a per-instance map would miss exactly the case this
+/// exists for).
+///
+/// Switching from view mode to manage mode (or back) *while the trip is still
+/// loading* used to fire the same multi-MB request twice: the mode being left
+/// had it in flight, and the mode being entered started load() from scratch
+/// and issued its own copy before the first one had a chance to populate
+/// [projectDataCache]. Both responses then landed and got `jsonDecode`d back
+/// to back on the UI isolate — reported as a ~6 s Android ANR on a large trip.
+/// A caller that finds a fetch for the same key already in flight now awaits
+/// that one instead of starting a second.
+final Map<String, Future<Map<String, dynamic>>> _inFlightFetches = {};
+
+Future<Map<String, dynamic>> _dedupFetch(
+    String key, Future<Map<String, dynamic>> Function() fetch) {
+  final existing = _inFlightFetches[key];
+  if (existing != null) return existing;
+  final future = fetch();
+  _inFlightFetches[key] = future;
+  // Whatever the outcome, the next caller after this one settles should be
+  // free to start a fresh fetch rather than replay a failure or a now-stale
+  // response. whenComplete() returns its own derived Future carrying the same
+  // outcome as `future` — since `future` itself is already returned below for
+  // every real caller to observe, this second one would otherwise go
+  // unlistened-to and surface a failed fetch as an unhandled async error the
+  // moment `future` rejects. .ignore() marks that deliberate (see the same
+  // pattern in ProjectNotifier.load()).
+  future.whenComplete(() => _inFlightFetches.remove(key)).ignore();
+  return future;
+}
+
 class ProjectService {
   /// Fetches the full project dict for [ref] including elevation_profile data.
   /// GET /api/projects/{name}
@@ -27,10 +61,12 @@ class ProjectService {
       final cached = await projectDataCache.readFullDetails(ref);
       if (cached != null) return cached;
     }
-    final data = await api.get(ref.path(), timeout: const Duration(minutes: 2))
-        as Map<String, dynamic>;
-    projectDataCache.writeFullDetails(ref, data);
-    return data;
+    return _dedupFetch('details:${ref.ownerId ?? 0}:${ref.name}', () async {
+      final data = await api.get(ref.path(), timeout: const Duration(minutes: 2))
+          as Map<String, dynamic>;
+      projectDataCache.writeFullDetails(ref, data);
+      return data;
+    });
   }
 
   /// Lightweight project dict — no elevation_profile or summary_polyline.
@@ -71,19 +107,21 @@ class ProjectService {
       final cached = await projectDataCache.readFullGeo(ref);
       if (cached != null) return cached;
     }
-    final encoded = Uri.encodeComponent(ref.name);
-    // Compact payload: activity tracks as Google-encoded polylines, decoded by
-    // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
-    // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
-    // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
-    // (see polyline_decoder.dart). The generous timeout covers a cold-cache
-    // build of a large trip.
-    final data = await api.get(
-        ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
-        timeout: const Duration(seconds: 90));
-    final expanded = expandEncodedActivities(data as Map<String, dynamic>);
-    projectDataCache.writeFullGeo(ref, expanded);
-    return expanded;
+    return _dedupFetch('geo:${ref.ownerId ?? 0}:${ref.name}', () async {
+      final encoded = Uri.encodeComponent(ref.name);
+      // Compact payload: activity tracks as Google-encoded polylines, decoded by
+      // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
+      // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
+      // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
+      // (see polyline_decoder.dart). The generous timeout covers a cold-cache
+      // build of a large trip.
+      final data = await api.get(
+          ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
+          timeout: const Duration(seconds: 90));
+      final expanded = expandEncodedActivities(data as Map<String, dynamic>);
+      projectDataCache.writeFullGeo(ref, expanded);
+      return expanded;
+    });
   }
 
   /// Expand any activity feature carrying a Google-encoded `polyline` property
@@ -126,12 +164,14 @@ class ProjectService {
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async {
     final cached = await projectDataCache.readLowResGeo(ref);
     if (cached != null) return cached;
-    final encoded = Uri.encodeComponent(ref.name);
-    final data = await api.get(
-        ref.withOwner('/api/geo/project/low-res?name=$encoded'),
-        timeout: _kLoadTimeout) as Map<String, dynamic>;
-    projectDataCache.writeLowResGeo(ref, data);
-    return data;
+    return _dedupFetch('lowResGeo:${ref.ownerId ?? 0}:${ref.name}', () async {
+      final encoded = Uri.encodeComponent(ref.name);
+      final data = await api.get(
+          ref.withOwner('/api/geo/project/low-res?name=$encoded'),
+          timeout: _kLoadTimeout) as Map<String, dynamic>;
+      projectDataCache.writeLowResGeo(ref, data);
+      return data;
+    });
   }
 
   /// Fetches pre-computed project statistics for [ref].
