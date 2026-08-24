@@ -306,11 +306,19 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       typeStyleOverrides: _typeStyles,
     );
     n.saveLanguages(_languages);
-    n.saveSyncMeta(
-      autoSyncEnabled: _autoSync,
-      linkedPsTripId: _linkedPsTripId,
-      clearLinkedTrip: _linkedPsTripId == null,
-    );
+    // _autoSync/_linkedPsTripId were seeded from the notifier in initState()
+    // (below) — now that ProjectNotifier fetches sync-meta in the background
+    // rather than before the panel becomes interactive, isSyncMetaLoaded can
+    // still be false here on a very fast save. Skip writing these two fields
+    // in that case rather than push their still-default snapshot and silently
+    // revert the real auto-sync setting / unlink the real Polarsteps trip.
+    if (n.isSyncMetaLoaded) {
+      n.saveSyncMeta(
+        autoSyncEnabled: _autoSync,
+        linkedPsTripId: _linkedPsTripId,
+        clearLinkedTrip: _linkedPsTripId == null,
+      );
+    }
     if (mounted) context.pop();
   }
 

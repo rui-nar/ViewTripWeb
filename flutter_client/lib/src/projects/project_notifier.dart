@@ -180,6 +180,19 @@ class ProjectNotifier extends ChangeNotifier
   bool isElevationLoaded = true;
   bool isGeoLoaded = true;
 
+  /// True once the background sync-status/share-link fetch (auto-sync
+  /// setting, linked Polarsteps trip, share tokens) has completed for the
+  /// current [ref] — false while it's still in flight. Unlike the flags
+  /// above, this is set by base [load()] itself (every mode fetches this
+  /// data the same way, gated only by [loadOwnerExtras]): false at the start
+  /// of a load whenever there's something to wait for, true once that
+  /// background fetch lands (or immediately when [loadOwnerExtras] is
+  /// false — nothing to wait for there). A screen reading autoSyncEnabled /
+  /// linkedPsTripId / shareToken / shareTokenNoMemories directly should gate
+  /// on this rather than assume isLoading turning false means they're
+  /// already populated.
+  bool isSyncMetaLoaded = true;
+
   /// The activity currently highlighted on the map. Null = no selection.
   @override dynamic selectedActivityId;
 
@@ -567,6 +580,9 @@ class ProjectNotifier extends ChangeNotifier
     error = null;
     loadErrorStatus = null;
     offlineFromCache = false;
+    // Nothing to wait for when loadOwnerExtras is false (view mode still
+    // has this true; shared mode doesn't) — see isSyncMetaLoaded's doc.
+    isSyncMetaLoaded = !loadOwnerExtras;
     activities = [];
     items = [];
     geo = null;
@@ -715,9 +731,6 @@ class ProjectNotifier extends ChangeNotifier
       _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
       await _restoreUiState();  // issue #76 follow-up: reapply persisted selection/filters
-      if (loadOwnerExtras) {
-        await Future.wait([_loadSyncMeta(ref), _loadShareInfo(ref)]);
-      }
       // Catch Object, not just Exception: retryFetch rethrows whatever the last
       // attempt threw, and a truncated response decodes into an Error
       // (RangeError/TypeError) that would otherwise escape this handler.
@@ -738,12 +751,29 @@ class ProjectNotifier extends ChangeNotifier
     // into the timeout that produced issue #178.
     unawaited(_loadFullGeoProgressively(ref)
         .whenComplete(() => _loadElevationData(ref)));
-    // Background sync check — fires only for active trips with auto-sync on.
-    // Delayed 5s so it doesn't compete with the full-res geo fetch on load.
-    if (loadOwnerExtras && _tripIsActive && autoSyncEnabled) {
-      Future.delayed(const Duration(seconds: 5), () {
-        if (_loadKey == ref) _backgroundSyncCheck(ref);
-      });
+
+    // Sync status / share-link info — neither the map nor the activity panel
+    // already rendered above needs them, so fetching them must not hold the
+    // loading spinner open. Backgrounded the same way as Phase 2 above;
+    // isSyncMetaLoaded lets a screen that reads autoSyncEnabled/
+    // linkedPsTripId/shareToken/shareTokenNoMemories directly (e.g.
+    // project-settings) know when it's safe to trust them instead of
+    // assuming isLoading turning false means they're already populated.
+    if (loadOwnerExtras) {
+      unawaited(Future.wait([_loadSyncMeta(ref), _loadShareInfo(ref)]).then((_) {
+        if (_loadKey != ref) return;
+        isSyncMetaLoaded = true;
+        notifyListeners();
+        // Background sync check — fires only for active trips with auto-sync
+        // on, which is only known for certain once _loadSyncMeta above has
+        // actually returned. Delayed 5s so it doesn't compete with the
+        // full-res geo fetch on load.
+        if (_tripIsActive && autoSyncEnabled) {
+          Future.delayed(const Duration(seconds: 5), () {
+            if (_loadKey == ref) _backgroundSyncCheck(ref);
+          });
+        }
+      }));
     }
   }
 
@@ -1201,6 +1231,10 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _loadSyncMeta(ProjectRef ref) async {
     try {
       final data = await api.get(ref.path('/sync-meta')) as Map<String, dynamic>;
+      // Now fired in the background rather than awaited inside load(), so a
+      // late response must not clobber a newer project's state if the user
+      // has since navigated on to a different one.
+      if (_loadKey != ref) return;
       autoSyncEnabled = data['auto_sync_enabled'] as bool? ?? true;
       linkedPsTripId = data['linked_ps_trip_id'] as int?;
       lastStravaSyncAt = (data['last_strava_sync_at'] as num?)?.toDouble();
@@ -1213,6 +1247,7 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _loadShareInfo(ProjectRef ref) async {
     try {
       final data = await api.get(ref.path('/share-info')) as Map<String, dynamic>;
+      if (_loadKey != ref) return; // see _loadSyncMeta above
       shareToken = data['share_token'] as String?;
       shareTokenNoMemories = data['share_token_no_memories'] as String?;
     } catch (_) {

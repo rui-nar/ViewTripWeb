@@ -14,7 +14,6 @@ import 'package:go_router/go_router.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
-import '../api/client.dart' show api;
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/last_opened_project.dart';
@@ -36,15 +35,6 @@ import 'viewport_sync.dart';
 // ── Service — calls /api/projects/{name}/meta first, full details in background
 
 class _ViewProjectService extends ProjectService {
-  /// Returns the lightweight /meta response so load() can render the UI quickly.
-  /// Full details are fetched separately via fetchFullDetails() after load()
-  /// returns, giving meta exclusive NAS uplink bandwidth.
-  @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef ref, {bool bypassCache = false}) async {
-    final meta = await api.get(ref.path('/meta')) as Map<String, dynamic>;
-    return meta;
-  }
-
   /// Fetches the full ~3 MB response (elevation_profile included).
   /// Called by ViewProjectNotifier.loadView() after load() has returned.
   ///
@@ -82,8 +72,10 @@ class ViewProjectNotifier extends ProjectNotifier {
     isElevationLoaded = false;
     isGeoLoaded = false;
 
-    // Phase 1: load() calls _viewSvc.getDetails() which returns the
-    // lightweight /meta response in ~1 s.  isLoading goes false after that.
+    // Phase 1: load() calls _viewSvc.getDetailsMeta() (inherited, unoverridden
+    // — a view-mode ref addresses a real project, so the base implementation
+    // already hits the right /meta endpoint) which returns the lightweight
+    // response in ~1 s.  isLoading goes false after that.
     await load(ref);
     if (_disposed) return;
     isMetaLoaded = true;
