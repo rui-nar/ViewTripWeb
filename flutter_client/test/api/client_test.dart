@@ -4,12 +4,41 @@
 // surface in the exception message instead of a bare, unhelpful
 // "ApiException(308): ".
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:viewtrip_client/src/api/client.dart';
 
 void main() {
+  group('ApiClient.getRaw timeout', () {
+    // getRaw() used to have no .timeout() at all (unlike get/post/put/delete),
+    // so a stalled binary download could hang forever.
+    test('a stalled response times out instead of hanging forever', () async {
+      final mock = MockClient((req) async {
+        await Future<void>.delayed(const Duration(seconds: 5));
+        return http.Response('bytes', 200);
+      });
+      final client = ApiClient(baseUrl: 'http://trax.example.com', httpClient: mock);
+
+      await expectLater(
+        client.getRaw('/api/photos/1/full', timeout: const Duration(milliseconds: 50)),
+        throwsA(isA<TimeoutException>()),
+      );
+    });
+
+    test('a response within the timeout resolves normally', () async {
+      final mock = MockClient((req) async => http.Response('bytes', 200));
+      final client = ApiClient(baseUrl: 'http://trax.example.com', httpClient: mock);
+
+      final res = await client.getRaw('/api/photos/1/full',
+          timeout: const Duration(milliseconds: 50));
+
+      expect(res.body, 'bytes');
+    });
+  });
+
   group('ApiClient error handling', () {
     test('a redirect response surfaces the Location header', () async {
       final mock = MockClient((req) async => http.Response(

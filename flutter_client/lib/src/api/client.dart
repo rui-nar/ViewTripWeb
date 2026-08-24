@@ -76,10 +76,18 @@ class ApiClient {
     return _handle(res);
   }
 
+  /// Binary downloads (e.g. full-res photos) can legitimately take longer
+  /// than the 30s JSON default, so [getRaw] uses the same generous budget as
+  /// the other heavy project endpoints (see project_service.dart's
+  /// _kLoadTimeout) instead of hanging indefinitely.
+  static const _kRawTimeout = Duration(seconds: 60);
+
   /// Fetch a binary resource and return the raw response.
   /// Use this for file downloads where the body is not JSON.
-  Future<http.Response> getRaw(String path) async {
-    final res = await _client.get(Uri.parse('$baseUrl$path'), headers: _headers);
+  Future<http.Response> getRaw(String path, {Duration timeout = _kRawTimeout}) async {
+    final res = await _client
+        .get(Uri.parse('$baseUrl$path'), headers: _headers)
+        .timeout(timeout);
     if (res.statusCode >= 200 && res.statusCode < 300) return res;
     throw ApiException(res.statusCode, res.body);
   }

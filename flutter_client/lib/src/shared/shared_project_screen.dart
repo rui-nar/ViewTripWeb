@@ -33,26 +33,43 @@ class _SharedProjectService extends ProjectService {
   String get _aidParam =>
       anonymousId != null ? '?aid=${Uri.encodeComponent(anonymousId!)}' : '';
 
-  /// Returns the lightweight /meta response (~363 KB) so load() can render
-  /// the UI quickly.  Full details are fetched separately via fetchFullDetails()
-  /// after load() returns, giving meta exclusive NAS uplink bandwidth.
+  /// Returns the lightweight /meta response (~363 KB) — this is what
+  /// load()'s Phase 1 actually calls (via the base class's getDetailsMeta()).
+  ///
+  /// This override was missing before this fix: the inherited
+  /// ProjectService.getDetailsMeta() builds /api/projects/{token}/meta — an
+  /// authenticated, owner-scoped endpoint that doesn't recognise a share
+  /// token as a project name — so every shared-project load's Phase 1 hit
+  /// the wrong endpoint and failed outright.
   @override
-  Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) async {
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef _) async {
     final meta =
         await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
     ownerName = (meta['owner_name'] as String?) ?? '';
     return meta;
   }
 
-  /// Fetches the full ~3 MB response (elevation_profile included).
-  /// Called by SharedProjectNotifier.loadShared() after load() has returned,
-  /// so meta gets exclusive bandwidth before this request fires.
+  /// Fetches the full ~3 MB response (elevation_profile included) — the
+  /// getDetails() contract's actual meaning (see ProjectService.getDetails).
+  /// Called directly by SharedProjectNotifier.loadShared() as Phase 2, after
+  /// load() has returned, so meta gets exclusive bandwidth before this
+  /// request fires.
   Future<Map<String, dynamic>> fetchFullDetails() async {
     final data = await api.get('/api/share/$token$_aidParam');
     final m = data as Map<String, dynamic>;
     ownerName = (m['owner_name'] as String?) ?? '';
     return m;
   }
+
+  /// Base-class code (e.g. ProjectNotifier._loadElevationData, fired in the
+  /// background by every load()) calls getDetails() expecting the real full
+  /// payload — this used to be overridden to return the /meta response
+  /// instead, so any such caller silently got meta-shaped data. Routing it
+  /// through fetchFullDetails() keeps a single implementation and makes
+  /// getDetails() mean what the base contract says everywhere.
+  @override
+  Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) =>
+      fetchFullDetails();
 
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) async {
@@ -125,7 +142,7 @@ class SharedProjectNotifier extends ProjectNotifier {
     isElevationLoaded = false;
     isGeoLoaded = false;
 
-    // Phase 1: load() calls _sharedSvc.getDetails() which returns the
+    // Phase 1: load() calls _sharedSvc.getDetailsMeta() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
     final tokenRef = ProjectRef(name: token);
     await load(tokenRef);

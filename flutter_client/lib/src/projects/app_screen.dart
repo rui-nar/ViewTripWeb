@@ -203,7 +203,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       // issue #109) is correct for shared projects (issue #106).
       final projectRef = widget.projectRef
           .resolveRoleFor(context.read<AuthNotifier>().user?.id);
-      notifier.load(projectRef).then((_) {
+
+      void afterLoad() {
         if (!mounted) return;
         if (notifier.error != null) {
           // Stale shared-project ref (owner renamed the trip) — issue #111.
@@ -220,7 +221,23 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         // that never render the banner and must not carry this timer around.
         _degradedRouteWatchNotifier = notifier;
         notifier.startDegradedRouteWatch(notifier.ref ?? projectRef);
-      });
+      }
+
+      // This (singleton, manage-mode) notifier may already hold this exact
+      // project — e.g. toggling back from view mode a moment later — in
+      // which case a fresh network round trip is pure redundancy. Only skip
+      // it when the held data is actually good: a matching ref that finished
+      // loading without error. A mismatched ref, a still-in-flight load, or
+      // one that failed all still need a real load() — mirrors (with the
+      // extra loading/error guards) ProjectStatsScreen's identical singleton
+      // reuse check (see project_stats_screen.dart).
+      if (notifier.ref == projectRef &&
+          !notifier.isLoading &&
+          notifier.error == null) {
+        afterLoad();
+      } else {
+        notifier.load(projectRef).then((_) => afterLoad());
+      }
     });
     SharedPreferences.getInstance().then((prefs) {
       final saved = prefs.getDouble(_kPanelWidthPref);

@@ -54,6 +54,13 @@ def _resolve_user_id(request: Request) -> str:
     logic. Never raises: a missing, malformed or expired token just means the
     request logs with user_id="-" — unauthenticated routes, or a request
     that will itself 401 further down the stack.
+
+    Stashes the decoded payload on ``request.state`` so ``get_current_user``/
+    ``get_optional_current_user`` (api.deps) can reuse it instead of decoding
+    the same token a second time moments later. Only a
+    *successful* decode is stashed — a failure here means the token is bad,
+    and the route dependency below still needs to run its own decode to raise
+    the right 401.
     """
     auth = request.headers.get("authorization", "")
     scheme, _, token = auth.partition(" ")
@@ -63,6 +70,7 @@ def _resolve_user_id(request: Request) -> str:
         payload = decode_token(token.strip())
     except Exception:
         return "-"
+    request.state.jwt_payload = payload
     sub = payload.get("sub")
     return str(sub) if sub is not None else "-"
 
