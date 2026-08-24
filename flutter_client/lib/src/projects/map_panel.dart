@@ -343,6 +343,7 @@ List<Marker> _buildActivityMarkersFromGeo(
             : baseColor;
 
     markers.add(Marker(
+      key: actId != null ? ValueKey('activity-$actId') : null,
       point: point,
       width: 22,
       height: 22,
@@ -418,6 +419,7 @@ List<Marker> _buildSegmentMarkers(
             : baseColor;
 
     markers.add(Marker(
+      key: segId != null ? ValueKey('segment-$segId') : null,
       point: point,
       width: 22,
       height: 22,
@@ -478,7 +480,9 @@ List<Marker> buildEncounterMarkers(
             Navigator.of(context).pop();
             onLocationTap(lat2, lon2);
           };
+    final encId = e['id']?.toString();
     markers.add(Marker(
+      key: encId != null ? ValueKey('encounter-$encId') : null,
       point: LatLng(lat, lon),
       width: 22,
       height: 22,
@@ -1081,6 +1085,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               ? const Color(0xA064748B)
               : const Color(0xFF64748B);
       markers.add(Marker(
+        key: ValueKey('journal-$jId'),
         point: LatLng(lat, lon),
         width: size,
         height: size,
@@ -1426,16 +1431,26 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
                 simplificationTolerance: 0.5,
               ),
             if (_showActivities && _cachedActivityMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedActivityMarkers),
+              MarkerLayer(
+                  key: const ValueKey('activities-layer'),
+                  markers: _cachedActivityMarkers),
             if (_cachedSegmentMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedSegmentMarkers),
+              MarkerLayer(
+                  key: const ValueKey('segment-layer'),
+                  markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedMemoryMarkers),
+              MarkerLayer(
+                  key: const ValueKey('memories-layer'),
+                  markers: _cachedMemoryMarkers),
             if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedJournalMarkers),
+              MarkerLayer(
+                  key: const ValueKey('journal-layer'),
+                  markers: _cachedJournalMarkers),
             if (widget.showEncounters && _showEncounters &&
                 _cachedEncounterMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedEncounterMarkers),
+              MarkerLayer(
+                  key: const ValueKey('encounters-layer'),
+                  markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             if (widget.hereLatLng != null)
@@ -1900,6 +1915,7 @@ class ManageMapPanelState extends State<ManageMapPanel>
               ? const Color(0xA064748B)
               : const Color(0xFF64748B);
       markers.add(Marker(
+        key: ValueKey('journal-$jId'),
         point: LatLng(lat, lon),
         width: size,
         height: size,
@@ -2293,15 +2309,25 @@ class ManageMapPanelState extends State<ManageMapPanel>
                 simplificationTolerance: 0.5,
               ),
             if (_cachedActivityMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedActivityMarkers),
+              MarkerLayer(
+                  key: const ValueKey('activities-layer'),
+                  markers: _cachedActivityMarkers),
             if (_cachedSegmentMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedSegmentMarkers),
+              MarkerLayer(
+                  key: const ValueKey('segment-layer'),
+                  markers: _cachedSegmentMarkers),
             if (_showMemories && _cachedMemoryMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedMemoryMarkers),
+              MarkerLayer(
+                  key: const ValueKey('memories-layer'),
+                  markers: _cachedMemoryMarkers),
             if (notifier.showJournals && _cachedJournalMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedJournalMarkers),
+              MarkerLayer(
+                  key: const ValueKey('journal-layer'),
+                  markers: _cachedJournalMarkers),
             if (_cachedEncounterMarkers.isNotEmpty)
-              MarkerLayer(markers: _cachedEncounterMarkers),
+              MarkerLayer(
+                  key: const ValueKey('encounters-layer'),
+                  markers: _cachedEncounterMarkers),
             if (widget.focusedLatLng != null)
               MarkerLayer(markers: [focusedLocationMarker(widget.focusedLatLng!)]),
             if (widget.hereLatLng != null)
