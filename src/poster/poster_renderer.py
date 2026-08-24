@@ -37,6 +37,8 @@ from PIL import Image, ImageDraw, ImageFilter
 from models.db import get_session
 from src.billing.trip_days import bounds, normalise
 from src.poster.card_layout import (
+    CARD_MAX_HEIGHT_MM,
+    CardLayout,
     PhotoOp,
     RuleOp,
     TextOp,
@@ -105,6 +107,19 @@ _PREVIEW_MAX_TILES = 24
 # the per-request timeout for an individual tile fetch within that budget.
 _PREVIEW_TOTAL_BUDGET_S = 10.0
 _PREVIEW_TILE_TIMEOUT_S = 5.0
+
+# Real card measurement (font metrics, and especially photo decode via
+# _photo_resolver) is per-memory CPU/IO cost that scales with trip size and
+# photo count — for a real trip with real photos, this alone ran the preview
+# well past the client's own timeout before it ever reached placement or
+# drawing, despite those already being budgeted above (issue #14: "preview
+# keeps failing on real data"). The preview exists to show *where* cards
+# would land, not what is on them, so it skips content measurement entirely
+# and gives every card this same placeholder size instead — a plausible
+# "average" card, not the bare minimum, so the preview's card count and
+# density still read like the real poster's. Real card_layout.layout_card
+# measurement still runs for the full render.
+_PREVIEW_CARD_HEIGHT_MM = 0.3 * CARD_MAX_HEIGHT_MM
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 # Card/legend surfaces, text and divider colours come from the active
@@ -756,6 +771,7 @@ def _compose_poster_image(
     layouts: Dict[Any, Any] = {}
     pins: List[PinSpec] = []
     content_less: List[Dict[str, Any]] = []
+    placeholder_height = mm_to_px(_PREVIEW_CARD_HEIGHT_MM, dpi)
     for memory in memories:
         x, y = projector.project(memory["lon"], memory["lat"])
         pin_xy[memory["id"]] = (x, y)
@@ -771,10 +787,15 @@ def _compose_poster_image(
             # memory whose card could not be fitted. Its pin is still drawn.
             content_less.append(memory)
             continue
-        layout = layout_card(
-            blocks, scale, width=width,
-            photo_path=_photo_resolver(user_id, memory["id"]),
-        )
+        if basemap_optional:
+            # See _PREVIEW_CARD_HEIGHT_MM: the preview never measures real
+            # content, so it never resolves or decodes a photo either.
+            layout = CardLayout(width=width, height=placeholder_height)
+        else:
+            layout = layout_card(
+                blocks, scale, width=width,
+                photo_path=_photo_resolver(user_id, memory["id"]),
+            )
         layouts[memory["id"]] = layout
         pins.append(PinSpec(id=memory["id"], x=x, y=y,
                             sort_key=memory.get("date", ""),

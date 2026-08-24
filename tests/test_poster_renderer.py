@@ -572,6 +572,66 @@ def test_preview_degrades_cards_to_legend_when_over_time_budget(
     assert "legend" in warning
 
 
+def test_preview_never_measures_or_decodes_real_card_content(project_id, monkeypatch):
+    """Real measurement (font metrics, and especially photo decode via
+    _photo_resolver) is per-memory cost that scales with trip size and photo
+    count — for a real trip with real photos this alone ran the preview past
+    the client's timeout before it ever reached placement or drawing, even
+    with the wall-clock budget from the test above already in place (issue
+    #14 follow-up: "the preview keeps failing on real data"). The preview
+    must never resolve or measure a memory's photos, however many it has.
+
+    (The trip-summary card's own layout_card call is unaffected and expected
+    — it is text-only, no photo decode, and cheap regardless of trip size.)"""
+    import src.poster.poster_renderer as renderer_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("preview must not resolve/decode a memory's photos")
+
+    monkeypatch.setattr(renderer_module, "_photo_resolver", boom)
+
+    calls = []
+    real_layout_card = renderer_module.layout_card
+    monkeypatch.setattr(
+        renderer_module, "layout_card",
+        lambda *a, **k: (calls.append(1), real_layout_card(*a, **k))[-1],
+    )
+
+    body = {
+        **_BODY,
+        "config": {**_BODY["config"], "hero_photo": True, "all_photos": True},
+        "memories": [
+            {**m, "photo_uuids": ["abc", "def"]} for m in _BODY["memories"]
+        ],
+    }
+    png_bytes, _ = render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        assert img.size[0] > 0
+    # The one remaining call is the trip-summary card's own — text-only, no
+    # photo decode, unaffected by this guard. Neither memory card reached
+    # layout_card at all.
+    assert len(calls) == 1, "a memory card was measured with real content in preview"
+
+
+def test_full_render_still_measures_real_card_content(project_id, tmp_path, monkeypatch):
+    """The counterpart: the preview-only guard above must not silently turn
+    into a global regression that skips real measurement for the full render
+    too — a real poster's cards must still show their real content."""
+    import src.poster.poster_renderer as renderer_module
+
+    calls = []
+    real_layout_card = renderer_module.layout_card
+    monkeypatch.setattr(
+        renderer_module, "layout_card",
+        lambda *a, **k: (calls.append(1), real_layout_card(*a, **k))[-1],
+    )
+    render_poster(
+        job_id=1, user_info_id=1, project_id=project_id, request=_BODY,
+        poster_dir=tmp_path, progress=lambda stage: None, tile_fetcher=_fake_tile_fetcher,
+    )
+    assert calls, "the full render must still measure real card content"
+
+
 def test_full_render_still_fails_hard_when_the_basemap_fails(project_id, tmp_path):
     """Unlike the preview, the real poster must never be produced on grey:
     a poster without its map is not a useful output (issue #14, PR 1)."""
