@@ -13,7 +13,7 @@ import datetime
 from typing import Annotated, Optional
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import select
 
@@ -107,13 +107,24 @@ _optional_bearer = HTTPBearer(auto_error=False)
 
 
 def get_current_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
 ) -> dict:
-    """FastAPI dependency — validates JWT and returns the decoded payload."""
+    """FastAPI dependency — validates JWT and returns the decoded payload.
+
+    Reuses the decode the access-log middleware (api.middleware._resolve_user_id)
+    already performed for this same token, when present, instead of decoding it
+    a second time (issue #212). Falls back to decoding here when there is
+    nothing to reuse — e.g. middleware isn't installed, as in most unit tests.
+    """
+    cached = getattr(request.state, "jwt_payload", None)
+    if cached is not None:
+        return cached
     return decode_token(credentials.credentials)
 
 
 def get_optional_current_user(
+    request: Request,
     credentials: Annotated[
         Optional[HTTPAuthorizationCredentials], Depends(_optional_bearer)
     ],
@@ -121,9 +132,14 @@ def get_optional_current_user(
     """FastAPI dependency — returns the decoded JWT payload if a valid Bearer
     token is present, or None if no token was supplied.  Never raises 401.
     Used on public endpoints that want to behave differently for logged-in users.
+
+    Reuses the middleware's decode the same way ``get_current_user`` does.
     """
     if credentials is None:
         return None
+    cached = getattr(request.state, "jwt_payload", None)
+    if cached is not None:
+        return cached
     try:
         return decode_token(credentials.credentials)
     except HTTPException:

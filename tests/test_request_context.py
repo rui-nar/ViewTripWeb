@@ -10,14 +10,17 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from typing import Annotated
+
 import jwt as pyjwt
 import pytest
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.responses import Response
 
 from api.deps import get_current_user, jwt_secret
-from api.middleware import DEBUG_ROUTE_TEMPLATES, access_log_middleware
+from api.middleware import DEBUG_ROUTE_TEMPLATES, access_log_middleware, install_middleware
 from src.utils.logging import request_id_var, user_id_var
 
 
@@ -108,6 +111,67 @@ class TestContextVarIsolation:
 
         resp = asyncio.run(_run())
         assert resp.body.decode() == "-"
+
+
+class TestSharedJwtDecode:
+    """get_current_user reuses the middleware's decode instead of repeating it
+    (issue #212) — a request's JWT is decoded once, not twice."""
+
+    def test_get_current_user_reuses_the_middlewares_decode(self, monkeypatch):
+        calls = {"n": 0}
+        orig_decode = pyjwt.decode
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig_decode(*args, **kwargs)
+
+        monkeypatch.setattr(pyjwt, "decode", _spy)
+
+        app = FastAPI()
+        install_middleware(app)
+
+        @app.get("/protected")
+        def protected(current_user: Annotated[dict, Depends(get_current_user)]):
+            return {"sub": current_user["sub"]}
+
+        token = pyjwt.encode({"sub": "42"}, jwt_secret(), algorithm="HS256")
+        client = TestClient(app)
+        resp = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"sub": "42"}
+        assert calls["n"] == 1, f"expected exactly one JWT decode, got {calls['n']}"
+
+    def test_get_current_user_still_works_without_the_middleware(self):
+        """Most unit tests mount routers on a bare FastAPI() with no middleware —
+        get_current_user must still decode for itself when there is nothing to
+        reuse from request.state."""
+        app = FastAPI()
+
+        @app.get("/protected")
+        def protected(current_user: Annotated[dict, Depends(get_current_user)]):
+            return {"sub": current_user["sub"]}
+
+        token = pyjwt.encode({"sub": "42"}, jwt_secret(), algorithm="HS256")
+        client = TestClient(app)
+        resp = client.get("/protected", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"sub": "42"}
+
+    def test_an_invalid_token_still_401s_through_get_current_user(self):
+        """Middleware swallows the decode failure for logging purposes; the
+        route dependency must still raise its own 401 for a bad token."""
+        app = FastAPI()
+        install_middleware(app)
+
+        @app.get("/protected")
+        def protected(current_user: Annotated[dict, Depends(get_current_user)]):
+            return {"sub": current_user["sub"]}
+
+        client = TestClient(app)
+        resp = client.get("/protected", headers={"Authorization": "Bearer garbage"})
+        assert resp.status_code == 401
 
 
 class TestAccessLogLevel:
