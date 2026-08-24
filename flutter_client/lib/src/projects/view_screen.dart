@@ -27,7 +27,6 @@ import 'elevation_chart.dart';
 import 'map_panel.dart';
 import 'people_screen.dart';
 import 'project_add_fab.dart';
-import 'project_data_cache.dart';
 import 'project_notifier.dart';
 import 'project_service.dart';
 import 'sync_import_dialog.dart';
