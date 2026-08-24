@@ -15,18 +15,31 @@ const _defaults = PosterConfigOptions(
   counters: true,
   tagPie: false,
   encounters: false,
+  tripSummary: true,
   theme: 'dark',
   layout: 'radial',
 );
 
-Future<PosterConfigOptions?> _openAndConfirm(
+/// Every checkbox that is on by default and feeds the *memory* card — turning
+/// all of these off leaves that card with nothing on it. ('Trip summary card'
+/// is left out on purpose: it is a separate, standalone card.)
+const _memoryDefaultsOn = [
+  'Distance',
+  'Elevation',
+  'Hero photo',
+  'Memory text',
+  'Counters',
+];
+
+/// Opens the dialog and applies [selectTheme]/[toggleTitles], leaving it open
+/// so a test can either inspect the live preview or press an action itself.
+Future<void> _openDialog(
   WidgetTester tester, {
   List<String> toggleTitles = const [],
   String? selectTheme,
   String? selectLayout,
-  bool cancel = false,
+  void Function(PosterConfigOptions)? onConfirm,
 }) async {
-  PosterConfigOptions? result;
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
       body: Builder(
@@ -35,7 +48,7 @@ Future<PosterConfigOptions?> _openAndConfirm(
             onPressed: () => showDialog<void>(
               context: context,
               builder: (_) => PosterConfigDialog(
-                onConfirm: (opts) => result = opts,
+                onConfirm: (opts) => onConfirm?.call(opts),
               ),
             ),
             child: const Text('open'),
@@ -69,6 +82,23 @@ Future<PosterConfigOptions?> _openAndConfirm(
     await tester.tap(finder);
     await tester.pump();
   }
+}
+
+Future<PosterConfigOptions?> _openAndConfirm(
+  WidgetTester tester, {
+  List<String> toggleTitles = const [],
+  String? selectTheme,
+  String? selectLayout,
+  bool cancel = false,
+}) async {
+  PosterConfigOptions? result;
+  await _openDialog(
+    tester,
+    toggleTitles: toggleTitles,
+    selectTheme: selectTheme,
+    selectLayout: selectLayout,
+    onConfirm: (opts) => result = opts,
+  );
 
   await tester.tap(find.text(cancel ? 'Cancel' : 'Generate'));
   await tester.pumpAndSettle();
@@ -107,6 +137,29 @@ void main() {
     expect(result.counters, _defaults.counters);
     expect(result.tagPie, _defaults.tagPie);
     expect(result.encounters, _defaults.encounters);
+    expect(result.tripSummary, _defaults.tripSummary);
+    expect(result.theme, _defaults.theme);
+  });
+
+  testWidgets('trip summary defaults to on and is sent as trip_summary',
+      (tester) async {
+    final result = await _openAndConfirm(tester);
+
+    expect(result, isNotNull);
+    expect(result!.tripSummary, isTrue);
+    expect(result.toJson()['trip_summary'], isTrue);
+  });
+
+  testWidgets('turning the trip summary card off flips only that field',
+      (tester) async {
+    final result =
+        await _openAndConfirm(tester, toggleTitles: ['Trip summary card']);
+
+    expect(result, isNotNull);
+    expect(result!.tripSummary, isFalse);
+    expect(result.toJson()['trip_summary'], isFalse);
+    expect(result.distance, _defaults.distance);
+    expect(result.memoryText, _defaults.memoryText);
     expect(result.theme, _defaults.theme);
     expect(result.layout, _defaults.layout);
   });
@@ -136,6 +189,7 @@ void main() {
     expect(result.tagPie, _defaults.tagPie);
     expect(result.encounters, _defaults.encounters);
     expect(result.layout, _defaults.layout);
+    expect(result.tripSummary, _defaults.tripSummary);
   });
 
   testWidgets('layout defaults to radial', (tester) async {
@@ -163,6 +217,56 @@ void main() {
     expect(result.tagPie, _defaults.tagPie);
     expect(result.encounters, _defaults.encounters);
     expect(result.theme, _defaults.theme);
+    expect(result.tripSummary, _defaults.tripSummary);
+  });
+
+  // ── Live preview ──────────────────────────────────────────────────
+  // Light checks that the mock-up follows the toggles; it is a visual
+  // approximation, so nothing here asserts on its layout or measurements.
+
+  testWidgets('preview shows a titled, day-badged card by default',
+      (tester) async {
+    await _openDialog(tester);
+
+    expect(find.text('DAY 3'), findsOneWidget);
+    expect(find.text('Sunset at the beach'), findsOneWidget);
+  });
+
+  testWidgets('preview keeps the title when memory text is off',
+      (tester) async {
+    // The title is no longer tied to the memory_text toggle; only the date
+    // and description lines are.
+    await _openDialog(tester, toggleTitles: ['Memory text']);
+
+    expect(find.text('Sunset at the beach'), findsOneWidget);
+    expect(find.text('DAY 3'), findsOneWidget);
+    expect(find.text('12 Jun 2024'), findsNothing);
+  });
+
+  testWidgets('preview shows no card when every memory element is off',
+      (tester) async {
+    await _openDialog(tester, toggleTitles: _memoryDefaultsOn);
+
+    expect(find.textContaining('no card'), findsOneWidget);
+    expect(find.text('DAY 3'), findsNothing);
+    expect(find.text('Sunset at the beach'), findsNothing);
+  });
+
+  testWidgets('preview mocks up the trip summary card while it is on',
+      (tester) async {
+    await _openDialog(tester);
+
+    expect(find.text('Iceland ring road'), findsOneWidget);
+    expect(find.text('1 Jun 2024 – 14 Jun 2024'), findsOneWidget);
+  });
+
+  testWidgets('preview drops the trip summary card when it is off',
+      (tester) async {
+    await _openDialog(tester, toggleTitles: ['Trip summary card']);
+
+    expect(find.text('Iceland ring road'), findsNothing);
+    // The memory card is untouched by that toggle.
+    expect(find.text('Sunset at the beach'), findsOneWidget);
   });
 
   // Every checkbox title maps 1:1 to a PosterConfigOptions.toJson() key.
@@ -175,6 +279,7 @@ void main() {
     'Counters': 'counters',
     'Tag pie chart': 'tag_pie',
     'Number of encounters': 'encounters',
+    'Trip summary card': 'trip_summary',
   };
 
   for (final entry in fieldsByTitle.entries) {
