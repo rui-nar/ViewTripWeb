@@ -1,5 +1,7 @@
 .states
 *.db
+*.db-shm
+*.db-wal
 .web
 assets/external/
 # Virtual environment
