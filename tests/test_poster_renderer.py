@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import logging
+from datetime import datetime
 
 import pytest
 from PIL import Image
@@ -23,21 +24,28 @@ import src.poster.tile_stitcher as tile_stitcher
 from models.project_db import DBProject
 from models.user import UserInfo
 from src.exceptions.errors import APIError
-from src.poster.card_layout import layout_card
+from src.poster.card_layout import card_width_px, layout_card, mm_to_px
 from src.poster.card_placement import Rect
+from src.models.journal import JournalEntry
+from src.models.memory import Memory
+from src.models.project import Project
 from src.poster.poster_renderer import (
     _MISSING_BASEMAP_COLOR,
+    _PAGE_MARGIN_MM,
     _PIN_COLOR,
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
     _PREVIEW_TOTAL_BUDGET_S,
     _Projector,
+    _day_number,
     _draw_card,
     _draw_card_chrome,
     _draw_legend,
     _paste_cover,
     _pdf_resolution,
     _target_size,
+    _trip_span,
+    _trip_summary_blocks,
     assemble_card_content,
     render_poster,
     render_poster_preview,
@@ -98,11 +106,30 @@ def test_no_flags_produce_no_blocks():
     assert assemble_card_content(_NO_FLAGS, _MEMORY, _METRICS) == []
 
 
-def test_memory_text_off_hides_name_and_description():
+def test_memory_text_off_still_shows_the_title():
+    """Regression: ``name`` used to be gated by ``memory_text`` alongside the
+    date and description, so a card built from distance/counters alone rendered
+    as an anonymous stats box with no way to tell which memory it belonged to.
+    The title now shows on every card that has any content at all."""
     config = {**_ALL_FLAGS, "memory_text": False}
     kinds = [b["kind"] for b in assemble_card_content(config, _MEMORY, _METRICS)]
-    assert "name" not in kinds
+    assert kinds[0] == "name"
+    assert "date" not in kinds
     assert "description" not in kinds
+
+
+def test_memory_text_off_shows_the_title_on_a_stats_only_card():
+    config = {**_NO_FLAGS, "distance": True, "counters": True}
+    blocks = assemble_card_content(config, _MEMORY, _METRICS)
+    assert [b["kind"] for b in blocks] == ["name", "distance", "counters"]
+    assert blocks[0]["text"] == "Day 1"
+
+
+def test_a_title_alone_is_not_content_enough_for_a_card():
+    """The title is prepended to a card that has content; it never *creates*
+    one on its own, or every flag-less memory would still get an all-but-empty
+    box (bug 1)."""
+    assert assemble_card_content(_NO_FLAGS, _MEMORY, _METRICS) == []
 
 
 def test_memory_text_on_but_no_description_omits_description_block():
@@ -116,7 +143,48 @@ def test_memory_text_on_but_no_description_omits_description_block():
 def test_hero_photo_uses_only_first_uuid():
     config = {**_NO_FLAGS, "hero_photo": True}
     blocks = assemble_card_content(config, _MEMORY, _METRICS)
-    assert blocks == [{"kind": "hero_photo", "uuid": "abc"}]
+    assert blocks == [
+        {"kind": "name", "text": "Day 1"},
+        {"kind": "hero_photo", "uuid": "abc"},
+    ]
+
+
+# ── The "Day N" badge ─────────────────────────────────────────────────────────
+
+def test_day_badge_leads_every_card_with_content():
+    config = {**_NO_FLAGS, "distance": True}
+    blocks = assemble_card_content(config, _MEMORY, _METRICS, day_number=4)
+    assert [b["kind"] for b in blocks] == ["day_badge", "name", "distance"]
+    assert blocks[0] == {"kind": "day_badge", "day_number": 4}
+
+
+def test_day_badge_precedes_the_title_with_all_flags_on():
+    blocks = assemble_card_content(_ALL_FLAGS, _MEMORY, _METRICS, day_number=1)
+    assert [b["kind"] for b in blocks][:3] == ["day_badge", "name", "date"]
+
+
+def test_day_badge_does_not_give_an_empty_card_content():
+    """A day number is not content: with nothing enabled the memory still gets
+    no card at all."""
+    assert assemble_card_content(_NO_FLAGS, _MEMORY, _METRICS, day_number=3) == []
+
+
+def test_no_day_badge_when_the_day_number_is_unknown():
+    config = {**_NO_FLAGS, "distance": True}
+    blocks = assemble_card_content(config, _MEMORY, _METRICS, day_number=None)
+    assert [b["kind"] for b in blocks] == ["name", "distance"]
+
+
+def test_day_badge_lays_out_as_text_above_the_title():
+    scale = TypeScale(150.0)
+    layout = layout_card(
+        [{"kind": "day_badge", "day_number": 7}, {"kind": "name", "text": "Col du Galibier"}],
+        scale,
+    )
+    texts = [op for op in layout.ops if hasattr(op, "text")]
+    assert texts[0].text.upper().startswith("DAY 7")
+    assert texts[0].style == "day_badge"
+    assert texts[0].y < texts[1].y  # the badge sits above the title
 
 
 def test_hero_photo_and_all_photos_skipped_when_no_photos():
@@ -138,13 +206,17 @@ def test_encounters_block_present_even_when_count_is_zero():
     a count of 0 is still meaningful information for the card."""
     metrics = {**_METRICS, "encounter_count": 0}
     config = {**_NO_FLAGS, "encounters": True}
-    assert assemble_card_content(config, _MEMORY, metrics) == [{"kind": "encounters", "count": 0}]
+    assert assemble_card_content(config, _MEMORY, metrics) == [
+        {"kind": "name", "text": "Day 1"},
+        {"kind": "encounters", "count": 0},
+    ]
 
 
 def test_distance_and_elevation_carry_raw_metric_values():
     config = {**_NO_FLAGS, "distance": True, "elevation": True}
     blocks = assemble_card_content(config, _MEMORY, _METRICS)
     assert blocks == [
+        {"kind": "name", "text": "Day 1"},
         {"kind": "distance", "value_m": 12_345.0},
         {"kind": "elevation", "value_m": 210.0},
     ]
@@ -783,3 +855,269 @@ class TestThemeThreadedThroughTheRender:
             project_id, 1, {**_BODY, "config": config})
         default = Image.open(io.BytesIO(png_bytes)).convert("RGB").tobytes()
         assert default == self._preview(project_id, "dark").tobytes()
+
+
+# ── Trip day numbering ────────────────────────────────────────────────────────
+# The app's canonical formula (dayTripNumbering in project_notifier.dart):
+# day 1 is the project's explicit trip_start override when set, otherwise the
+# earliest dated thing in the trip; rest days in between still count.
+
+def _dated_activity(make_activity, day: str, **kwargs):
+    dt = datetime.fromisoformat(f"{day}T09:00:00")
+    return make_activity(start_date=dt, start_date_local=dt, **kwargs)
+
+
+class TestTripDayNumbering:
+    def test_day_one_is_the_earliest_activity(self, make_activity):
+        project = Project(name="T", activities=[
+            _dated_activity(make_activity, "2024-06-05", id=2),
+            _dated_activity(make_activity, "2024-06-01", id=1),
+        ])
+        start, end = _trip_span(project)
+        assert (start, end) == ("2024-06-01", "2024-06-05")
+        assert _day_number("2024-06-01", start) == 1
+        assert _day_number("2024-06-05", start) == 5
+
+    def test_rest_days_between_dated_items_still_count(self, make_activity):
+        """Numbering is calendar arithmetic over min/max, not a position in a
+        list — a week off in the middle of a trip does not renumber the days
+        after it."""
+        project = Project(name="T", activities=[
+            _dated_activity(make_activity, "2024-06-01", id=1),
+            _dated_activity(make_activity, "2024-06-10", id=2),
+        ])
+        start, _ = _trip_span(project)
+        assert _day_number("2024-06-10", start) == 10
+
+    def test_an_explicit_trip_start_overrides_the_earliest_item(self, make_activity):
+        project = Project(
+            name="T",
+            trip_start="2024-05-30",
+            activities=[_dated_activity(make_activity, "2024-06-01", id=1)],
+        )
+        start, _ = _trip_span(project)
+        assert start == "2024-05-30"
+        assert _day_number("2024-06-01", start) == 3
+
+    def test_memories_and_journal_entries_extend_the_span(self, make_activity):
+        project = Project(
+            name="T",
+            activities=[_dated_activity(make_activity, "2024-06-05", id=1)],
+            memories=[Memory(id=1, date="2024-06-02")],
+            journal_entries=[JournalEntry(id=1, date="2024-06-09")],
+        )
+        assert _trip_span(project) == ("2024-06-02", "2024-06-09")
+
+    def test_an_explicit_trip_end_overrides_the_latest_item(self, make_activity):
+        project = Project(
+            name="T",
+            trip_end="2024-06-30",
+            activities=[_dated_activity(make_activity, "2024-06-01", id=1)],
+        )
+        assert _trip_span(project)[1] == "2024-06-30"
+
+    def test_a_trip_with_no_dates_has_no_span_and_no_day_numbers(self):
+        assert _trip_span(Project(name="T")) == (None, None)
+        assert _day_number("2024-06-01", None) is None
+        assert _day_number(None, "2024-06-01") is None
+        assert _day_number("not a date", "2024-06-01") is None
+
+    def test_the_badge_reaches_a_rendered_card(self, make_activity):
+        """End to end through the renderer's own per-memory assembly: a memory
+        on the trip's second day gets a "Day 2" badge."""
+        project = Project(name="T", activities=[
+            _dated_activity(make_activity, "2024-06-01", id=1),
+        ])
+        start, _ = _trip_span(project)
+        blocks = assemble_card_content(
+            _ALL_FLAGS, {**_MEMORY, "date": "2024-06-02"}, _METRICS,
+            day_number=_day_number("2024-06-02", start),
+        )
+        assert blocks[0] == {"kind": "day_badge", "day_number": 2}
+
+
+# ── Bug 1: a memory with no content must never get a card ────────────────────
+# With every flag off, assemble_card_content returns [] — but the pipeline
+# still built a PinSpec for it, placed it, and drew an empty rounded card with
+# a leader line pointing at nothing. Such a memory now skips card placement
+# entirely and goes to the legend, exactly like an overflowed pin.
+
+_BLANK_BODY = {
+    **_BODY,
+    "config": {**{k: False for k in _ALL_FLAGS}, "theme": "dark"},
+}
+
+
+def _spy_pipeline(monkeypatch):
+    """Record the pins offered to placement, the legend entries, and the cards
+    actually drawn during one render."""
+    import src.poster.poster_renderer as renderer_module
+
+    seen = {"pins": None, "legend": [], "cards": 0}
+
+    real_place = renderer_module.place_cards
+
+    def place_spy(pins, *args, **kwargs):
+        seen["pins"] = list(pins)
+        return real_place(pins, *args, **kwargs)
+
+    real_legend = renderer_module._draw_legend
+
+    def legend_spy(canvas, entries, *args, **kwargs):
+        seen["legend"] = list(entries)
+        return real_legend(canvas, entries, *args, **kwargs)
+
+    real_card = renderer_module._draw_card
+
+    def card_spy(*args, **kwargs):
+        seen["cards"] += 1
+        return real_card(*args, **kwargs)
+
+    monkeypatch.setattr(renderer_module, "place_cards", place_spy)
+    monkeypatch.setattr(renderer_module, "_draw_legend", legend_spy)
+    monkeypatch.setattr(renderer_module, "_draw_card", card_spy)
+    return seen
+
+
+class TestContentLessMemoriesGetNoCard:
+    def test_no_pin_spec_no_card_and_a_legend_entry(self, project_id, monkeypatch):
+        seen = _spy_pipeline(monkeypatch)
+        render_poster_preview(project_id, 1, _BLANK_BODY,
+                              tile_fetcher=_fake_tile_fetcher)
+
+        assert seen["pins"] == [], "a content-less memory reached card placement"
+        assert seen["cards"] == 0, "an empty card was drawn"
+        assert {m["id"] for m in seen["legend"]} == {1, 2}
+
+    def test_the_pin_marker_is_still_drawn(self, project_id):
+        """Only the *card* is skipped — the memory is still a place on the map."""
+        png_bytes, _ = render_poster_preview(
+            project_id, 1, _BLANK_BODY, tile_fetcher=_fake_tile_fetcher)
+        with Image.open(io.BytesIO(png_bytes)) as img:
+            pixels = img.convert("RGB").load()
+            w, h = img.size
+            assert any(pixels[x, y] == _PIN_COLOR
+                       for x in range(w) for y in range(h)), (
+                "the content-less memory lost its pin marker as well as its card")
+
+    def test_a_memory_with_content_still_gets_a_card(self, project_id, monkeypatch):
+        """The counterpart: the skip must key off emptiness, not fire always."""
+        seen = _spy_pipeline(monkeypatch)
+        render_poster_preview(project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+
+        assert {p.id for p in seen["pins"]} == {1, 2}
+        assert seen["cards"] > 0
+
+
+# ── The trip summary card ────────────────────────────────────────────────────
+# One card for the whole poster: the trip's own title, period and totals.
+
+def _summary_project(make_activity):
+    return Project(
+        name="Alps 2024",
+        activities=[
+            _dated_activity(make_activity, "2024-06-01", id=1,
+                            distance=84_210.0, total_elevation_gain=1_200.0),
+            _dated_activity(make_activity, "2024-06-03", id=2,
+                            distance=15_790.0, total_elevation_gain=300.0),
+        ],
+    )
+
+
+class TestTripSummaryBlocks:
+    def test_it_carries_the_title_period_and_both_totals(self, make_activity):
+        project = _summary_project(make_activity)
+        blocks = _trip_summary_blocks(project, _trip_span(project))
+        by_kind = {b["kind"]: b for b in blocks}
+
+        assert [b["kind"] for b in blocks] == ["name", "date", "distance", "elevation"]
+        assert by_kind["name"]["text"] == "Alps 2024"
+        assert by_kind["date"]["text"] == "1 Jun 2024 – 3 Jun 2024"
+        # Summed across ALL the trip's activities, not one day's worth.
+        assert by_kind["distance"]["value_m"] == pytest.approx(100_000.0)
+        assert by_kind["elevation"]["value_m"] == pytest.approx(1_500.0)
+
+    def test_the_period_is_omitted_when_the_trip_has_no_dates(self):
+        blocks = _trip_summary_blocks(Project(name="Undated"), (None, None))
+        assert [b["kind"] for b in blocks] == ["name", "distance", "elevation"]
+
+    def test_an_explicit_trip_start_shows_in_the_period(self, make_activity):
+        project = _summary_project(make_activity)
+        project.trip_start = "2024-05-30"
+        blocks = _trip_summary_blocks(project, _trip_span(project))
+        assert blocks[1]["text"] == "30 May 2024 – 3 Jun 2024"
+
+    def test_totals_reuse_the_per_card_km_and_m_formatting(self, make_activity):
+        """Same block kinds as a memory card, so the units come out of the same
+        code — a summary reading "100 km" while a card reads "100000 m" would
+        be the poster contradicting itself."""
+        project = _summary_project(make_activity)
+        layout = layout_card(_trip_summary_blocks(project, _trip_span(project)),
+                             TypeScale(150.0))
+        texts = [op.text for op in layout.ops if hasattr(op, "text")]
+        assert "100 km" in texts
+        assert "1,500 m" in texts
+        assert "Alps 2024" in texts
+
+
+class TestTripSummaryRendering:
+    def _summary_calls(self, project_id, monkeypatch, config_extra):
+        import src.poster.poster_renderer as renderer_module
+
+        calls = []
+        real = renderer_module._draw_trip_summary
+
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(renderer_module, "_draw_trip_summary", spy)
+        body = {**_BODY, "config": {**_BODY["config"], **config_extra}}
+        render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+        return calls
+
+    def test_drawn_when_the_flag_is_on(self, project_id, monkeypatch):
+        assert self._summary_calls(project_id, monkeypatch, {"trip_summary": True})
+
+    def test_drawn_by_default_when_the_request_omits_the_flag(self, project_id, monkeypatch):
+        """A real feature default, so a stored request predating the field
+        still gets the card."""
+        assert self._summary_calls(project_id, monkeypatch, {})
+
+    def test_not_drawn_when_the_flag_is_off(self, project_id, monkeypatch):
+        assert self._summary_calls(project_id, monkeypatch, {"trip_summary": False}) == []
+
+    def test_it_sits_in_the_top_left_corner_sized_to_its_content(
+        self, project_id, monkeypatch
+    ):
+        """It has no pin and no leader line, so it is pinned to the corner by
+        the same page margin the legend uses bottom-left, rather than being
+        placed by the pin-based search."""
+        import src.poster.poster_renderer as renderer_module
+
+        rects = []
+        real_chrome = renderer_module._draw_card_chrome
+        real_summary = renderer_module._draw_trip_summary
+
+        def summary_spy(*args, **kwargs):
+            def chrome_spy(canvas, rect, dpi, theme):
+                rects.append(rect)
+                return real_chrome(canvas, rect, dpi, theme)
+
+            monkeypatch.setattr(renderer_module, "_draw_card_chrome", chrome_spy)
+            try:
+                return real_summary(*args, **kwargs)
+            finally:
+                monkeypatch.setattr(renderer_module, "_draw_card_chrome", real_chrome)
+
+        monkeypatch.setattr(renderer_module, "_draw_trip_summary", summary_spy)
+        render_poster_preview(project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+
+        assert len(rects) == 1
+        rect = rects[0]
+        ratio = _PREVIEW_MAX_DIMENSION / max(*_target_size("landscape"))
+        dpi = 150.0 * ratio
+        margin = mm_to_px(_PAGE_MARGIN_MM, dpi)
+        assert (rect.left, rect.top) == (margin, margin)
+        assert rect.right - rect.left == card_width_px(dpi)
+        assert rect.bottom - rect.top > 0  # sized to content, not a fixed box

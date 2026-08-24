@@ -207,6 +207,11 @@ _ACCENT = (252, 76, 2)
 TYPE_SCALE: Dict[str, TextStyle] = {
     "hero_title": TextStyle(16.0, "bold", _INK, line_height=1.18, space_after_pt=1.0),
     "title": TextStyle(11.0, "bold", _INK, line_height=1.22, space_after_pt=1.0),
+    # "DAY 4" — the app's canonical trip day number, set like the date label
+    # (small, tracked, uppercase, brand accent) but bolder and tighter, so it
+    # reads as a badge sitting above the title rather than as a second date.
+    "day_badge": TextStyle(6.5, "bold", _ACCENT, role="accent", line_height=1.2,
+                           space_after_pt=0.5, tracking_pt=0.5, uppercase=True),
     "date": TextStyle(7.0, "medium", _ACCENT, role="accent", space_after_pt=3.0,
                       tracking_pt=0.4, uppercase=True),
     "body": TextStyle(8.0, "regular", _INK, line_height=1.42, space_after_pt=3.0),

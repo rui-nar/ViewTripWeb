@@ -28,12 +28,14 @@ from __future__ import annotations
 import io
 import logging
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFilter
 
 from models.db import get_session
+from src.billing.trip_days import bounds, normalise
 from src.poster.card_layout import (
     PhotoOp,
     RuleOp,
@@ -59,6 +61,7 @@ from src.poster.tile_stitcher import (
 )
 from src.poster.typography import TypeScale, strip_unsupported
 from src.project.project_repo import ProjectRepo
+from src.project.repo_core import _compute_stats
 
 _log = logging.getLogger(__name__)
 
@@ -205,7 +208,10 @@ class _Projector:
 # ── Pure content assembly (no Pillow) ─────────────────────────────────────────
 
 def assemble_card_content(
-    config: Dict[str, bool], memory: Dict[str, Any], metrics: Dict[str, Any]
+    config: Dict[str, bool],
+    memory: Dict[str, Any],
+    metrics: Dict[str, Any],
+    day_number: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Turn enabled ``config`` flags + one memory + its day metrics into an
     ordered list of content blocks for a poster card.
@@ -216,6 +222,7 @@ def assemble_card_content(
     ``kind`` determines the rest of its fields:
 
       - ``name`` / ``description`` / ``date``: ``{"text": str}``
+      - ``day_badge``: ``{"day_number": int}``
       - ``hero_photo``: ``{"uuid": str}`` (first photo only)
       - ``photos``: ``{"uuids": list[str]}`` (all photos)
       - ``distance`` / ``elevation``: ``{"value_m": float}``
@@ -223,15 +230,24 @@ def assemble_card_content(
       - ``tag_pie``: ``{"data": dict[str, float]}``
       - ``encounters``: ``{"count": int}``
 
-    A field is included only when its ``config`` flag is set *and* there is
-    actual content for it (e.g. ``hero_photo`` is skipped if the memory has no
-    photos; ``counters``/``tag_pie`` are skipped if empty).
+    A configurable field is included only when its ``config`` flag is set *and*
+    there is actual content for it (e.g. ``hero_photo`` is skipped if the memory
+    has no photos; ``counters``/``tag_pie`` are skipped if empty).
+
+    Returns ``[]`` when none of the configurable fields produced anything. That
+    is the signal the caller keys off to skip the card entirely: a card with no
+    content is a content-free box with a leader line pointing at it, so such a
+    memory belongs in the legend instead (see ``_compose_poster_image``).
+
+    ``day_badge`` and ``name`` are deliberately *outside* that gating and are
+    prepended, in that order, to any card that has content at all. They identify
+    which memory the card belongs to; without them a card showing only distance
+    and counters is an anonymous stats box. In particular ``name`` is no longer
+    gated by ``memory_text``, which now governs only the date and description.
     """
     blocks: List[Dict[str, Any]] = []
 
     if config.get("memory_text"):
-        if memory.get("name"):
-            blocks.append({"kind": "name", "text": memory["name"]})
         # The date rides along with the memory text: a dated card reads as a
         # journal entry, and it is what the overflow legend refers to.
         if memory.get("date"):
@@ -256,7 +272,15 @@ def assemble_card_content(
     if config.get("encounters"):
         blocks.append({"kind": "encounters", "count": metrics.get("encounter_count", 0)})
 
-    return blocks
+    if not blocks:
+        return []
+
+    lead: List[Dict[str, Any]] = []
+    if day_number is not None:
+        lead.append({"kind": "day_badge", "day_number": day_number})
+    if memory.get("name"):
+        lead.append({"kind": "name", "text": memory["name"]})
+    return lead + blocks
 
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -273,6 +297,52 @@ def _format_date(value: str) -> str:
         return f"{day} {_MONTHS[month - 1]} {year}"
     except (ValueError, IndexError):
         return str(value)
+
+
+# ── Trip day numbering ────────────────────────────────────────────────────────
+# The app numbers trip days with one canonical formula (``dayTripNumbering`` in
+# flutter_client/lib/src/projects/project_notifier.dart):
+#
+#     dayNumber = (date - trip_start).days + 1
+#
+# where ``trip_start`` is the project's explicit start-date override when set,
+# and otherwise the earliest dated thing in the trip. Rest days count, so the
+# span comes from min/max over dates rather than from list order. Date parsing
+# and min/max are reused from src/billing/trip_days.py (the same helpers the
+# billing day-count uses) rather than reimplemented here.
+
+def _trip_span(project: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(start, end)`` ISO dates for *project*, or ``(None, None)``.
+
+    Collected from every dated collection the in-memory ``Project`` actually
+    carries — a partially-loaded project (or a future one that drops a
+    collection) simply contributes fewer dates rather than raising.
+    """
+    values: List[Any] = []
+    for activity in getattr(project, "activities", None) or []:
+        values.append(getattr(activity, "start_date_local", None))
+    for memory in getattr(project, "memories", None) or []:
+        values.append(getattr(memory, "date", None))
+    for entry in getattr(project, "journal_entries", None) or []:
+        values.append(getattr(entry, "date", None))
+    for item in getattr(project, "items", None) or []:
+        segment = getattr(item, "segment", None)
+        if segment is not None:
+            values.append(getattr(segment, "date", None))
+
+    earliest, latest = bounds(values)
+    start = normalise(getattr(project, "trip_start", None)) or earliest
+    end = normalise(getattr(project, "trip_end", None)) or latest
+    return start, end
+
+
+def _day_number(value: Any, trip_start: Optional[str]) -> Optional[int]:
+    """Which day of the trip *value* falls on (1-based), or None if unknowable."""
+    day = normalise(value)
+    start = normalise(trip_start)
+    if day is None or start is None:
+        return None
+    return (date.fromisoformat(day) - date.fromisoformat(start)).days + 1
 
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
@@ -466,13 +536,19 @@ def _draw_scaled_run(
 
 def _draw_card(canvas: Image.Image, rect: Rect, layout, scale: TypeScale,
                theme: PosterTheme) -> None:
-    """Execute one card's measured layout ops at its placed position.
+    """Draw one memory card — themed chrome, then its measured layout ops."""
+    _draw_card_chrome(canvas, rect, scale.dpi, theme)
+    _draw_card_ops(canvas, rect, layout, scale, theme)
+
+
+def _draw_card_ops(canvas: Image.Image, rect: Rect, layout, scale: TypeScale,
+                   theme: PosterTheme) -> None:
+    """Execute a measured layout's ops at *rect*'s position.
 
     Text colours are resolved through *theme* by each style's semantic role
     (see ``typography.TextStyle.role``), and the stat panels' separating rules
     use the theme's divider colour.
     """
-    _draw_card_chrome(canvas, rect, scale.dpi, theme)
     draw = ImageDraw.Draw(canvas)
     ox, oy = int(rect.left), int(rect.top)
 
@@ -535,6 +611,63 @@ def _draw_legend(
         y += line_h
 
 
+# ── Trip summary card ─────────────────────────────────────────────────────────
+# One card for the whole poster (not one per memory): what the trip *was* —
+# its title, the period it covered, and its totals.
+
+def _trip_summary_blocks(
+    project: Any, span: Tuple[Optional[str], Optional[str]]
+) -> List[Dict[str, Any]]:
+    """Content blocks for the trip summary card.
+
+    Deliberately the same block vocabulary a memory card uses, so the summary
+    is measured, styled and unit-formatted by exactly the same code: the title
+    is a ``name``, the period a ``date``, and the totals ``distance``/
+    ``elevation`` (which ``card_layout`` renders as its usual km/m stat row).
+
+    Totals come from ``repo_core._compute_stats``, which already sums across
+    *all* of the project's activities — unlike ``compute_day_metrics``, which
+    is scoped to a single date.
+    """
+    start, end = span
+    stats = _compute_stats(project)
+
+    blocks: List[Dict[str, Any]] = [
+        {"kind": "name", "text": getattr(project, "name", "") or "Trip"},
+    ]
+    if start and end:
+        blocks.append({
+            "kind": "date",
+            "text": f"{_format_date(start)} – {_format_date(end)}",
+        })
+    blocks.append({"kind": "distance", "value_m": stats.get("total_distance_m", 0.0)})
+    blocks.append({"kind": "elevation", "value_m": stats.get("total_elevation_m", 0.0)})
+    return blocks
+
+
+def _draw_trip_summary(
+    canvas: Image.Image,
+    project: Any,
+    span: Tuple[Optional[str], Optional[str]],
+    scale: TypeScale,
+    theme: PosterTheme,
+) -> None:
+    """Draw the trip summary card in the top-left corner.
+
+    It has no pin and no leader line, so it is not part of the pin-based
+    placement search — it is pinned to the corner, inset by the same page
+    margin the legend uses bottom-left, and sized to its own content by the
+    ordinary card measure pass.
+    """
+    layout = layout_card(
+        _trip_summary_blocks(project, span), scale, width=card_width_px(scale.dpi)
+    )
+    margin = mm_to_px(_PAGE_MARGIN_MM, scale.dpi)
+    rect = Rect(margin, margin, margin + layout.width, margin + layout.height)
+    _draw_card_chrome(canvas, rect, scale.dpi, theme)
+    _draw_card_ops(canvas, rect, layout, scale, theme)
+
+
 # ── Composition (shared by the full render and the low-res preview) ─────────
 
 def _compose_poster_image(
@@ -551,7 +684,7 @@ def _compose_poster_image(
     progress: Optional[ProgressFn] = None,
 ) -> Tuple[Image.Image, Optional[str]]:
     """Build the composited poster: basemap, route, pins, content-sized
-    non-overlapping cards, and an overflow legend.
+    non-overlapping cards, a corner trip summary card, and an overflow legend.
 
     ``dpi`` drives every physical dimension (type, card size, line widths), so
     the preview and the full render are the same design at two resolutions.
@@ -616,14 +749,28 @@ def _compose_poster_image(
 
     _notify(progress, "measuring cards")
     width = card_width_px(dpi)
+    # One span for the whole trip, computed once rather than per memory — it
+    # feeds both every card's "Day N" badge and the trip summary card.
+    trip_span = _trip_span(project) if project is not None else (None, None)
     pin_xy: Dict[Any, Tuple[float, float]] = {}
     layouts: Dict[Any, Any] = {}
     pins: List[PinSpec] = []
+    content_less: List[Dict[str, Any]] = []
     for memory in memories:
         x, y = projector.project(memory["lon"], memory["lat"])
         pin_xy[memory["id"]] = (x, y)
         metrics = compute_day_metrics(project, memory["date"]) if project is not None else _EMPTY_METRICS
-        blocks = assemble_card_content(config, memory, metrics)
+        blocks = assemble_card_content(
+            config, memory, metrics,
+            day_number=_day_number(memory.get("date"), trip_span[0]),
+        )
+        if not blocks:
+            # Nothing to show. Placing this card anyway drew an empty rounded
+            # box with a leader line pointing at it — so it never enters card
+            # placement at all and goes straight to the legend, exactly like a
+            # memory whose card could not be fitted. Its pin is still drawn.
+            content_less.append(memory)
+            continue
         layout = layout_card(
             blocks, scale, width=width,
             photo_path=_photo_resolver(user_id, memory["id"]),
@@ -646,7 +793,7 @@ def _compose_poster_image(
 
     _notify(progress, "rendering cards")
     memories_by_id = {m["id"]: m for m in memories}
-    legend_entries: List[Dict[str, Any]] = []
+    legend_entries: List[Dict[str, Any]] = list(content_less)
     budget_skipped = 0
 
     for placement in placements:
@@ -672,6 +819,9 @@ def _compose_poster_image(
     # Pins last, so a leader line never runs over the pin it points from.
     for pin_id, (x, y) in pin_xy.items():
         _draw_pin(ImageDraw.Draw(canvas), x, y, dpi)
+
+    if project is not None and config.get("trip_summary", True):
+        _draw_trip_summary(canvas, project, trip_span, scale, theme)
 
     if legend_entries:
         _draw_legend(canvas, legend_entries, pin_xy, scale, target_w, target_h, theme)
