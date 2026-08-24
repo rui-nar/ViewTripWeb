@@ -38,6 +38,7 @@ from src.poster.poster_renderer import (
     _PREVIEW_TOTAL_BUDGET_S,
     _Projector,
     _day_number,
+    _decimate_pixels,
     _draw_card,
     _draw_card_chrome,
     _draw_legend,
@@ -286,6 +287,47 @@ def test_projector_orders_points_geographically_nw_before_se():
     se_x, se_y = projector.project(_FRANCE_BOUNDS["east"] - 0.1, _FRANCE_BOUNDS["south"] + 0.1)
     assert nw_x < se_x
     assert nw_y < se_y
+
+
+# ── _decimate_pixels ─────────────────────────────────────────────────────────
+# A real multi-week trip's full-resolution GPS track can be hundreds of
+# thousands of points; projecting and then RouteIndex-bucketing all of them
+# — for both the full render and, worse, the tiny preview canvas — was real,
+# unbudgeted per-render cost that kept the preview timing out even after the
+# card-measurement and basemap-fetch budgets were fixed (issue #14 follow-up).
+
+def test_keeps_first_and_last_points_even_when_close_together():
+    assert _decimate_pixels([(0.0, 0.0), (0.2, 0.2)]) == [(0.0, 0.0), (0.2, 0.2)]
+
+
+def test_drops_points_that_have_not_moved_a_full_pixel():
+    points = [(0.0, 0.0), (0.3, 0.1), (0.6, 0.2), (5.0, 5.0)]
+    assert _decimate_pixels(points, threshold=1.0) == [(0.0, 0.0), (5.0, 5.0)]
+
+
+def test_keeps_points_that_each_move_a_full_pixel():
+    points = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]
+    assert _decimate_pixels(points, threshold=1.0) == points
+
+
+def test_a_dense_synthetic_track_collapses_to_a_small_fraction_of_its_points():
+    """The actual regression: a real 120-activity trip is documented (see
+    api/geo.py) at ~500k points; decimated to a small preview canvas's pixel
+    resolution, the point count and therefore RouteIndex's segment count
+    should drop by orders of magnitude, not merely somewhat."""
+    import random
+
+    rng = random.Random(20260824)
+    points = []
+    x, y = 0.0, 0.0
+    for _ in range(50_000):
+        x += rng.uniform(-0.05, 0.05)
+        y += rng.uniform(-0.05, 0.05)
+        points.append((x, y))
+
+    decimated = _decimate_pixels(points, threshold=1.0)
+    assert len(decimated) < len(points) / 20, (
+        f"only {len(points)} -> {len(decimated)}, expected a much larger drop")
 
 
 # ── Golden-path render_poster test ───────────────────────────────────────────

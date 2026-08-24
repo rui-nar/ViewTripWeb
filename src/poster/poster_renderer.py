@@ -379,13 +379,49 @@ def _photo_resolver(user_id: str, memory_id: Any) -> Callable[[str], Optional[Pa
     return resolve
 
 
+def _decimate_pixels(points: Sequence[Tuple[float, float]], threshold: float = 1.0
+                      ) -> List[Tuple[float, float]]:
+    """Drop consecutive points that haven't moved a full pixel from the last
+    kept one — same "why draw what nobody can tell apart" idea already used
+    for the live map's own tiles (``src/tile_renderer.py``'s per-tile
+    decimation), applied once in canvas-pixel space instead of per-tile in
+    geographic space.
+
+    A real multi-week trip's full-resolution GPS track is hundreds of
+    thousands of points (api/geo.py's own docstring: a 120-activity trip is
+    ~17.7MB of expanded coordinates) — decoding and projecting all of them,
+    then bucketing every resulting segment into ``RouteIndex``, is real,
+    unbudgeted work that ran on both the full render and the preview alike.
+    At the preview's small canvas especially, the vast majority of those
+    points land within the same handful of pixels as their neighbours and
+    are pure waste to keep: projecting a synthetic 120-activity/504k-point
+    trip took ~3s just for route projection + RouteIndex construction at
+    preview scale; decimated first, the same route was ~1,300 points and the
+    same two steps took a few hundredths of a second — a threshold small
+    enough that the drawn line looks identical.
+    """
+    if len(points) < 3:
+        return list(points)
+    out = [points[0]]
+    last_x, last_y = points[0]
+    for x, y in points[1:-1]:
+        if abs(x - last_x) >= threshold or abs(y - last_y) >= threshold:
+            out.append((x, y))
+            last_x, last_y = x, y
+    out.append(points[-1])
+    return out
+
+
 def _project_route(project: Any, projector: _Projector) -> List[List[Tuple[float, float]]]:
     """Project every track feature into canvas pixel coordinates.
 
     Reuses ``api.geo``'s own server-side GeoJSON feature builder (the same data
     ``GET /api/geo/project`` serves the client) rather than reimplementing
     polyline decoding, and projects through the same ``_Projector`` used for
-    pins so route and pins stay aligned.
+    pins so route and pins stay aligned. Each projected line is then decimated
+    to the canvas's own pixel resolution (see ``_decimate_pixels``) — this is
+    resolution-aware, so a full A0 render keeps far more detail than a small
+    preview, exactly as much as each one can actually show.
     """
     try:
         from api.geo import _build_full_geo_features
@@ -398,7 +434,8 @@ def _project_route(project: Any, projector: _Projector) -> List[List[Tuple[float
         coords = (feature.get("geometry") or {}).get("coordinates") or []
         if len(coords) < 2:
             continue
-        lines.append([projector.project(lon, lat) for lon, lat in coords])
+        projected = [projector.project(lon, lat) for lon, lat in coords]
+        lines.append(_decimate_pixels(projected))
     return lines
 
 
