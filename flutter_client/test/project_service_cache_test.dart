@@ -220,4 +220,28 @@ void main() {
 
     expect(detailsCalls, 2);
   });
+
+  test(
+      'a rejected dedup-tracked fetch does not surface as an orphaned '
+      'unhandled async error', () async {
+    // Regression test: _dedupFetch's whenComplete() cleanup hook creates its
+    // own derived Future carrying the same outcome as the fetch it's
+    // observing. That derived Future going unlistened-to meant a failed
+    // fetch was reported as an unhandled async error moments after the
+    // caller had already caught the very same rejection via the Future
+    // _dedupFetch returns — exactly the failure mode
+    // project_notifier_load_test.dart guards against for load()'s own
+    // futures. If this regresses, flutter_test fails this test with
+    // "<exception> was thrown ... but after the test had completed" even
+    // though every assertion below still passes.
+    api = ApiClient(
+        baseUrl: '',
+        httpClient: MockClient((req) async => http.Response('nope', 400)));
+
+    await expectLater(ProjectService().getGeo(_ref), throwsA(anything));
+
+    // Give whenComplete()'s derived Future a chance to reject unobserved,
+    // the way it used to.
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  });
 }
