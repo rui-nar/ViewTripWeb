@@ -159,7 +159,7 @@ def test_warm_after_the_bust_still_caches(env):
 
 
 def test_mutation_busts_the_low_res_cache_entry_too(env):
-    """A project edit must not leave stale low-res geo behind (issue #212).
+    """A project edit must not leave stale low-res geo behind.
 
     ``bust_geo_cache`` pops every key sharing (uid, name) regardless of the
     variant slot, so this only needs the low-res endpoint to actually key into

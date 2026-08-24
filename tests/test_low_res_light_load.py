@@ -98,7 +98,7 @@ def test_the_payload_is_unchanged_by_the_lighter_load(env):
 
 
 def test_a_second_identical_request_is_served_from_cache(env, monkeypatch):
-    """The endpoint must not recompute from scratch on a cache-warm repeat (issue #212)."""
+    """The endpoint must not recompute from scratch on a cache-warm repeat."""
     client, _uid = env
     seen: list[dict] = []
     orig = geo_mod._repo.get_project

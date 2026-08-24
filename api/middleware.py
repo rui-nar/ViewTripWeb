@@ -57,7 +57,7 @@ def _resolve_user_id(request: Request) -> str:
 
     Stashes the decoded payload on ``request.state`` so ``get_current_user``/
     ``get_optional_current_user`` (api.deps) can reuse it instead of decoding
-    the same token a second time moments later (issue #212). Only a
+    the same token a second time moments later. Only a
     *successful* decode is stashed — a failure here means the token is bad,
     and the route dependency below still needs to run its own decode to raise
     the right 401.

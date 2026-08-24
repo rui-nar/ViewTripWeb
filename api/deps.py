@@ -114,7 +114,7 @@ def get_current_user(
 
     Reuses the decode the access-log middleware (api.middleware._resolve_user_id)
     already performed for this same token, when present, instead of decoding it
-    a second time (issue #212). Falls back to decoding here when there is
+    a second time. Falls back to decoding here when there is
     nothing to reuse — e.g. middleware isn't installed, as in most unit tests.
     """
     cached = getattr(request.state, "jwt_payload", None)

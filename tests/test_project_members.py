@@ -343,7 +343,7 @@ def _shared_projects_query_count(n_memberships: int, monkeypatch) -> tuple[int, 
 
 
 def test_shared_project_list_query_count_does_not_scale_with_membership_count(monkeypatch):
-    """GET /api/projects/ must not issue two extra queries per membership (issue #212).
+    """GET /api/projects/ must not issue two extra queries per membership.
 
     Was ``sess.get(DBProject, ...)`` + ``sess.get(UserInfo, ...)`` inside the
     ``for m in memberships:`` loop — O(2N) queries for N shared projects.

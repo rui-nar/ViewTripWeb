@@ -285,7 +285,7 @@ def project_geo_low_res(
     was last saved.  No GPS polyline decoding occurs here — activities use
     two-point straight lines — so a MISS is cheap on its own; it still goes
     through the same ``_geo_cache``/generation machinery as ``/meta`` and the
-    full-res endpoint (issue #212) because this is one of exactly two calls
+    full-res endpoint because this is one of exactly two calls
     fired in parallel on *every* project open, and recomputing from scratch on
     every single request — cold or warm alike — added up on its own.
 

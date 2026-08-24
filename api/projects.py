@@ -115,7 +115,7 @@ def list_projects(current_user: Annotated[dict, Depends(get_current_user)]):
         ).all()
 
         # Batch-load the member projects and their owners in two queries total
-        # instead of two per membership (was an N+1 — issue #212).
+        # instead of two per membership (was an N+1).
         project_ids = [m.project_id for m in memberships]
         projects_by_id: Dict[int, DBProject] = {}
         owners_by_id: Dict[int, UserInfo] = {}

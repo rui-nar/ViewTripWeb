@@ -115,7 +115,7 @@ class TestContextVarIsolation:
 
 class TestSharedJwtDecode:
     """get_current_user reuses the middleware's decode instead of repeating it
-    (issue #212) — a request's JWT is decoded once, not twice."""
+    — a request's JWT is decoded once, not twice."""
 
     def test_get_current_user_reuses_the_middlewares_decode(self, monkeypatch):
         calls = {"n": 0}
