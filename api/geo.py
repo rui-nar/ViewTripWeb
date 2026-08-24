@@ -46,10 +46,11 @@ _repo = ProjectRepo()
 # The stored generation is what the entry was computed against — compared on
 # read so an invalidation from another process is honoured (issue #173).
 # The variant slot distinguishes payloads of the same project: the full-res geo
-# endpoint keys on its ``encoded`` flag, /meta on ("meta", caller_id) — see
-# api.project_shared.meta_cache_key. Every variant of a project shares one
-# generation counter, so a single bust drops them all, which is what keeps
-# "one bust per mutation" sufficient as payload kinds are added (issue #178).
+# endpoint keys on its ``encoded`` flag, low-res geo on the literal "low-res",
+# /meta on ("meta", caller_id) — see api.project_shared.meta_cache_key. Every
+# variant of a project shares one generation counter, so a single bust drops
+# them all, which is what keeps "one bust per mutation" sufficient as payload
+# kinds are added (issue #178).
 _geo_cache: dict[tuple, tuple[bytes, float, int]] = {}
 _geo_cache_lock = Lock()
 _GEO_CACHE_TTL_S = 300.0
@@ -282,8 +283,11 @@ def project_geo_low_res(
     Always computed from the live project (no cached ``low_res_geo_json``
     column) so segment arcs are always present regardless of when the DB row
     was last saved.  No GPS polyline decoding occurs here — activities use
-    two-point straight lines — so this is fast enough to compute on every
-    request.
+    two-point straight lines — so a MISS is cheap on its own; it still goes
+    through the same ``_geo_cache``/generation machinery as ``/meta`` and the
+    full-res endpoint (issue #212) because this is one of exactly two calls
+    fired in parallel on *every* project open, and recomputing from scratch on
+    every single request — cold or warm alike — added up on its own.
 
     include_heavy=False because ``_compute_low_res_geo`` reads only
     start_latlng/end_latlng and segment geometry: loading every activity's
@@ -295,18 +299,35 @@ def project_geo_low_res(
     t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+
+        cache_key = (owner_id, name, "low-res")
+        cached_bytes = _geo_cache_get(cache_key)
+        if cached_bytes is not None:
+            return Response(
+                content=cached_bytes,
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+            )
+
+        gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
         project = _repo.get_project(
-            sess, row.user_info_id, name,
-            legacy_path=_legacy_path(str(row.user_info_id), name),
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
             include_heavy=False,
         )
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     t1 = time.time()
-    payload = json.loads(_compute_low_res_geo(project))
-    _log.info("geo_low_res name=%s load=%.3fs build=%.3fs",
+    gz_bytes = gzip_lib.compress(_compute_low_res_geo(project).encode(), compresslevel=6)
+    _geo_cache_store(cache_key, gz_bytes, gen)
+    _log.info("geo_low_res name=%s load=%.3fs build=%.3fs cache=MISS",
               name, t1 - t0, time.time() - t1)
-    return payload
+    return Response(
+        content=gz_bytes,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "X-Cache": "MISS"},
+    )
 
 
 def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Dict[str, Any]]:
