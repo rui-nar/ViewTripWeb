@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 import '../crypto/encryption.dart';
@@ -89,6 +92,14 @@ class AuthNotifier extends ChangeNotifier {
   bool get isRestoring => _isRestoring;
   String? get error => _error;
 
+  /// Below this much remaining life on a restored token, [init] falls back to
+  /// blocking on getMe() to find out for sure whether it's still valid.
+  /// Tokens are minted with a 7-day lifetime (see api/deps.py), so this buffer
+  /// isn't there to catch near-term revocation — the still-fired background
+  /// getMe() below does that within the same session — it's just a guard
+  /// against clock skew and the rare relaunch that lands right at expiry.
+  static const _kMinTokenLifetime = Duration(minutes: 5);
+
   /// Restores a persisted session on app start.
   /// Call via `..init()` cascade in Provider `create`.
   Future<void> init() async {
@@ -98,23 +109,37 @@ class AuthNotifier extends ChangeNotifier {
     try {
       final restored = await _service.restoreSession();
       if (restored) {
-        // Token restored — attempt to fetch the real profile from the server.
-        // A 401 means the token is expired/invalid: clear it and force re-login.
-        // Any other error (no network, timeout) keeps the sentinel user so the
-        // session remains valid offline.
-        try {
-          final data = await _service.getMe();
-          _user = User.fromMap(data);
-          await _unlockEncryption();
-        } on ApiException catch (e) {
-          if (e.statusCode == 401) {
-            await _service.logout();
-            _user = null;
-          } else {
+        final token = api.tokenForUpload;
+        final expiry = token == null ? null : _jwtExpiry(token);
+        final comfortablyValid = expiry != null &&
+            expiry.difference(DateTime.now().toUtc()) > _kMinTokenLifetime;
+        if (comfortablyValid) {
+          // Plenty of life left on the token: trust it locally instead of
+          // blocking app start on the network. getMe() still runs in the
+          // background (see _refreshMeInBackground) to catch server-side
+          // revocation, email_verified changes, or a 401 forcing logout.
+          _user = User.restored;
+          unawaited(_refreshMeInBackground());
+        } else {
+          // Token missing/unparseable/at-or-near expiry — fall back to the
+          // original blocking behavior so we find out for sure.
+          // A 401 means the token is expired/invalid: clear it and force
+          // re-login. Any other error (no network, timeout) keeps the
+          // sentinel user so the session remains valid offline.
+          try {
+            final data = await _service.getMe();
+            _user = User.fromMap(data);
+            await _unlockEncryption();
+          } on ApiException catch (e) {
+            if (e.statusCode == 401) {
+              await _service.logout();
+              _user = null;
+            } else {
+              _user = User.restored;
+            }
+          } catch (_) {
             _user = User.restored;
           }
-        } catch (_) {
-          _user = User.restored;
         }
       } else {
         _user = null;
@@ -125,6 +150,47 @@ class AuthNotifier extends ChangeNotifier {
       _isLoading = false;
       _isRestoring = false;
       notifyListeners();
+    }
+  }
+
+  /// Reconciles an optimistically-restored session (see [init]) with the
+  /// server without blocking app start. Mirrors the blocking path's
+  /// getMe() handling: a 401 forces logout, any other failure (offline,
+  /// timeout) leaves the already-restored sentinel session in place.
+  Future<void> _refreshMeInBackground() async {
+    try {
+      final data = await _service.getMe();
+      _user = User.fromMap(data);
+      await _unlockEncryption();
+      notifyListeners();
+    } on ApiException catch (e) {
+      if (e.statusCode == 401) {
+        await _service.logout();
+        _user = null;
+        notifyListeners();
+      }
+    } catch (_) {
+      // Offline/timeout — keep the optimistically-restored session.
+    }
+  }
+
+  /// Reads the `exp` claim (seconds since the Unix epoch) out of a JWT's
+  /// payload segment, without verifying its signature — the server remains
+  /// the source of truth; this is only used to decide whether [init] can
+  /// skip blocking on the network. Returns null if [token] isn't a
+  /// well-formed JWT or carries no numeric `exp`.
+  static DateTime? _jwtExpiry(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      final exp = payload is Map ? payload['exp'] : null;
+      if (exp is! num) return null;
+      return DateTime.fromMillisecondsSinceEpoch((exp * 1000).round(), isUtc: true);
+    } catch (_) {
+      return null;
     }
   }
 
