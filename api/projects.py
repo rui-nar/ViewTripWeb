@@ -113,11 +113,31 @@ def list_projects(current_user: Annotated[dict, Depends(get_current_user)]):
         memberships = sess.exec(
             select(DBProjectMember).where(DBProjectMember.user_info_id == user_info_id)
         ).all()
+
+        # Batch-load the member projects and their owners in two queries total
+        # instead of two per membership (was an N+1).
+        project_ids = [m.project_id for m in memberships]
+        projects_by_id: Dict[int, DBProject] = {}
+        owners_by_id: Dict[int, UserInfo] = {}
+        if project_ids:
+            projects_by_id = {
+                p.id: p for p in sess.exec(
+                    select(DBProject).where(DBProject.id.in_(project_ids))
+                ).all()
+            }
+            owner_ids = {p.user_info_id for p in projects_by_id.values()}
+            if owner_ids:
+                owners_by_id = {
+                    u.id: u for u in sess.exec(
+                        select(UserInfo).where(UserInfo.id.in_(owner_ids))
+                    ).all()
+                }
+
         for m in memberships:
-            proj = sess.get(DBProject, m.project_id)
+            proj = projects_by_id.get(m.project_id)
             if proj is None:
                 continue
-            owner_user = sess.get(UserInfo, proj.user_info_id)
+            owner_user = owners_by_id.get(proj.user_info_id)
             shared.append({
                 "name": proj.name,
                 "filename": proj.name + ProjectIO.EXTENSION,

@@ -158,6 +158,42 @@ def test_warm_after_the_bust_still_caches(env):
     assert client.get("/api/geo/project?name=Trip").headers["x-cache"] == "HIT"
 
 
+def test_mutation_busts_the_low_res_cache_entry_too(env):
+    """A project edit must not leave stale low-res geo behind.
+
+    ``bust_geo_cache`` pops every key sharing (uid, name) regardless of the
+    variant slot, so this only needs the low-res endpoint to actually key into
+    ``_geo_cache`` — this is the regression the low-res cache addition could
+    have introduced (serving stale geo after an edit) if it used its own cache
+    or skipped the generation check.
+
+    Low-res geo is built from start_latlng/end_latlng, not summary_polyline
+    (that's the whole point of the endpoint), so the mutation here has to move
+    those columns rather than the shared ``_mutate`` helper's polyline.
+    """
+    client, uid, engine = env
+
+    first = client.get("/api/geo/project/low-res?name=Trip")
+    assert first.headers["x-cache"] == "MISS"
+    before = _first_coords(first)
+    assert before[0] == pytest.approx([_LINE_BEFORE[0][1], _LINE_BEFORE[0][0]])
+
+    warm = client.get("/api/geo/project/low-res?name=Trip")
+    assert warm.headers["x-cache"] == "HIT"
+
+    with Session(engine) as sess:
+        act = sess.exec(select(DBActivity).where(DBActivity.id == 111)).first()
+        act.start_latlng_json = json.dumps(list(_LINE_AFTER[0]))
+        act.end_latlng_json = json.dumps(list(_LINE_AFTER[-1]))
+        sess.add(act)
+        sess.commit()
+    bust_geo_cache(uid, "Trip")
+
+    after = client.get("/api/geo/project/low-res?name=Trip")
+    assert after.headers["x-cache"] == "MISS", "stale low-res geo served after an edit"
+    assert _first_coords(after)[0] == pytest.approx([_LINE_AFTER[0][1], _LINE_AFTER[0][0]])
+
+
 def test_entry_expires_after_the_ttl(env, monkeypatch):
     """A HIT turns back into a MISS once the entry outlives ``_GEO_CACHE_TTL_S``."""
     client, uid, _engine = env

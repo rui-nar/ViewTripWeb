@@ -95,3 +95,27 @@ def test_the_payload_is_unchanged_by_the_lighter_load(env):
         [_LINE[0][1], _LINE[0][0]],
         [_LINE[-1][1], _LINE[-1][0]],
     ]
+
+
+def test_a_second_identical_request_is_served_from_cache(env, monkeypatch):
+    """The endpoint must not recompute from scratch on a cache-warm repeat."""
+    client, _uid = env
+    seen: list[dict] = []
+    orig = geo_mod._repo.get_project
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs)
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(geo_mod._repo, "get_project", _spy)
+
+    first = client.get("/api/geo/project/low-res?name=Trip")
+    assert first.status_code == 200
+    assert first.headers["x-cache"] == "MISS"
+    assert len(seen) == 1
+
+    second = client.get("/api/geo/project/low-res?name=Trip")
+    assert second.status_code == 200
+    assert second.headers["x-cache"] == "HIT"
+    assert len(seen) == 1, "a cache HIT must not touch the DB again"
+    assert second.json() == first.json()
