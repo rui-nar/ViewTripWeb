@@ -88,6 +88,17 @@ def meta_cache_key(owner_id: int, name: str, caller_id: int) -> tuple:
     return (owner_id, name, ("meta", caller_id))
 
 
+def details_cache_key(owner_id: int, name: str, caller_id: int) -> tuple:
+    """Cache key for one caller's ``GET /{name}`` (full details) payload.
+
+    Same caller-scoping rationale as ``meta_cache_key`` — journal entries are
+    filtered to their author and ``caller_role`` is baked into the body — with
+    a distinct variant tag so it never collides with that caller's ``"meta"``
+    entry for the same project (issue #178 follow-up).
+    """
+    return (owner_id, name, ("details", caller_id))
+
+
 def gzip_json(payload: Any) -> bytes:
     """Serialise and gzip a payload for the byte caches (mirrors api.geo._gzip_geo)."""
     return gzip_lib.compress(json.dumps(payload).encode(), compresslevel=6)
@@ -104,6 +115,26 @@ def build_meta_payload(sess, row: DBProject, name: str, caller_id: int) -> dict 
         sess, owner_id, name,
         legacy_path=_legacy_path(str(owner_id), name),
         include_heavy=False,
+        journal_user_id=caller_id,
+    )
+    if project is None:
+        return None
+    data = _repo.to_dict(project)
+    data["caller_role"] = effective_role(sess, row, caller_id)
+    return data
+
+
+def build_details_payload(sess, row: DBProject, name: str, caller_id: int) -> dict | None:
+    """The ``GET /{name}`` (full details) body as *caller_id* sees it, or None if gone.
+
+    Full loading (``include_heavy`` defaults True) — unlike ``build_meta_payload``,
+    this keeps summary_polyline and elevation_profile_json, which is the whole
+    point of this endpoint over ``/meta``.
+    """
+    owner_id = row.user_info_id
+    project = _repo.get_project(
+        sess, owner_id, name,
+        legacy_path=_legacy_path(str(owner_id), name),
         journal_user_id=caller_id,
     )
     if project is None:

@@ -41,12 +41,14 @@ from api.geo import (
     project_cache_get,
     project_cache_store,
 )
-from api.project_access import OwnerParam, effective_role, require_role, resolve_project
+from api.project_access import OwnerParam, require_role, resolve_project
 from api.project_shared import (
     _legacy_path,
     _refresh_stats_background,
     _repo,
+    build_details_payload,
     build_meta_payload,
+    details_cache_key,
     gzip_json,
     meta_cache_key,
     queue_share_tiles_refresh,
@@ -160,20 +162,37 @@ def get_project(
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: OwnerParam = None,
 ):
+    """Full project data — the same shape as ``/meta`` but with elevation_profile
+    and map.summary_polyline present on each activity.
+
+    Served from the per-project payload cache when warm (issue #178 follow-up):
+    this endpoint had the identical cold-load cost as ``/meta`` — 12-13 s on a
+    real 219-activity project, with zero improvement on repeat calls since it
+    had no cache at all. Rides the same cache infra as ``/meta`` (see
+    api.project_shared), keyed per caller for the same reason: journal entries
+    are filtered per-author and ``caller_role`` is baked into the body.
+    """
     user_info_id = int(current_user["sub"])
+    t0 = time.time()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
-        role = effective_role(sess, row, user_info_id)
-        project = _repo.get_project(
-            sess, row.user_info_id, name,
-            legacy_path=_legacy_path(str(row.user_info_id), name),
-            journal_user_id=user_info_id,
-        )
-    if project is None:
+        owner_id = row.user_info_id
+        cache_key = details_cache_key(owner_id, name, user_info_id)
+        cached = project_cache_get(cache_key)
+        if cached is not None:
+            return _gzip_response(cached, "HIT")
+
+        gen = project_cache_generation(owner_id, name)  # before the read, so a bust wins
+        data = build_details_payload(sess, row, name, user_info_id)
+    if data is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    data = _repo.to_dict(project)
-    data["caller_role"] = role
-    return data
+    t1 = time.time()
+
+    gz_bytes = gzip_json(data)
+    project_cache_store(cache_key, gz_bytes, gen)
+    _log.info("project_details name=%s load=%.3fs gzip=%.3fs cache=MISS",
+              name, t1 - t0, time.time() - t1)
+    return _gzip_response(gz_bytes, "MISS")
 
 
 @router.get("/{name}/meta", summary="Get project metadata (lightweight)")
