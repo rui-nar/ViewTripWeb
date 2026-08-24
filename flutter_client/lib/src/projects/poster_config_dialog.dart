@@ -154,7 +154,7 @@ class _PosterConfigDialogState extends State<PosterConfigDialog> {
             Navigator.of(context).pop();
             widget.onConfirm(opts);
           },
-          child: const Text('Generate'),
+          child: const Text('Preview'),
         ),
       ],
     );

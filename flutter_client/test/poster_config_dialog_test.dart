@@ -100,7 +100,11 @@ Future<PosterConfigOptions?> _openAndConfirm(
     onConfirm: (opts) => result = opts,
   );
 
-  await tester.tap(find.text(cancel ? 'Cancel' : 'Generate'));
+  // "Preview" is ambiguous with the live preview card's own section heading
+  // (poster_preview_card.dart) — target the action button specifically.
+  await tester.tap(cancel
+      ? find.text('Cancel')
+      : find.widgetWithText(FilledButton, 'Preview'));
   await tester.pumpAndSettle();
 
   return result;
