@@ -254,7 +254,14 @@ class PosterPreview extends StatelessWidget {
   Widget _statRow(_Palette p, String label, String value) => _pad(Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(color: p.mutedText, fontSize: 10)),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(color: p.mutedText, fontSize: 10),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 6),
           Text(
             value,
             style: TextStyle(
