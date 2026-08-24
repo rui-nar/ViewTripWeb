@@ -283,6 +283,81 @@ def test_list_includes_shared_project_with_role_and_owner(env):
     assert entries[0]["owner_id"] == ids["owner"]
 
 
+def _shared_projects_query_count(n_memberships: int, monkeypatch) -> tuple[int, list]:
+    """Set up one member shared into *n_memberships* projects (each with its own
+    owner), call GET /api/projects/ as that member, and return
+    (SELECT query count, response entries).
+    """
+    from sqlalchemy import event
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+
+    owner_ids: list[int] = []
+    with Session(engine) as sess:
+        member = UserInfo(display_name="Member", email="member@e.com")
+        sess.add(member); sess.commit(); sess.refresh(member)
+        member_id = member.id
+
+        for i in range(n_memberships):
+            owner = UserInfo(display_name=f"Owner{i}", email=f"owner{i}@e.com")
+            sess.add(owner); sess.commit(); sess.refresh(owner)
+            owner_ids.append(owner.id)
+            proj = DBProject(user_info_id=owner.id, name=f"Trip{i}")
+            sess.add(proj); sess.commit(); sess.refresh(proj)
+            sess.add(DBProjectMember(project_id=proj.id, user_info_id=member_id,
+                                      role="editor", invited_by=owner.id))
+        sess.commit()
+
+    app = FastAPI()
+    app.dependency_overrides[get_current_user] = lambda: {"sub": str(member_id)}
+    app.include_router(projects_router)
+    client = TestClient(app)
+
+    selects: list[str] = []
+
+    def _count(_conn, _cursor, statement, _params, _context, _executemany):
+        if statement.strip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _count)
+    try:
+        resp = client.get("/api/projects/")
+    finally:
+        event.remove(engine, "before_cursor_execute", _count)
+
+    assert resp.status_code == 200
+    entries = resp.json()
+    assert len(entries) == n_memberships
+    for i, oid in enumerate(owner_ids):
+        entry = next(e for e in entries if e["name"] == f"Trip{i}")
+        assert entry["owner_id"] == oid
+        assert entry["owner_name"] == f"Owner{i}"
+        assert entry["role"] == "editor"
+    return len(selects), entries
+
+
+def test_shared_project_list_query_count_does_not_scale_with_membership_count(monkeypatch):
+    """GET /api/projects/ must not issue two extra queries per membership (issue #212).
+
+    Was ``sess.get(DBProject, ...)`` + ``sess.get(UserInfo, ...)`` inside the
+    ``for m in memberships:`` loop — O(2N) queries for N shared projects.
+    Batched into one query for the projects and one for their owners, so the
+    query count is flat as membership count grows.
+    """
+    small, _ = _shared_projects_query_count(2, monkeypatch)
+    large, _ = _shared_projects_query_count(6, monkeypatch)
+    assert small == large, (
+        f"query count scales with membership count: {small} (2 memberships) "
+        f"vs {large} (6 memberships)"
+    )
+
+
 # ── E2EE mutual exclusion ─────────────────────────────────────────────────────
 
 def _enable_encryption_body() -> dict:
