@@ -30,10 +30,12 @@ from pathlib import Path
 from typing import Annotated, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from models.db import get_session
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -338,7 +340,24 @@ def create_memory(
             polarsteps_step_id=body.polarsteps_step_id,
         )
         sess.add(mem_row)
-        sess.flush()
+        try:
+            # This flush is where the partial unique index actually fires the
+            # INSERT (needed early to get mem_row.id for the project item
+            # below) — not the later sess.commit(). Two concurrent requests
+            # for the same Polarsteps step can both pass the _find_by_step_id
+            # check above; the loser lands here. Recover the same
+            # "already imported" response the check would have given had it
+            # run a moment later. Any other integrity error is a real bug and
+            # must still surface.
+            sess.flush()
+        except IntegrityError as exc:
+            sess.rollback()
+            if body.polarsteps_step_id is None or "polarsteps_step_id" not in str(exc.orig):
+                raise
+            winner = _find_by_step_id(sess, project_id, body.polarsteps_step_id)
+            if winner is None:
+                raise
+            return {"id": winner.id}
 
         existing_items = sess.exec(
             select(DBProjectItem)
@@ -468,11 +487,19 @@ def delete_memory(
 # ── Photos ────────────────────────────────────────────────────────────────────
 
 def _save_photo_files(user_id: str, memory_id: int, uuid_str: str, raw: bytes) -> None:
+    # Decode before writing anything to disk: a corrupt/non-image upload must
+    # not leave an orphaned full-res file behind with no valid thumbnail.
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Invalid image file",
+        ) from exc
     photo_path = _photo_dir(user_id, memory_id)
     full = photo_path / f"{uuid_str}.jpg"
     thumb = photo_path / f"{uuid_str}_thumb.jpg"
     full.write_bytes(raw)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
     img.save(str(thumb), "JPEG", quality=85)
     # Storage accounting for quota checks (issue #121). Done here rather than at
@@ -590,7 +617,12 @@ async def upload_photo(
     with get_session() as sess:
         ensure_storage_quota(sess, int(owner_dir), len(raw))
     photo_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(owner_dir, memory_id, photo_uuid, raw)
+    # JPEG decode + LANCZOS thumbnail resize is CPU-bound; run it off the event
+    # loop so one upload doesn't stall every other in-flight request (mirrors
+    # the read-path thumbnail server's own move to a thread — see the
+    # semaphore comment above — but here via FastAPI's thread pool instead of
+    # a sync route, since the rest of this handler needs to stay async).
+    await run_in_threadpool(_save_photo_files, owner_dir, memory_id, photo_uuid, raw)
     _write_memory_photo(memory_id, photo_uuid)
     return {"uuid": photo_uuid}
 
@@ -661,7 +693,7 @@ async def replace_photo(
     with get_session() as sess:
         ensure_storage_quota(sess, int(owner_dir), len(raw))
     new_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(owner_dir, memory_id, new_uuid, raw)
+    await run_in_threadpool(_save_photo_files, owner_dir, memory_id, new_uuid, raw)
 
     with photo_lock("memory", memory_id), get_session() as sess:
         mem_row = sess.get(DBMemory, memory_id)
