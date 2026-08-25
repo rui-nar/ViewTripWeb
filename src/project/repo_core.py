@@ -677,6 +677,10 @@ def _compute_low_res_geo(project: Project) -> str:
                     "label": seg.label,
                     "route_mode": seg.route_mode,
                     "route_degraded": seg.route_degraded,
+                    # Surfaced so the map can draw a failed resolve distinctly
+                    # instead of it reading as an ordinary great-circle segment
+                    # forever (issue #205 Unit D).
+                    "route_status": seg.route_status,
                 },
             })
 
