@@ -1628,12 +1628,19 @@ class ProjectNotifier extends ChangeNotifier
 
   // ── Photo polling (post-import background download) ──────────────────────
 
-  /// Polls memory photos every 3 s for up to 60 s after a Polarsteps import.
+  /// Polls memory photos every 3 s for up to 3 min after a Polarsteps import.
   /// Updates only the `photos` list inside each memory item so map markers
   /// refresh without a full reload. [interval]/[maxTicks] are overridable for
-  /// tests; production callers use the 3 s × 20 default.
+  /// tests; production callers use the 3 s × 60 default.
+  ///
+  /// 60 s (the previous budget) was too short for a large bulk import: each
+  /// photo is downloaded server-side in its own background task with up to a
+  /// 30 s fetch timeout (see `_download_photo_from_url` in api/memories.py),
+  /// and a big trip can queue far more of those than finish inside a minute.
+  /// There's no pending-download-count signal from the server to poll against
+  /// instead, so this widens the fixed budget rather than inferring one.
   void startPhotoPolling(ProjectRef ref,
-      {Duration interval = const Duration(seconds: 3), int maxTicks = 20}) {
+      {Duration interval = const Duration(seconds: 3), int maxTicks = 60}) {
     _stopPhotoPolling();
     var remainingTicks = maxTicks;
     _photoPollingTimer = Timer.periodic(interval, (_) async {
