@@ -57,6 +57,12 @@ REGISTRATIONS = Counter(
     ["provider"],
 )
 
+APP_OPENS = Counter(
+    "viewtrip_app_opens_total",
+    "App launches, by whether the cached session was still valid.",
+    ["session_state"],
+)
+
 # ── Third-party APIs (Strava, Polarsteps, Google Translate, SMTP) ──────────────
 
 EXTERNAL_REQUESTS = Counter(

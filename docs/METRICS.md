@@ -81,9 +81,16 @@ The in-progress gauge is what tells a slow request apart from a stuck one
 |---|---|
 | `viewtrip_logins_total` | `provider` (`password`\|`google`), `result` (`success`\|`failure`) |
 | `viewtrip_registrations_total` | `provider` |
+| `viewtrip_app_opens_total` | `session_state` (`resumed`\|`login_required`) |
 
 Google sign-in has no separate sign-up call, so `registrations_total{provider="google"}`
 fires on first sight of an account and never again.
+
+`viewtrip_logins_total` only counts a fresh credential submission — it misses
+every launch where a cached session was simply resumed. `app_opens_total`
+covers "returnability" instead: the client pings `POST /api/auth/app-opened`
+once per launch, `resumed` when the cached session was still valid and
+`login_required` when the user had to sign in from scratch.
 
 ### Third-party APIs
 

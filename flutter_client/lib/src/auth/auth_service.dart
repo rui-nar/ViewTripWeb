@@ -76,6 +76,13 @@ class AuthService {
     return data as Map<String, dynamic>;
   }
 
+  /// POST /api/auth/app-opened — best-effort "returnability" ping fired once
+  /// per app launch. Unauthenticated: it also fires when no valid session
+  /// was found, when there is no token to attach.
+  Future<void> appOpened(String sessionState) async {
+    await api.post('/api/auth/app-opened', {'session_state': sessionState});
+  }
+
   Future<void> logout() async {
     api.clearToken();
     final prefs = await SharedPreferences.getInstance();
