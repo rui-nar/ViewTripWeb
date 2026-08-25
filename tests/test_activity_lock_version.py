@@ -1,10 +1,13 @@
-"""Regression tests for the activity-mutation lock_version audit fix (Fix 1):
+"""Regression tests for the activity-mutation lock_version audit fixes:
 
-edit_activity_track / split_activity / delete_local_activity /
-reset_activity_track, and the background Strava-stream enrichment completion
-path, must all advance ``DBProject.lock_version`` — the only signal the
-native app's on-disk cache uses to know its cached heavy payloads are stale
-(issue #173).
+  - Fix 1: edit_activity_track / split_activity / delete_local_activity /
+    reset_activity_track, and the background Strava-stream enrichment
+    completion path, must all advance ``DBProject.lock_version`` — the only
+    signal the native app's on-disk cache uses to know its cached heavy
+    payloads are stale (issue #173).
+  - Fix 2: edit_activity_track / split_activity accept the lock_version the
+    client last saw and 409 (instead of silently overwriting) when it no
+    longer matches — two tabs racing on the same activity.
 """
 from __future__ import annotations
 
@@ -13,15 +16,17 @@ import json
 import polyline as polyline_lib
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import models.db as db_module
 from api.deps import get_current_user
 from api.activities import router as activities_router
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
+from src.project.project_repo import StaleWriteError
 
 _TRACK = [(48.0, 2.0), (48.0, 2.01), (48.0, 2.02), (48.0, 2.03), (48.0, 2.04)]
 _ELEV = [100.0, 120.0, 110.0, 140.0, 130.0]
@@ -66,6 +71,12 @@ def env(monkeypatch):
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid), "email": "a@e.com"}
     app.include_router(activities_router)
+
+    # Mirrors api/router.py's StaleWriteError -> 409 mapping.
+    @app.exception_handler(StaleWriteError)
+    async def _stale_write_handler(_request, exc):  # noqa: ANN001
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     return TestClient(app), engine
 
 
@@ -159,3 +170,75 @@ class TestLockVersionBump:
         before = _lock_version(engine)
         activities_mod._enrich_activities_background([111], 1, 1, "My Trip")
         assert _lock_version(engine) == before
+
+
+class TestOptimisticLock:
+    """Fix 2: a save/split against a stale lock_version 409s instead of
+    silently overwriting a concurrent edit."""
+
+    def test_stale_edit_returns_409_and_does_not_overwrite(self, env):
+        client, engine = env
+        # Both "tabs" open the editor at the same starting version.
+        track = client.get("/api/projects/My Trip/activities/111/track").json()
+        v0 = track["lock_version"]
+        assert v0 == 0
+
+        # Tab A saves first and wins.
+        resp_a = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": _points(3), "lock_version": v0},
+        )
+        assert resp_a.status_code == 200, resp_a.text
+
+        # Tab B is still working from v0 — must be rejected, not applied on
+        # top of Tab A's edit.
+        resp_b = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": _points(2), "lock_version": v0},
+        )
+        assert resp_b.status_code == 409, resp_b.text
+
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            # Tab A's 3-point trim persisted; Tab B's 2-point trim did not.
+            assert len(polyline_lib.decode(row.summary_polyline)) == 3
+
+    def test_matching_lock_version_saves_normally(self, env):
+        client, _ = env
+        track = client.get("/api/projects/My Trip/activities/111/track").json()
+        resp = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": _points(3), "lock_version": track["lock_version"]},
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_omitted_lock_version_saves_unconditionally(self, env):
+        """Backward compatible: a caller that never sends lock_version (older
+        client) still saves — Fix 2 is opt-in, not a breaking requirement."""
+        client, _ = env
+        resp = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": _points(3)},
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_stale_split_returns_409_and_does_not_double_split(self, env):
+        client, engine = env
+        track = client.get("/api/projects/My Trip/activities/111/track").json()
+        v0 = track["lock_version"]
+
+        resp_a = client.post(
+            "/api/projects/My Trip/activities/111/split",
+            json={"split_index": 2, "lock_version": v0},
+        )
+        assert resp_a.status_code == 200, resp_a.text
+
+        resp_b = client.post(
+            "/api/projects/My Trip/activities/111/split",
+            json={"split_index": 1, "lock_version": v0},
+        )
+        assert resp_b.status_code == 409, resp_b.text
+
+        with Session(engine) as sess:
+            tails = sess.exec(select(DBActivity).where(DBActivity.id < 0)).all()
+        assert len(tails) == 1  # only Tab A's split took effect

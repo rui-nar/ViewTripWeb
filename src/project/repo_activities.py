@@ -15,7 +15,7 @@ from models.db import get_session
 from models.project_db import DBActivity, DBProjectItem
 from src.models.activity import Activity
 from src.project.elevation_downsample import downsample_elevation
-from src.project.repo_core import bump_lock_version
+from src.project.repo_core import bump_lock_version, check_and_bump_lock_version
 from src.utils.encryption_check import is_encrypted_envelope
 
 
@@ -150,7 +150,8 @@ class ActivityMixin:
         row.is_edited = True
 
     def edit_activity_track(
-        self, sess: Session, project_id: int, activity_id: int, points: "list"
+        self, sess: Session, project_id: int, activity_id: int, points: "list",
+        *, expected_version: Optional[int] = None,
     ) -> bool:
         """Apply an edited point list to an activity, recomputing all metrics.
 
@@ -158,12 +159,20 @@ class ActivityMixin:
         Returns False if the activity row does not exist.
 
         Advances the project's lock_version (issue #173) so a native client's
-        on-disk cache — which only ever checks that counter — notices the edit.
+        on-disk cache — which only ever checks that counter — notices the
+        edit. When *expected_version* is given, this is instead an atomic
+        compare-and-swap (like ``save_project(check_version=True)``): it
+        raises ``StaleWriteError`` if the project changed since the caller
+        last loaded it, so two edits racing on the same activity don't
+        silently clobber each other.
         """
         row = sess.get(DBActivity, activity_id)
         if row is None:
             return False
-        bump_lock_version(sess, project_id)
+        if expected_version is not None:
+            check_and_bump_lock_version(sess, project_id, expected_version)
+        else:
+            bump_lock_version(sess, project_id)
         self._write_track_geometry(row, points)
         sess.commit()
         return True
@@ -362,6 +371,7 @@ class ActivityMixin:
         split_index: int,
         drop_boundary: bool = False,
         points: Optional[list] = None,
+        expected_version: Optional[int] = None,
     ) -> Optional[int]:
         """Split an activity into a head (keeps id) and a local tail (negative id).
 
@@ -390,7 +400,11 @@ class ActivityMixin:
 
         Advances the project's lock_version (issue #173) so a native client's
         on-disk cache — which only ever checks that counter — notices the new
-        tail.
+        tail. When *expected_version* is given, this is instead an atomic
+        compare-and-swap (like ``save_project(check_version=True)``): it
+        raises ``StaleWriteError`` if the project changed since the caller
+        last loaded it, so two splits racing on the same activity don't
+        silently clobber each other.
         """
         from src.models.track_edit import align_points
 
@@ -408,7 +422,10 @@ class ActivityMixin:
             raise ValueError(
                 f"split_index {split_index} out of range for a {len(points)}-point track")
 
-        bump_lock_version(sess, project_id)
+        if expected_version is not None:
+            check_and_bump_lock_version(sess, project_id, expected_version)
+        else:
+            bump_lock_version(sess, project_id)
 
         head_points = points[: split_index + 1]
         tail_points = points[min_tail_start:]

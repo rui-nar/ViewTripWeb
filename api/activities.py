@@ -465,6 +465,12 @@ class TrackPointIn(BaseModel):
 class TrackEditRequest(BaseModel):
     points: List[TrackPointIn] = Field(
         description="Full edited track as an ordered list of {lat, lng, elev?} points")
+    lock_version: Optional[int] = Field(
+        default=None,
+        description="The project's lock_version last seen by the editor (from "
+                    "GET .../track). When given, the save is rejected with 409 "
+                    "if the project has changed since — e.g. the same activity "
+                    "edited from a second tab. Omit to save unconditionally.")
 
 
 def _project_contains_activity(project, activity_id: int) -> bool:
@@ -502,6 +508,8 @@ def get_activity_track(
     d = activity.to_strava_dict()
     ep = activity.elevation_profile or getattr(activity, "elevation_profile_low_res", None)
     d["elevation_profile"] = [list(pair) for pair in zip(ep[0], ep[1])] if ep else None
+    # So the editor can send it back on save/split — see TrackEditRequest.lock_version.
+    d["lock_version"] = project.lock_version
     return d
 
 
@@ -554,7 +562,9 @@ def edit_activity_track(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
-        if not _repo.edit_activity_track(sess, row.id, activity_id, points):
+        if not _repo.edit_activity_track(
+            sess, row.id, activity_id, points, expected_version=body.lock_version
+        ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         # include_elevation=False: the client (see project_notifier.dart
         # saveActivityTrack) discards this response and immediately re-fetches
@@ -647,6 +657,12 @@ class SplitRequest(BaseModel):
                     "Issue #127: without this the editor's pending trims/deletes "
                     "were discarded by a split and split_index was applied to a "
                     "different point list than the one the user was looking at.")
+    lock_version: Optional[int] = Field(
+        default=None,
+        description="The project's lock_version last seen by the editor (from "
+                    "GET .../track). When given, the split is rejected with 409 "
+                    "if the project has changed since — e.g. the same activity "
+                    "edited from a second tab. Omit to split unconditionally.")
 
 
 @router.post("/{name}/activities/{activity_id}/split",
@@ -697,7 +713,8 @@ def split_activity(
         try:
             tail_id = _repo.split_activity(
                 sess, owner_id, row.id, activity_id, body.split_index,
-                drop_boundary=body.drop_boundary, points=edited_points)
+                drop_boundary=body.drop_boundary, points=edited_points,
+                expected_version=body.lock_version)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
