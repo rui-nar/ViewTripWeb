@@ -207,6 +207,24 @@ void main() {
       expect(props['route_degraded'], isTrue);
     });
 
+    test('includes route_status on segment properties, so a failed resolve '
+        'can be drawn distinctly on load (issue #205 Unit D)', () {
+      final items = [
+        {
+          'item_type': 'segment',
+          'segment': {
+            'id': 's1', 'segment_type': 'boat', 'label': 'A -> B',
+            'route_mode': 'great_circle', 'route_status': 'failed',
+            'start': {'lat': 10.0, 'lon': 20.0},
+            'end': {'lat': 15.0, 'lon': 25.0},
+          },
+        },
+      ];
+      final geo = buildLowResGeo(items, {});
+      final props = (geo['features'] as List)[0]['properties'] as Map;
+      expect(props['route_status'], 'failed');
+    });
+
     test('skips an activity with no start/end latlng at all', () {
       final items = [
         {'item_type': 'activity', 'activity_id': 1},
