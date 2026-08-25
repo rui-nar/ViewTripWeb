@@ -180,6 +180,8 @@ def test_enrichment_uses_importer_client_and_owner_cache(env, monkeypatch):
     client, _, ids, act_as = env
 
     class _FakeClient:
+        remaining_requests = 100
+
         def get_activity_streams(self, _id):
             return {"latlng": {"data": [[48.0, 2.0], [48.1, 2.1]]}}
 
