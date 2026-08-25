@@ -8,6 +8,8 @@
   - Fix 2: edit_activity_track / split_activity accept the lock_version the
     client last saw and 409 (instead of silently overwriting) when it no
     longer matches — two tabs racing on the same activity.
+  - Fix 3: TrackPointIn rejects out-of-range / non-finite lat/lng with a
+    clean 422 instead of persisting malformed points.
 """
 from __future__ import annotations
 
@@ -242,3 +244,78 @@ class TestOptimisticLock:
         with Session(engine) as sess:
             tails = sess.exec(select(DBActivity).where(DBActivity.id < 0)).all()
         assert len(tails) == 1  # only Tab A's split took effect
+
+
+def _put_track_raw(client, payload):
+    """PUT /track with a hand-encoded JSON body.
+
+    httpx's ``json=`` convenience param refuses to encode NaN/Infinity
+    (``allow_nan=False``) — but a client can still send them over the wire
+    (stdlib ``json.dumps``/``json.loads`` allow them by default), so this
+    sends the raw bytes to exercise exactly what the server has to guard
+    against.
+    """
+    body = json.dumps(payload, allow_nan=True).encode()
+    return client.put(
+        "/api/projects/My Trip/activities/111/track",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+
+class TestCoordinateValidation:
+    """Fix 3: TrackPointIn rejects out-of-range / non-finite lat/lng."""
+
+    @pytest.mark.parametrize("bad_lat", [95.0, -95.0])
+    def test_out_of_range_lat_rejected(self, env, bad_lat):
+        client, engine = env
+        resp = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": [{"lat": bad_lat, "lng": 2.0},
+                              {"lat": 48.0, "lng": 2.01}]},
+        )
+        assert resp.status_code == 422, resp.text
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            assert row.summary_polyline == polyline_lib.encode(_TRACK)  # unchanged
+
+    @pytest.mark.parametrize("bad_lng", [185.0, -185.0])
+    def test_out_of_range_lng_rejected(self, env, bad_lng):
+        client, engine = env
+        resp = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": [{"lat": 48.0, "lng": bad_lng},
+                              {"lat": 48.0, "lng": 2.01}]},
+        )
+        assert resp.status_code == 422, resp.text
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            assert row.summary_polyline == polyline_lib.encode(_TRACK)  # unchanged
+
+    @pytest.mark.parametrize("bad_lat", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_lat_rejected(self, env, bad_lat):
+        client, engine = env
+        resp = _put_track_raw(client, {"points": [{"lat": bad_lat, "lng": 2.0},
+                                                    {"lat": 48.0, "lng": 2.01}]})
+        assert resp.status_code == 422, resp.text
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            assert row.summary_polyline == polyline_lib.encode(_TRACK)  # unchanged
+
+    @pytest.mark.parametrize("bad_lng", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_lng_rejected(self, env, bad_lng):
+        client, engine = env
+        resp = _put_track_raw(client, {"points": [{"lat": 48.0, "lng": bad_lng},
+                                                    {"lat": 48.0, "lng": 2.01}]})
+        assert resp.status_code == 422, resp.text
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            assert row.summary_polyline == polyline_lib.encode(_TRACK)  # unchanged
+
+    def test_valid_points_still_accepted(self, env):
+        client, _ = env
+        resp = client.put(
+            "/api/projects/My Trip/activities/111/track",
+            json={"points": _points(2)},
+        )
+        assert resp.status_code == 200, resp.text

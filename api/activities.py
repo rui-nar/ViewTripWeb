@@ -13,6 +13,7 @@ Routes:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from models.db import get_session
 from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
@@ -460,6 +461,34 @@ class TrackPointIn(BaseModel):
     lat: float
     lng: float
     elev: Optional[float] = None
+
+    # Raises HTTPException directly rather than the usual ValueError: a
+    # ValueError becomes a pydantic ValidationError, and FastAPI's default 422
+    # handler echoes the rejected value back as `input` in the response body —
+    # Starlette's JSONResponse renders with allow_nan=False, so a NaN/Infinity
+    # `input` would blow up turning this into a 500 instead of the clean 422
+    # this validation exists to produce. An HTTPException skips that path
+    # entirely (matches the plain-string 422s raised elsewhere in this file,
+    # e.g. edit_activity_track's "A track needs at least 2 points").
+    @field_validator("lat")
+    @classmethod
+    def _lat_in_range(cls, v: float) -> float:
+        if not math.isfinite(v) or not (-90.0 <= v <= 90.0):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="lat must be finite and within -90..90",
+            )
+        return v
+
+    @field_validator("lng")
+    @classmethod
+    def _lng_in_range(cls, v: float) -> float:
+        if not math.isfinite(v) or not (-180.0 <= v <= 180.0):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="lng must be finite and within -180..180",
+            )
+        return v
 
 
 class TrackEditRequest(BaseModel):
