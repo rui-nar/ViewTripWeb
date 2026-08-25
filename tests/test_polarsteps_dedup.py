@@ -209,6 +209,80 @@ class TestUniqueStepIdIndex:
             sess.commit()  # must not raise
 
 
+# ── TOCTOU race: two concurrent imports of the same step ──────────────────────
+
+class TestConcurrentStepIdRace:
+    """`_find_by_step_id` (the app-level dedup check) and the commit that
+    follows it are not atomic. If a second request for the same step commits
+    in between, the first request's own commit now loses to the unique index
+    and must recover the same "already imported" response instead of a raw
+    500 (issue: uncaught IntegrityError on create_memory's commit)."""
+
+    def _body(self, **over):
+        b = {"project_name": "My Trip", "date": "2026-03-04", "geo_mode": "custom",
+             "name": "Beuron", "description": "hi", "lat": 48.0, "lon": 8.9,
+             "polarsteps_step_id": 220373126}
+        b.update(over)
+        return b
+
+    def test_loser_of_the_race_returns_the_winners_id_not_500(self, env, monkeypatch):
+        client, _, project_id, engine, _ = env
+        import api.memories as mem_mod
+
+        # The row a *different* request already committed for this step,
+        # landing after our own `_find_by_step_id` check ran but before our
+        # commit — the exact TOCTOU window the bug lives in.
+        winner_id = _insert_memory(engine, project_id, name="Beuron",
+                                    date="2026-03-04", polarsteps_step_id=220373126)
+
+        orig_find = mem_mod._find_by_step_id
+        calls = {"n": 0}
+
+        def flaky_find(sess, pid, step_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # the pre-commit check ran before the race landed
+            return orig_find(sess, pid, step_id)
+
+        monkeypatch.setattr(mem_mod, "_find_by_step_id", flaky_find)
+
+        resp = client.post("/api/memories/", json=self._body())
+
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["id"] == winner_id
+        assert _counts(engine, project_id) == (1, 1)  # no duplicate row or item
+
+    def test_unrecoverable_integrity_error_still_propagates(self, env, monkeypatch):
+        """If recovery can't find a winning row after all, the failure must
+        still surface — never silently swallowed."""
+        client, _, project_id, engine, _ = env
+        import api.memories as mem_mod
+
+        # Both lookups miss, so the handler has no row to fall back to.
+        monkeypatch.setattr(mem_mod, "_find_by_step_id", lambda sess, pid, step_id: None)
+        # Force the commit to fail as if the unique index caught a race that,
+        # in this contrived case, no query can see afterwards.
+        real_commit = Session.commit
+        state = {"n": 0}
+
+        def flaky_commit(self):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise IntegrityError(
+                    "INSERT INTO memory ...", {},
+                    Exception("UNIQUE constraint failed: memory.project_id, memory.polarsteps_step_id"),
+                )
+            return real_commit(self)
+
+        monkeypatch.setattr(Session, "commit", flaky_commit)
+
+        no_raise_client = TestClient(client.app, raise_server_exceptions=False)
+        resp = no_raise_client.post("/api/memories/", json=self._body())
+
+        assert resp.status_code == 500
+        assert _counts(engine, project_id) == (0, 0)
+
+
 # ── Read path: /trips/{id}/steps already_imported ─────────────────────────────
 
 class TestStepsAlreadyImported:

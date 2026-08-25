@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse
 from models.db import get_session
 from PIL import Image
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -338,7 +339,24 @@ def create_memory(
             polarsteps_step_id=body.polarsteps_step_id,
         )
         sess.add(mem_row)
-        sess.flush()
+        try:
+            # This flush is where the partial unique index actually fires the
+            # INSERT (needed early to get mem_row.id for the project item
+            # below) — not the later sess.commit(). Two concurrent requests
+            # for the same Polarsteps step can both pass the _find_by_step_id
+            # check above; the loser lands here. Recover the same
+            # "already imported" response the check would have given had it
+            # run a moment later. Any other integrity error is a real bug and
+            # must still surface.
+            sess.flush()
+        except IntegrityError as exc:
+            sess.rollback()
+            if body.polarsteps_step_id is None or "polarsteps_step_id" not in str(exc.orig):
+                raise
+            winner = _find_by_step_id(sess, project_id, body.polarsteps_step_id)
+            if winner is None:
+                raise
+            return {"id": winner.id}
 
         existing_items = sess.exec(
             select(DBProjectItem)
