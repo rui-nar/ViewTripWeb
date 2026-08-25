@@ -561,6 +561,9 @@ def test_hafas_failure_logs_warning_and_falls_back_unchanged(caplog):
     assert stop_count == 2
     assert degraded is True
     assert strategy == "straight"
+    # The specific train's HAFAS lookup failed — recorded on the segment even
+    # though this fallback also happened to degrade (issue #205 Unit C).
+    assert seg.route_hafas_failed is True
 
     # Visibility added: a WARNING naming the segment was logged before the fallback.
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -587,3 +590,54 @@ def test_hafas_success_does_not_log_warning(caplog):
                 seg, {"hafas_provider": "vr", "train_number": "273"})
 
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert seg.route_hafas_failed is False
+
+
+# ── Distinguishing a HAFAS-fallback resolve from a fully clean one (Unit C) ──
+#
+# Both land as route_status="resolved" and both can be non-degraded (OSM finds
+# real track either way) — route_hafas_failed is the only thing telling them
+# apart, so the user still learns their specific train selection didn't
+# resolve as chosen even when the generic fallback happens to succeed well.
+
+def test_job_hafas_fallback_flagged_distinctly_from_clean_resolve(env, monkeypatch):
+    from src.services.hafas_service import HafasError
+
+    client, user_id, project_id, engine = env
+    _add_segments(engine, project_id, [
+        _train_segment("seg-hafas-fail"), _train_segment("seg-clean"),
+    ])
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+
+    real_line = [[24.9414, 60.1719], [25.7294, 66.5039]]
+
+    with patch("src.services.hafas_service.get_stop_sequence",
+               side_effect=HafasError("VR train lookup failed: boom")), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": real_line, "degraded": False, "strategy": "straight"})()
+        _resolve_route_job(user_id, "My Trip", "seg-hafas-fail",
+                           {"hafas_provider": "vr", "train_number": "273"})
+
+    hafas_stops = [
+        {"lat": 60.1719, "lon": 24.9414, "uic": "1"},
+        {"lat": 66.5039, "lon": 25.7294, "uic": "2"},
+    ]
+    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": real_line, "degraded": False, "strategy": "relation_uic"})()
+        _resolve_route_job(user_id, "My Trip", "seg-clean",
+                           {"hafas_provider": "vr", "train_number": "273"})
+
+    fallback_seg = _load_segment(engine, user_id, "My Trip", "seg-hafas-fail")
+    clean_seg = _load_segment(engine, user_id, "My Trip", "seg-clean")
+
+    # Neither is "degraded" — OSM found real track in both cases — so
+    # route_hafas_failed is the only signal distinguishing them.
+    assert fallback_seg.route_status == "resolved"
+    assert clean_seg.route_status == "resolved"
+    assert fallback_seg.route_degraded is False
+    assert clean_seg.route_degraded is False
+    assert fallback_seg.route_hafas_failed is True
+    assert clean_seg.route_hafas_failed is False

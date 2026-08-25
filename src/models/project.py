@@ -140,6 +140,11 @@ class ConnectingSegment:
     route_degraded: bool = False            # rail only: resolved to a straight endpoint-chord, not
     #   real track (Overpass found no usable geometry). Surfaced to the UI so a straight segment
     #   isn't silently mistaken for a real resolved route.
+    route_hafas_failed: bool = False        # train only: the HAFAS lookup for the selected
+    #   train_number/date failed and resolution fell through to the generic two-point OSM
+    #   strategy instead (route_status is still "resolved" — independent of route_degraded,
+    #   which means OSM itself found no usable track). Surfaced to the UI so the user knows
+    #   their specific train selection wasn't what actually got resolved.
     route_degrade_retries: int = 0          # scheduled sweep attempts since the segment last
     #   became degraded (issue #207) — reset to 0 by any successful resolve, incremented by
     #   sweep_degraded_segments before each automatic retry, capped at MAX_DEGRADE_RETRIES.
@@ -171,6 +176,7 @@ class ConnectingSegment:
             "route_error": self.route_error,
             "route_started_at": self.route_started_at,
             "route_degraded": self.route_degraded,
+            "route_hafas_failed": self.route_hafas_failed,
             "route_degrade_retries": self.route_degrade_retries,
             "route_edited": self.route_edited,
         }
@@ -201,6 +207,7 @@ class ConnectingSegment:
             route_error=d.get("route_error"),
             route_started_at=d.get("route_started_at"),
             route_degraded=d.get("route_degraded", False),
+            route_hafas_failed=d.get("route_hafas_failed", False),
             route_degrade_retries=d.get("route_degrade_retries", 0),
             route_edited=d.get("route_edited", False),
         )

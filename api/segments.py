@@ -66,6 +66,14 @@ def _compute_segment_geometry(
     endpoint chord — the line is approximate, not real track.  Ferry/bus raise
     ``OverpassError`` on failure (never degrade), so their ``degraded`` is always
     False.  ``strategy`` names how the geometry was obtained (for logging).
+
+    Side effect: also sets ``seg.route_hafas_failed`` — True when a train's HAFAS
+    stop lookup failed and resolution fell through to the generic two-point OSM
+    strategy instead. This is independent of ``degraded`` (OSM can still find a
+    real track between the two plain endpoints), so it isn't part of the return
+    tuple; the caller reads it off *seg* after this returns. Always reset here
+    (not just on failure) so a segment's stale flag from an earlier attempt
+    doesn't leak into a fresh, fully-successful resolve.
     """
     from src.services.overpass_service import (
         OverpassError,  # noqa: F401 — re-exported for callers' except clauses
@@ -73,6 +81,8 @@ def _compute_segment_geometry(
         get_ferry_geometry,
         get_rail_geometry,
     )
+
+    seg.route_hafas_failed = False
 
     if seg.segment_type == "train":
         from src.services.hafas_service import HafasError, get_stop_sequence
@@ -97,6 +107,7 @@ def _compute_segment_geometry(
                     "degrading to straight-line geometry",
                     seg.id, params.get("hafas_provider"), params.get("train_number"), exc)
                 # fall back to two-point geometry
+                seg.route_hafas_failed = True
         rail = get_rail_geometry(stops)
         return rail.polyline, len(stops), rail.degraded, rail.strategy
 
@@ -173,6 +184,10 @@ def _resolve_route_job(
                 "route_mode": _mode_for_type.get(seg.segment_type, "great_circle"),
                 "route_error": None,
                 "route_degraded": degraded,
+                # The specific train HAFAS lookup failed and this resolved via the
+                # generic two-point OSM fallback instead — distinct from `degraded`,
+                # which means OSM itself found no usable track (issue #205 Unit C).
+                "route_hafas_failed": seg.route_hafas_failed,
                 # Any successful resolve — manual or a sweep_degraded_segments
                 # retry — starts the automatic-retry budget over (issue #207).
                 "route_degrade_retries": 0,
@@ -185,8 +200,10 @@ def _resolve_route_job(
             if params.get("hafas_provider"):
                 fields["hafas_provider"] = params["hafas_provider"]
             _log.info(
-                "resolve seg=%s type=%s strategy=%s points=%d degraded=%s status=resolved",
-                seg_id, seg.segment_type, strategy, len(polyline), degraded)
+                "resolve seg=%s type=%s strategy=%s points=%d degraded=%s "
+                "hafas_failed=%s status=resolved",
+                seg_id, seg.segment_type, strategy, len(polyline), degraded,
+                seg.route_hafas_failed)
         except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
             # Leave route_mode/route_polyline so geo still renders the
             # great-circle arc; surface a short error for the UI.
@@ -194,6 +211,7 @@ def _resolve_route_job(
                 "route_status": "failed",
                 "route_error": str(exc)[:200] or "Route resolution failed",
                 "route_degraded": False,
+                "route_hafas_failed": False,
             }
             _log.warning("resolve seg=%s type=%s status=failed: %s",
                          seg_id, seg.segment_type, exc)
@@ -461,6 +479,7 @@ def edit_segment_track(
             "route_status": "resolved",
             "route_error": None,
             "route_degraded": False,
+            "route_hafas_failed": False,
             "route_edited": True,
             "route_started_at": None,
         }
@@ -594,6 +613,7 @@ def resolve_segment_route(
             "route_status": "pending",
             "route_error": None,
             "route_degraded": False,
+            "route_hafas_failed": False,
             "route_started_at": started_at,
         }
         if body.train_number:
