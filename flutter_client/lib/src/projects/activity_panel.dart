@@ -103,7 +103,10 @@ class _ActivityIconBox extends StatelessWidget {
   /// ("ride"/"run"/"hike"/"other"). Null/missing entries fall back to the
   /// built-in [defaultTypeColor] palette — same as before this field existed.
   final Map<String, Map<String, dynamic>>? typeStyles;
-  const _ActivityIconBox({this.type, this.typeStyles});
+  /// True when this activity was imported from a GPX file rather than
+  /// synced from Strava — shows a small corner badge to flag the source.
+  final bool manualImport;
+  const _ActivityIconBox({this.type, this.typeStyles, this.manualImport = false});
 
   static IconData _icon(String? t) => switch (t?.toLowerCase()) {
         'run' || 'virtualrun'  => Icons.directions_run,
@@ -117,7 +120,7 @@ class _ActivityIconBox extends StatelessWidget {
     final bucket = activityTypeBucket(type);
     final c = resolveTypeStyle(bucket, isSegment: false, overrides: typeStyles?[bucket]).color;
     final dark = Theme.of(context).brightness == Brightness.dark;
-    return Container(
+    final box = Container(
       width: 32,
       height: 32,
       decoration: BoxDecoration(
@@ -125,6 +128,30 @@ class _ActivityIconBox extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Icon(_icon(type), size: 17, color: iconBoxFg(c, dark: dark)),
+    );
+    if (!manualImport) return box;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        box,
+        Positioned(
+          right: -2,
+          bottom: -2,
+          child: Container(
+            width: 13,
+            height: 13,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Theme.of(context).colorScheme.surface,
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+                width: 1,
+              ),
+            ),
+            child: Icon(Icons.route, size: 9, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1618,7 +1645,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                       .withValues(alpha: 0.45)
                                   : null,
                               leading: _ActivityIconBox(
-                                  type: type, typeStyles: notifier.typeStyles),
+                                  type: type,
+                                  typeStyles: notifier.typeStyles,
+                                  manualImport: a['source'] == 'gpx'),
                               title: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
