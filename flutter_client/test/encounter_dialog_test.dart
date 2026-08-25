@@ -13,7 +13,7 @@ class _FakeNotifier extends ProjectNotifier {
   Map<String, dynamic>? updated;
 
   @override
-  Future<void> createEncounter({
+  Future<bool> createEncounter({
     int? personId,
     int? groupId,
     required String date,
@@ -25,10 +25,11 @@ class _FakeNotifier extends ProjectNotifier {
     int? insertAfterIndex,
   }) async {
     created = {'personId': personId, 'groupId': groupId, 'date': date};
+    return true;
   }
 
   @override
-  Future<void> updateEncounter(
+  Future<bool> updateEncounter(
     String encounterId, {
     int? personId,
     int? groupId,
@@ -42,6 +43,7 @@ class _FakeNotifier extends ProjectNotifier {
     updated = {
       'id': encounterId, 'personId': personId, 'groupId': groupId, 'date': date,
     };
+    return true;
   }
 }
 

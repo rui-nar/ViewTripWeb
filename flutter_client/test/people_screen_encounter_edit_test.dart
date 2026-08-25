@@ -21,7 +21,7 @@ class _FakeNotifier extends ProjectNotifier {
   int fetchPersonCalls = 0;
 
   @override
-  Future<void> updateEncounter(
+  Future<bool> updateEncounter(
     String encounterId, {
     int? personId,
     int? groupId,
@@ -39,6 +39,7 @@ class _FakeNotifier extends ProjectNotifier {
       'date': date,
       'description': description,
     };
+    return true;
   }
 
   @override

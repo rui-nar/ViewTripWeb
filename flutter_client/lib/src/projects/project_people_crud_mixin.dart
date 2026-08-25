@@ -17,6 +17,11 @@ List<Map<String, dynamic>> mappablePolarstepsSteps(List<dynamic> raw) => raw
     .where((s) => s['lat'] != null && s['lon'] != null)
     .toList();
 
+/// Monotonic counter backing createEncounter's optimistic placeholder ids — a
+/// counter (rather than a literal id) guarantees two concurrent creates never
+/// collide even if they land in the same clock tick.
+int _optimisticEncounterIdCounter = 0;
+
 mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
@@ -172,7 +177,10 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
 
   /// Create an encounter with a person OR a group met (issue #56 — caller
   /// guarantees exactly one of [personId]/[groupId] is set).
-  Future<void> createEncounter({
+  /// Creates an encounter. Returns `true` on success, `false` on failure (in
+  /// which case the optimistic placeholder is rolled back and [error] is
+  /// set) — callers must check this before treating the save as done.
+  Future<bool> createEncounter({
     int? personId,
     int? groupId,
     required String date,
@@ -184,11 +192,15 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     int? insertAfterIndex,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
+    // Unique per call so two concurrent creates never share a placeholder id
+    // (a literal '__optimistic__' would collide and produce duplicate
+    // ValueKeys in the map marker layer).
+    final tempId = 'optimistic-${_optimisticEncounterIdCounter++}';
     final placeholder = {
       'item_type': 'encounter',
       'encounter': {
-        'id': '__optimistic__',
+        'id': tempId,
         'person_id': personId,
         'group_id': groupId,
         'date': date,
@@ -218,15 +230,25 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
+      // Roll back the placeholder so a failed create leaves no phantom item.
+      items = items
+          .where((item) =>
+              !(item['item_type'] == 'encounter' &&
+                item['encounter']?['id']?.toString() == tempId))
+          .toList();
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 
   /// Update an encounter's person/group, date, place, or note (issue #56 —
-  /// caller guarantees exactly one of [personId]/[groupId] is set).
-  Future<void> updateEncounter(
+  /// caller guarantees exactly one of [personId]/[groupId] is set). Returns
+  /// `true` on success, `false` on failure (with [error] set) — callers must
+  /// check this before treating the save as done.
+  Future<bool> updateEncounter(
     String encounterId, {
     int? personId,
     int? groupId,
@@ -238,7 +260,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     double? lon,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
     try {
       await api.put('/api/encounters/$encounterId', {
         'person_id': personId,
@@ -251,9 +273,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         if (lon != null) 'lon': lon,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 

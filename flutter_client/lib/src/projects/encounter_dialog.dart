@@ -95,6 +95,7 @@ class _EncounterDialogState extends State<EncounterDialog> {
   double? _lat;
   double? _lon;
   bool _saving = false;
+  String? _saveError;
   bool _locating = false;
   // True while the pin is still a default (day location / device GPS) rather
   // than something the user picked on the map — controls whether changing
@@ -254,39 +255,49 @@ class _EncounterDialogState extends State<EncounterDialog> {
       );
       return;
     }
-    setState(() => _saving = true);
+    setState(() {
+      _saveError = null;
+      _saving = true;
+    });
     final navigator = Navigator.of(context);
     final dateStr = _toIso(_date!);
     final timeStr = _time != null ? _fmtTime(_time!) : null;
     final desc = _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim();
 
-    final e = widget.editEntry;
-    if (e != null) {
-      await widget.notifier.updateEncounter(
-        e['id'].toString(),
-        personId: _personId,
-        groupId: _groupId,
-        date: dateStr,
-        geoMode: 'custom',
-        time: timeStr,
-        description: desc,
-        lat: _lat,
-        lon: _lon,
-      );
-    } else {
-      await widget.notifier.createEncounter(
-        personId: _personId,
-        groupId: _groupId,
-        date: dateStr,
-        geoMode: 'custom',
-        time: timeStr,
-        description: desc,
-        lat: _lat,
-        lon: _lon,
-        insertAfterIndex: widget.insertAfterIndex,
-      );
+    try {
+      final e = widget.editEntry;
+      final ok = e != null
+          ? await widget.notifier.updateEncounter(
+              e['id'].toString(),
+              personId: _personId,
+              groupId: _groupId,
+              date: dateStr,
+              geoMode: 'custom',
+              time: timeStr,
+              description: desc,
+              lat: _lat,
+              lon: _lon,
+            )
+          : await widget.notifier.createEncounter(
+              personId: _personId,
+              groupId: _groupId,
+              date: dateStr,
+              geoMode: 'custom',
+              time: timeStr,
+              description: desc,
+              lat: _lat,
+              lon: _lon,
+              insertAfterIndex: widget.insertAfterIndex,
+            );
+      if (!ok) {
+        setState(() =>
+            _saveError = widget.notifier.error ?? 'Failed to save encounter');
+        return;
+      }
+      if (mounted) navigator.pop();
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
-    if (mounted) navigator.pop();
   }
 
   @override
@@ -505,6 +516,31 @@ class _EncounterDialogState extends State<EncounterDialog> {
                         : '${_lat!.toStringAsFixed(5)}, ${_lon!.toStringAsFixed(5)}'),
                 onPressed: _pickLocation,
               ),
+              if (_saveError != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.error_outline, size: 18,
+                          color: theme.colorScheme.onErrorContainer),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _saveError!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onErrorContainer),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),
