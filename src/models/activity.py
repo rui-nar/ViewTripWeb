@@ -76,6 +76,9 @@ class Activity:
     refresh_status: Optional[str] = None
     refresh_started_at: Optional[str] = None
     refresh_error: Optional[str] = None
+    # Import origin. None = from Strava (today's implicit default), "gpx" = imported
+    # from a GPX file.
+    source: Optional[str] = None
 
     # Client-side E2EE ciphertext passthrough (issue #29). start_latlng/end_latlng/
     # elevation_profile are parsed structures (list/tuple) — they can't carry a
@@ -141,6 +144,7 @@ class Activity:
             "refresh_status": self.refresh_status,
             "refresh_started_at": self.refresh_started_at,
             "refresh_error": self.refresh_error,
+            "source": self.source,
             "start_latlng_enc": self.start_latlng_enc,
             "end_latlng_enc": self.end_latlng_enc,
             "elevation_profile_enc": self.elevation_profile_enc,
@@ -207,6 +211,7 @@ class Activity:
             refresh_status=data.get("refresh_status"),
             refresh_started_at=data.get("refresh_started_at"),
             refresh_error=data.get("refresh_error"),
+            source=data.get("source"),
             start_latlng_enc=data.get("start_latlng_enc"),
             end_latlng_enc=data.get("end_latlng_enc"),
             elevation_profile_enc=data.get("elevation_profile_enc"),

@@ -754,6 +754,7 @@ class ActivityMixin:
             summary_polyline=act.summary_polyline,
             elevation_profile_json=_ep_json,
             elevation_profile_low_res_json=_low_res_ep_json(_ep_json),
+            source=act.source,
         )
         sess.add(row)
 
@@ -864,6 +865,7 @@ class ActivityMixin:
             refresh_status=getattr(row, "refresh_status", None),
             refresh_started_at=getattr(row, "refresh_started_at", None),
             refresh_error=getattr(row, "refresh_error", None),
+            source=getattr(row, "source", None),
             start_latlng_enc=start_latlng_enc,
             end_latlng_enc=end_latlng_enc,
             # Prefer the full profile's ciphertext; fall back to the low-res
