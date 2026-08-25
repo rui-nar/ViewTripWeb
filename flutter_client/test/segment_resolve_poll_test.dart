@@ -96,5 +96,42 @@ void main() {
       expect(result['degraded'], true);
       expect(n.error, isNull);
     });
+
+    test('a HAFAS-fallback resolution is reported back distinctly from a '
+        'clean resolve (issue #205 Unit C)', () async {
+      final service = _PollService([
+        [
+          {
+            'id': 'seg-1',
+            'route_status': 'resolved',
+            'route_degraded': false,
+            'route_hafas_failed': true,
+          }
+        ],
+      ]);
+      final n = _notifier(service);
+
+      final result = await n.pollSegmentResolution('seg-1',
+          interval: _fast, timeout: const Duration(seconds: 5));
+
+      expect(result['route_status'], 'resolved');
+      expect(result['degraded'], false);
+      expect(result['hafas_failed'], true);
+      expect(n.error, isNull);
+    });
+
+    test('a clean resolve reports hafas_failed as false', () async {
+      final service = _PollService([
+        [
+          {'id': 'seg-1', 'route_status': 'resolved', 'route_degraded': false}
+        ],
+      ]);
+      final n = _notifier(service);
+
+      final result = await n.pollSegmentResolution('seg-1',
+          interval: _fast, timeout: const Duration(seconds: 5));
+
+      expect(result['hafas_failed'], false);
+    });
   });
 }

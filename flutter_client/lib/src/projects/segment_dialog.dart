@@ -520,6 +520,18 @@ class _SegmentDialogState extends State<SegmentDialog> {
         ));
         return;
       }
+      // The selected train's own HAFAS lookup failed, but OSM still resolved a
+      // real route via the generic two-point fallback — a successful resolve,
+      // but not the one the user asked for by train number (issue #205 Unit C).
+      if (result['hafas_failed'] == true) {
+        messenger.showSnackBar(const SnackBar(
+          content: Text(
+              'Route resolved, but the selected train could not be looked up — '
+              'showing a generic route instead'),
+          duration: Duration(seconds: 6),
+        ));
+        return;
+      }
       final msg = switch (routeMode) {
         'ferry' => 'Ferry route resolved',
         'bus'   => 'Bus route resolved',

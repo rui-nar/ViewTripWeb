@@ -326,6 +326,10 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           // True when the server fell back to a straight endpoint chord (no real
           // track found) — surfaced so the UI doesn't claim a detailed route.
           'degraded': seg['route_degraded'] == true,
+          // True when the HAFAS lookup for the selected train failed and this
+          // resolved via the generic two-point OSM fallback instead — distinct
+          // from `degraded` (issue #205 Unit C).
+          'hafas_failed': seg['route_hafas_failed'] == true,
         };
       }
       if (stat == 'failed') {
@@ -387,6 +391,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       'route_status': 'resolved',
       'route_error': null,
       'route_degraded': degraded,
+      'route_hafas_failed': segMeta['route_hafas_failed'] == true,
       'route_edited': segMeta['route_edited'] == true,
       'route_polyline': segMeta['route_polyline'],
       if (segMeta['train_number'] != null) 'train_number': segMeta['train_number'],
