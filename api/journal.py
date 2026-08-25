@@ -25,9 +25,10 @@ from pathlib import Path
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from models.db import get_session
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
@@ -135,11 +136,19 @@ def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
 
 
 def _save_photo_files(user_id: str, journal_id: int, uuid_str: str, raw: bytes) -> None:
+    # Decode before writing anything to disk: a corrupt/non-image upload must
+    # not leave an orphaned full-res file behind with no valid thumbnail.
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Invalid image file",
+        ) from exc
     photo_path = _photo_dir(user_id, journal_id)
     full = photo_path / f"{uuid_str}.jpg"
     thumb = photo_path / f"{uuid_str}_thumb.jpg"
     full.write_bytes(raw)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail(_THUMB_SIZE, Image.LANCZOS)
     img.save(str(thumb), "JPEG", quality=85)
     # Storage accounting for quota checks (issue #121) — see api/memories.py.
@@ -385,7 +394,12 @@ async def upload_photo(
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     photo_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(current_user["sub"], journal_id, photo_uuid, raw)
+    # JPEG decode + LANCZOS thumbnail resize is CPU-bound; run it off the event
+    # loop so one upload doesn't stall every other in-flight request (mirrors
+    # the read-path thumbnail server's own move to a thread — see the
+    # semaphore comment in api/memories.py — but here via FastAPI's thread
+    # pool instead of a sync route, since the rest of this handler stays async).
+    await run_in_threadpool(_save_photo_files, current_user["sub"], journal_id, photo_uuid, raw)
     _write_journal_photo(journal_id, photo_uuid)
     return {"uuid": photo_uuid}
 
@@ -457,7 +471,7 @@ async def replace_photo(
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     new_uuid = str(uuid_lib.uuid4())
-    _save_photo_files(current_user["sub"], journal_id, new_uuid, raw)
+    await run_in_threadpool(_save_photo_files, current_user["sub"], journal_id, new_uuid, raw)
 
     with photo_lock("journal", journal_id), get_session() as sess:
         row = sess.get(DBJournalEntry, journal_id)
