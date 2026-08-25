@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
 import '../core/design_tokens.dart';
+import '../core/scrolling_selectable_text.dart';
 import '../crypto/e2ee_crypto.dart' show EncryptedField;
 import 'activity_editor_page.dart';
 import 'day_meta_editor.dart';
@@ -150,6 +151,11 @@ class _ActivityPanelState extends State<ActivityPanel> {
   bool _multiSelect = false;
   final Set<String> _selectedDays = {};
   String? _anchorDayKey; // last day tapped without Shift — range-select anchor
+
+  // Local, ephemeral "selected" encounter — encounters have no selection
+  // concept in ProjectNotifier (unlike activities/memories/days); this exists
+  // solely to gate the name's scroll-marquee animation.
+  String? _selectedEncounterId;
 
   // Narrow-layout: day keys whose edit strip is revealed by swipe-right
 
@@ -977,6 +983,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
     final time = enc['time'] as String?;
     final note = enc['description'] as String?;
     final label = date != null ? _fmtMemDate(date, time) : 'Encounter';
+    final isSelected = _selectedEncounterId == encId;
 
     void openEdit() => showDialog<void>(
           context: context,
@@ -1018,6 +1025,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
       },
       child: ListTile(
         dense: true,
+        tileColor: isSelected
+            ? theme.colorScheme.primaryContainer.withValues(alpha: 0.45)
+            : null,
         leading: group != null
             ? CircleAvatar(
                 radius: 16,
@@ -1030,9 +1040,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Met $name',
+            ScrollingSelectableText(
+                text: 'Met $name',
                 style: theme.textTheme.labelSmall,
-                overflow: TextOverflow.ellipsis),
+                isSelected: isSelected),
             Text(
               note != null && note.isNotEmpty ? '$label  •  $note' : label,
               maxLines: 1,
@@ -1051,6 +1062,8 @@ class _ActivityPanelState extends State<ActivityPanel> {
         onTap: _multiSelect
             ? null
             : () {
+                setState(() => _selectedEncounterId =
+                    isSelected ? null : encId);
                 final onLocationTap = widget.onLocationTap;
                 final sheetLocationTap = onLocationTap == null
                     ? null
@@ -1440,9 +1453,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Text(
-                                        'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
-                                        overflow: TextOverflow.ellipsis,
+                                      ScrollingSelectableText(
+                                        text:
+                                            'Day ${h.dayNumber} · ${_fmtGroupDate(h.date)}',
+                                        isSelected: isHighlighted,
                                         style: theme.textTheme.labelMedium?.copyWith(
                                           color: isHighlighted
                                               ? theme.colorScheme.primary
@@ -1623,9 +1637,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Text(name,
+                                  ScrollingSelectableText(
+                                      text: name,
                                       style: theme.textTheme.labelSmall,
-                                      overflow: TextOverflow.ellipsis),
+                                      isSelected: isSelected),
                                   Text(
                                     '${(distM / 1000).toStringAsFixed(1)} km  •  ${_formatDuration(movingSec)}',
                                     style: theme.textTheme.bodySmall,
@@ -1771,9 +1786,10 @@ class _ActivityPanelState extends State<ActivityPanel> {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Text(label,
+                                    ScrollingSelectableText(
+                                        text: label,
                                         style: theme.textTheme.labelSmall,
-                                        overflow: TextOverflow.ellipsis),
+                                        isSelected: isSelected),
                                     if (memDesc != null && memDesc.isNotEmpty)
                                       Text(memDesc,
                                           maxLines: 1,
