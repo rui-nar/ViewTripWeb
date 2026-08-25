@@ -207,8 +207,10 @@ def _enrich_activities_background(
                 if not _repo.activity_is_edited(a)
             )
             break
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — private activity, network error, or revoked auth
+            _log.warning(
+                "enrich activity=%s failed: %s: %s", activity_id, type(exc).__name__, exc,
+            )
 
     if any_enriched:
         bust_geo_cache(owner_id, project_name)
