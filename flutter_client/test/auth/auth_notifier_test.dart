@@ -73,7 +73,8 @@ class _FakeAuthService extends AuthService {
   @override
   Future<Map<String, dynamic>> getMe() async {
     getMeCalls++;
-    if (_getMeError != null) throw _getMeError;
+    final error = _getMeError;
+    if (error != null) throw error;
     // No future supplied means "never resolves" — used to prove init()
     // did not await it.
     return _getMeFuture ?? Completer<Map<String, dynamic>>().future;
