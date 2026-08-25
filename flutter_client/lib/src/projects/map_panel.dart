@@ -93,7 +93,7 @@ const Color _kDegradedRouteColor = Color(0xFF64748B); // slate-500
 // A segment whose route resolution ended in route_status="failed" (e.g. no
 // ferry route exists, or the job never got a verdict) otherwise renders as an
 // ordinary great-circle line forever — indistinguishable from an intentional
-// straight segment (issue #205 Unit D). Drawn in this red so it reads as
+// straight segment. Drawn in this red so it reads as
 // "needs attention" on the map itself, same rationale as the degraded colour
 // above; retrying is still done from the tile list's "tap to retry" row.
 const Color _kFailedRouteColor = Color(0xFFDC2626); // red-600
@@ -1699,7 +1699,7 @@ List<Polyline> _buildPolylines(
       lineStyle = isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
     }
     // Degraded/failed override type/track colouring but not line style — the
-    // tile list carries the same signal via _segmentStatusLine (issues #207, #205).
+    // tile list carries the same signal via _segmentStatusLine (issue #207).
     final effectiveBaseColor = (isSegment && props['route_degraded'] == true)
         ? _kDegradedRouteColor
         : (isSegment && props['route_status'] == 'failed')

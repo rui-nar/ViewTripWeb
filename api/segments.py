@@ -186,7 +186,7 @@ def _resolve_route_job(
                 "route_degraded": degraded,
                 # The specific train HAFAS lookup failed and this resolved via the
                 # generic two-point OSM fallback instead — distinct from `degraded`,
-                # which means OSM itself found no usable track (issue #205 Unit C).
+                # which means OSM itself found no usable track.
                 "route_hafas_failed": seg.route_hafas_failed,
                 # Any successful resolve — manual or a sweep_degraded_segments
                 # retry — starts the automatic-retry budget over (issue #207).

@@ -121,7 +121,7 @@ def test_a_second_identical_request_is_served_from_cache(env, monkeypatch):
     assert second.json() == first.json()
 
 
-# ── A failed segment is discoverable on the map itself (issue #205 Unit D) ──
+# ── A failed segment is discoverable on the map itself ──
 #
 # route_status wasn't in the low-res geo feature properties at all — a failed
 # resolve rendered as an ordinary great-circle line forever, with no signal on

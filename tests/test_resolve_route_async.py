@@ -525,7 +525,7 @@ def test_the_trigger_enqueues_onto_the_resolve_queue(env, monkeypatch):
         engine, user_id, "My Trip", "ferry-1").route_started_at
 
 
-# ── HAFAS-failure fallback logging (issue #205, Unit C) ──────────────────────
+# ── HAFAS-failure fallback logging ──────────────────────
 #
 # _compute_segment_geometry's `except HafasError: pass` used to swallow every
 # HAFAS failure silently and fall back to two-point (great-circle-endpoint)
@@ -562,7 +562,7 @@ def test_hafas_failure_logs_warning_and_falls_back_unchanged(caplog):
     assert degraded is True
     assert strategy == "straight"
     # The specific train's HAFAS lookup failed — recorded on the segment even
-    # though this fallback also happened to degrade (issue #205 Unit C).
+    # though this fallback also happened to degrade.
     assert seg.route_hafas_failed is True
 
     # Visibility added: a WARNING naming the segment was logged before the fallback.
@@ -593,7 +593,7 @@ def test_hafas_success_does_not_log_warning(caplog):
     assert seg.route_hafas_failed is False
 
 
-# ── Distinguishing a HAFAS-fallback resolve from a fully clean one (Unit C) ──
+# ── Distinguishing a HAFAS-fallback resolve from a fully clean one ──
 #
 # Both land as route_status="resolved" and both can be non-degraded (OSM finds
 # real track either way) — route_hafas_failed is the only thing telling them

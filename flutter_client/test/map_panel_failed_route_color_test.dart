@@ -2,7 +2,7 @@
 // ferry route exists, or the resolve never got a verdict within the client's
 // poll window) used to render as an ordinary great-circle line forever —
 // indistinguishable from an intentionally straight segment, discoverable only
-// by scrolling to the tile list's "tap to retry" row (issue #205 Unit D).
+// by scrolling to the tile list's "tap to retry" row.
 // Fixed with a distinct line colour on the map itself, mirroring the existing
 // degraded-route treatment (map_panel_degraded_route_color_test.dart).
 

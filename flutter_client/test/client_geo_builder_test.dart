@@ -208,7 +208,7 @@ void main() {
     });
 
     test('includes route_status on segment properties, so a failed resolve '
-        'can be drawn distinctly on load (issue #205 Unit D)', () {
+        'can be drawn distinctly on load', () {
       final items = [
         {
           'item_type': 'segment',

@@ -98,7 +98,7 @@ void main() {
     });
 
     test('a HAFAS-fallback resolution is reported back distinctly from a '
-        'clean resolve (issue #205 Unit C)', () async {
+        'clean resolve', () async {
       final service = _PollService([
         [
           {

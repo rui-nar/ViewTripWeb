@@ -328,7 +328,7 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           'degraded': seg['route_degraded'] == true,
           // True when the HAFAS lookup for the selected train failed and this
           // resolved via the generic two-point OSM fallback instead — distinct
-          // from `degraded` (issue #205 Unit C).
+          // from `degraded`.
           'hafas_failed': seg['route_hafas_failed'] == true,
         };
       }
