@@ -43,11 +43,17 @@ Map<String, dynamic> _userMap({String email = 'restored@example.com'}) => {
 /// AuthNotifier's `api.tokenForUpload` read sees it. getMe()/logout() are
 /// driven explicitly per test.
 class _FakeAuthService extends AuthService {
-  _FakeAuthService(this.token, {Future<Map<String, dynamic>>? getMeFuture})
-      : _getMeFuture = getMeFuture;
+  _FakeAuthService(this.token,
+      {Future<Map<String, dynamic>>? getMeFuture, Object? getMeError})
+      : _getMeFuture = getMeFuture,
+        _getMeError = getMeError;
 
   final String token;
   final Future<Map<String, dynamic>>? _getMeFuture;
+  // Thrown lazily from getMe() itself, rather than passed as a pre-built
+  // Future.error(...): building that eagerly, before init() ever awaits it,
+  // trips Dart's unhandled-error zone reporting and fails the test spuriously.
+  final Object? _getMeError;
 
   int getMeCalls = 0;
   bool loggedOut = false;
@@ -65,8 +71,9 @@ class _FakeAuthService extends AuthService {
   }
 
   @override
-  Future<Map<String, dynamic>> getMe() {
+  Future<Map<String, dynamic>> getMe() async {
     getMeCalls++;
+    if (_getMeError != null) throw _getMeError;
     // No future supplied means "never resolves" — used to prove init()
     // did not await it.
     return _getMeFuture ?? Completer<Map<String, dynamic>>().future;
@@ -196,7 +203,7 @@ void main() {
     final token =
         _fakeJwt(DateTime.now().toUtc().subtract(const Duration(minutes: 1)));
     final service = _FakeAuthService(token,
-        getMeFuture: Future.error(ApiException(401, '{"detail":"expired"}')));
+        getMeError: ApiException(401, '{"detail":"expired"}'));
     final notifier = AuthNotifier(service);
 
     await notifier.init();
