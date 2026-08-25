@@ -139,6 +139,13 @@ def _enrich_activities_background(
     preserved on interruption.  Strava 429 responses are handled by the
     StravaAPI client (sleeps Retry-After then continues).
 
+    If the application's own 15-min/daily quota (shared process-wide, see
+    :class:`RateLimiter`) runs low mid-batch, the remaining activities are
+    *not* pushed through the limiter's up-to-60s wait one at a time — that
+    would burn minutes for no benefit when every one of them would hit the
+    same wall. Instead they're handed to :func:`_enrich_pending_background`,
+    which sleeps until the window resets and retries them.
+
     ``user_info_id`` is the IMPORTER whose Strava token fetches the streams;
     ``owner_id`` is the PROJECT OWNER whose geo cache is keyed — the two differ
     when a companion imports into a shared trip (issue #106).
@@ -148,9 +155,20 @@ def _enrich_activities_background(
         return
 
     any_enriched = False
-    for activity_id in activity_ids:
+    pending: List[int] = []
+    for index, activity_id in enumerate(activity_ids):
         if _repo.activity_is_edited(activity_id):
             continue  # locally edited track — never overwrite from Strava
+        if client.remaining_requests <= 2:
+            # Quota window is nearly exhausted — every remaining activity
+            # would hit the same wall. Defer this one and the rest instead of
+            # blocking on the limiter for up to 60s each.
+            pending.append(activity_id)
+            pending.extend(
+                a for a in activity_ids[index + 1:]
+                if not _repo.activity_is_edited(a)
+            )
+            break
         try:
             streams  = client.get_activity_streams(activity_id)
             latlng   = streams.get("latlng",   {}).get("data") or []
@@ -175,8 +193,24 @@ def _enrich_activities_background(
                         sess, activity_id, polyline_str, ep_json
                     )
                 any_enriched = True
-        except Exception:
-            pass
+        except RateLimitError:
+            # The quota window filled between the check above and the call
+            # (another request got there first — the limiter is process-wide,
+            # issue #130). Defer this one and the rest of the batch.
+            _log.warning(
+                "enrich activity=%s: rate limit hit mid-batch, deferring %d "
+                "remaining activities", activity_id, len(activity_ids) - index,
+            )
+            pending.append(activity_id)
+            pending.extend(
+                a for a in activity_ids[index + 1:]
+                if not _repo.activity_is_edited(a)
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 — private activity, network error, or revoked auth
+            _log.warning(
+                "enrich activity=%s failed: %s: %s", activity_id, type(exc).__name__, exc,
+            )
 
     if any_enriched:
         bust_geo_cache(owner_id, project_name)
@@ -184,6 +218,9 @@ def _enrich_activities_background(
         # load is a fast cache HIT rather than a cold recompute.
         warm_geo_cache(owner_id, project_name)
         warm_meta_cache(owner_id, project_name)
+
+    if pending:
+        _enrich_pending_background(pending, user_info_id, owner_id, project_name)
 
 
 def _enrich_pending_background(
