@@ -13,6 +13,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../api/client.dart';
 import '../core/design_tokens.dart';
 import '../map/geo_point.dart';
 import 'elevation_chart.dart';
@@ -60,6 +61,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
   int get _activityId => (widget.activity['id'] as num).toInt();
   bool get _isEdited => widget.activity['is_edited'] == true;
+
+  /// The project's lock_version as of when this activity was fetched for
+  /// editing (see GET .../track) — sent back on save/split so the server can
+  /// reject a stale write with 409 if the project changed elsewhere since
+  /// (issue #31). Null on an older cached payload that predates the field,
+  /// in which case the save/split proceeds unconditionally.
+  int? get _lockVersion => (widget.activity['lock_version'] as num?)?.toInt();
 
   /// Local activities (split tails, added transport) carry a synthetic negative
   /// id and never came from Strava, so there is no Strava original to reset to —
@@ -161,18 +169,44 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
+  /// True for the 409 the server returns when this activity's project changed
+  /// elsewhere since the editor loaded it (issue #31) — TrackEditRequest /
+  /// SplitRequest.lock_version mismatched.
+  bool _isStaleVersionConflict(Object e) => e is ApiException && e.statusCode == 409;
+
+  /// Tell the user their edit was rejected because the activity changed
+  /// elsewhere, and close the editor: it's holding a now-stale copy, and
+  /// reopening it (activity_panel.dart always re-fetches on open) is the only
+  /// way to see the latest version before trying again. Mirrors
+  /// ProjectNotifier's segment-conflict handling (_resyncOnConflict in
+  /// project_segment_crud_mixin.dart).
+  void _handleStaleVersionConflict(
+    ScaffoldMessengerState messenger, NavigatorState navigator,
+  ) {
+    messenger.showSnackBar(const SnackBar(
+      content: Text('This activity changed elsewhere. Close and reopen the '
+          'editor to see the latest version, then try again.'),
+    ));
+    navigator.pop(false);
+  }
+
   Future<void> _save() async {
     if (!_c.canSave || _saving) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      await widget.notifier.saveActivityTrack(_activityId, _c.toSavePayload());
+      await widget.notifier.saveActivityTrack(
+          _activityId, _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
       navigator.pop(true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
+      if (_isStaleVersionConflict(e)) {
+        _handleStaleVersionConflict(messenger, navigator);
+        return;
+      }
       messenger.showSnackBar(SnackBar(content: Text('Save failed: $e')));
     }
   }
@@ -260,13 +294,17 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      await widget.notifier
-          .splitActivity(_activityId, index, payload: _c.toSavePayload());
+      await widget.notifier.splitActivity(_activityId, index,
+          payload: _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
       navigator.pop(true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
+      if (_isStaleVersionConflict(e)) {
+        _handleStaleVersionConflict(messenger, navigator);
+        return;
+      }
       messenger.showSnackBar(SnackBar(content: Text('Split failed: $e')));
     }
   }
@@ -303,12 +341,18 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     final navigator = Navigator.of(context);
     try {
       await widget.notifier.splitActivity(_activityId, index,
-          dropBoundary: true, payload: _c.toSavePayload());
+          dropBoundary: true,
+          payload: _c.toSavePayload(),
+          lockVersion: _lockVersion);
       if (!mounted) return;
       navigator.pop({'openSegmentFor': _activityId});
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
+      if (_isStaleVersionConflict(e)) {
+        _handleStaleVersionConflict(messenger, navigator);
+        return;
+      }
       messenger.showSnackBar(SnackBar(content: Text('Cut failed: $e')));
     }
   }

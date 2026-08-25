@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:viewtrip_client/src/api/client.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/map/geo_point.dart';
 import 'package:viewtrip_client/src/projects/activity_editor_page.dart';
@@ -91,6 +92,7 @@ class _RecordingNotifier extends ProjectNotifier {
     int splitIndex, {
     bool dropBoundary = false,
     Map<String, dynamic>? payload,
+    int? lockVersion,
   }) async {
     splits.add(
         (index: splitIndex, dropBoundary: dropBoundary, payload: payload));
@@ -99,6 +101,32 @@ class _RecordingNotifier extends ProjectNotifier {
   @override
   Future<void> resetActivityTrack(int activityId) async {
     resets.add(activityId);
+  }
+}
+
+/// A notifier whose saveActivityTrack/splitActivity always fail with the 409
+/// the server returns on a stale lock_version (issue #31) — for exercising
+/// ActivityEditorPage's conflict handling without a real server round trip.
+class _StaleVersionNotifier extends ProjectNotifier {
+  _StaleVersionNotifier() : super(ProjectService()) {
+    ref = const ProjectRef(name: 'Trip');
+  }
+
+  @override
+  Future<void> saveActivityTrack(
+    int activityId, Map<String, dynamic> payload, {int? lockVersion}) async {
+    throw ApiException(409, '{"detail":"stale"}');
+  }
+
+  @override
+  Future<void> splitActivity(
+    int activityId,
+    int splitIndex, {
+    bool dropBoundary = false,
+    Map<String, dynamic>? payload,
+    int? lockVersion,
+  }) async {
+    throw ApiException(409, '{"detail":"stale"}');
   }
 }
 
@@ -482,5 +510,39 @@ void main() {
     await _pointMenu(tester, 1, 'Delete point');
     await _pointMenu(tester, 2, 'Cut & add transport');
     expect(find.textContaining('unsaved point edits'), findsOneWidget);
+  });
+
+  // ── Optimistic-lock conflict (issue #31) ───────────────────────────────────
+  //
+  // A 409 means the activity changed elsewhere (another tab/device) since the
+  // editor loaded it — a stale copy that must not be silently retried. The
+  // editor tells the user plainly and closes rather than showing the raw
+  // ApiException text.
+
+  testWidgets('a stale-version conflict on save is explained and closes the editor',
+      (tester) async {
+    await _pumpPushed(tester, _activity(), _StaleVersionNotifier());
+
+    _controllerOf(tester).removeSelected(0);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('changed elsewhere'), findsOneWidget);
+    expect(find.byType(ActivityEditorPage), findsNothing,
+        reason: 'a stale write must close the editor, not leave it open on '
+            'a copy that can only conflict again');
+  });
+
+  testWidgets('a stale-version conflict on split is explained and closes the editor',
+      (tester) async {
+    await _pumpPushed(tester, _longActivity(), _StaleVersionNotifier());
+
+    await _pointMenu(tester, 2, 'Split here');
+    await tester.tap(find.widgetWithText(FilledButton, 'Split'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('changed elsewhere'), findsOneWidget);
+    expect(find.byType(ActivityEditorPage), findsNothing);
   });
 }

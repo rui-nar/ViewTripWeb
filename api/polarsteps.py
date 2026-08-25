@@ -108,6 +108,24 @@ class ConnectRequest(BaseModel):
     remember_token: str = Field(description="Polarsteps `remember_token` cookie value")
 
 
+def _is_malformed_token(token: str) -> bool:
+    """True if `token` doesn't look like a Polarsteps remember_token.
+
+    A well-formed token is "{user_id}|{hash}" (see PolarstepsClient). Given a
+    token missing the "|" separator or with a non-numeric/non-positive prefix,
+    PolarstepsClient silently falls back to user_id=0, and Polarsteps then
+    404s on that garbage id — surfacing as a confusing "Could not reach
+    Polarsteps: 404" instead of naming the actual problem, an invalid token.
+    """
+    parts = token.split("|", 1)
+    if len(parts) != 2 or not parts[1]:
+        return True
+    try:
+        return int(parts[0]) <= 0
+    except ValueError:
+        return True
+
+
 @router.post("/connect", response_model=ConnectedOut, summary="Connect Polarsteps account")
 def polarsteps_connect(
     body: ConnectRequest,
@@ -115,11 +133,17 @@ def polarsteps_connect(
 ):
     """Validate a Polarsteps remember_token against the Polarsteps API and store it.
 
-    Returns the verified username on success. Returns 401 if the token is invalid
-    and 502 if Polarsteps is unreachable.
+    Returns the verified username on success. Returns 401 if the token is
+    malformed or rejected by Polarsteps, and 502 if Polarsteps is unreachable.
     """
     user_info_id = int(current_user["sub"])
-    client = PolarstepsClient(body.remember_token.strip())
+    token = body.remember_token.strip()
+    if _is_malformed_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Polarsteps token — token format not recognised",
+        )
+    client = PolarstepsClient(token)
     try:
         me = client.get_me()
     except PermissionError:

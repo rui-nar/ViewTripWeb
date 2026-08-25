@@ -39,21 +39,84 @@ class _PolarstepsImportScreenState
     final notifier = context.read<PolarstepsImportNotifier>();
     final added = await notifier.importSelected(widget.projectRef);
     if (!mounted) return;
+
+    final failed = notifier.failedSteps.length;
+    final withMissingPhotos = notifier.stepsWithMissingPhotos;
+    final detailsAction = failed > 0
+        ? SnackBarAction(
+            label: 'Details',
+            onPressed: () =>
+                _showFailureDetails(context, notifier.failedSteps),
+          )
+        : null;
+
     if (added > 0) {
       // Reload the project so the newly-added memories appear immediately
       // in the activity panel and on the map when we pop back to AppScreen.
       final projectNotifier = context.read<ProjectNotifier>();
       projectNotifier.load(widget.projectRef);
       projectNotifier.startPhotoPolling(widget.projectRef);
+
+      final summary = StringBuffer(
+          '$added ${added == 1 ? 'memory' : 'memories'} added');
+      if (failed > 0) summary.write(', $failed failed');
+      if (withMissingPhotos > 0) {
+        summary.write(
+            ', $withMissingPhotos with some photos missing');
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$added ${added == 1 ? 'memory' : 'memories'} added')),
+        SnackBar(content: Text(summary.toString()), action: detailsAction),
       );
-      context.pop();
+      // Only leave the screen on a clean run. If some steps failed, stay so
+      // the "Details" action below has a still-mounted context to show its
+      // dialog with, and the still-selected failed steps stay visible to
+      // retry.
+      if (failed == 0) context.pop();
+    } else if (failed > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content:
+              Text('$failed ${failed == 1 ? 'step' : 'steps'} failed to import'),
+          action: detailsAction,
+        ),
+      );
     } else if (notifier.error == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No steps were imported')),
       );
     }
+  }
+
+  void _showFailureDetails(
+      BuildContext context, List<ImportFailure> failures) {
+    if (!context.mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Steps that failed'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: failures.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, i) {
+              final f = failures[i];
+              return ListTile(
+                title: Text(f.stepName),
+                subtitle: Text(f.reason),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override

@@ -3,6 +3,24 @@ import 'package:flutter/foundation.dart';
 import '../api/client.dart';
 import '../core/project_ref.dart';
 
+/// One step that failed to import, with the reason shown in the "Details"
+/// list on the completion summary (see [PolarstepsImportNotifier.failedSteps]).
+class ImportFailure {
+  final String stepName;
+  final String reason;
+  const ImportFailure(this.stepName, this.reason);
+}
+
+/// Per-step outcome of [PolarstepsImportNotifier._importStep], used to build
+/// the batch summary in [PolarstepsImportNotifier.importSelected].
+typedef _StepOutcome = ({
+  bool success,
+  String stepName,
+  String? failReason,
+  int photosAttempted,
+  int photosSucceeded,
+});
+
 class PolarstepsImportNotifier extends ChangeNotifier {
   // Injectable so tests can supply an ApiClient backed by a MockClient.
   final ApiClient _api;
@@ -28,6 +46,16 @@ class PolarstepsImportNotifier extends ChangeNotifier {
   bool isImporting = false;
   int importedCount = 0;
   int importTotal = 0;
+
+  /// Steps that failed to import in the last [importSelected] run, with why —
+  /// so a partial-batch failure is attributable instead of only showing up as
+  /// a lower success count. Cleared at the start of each run.
+  final List<ImportFailure> failedSteps = [];
+
+  /// Count of successfully-imported steps in the last run whose memory was
+  /// created but at least one photo failed to upload. Cleared at the start
+  /// of each run.
+  int stepsWithMissingPhotos = 0;
 
   String? error;
   bool polarstepsNotConnected = false;
@@ -220,6 +248,8 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     importedCount = 0;
     importTotal = toImport.length;
     error = null;
+    failedSteps.clear();
+    stepsWithMissingPhotos = 0;
     notifyListeners();
 
     int created = 0;
@@ -236,8 +266,18 @@ class PolarstepsImportNotifier extends ChangeNotifier {
           batch.map((step) => _importStep(step, ref)),
         );
 
-        for (final ok in results) {
-          if (ok) created++;
+        for (final outcome in results) {
+          if (outcome.success) {
+            created++;
+            if (outcome.photosSucceeded < outcome.photosAttempted) {
+              stepsWithMissingPhotos++;
+            }
+          } else {
+            failedSteps.add(ImportFailure(
+              outcome.stepName,
+              outcome.failReason ?? 'Unknown error',
+            ));
+          }
         }
         importedCount += batch.length;
         notifyListeners();
@@ -249,12 +289,24 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     return created;
   }
 
-  Future<bool> _importStep(
+  Future<_StepOutcome> _importStep(
     Map<String, dynamic> step,
     ProjectRef ref,
   ) async {
+    final stepName = (step['name'] as String?)?.isNotEmpty == true
+        ? step['name'] as String
+        : 'Step ${step['id'] ?? '?'}';
+
     final date = step['date'] as String?;
-    if (date == null) return false;
+    if (date == null) {
+      return (
+        success: false,
+        stepName: stepName,
+        failReason: 'Missing date',
+        photosAttempted: 0,
+        photosSucceeded: 0,
+      );
+    }
 
     final name = (step['name'] as String?)?.isNotEmpty == true
         ? step['name'] as String
@@ -278,23 +330,45 @@ class PolarstepsImportNotifier extends ChangeNotifier {
     try {
       final result = await _postWithRetry(ref.withOwner('/api/memories/'), body);
       final memId = result['id']?.toString();
+      var photosAttempted = 0;
+      var photosSucceeded = 0;
       if (memId != null) {
         // Photo uploads return 202 immediately (background download on server).
         // Fire all in parallel — no need to await sequentially. Each photo's
         // index in the step is sent as its `order`, so the server can place
-        // it correctly even when downloads complete out of order.
+        // it correctly even when downloads complete out of order. A failed
+        // upload no longer vanishes silently — it's counted so the summary
+        // can flag "some photos missing" for this step.
         final photos =
             (step['photos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-        await Future.wait([
+        final toUpload = [
           for (final entry in photos.asMap().entries)
-            if ((entry.value['url'] as String?)?.isNotEmpty == true)
-              _uploadPhotoFromUrl(memId, entry.value['url'] as String, entry.key)
-                  .catchError((_) {}),
+            if ((entry.value['url'] as String?)?.isNotEmpty == true) entry
+        ];
+        photosAttempted = toUpload.length;
+        final photoOutcomes = await Future.wait([
+          for (final entry in toUpload)
+            _uploadPhotoFromUrl(memId, entry.value['url'] as String, entry.key)
+                .then((_) => true)
+                .catchError((_) => false),
         ]);
+        photosSucceeded = photoOutcomes.where((ok) => ok).length;
       }
-      return true;
-    } on Exception catch (_) {
-      return false; // silently skip — server retried already, count will reflect actual imported
+      return (
+        success: true,
+        stepName: stepName,
+        failReason: null,
+        photosAttempted: photosAttempted,
+        photosSucceeded: photosSucceeded,
+      );
+    } on Exception catch (e) {
+      return (
+        success: false,
+        stepName: stepName,
+        failReason: e.toString().replaceFirst('Exception: ', ''),
+        photosAttempted: 0,
+        photosSucceeded: 0,
+      );
     }
   }
 

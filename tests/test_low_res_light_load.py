@@ -119,3 +119,57 @@ def test_a_second_identical_request_is_served_from_cache(env, monkeypatch):
     assert second.headers["x-cache"] == "HIT"
     assert len(seen) == 1, "a cache HIT must not touch the DB again"
     assert second.json() == first.json()
+
+
+# ── A failed segment is discoverable on the map itself ──
+#
+# route_status wasn't in the low-res geo feature properties at all — a failed
+# resolve rendered as an ordinary great-circle line forever, with no signal on
+# the map (see flutter_client map_panel.dart's _kFailedRouteColor), only in the
+# tile list's "tap to retry" row.
+
+def test_a_failed_segment_carries_route_status_in_low_res_geo(monkeypatch):
+    from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
+    from src.project.project_io import ProjectIO
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as sess:
+        user = UserInfo(display_name="Bob", email="bob@example.com")
+        sess.add(user)
+        sess.commit()
+        sess.refresh(user)
+        uid = user.id
+        project = DBProject(user_info_id=uid, name="Trip")
+        sess.add(project)
+        sess.commit()
+        sess.refresh(project)
+
+        seg = ConnectingSegment(
+            id="seg-1", segment_type="boat", label="Ferry",
+            start=SegmentEndpoint(60.17, 24.94), end=SegmentEndpoint(59.44, 24.75),
+            route_status="failed", route_error="no ferry route found",
+        )
+        item = ProjectItem(item_type="segment", segment=seg)
+        sess.add(DBProjectItem(
+            project_id=project.id, position=0, item_type="segment",
+            segment_json=json.dumps(ProjectIO._serialise_item(item)["segment"]),
+        ))
+        sess.commit()
+
+    app = FastAPI()
+    app.dependency_overrides[get_current_user] = lambda: {
+        "sub": str(uid), "email": "bob@example.com"}
+    app.include_router(geo_router)
+    client = TestClient(app)
+
+    feats = client.get("/api/geo/project/low-res?name=Trip").json()["features"]
+    segs = [f for f in feats if f["properties"]["type"] == "segment"]
+    assert len(segs) == 1
+    assert segs[0]["properties"]["route_status"] == "failed"

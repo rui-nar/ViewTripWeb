@@ -72,4 +72,25 @@ void main() {
 
     expect(identical(notifier.items, originalItems), isTrue);
   });
+
+  test('default poll budget outlives the old 20-tick (60s) cutoff', () async {
+    // A large bulk import's slower photo downloads used to outlast the old
+    // 60s window (maxTicks: 20 @ 3s) with no further signal once it gave up.
+    // Only the interval is overridden here (for test speed) — maxTicks is
+    // left at its production default so this proves the widened budget
+    // itself, not a test-only value.
+    final service = _PhotoPollService(['a']);
+    final notifier = ProjectNotifier(service)
+      ..ref = _ref
+      ..items = [_memoryItem('mem-1', const [])];
+    addTearDown(notifier.dispose);
+
+    notifier.startPhotoPolling(_ref, interval: const Duration(milliseconds: 1));
+    // The old default would have stopped after 20 ticks; wait well past that
+    // (with margin for slow/CI timer granularity) to prove the timer is
+    // still polling under the new budget.
+    await Future.delayed(const Duration(milliseconds: 250));
+
+    expect(service.calls, greaterThan(20));
+  });
 }
