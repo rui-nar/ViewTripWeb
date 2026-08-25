@@ -105,7 +105,7 @@ def _seed(engine) -> int:
         sess.add(DBProjectItem(project_id=proj.id, position=0,
                                item_type="activity", activity_id=111))
         sess.commit()
-        return u.id
+        return u.id, proj.id
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "engine", engine)
     # Isolate the module-level coalescing state between tests.
     monkeypatch.setattr(shared_module, "_coalesce_state", {})
-    uid = _seed(engine)
+    uid, _pid = _seed(engine)
     return engine, uid
 
 
@@ -137,7 +137,7 @@ def test_direct_writer_contention_reproduces_lock(env):
 
         with Session(engine) as sess:
             with pytest.raises(OperationalError, match="database is locked"):
-                repo.edit_activity_track(sess, 111, tps)
+                repo.edit_activity_track(sess, 1, 111, tps)
     finally:
         holder.rollback()
         holder.close()

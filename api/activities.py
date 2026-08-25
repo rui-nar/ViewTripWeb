@@ -36,6 +36,7 @@ from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.exceptions.errors import RateLimitError
 from src.models.activity import Activity, parse_activities_or_log
+from src.project.project_repo import bump_lock_version
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -179,6 +180,15 @@ def _enrich_activities_background(
             pass
 
     if any_enriched:
+        with get_session() as sess:
+            # Advance the project's lock_version (issue #173) so a native
+            # client's on-disk cache — which only ever checks that counter —
+            # notices the newly enriched polyline/elevation instead of serving
+            # pre-enrichment data from disk indefinitely.
+            project_id = _repo.project_id_for(sess, owner_id, project_name)
+            if project_id is not None:
+                bump_lock_version(sess, project_id)
+                sess.commit()
         bust_geo_cache(owner_id, project_name)
         # Recompute now (still in the background task) so the user's next geo
         # load is a fast cache HIT rather than a cold recompute.
@@ -544,7 +554,7 @@ def edit_activity_track(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
-        if not _repo.edit_activity_track(sess, activity_id, points):
+        if not _repo.edit_activity_track(sess, row.id, activity_id, points):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         # include_elevation=False: the client (see project_notifier.dart
         # saveActivityTrack) discards this response and immediately re-fetches
