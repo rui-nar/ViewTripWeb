@@ -90,6 +90,14 @@ const Color _kFocusMarkerColor = Color(0xFFF59E0B); // amber-500
 // alone — colour is the only signal.
 const Color _kDegradedRouteColor = Color(0xFF64748B); // slate-500
 
+// A segment whose route resolution ended in route_status="failed" (e.g. no
+// ferry route exists, or the job never got a verdict) otherwise renders as an
+// ordinary great-circle line forever — indistinguishable from an intentional
+// straight segment. Drawn in this red so it reads as
+// "needs attention" on the map itself, same rationale as the degraded colour
+// above; retrying is still done from the tile list's "tap to retry" row.
+const Color _kFailedRouteColor = Color(0xFFDC2626); // red-600
+
 /// A single highlighted pin at [point] — rendered by both map widgets when
 /// [MapPanel.focusedLatLng] / [ManageMapPanel.focusedLatLng] is set (issue #72).
 Marker focusedLocationMarker(LatLng point) => Marker(
@@ -1690,11 +1698,13 @@ List<Polyline> _buildPolylines(
       baseColor = isOdd ? altColor : trackColor;
       lineStyle = isSegment ? LineStyleKind.dashed : LineStyleKind.solid;
     }
-    // Degraded overrides type/track colouring but not line style — the tile
-    // list carries the same signal via _segmentStatusLine (issue #207).
+    // Degraded/failed override type/track colouring but not line style — the
+    // tile list carries the same signal via _segmentStatusLine (issue #207).
     final effectiveBaseColor = (isSegment && props['route_degraded'] == true)
         ? _kDegradedRouteColor
-        : baseColor;
+        : (isSegment && props['route_status'] == 'failed')
+            ? _kFailedRouteColor
+            : baseColor;
 
     final Color color;
     final double strokeWidth;

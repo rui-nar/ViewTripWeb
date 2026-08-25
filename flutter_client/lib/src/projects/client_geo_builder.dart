@@ -163,6 +163,7 @@ Map<String, dynamic> buildLowResGeo(
         'label': seg['label'],
         'route_mode': seg['route_mode'],
         'route_degraded': seg['route_degraded'],
+        'route_status': seg['route_status'],
       }));
     }
   }
