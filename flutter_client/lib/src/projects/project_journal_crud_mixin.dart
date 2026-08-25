@@ -9,6 +9,11 @@ import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 import 'project_quota_mixin.dart';
 
+/// Monotonic counter backing createJournal's optimistic placeholder ids — a
+/// counter (rather than a timestamp alone) guarantees two concurrent creates
+/// never collide even if they land in the same clock tick.
+int _optimisticJournalIdCounter = 0;
+
 mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
@@ -22,7 +27,10 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
 
   // ── Journal CRUD ──────────────────────────────────────────────────────────
 
-  Future<void> createJournal({
+  /// Creates a journal entry. Returns `true` on success, `false` on failure
+  /// (in which case the optimistic placeholder is rolled back and [error] is
+  /// set) — callers must check this before treating the save as done.
+  Future<bool> createJournal({
     required String date,
     required String geoMode,
     String? time,
@@ -32,11 +40,15 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     int? insertAfterIndex,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
+    // Unique per call so two concurrent creates never share a placeholder id
+    // (a literal '__optimistic__' would collide and produce duplicate
+    // ValueKeys in the map marker layer).
+    final tempId = 'optimistic-${_optimisticJournalIdCounter++}';
     final placeholder = {
       'item_type': 'journal',
       'journal': {
-        'id': '__optimistic__',
+        'id': tempId,
         'date': date,
         'time': time,
         'description': description,
@@ -64,9 +76,17 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
+      // Roll back the placeholder so a failed create leaves no phantom item.
+      items = items
+          .where((item) =>
+              !(item['item_type'] == 'journal' &&
+                item['journal']?['id']?.toString() == tempId))
+          .toList();
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 

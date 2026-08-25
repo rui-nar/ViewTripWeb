@@ -37,6 +37,10 @@ class _MemoryDialogState extends State<MemoryDialog> {
   double? _customLat;
   double? _customLon;
   bool _saving = false;
+  // Create-failure error, shown inline inside the dialog while it stays open
+  // for a retry — the root ScaffoldMessenger would render a SnackBar behind
+  // the modal, where the user never sees it (issue #20's fix, applied here).
+  String? _saveError;
 
   // Existing photos (UUIDs from the server, for edit mode)
   List<String> _existingPhotos = [];
@@ -149,12 +153,17 @@ class _MemoryDialogState extends State<MemoryDialog> {
     // Captured before the dialog pops: an upload refused on a plan limit opens
     // the upgrade sheet afterwards, and this dialog's context is gone by then.
     final hostContext = Navigator.of(context, rootNavigator: true).context;
-    setState(() => _saving = true);
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _saveError = null;
+      _saving = true;
+    });
     try {
       final dateStr = _toIso(_date!);
       final timeStr = _time != null ? _fmtTime(_time!) : null;
       final name = _nameCtrl.text.trim().isEmpty ? null : _nameCtrl.text.trim();
       final desc = _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim();
+      var failedPhotos = 0;
 
       final mem = widget.editMemory;
       if (mem != null) {
@@ -179,7 +188,9 @@ class _MemoryDialogState extends State<MemoryDialog> {
 
         // Upload new photos
         for (final p in _pendingPhotos) {
-          await widget.notifier.uploadMemoryPhoto(memId, p.bytes, p.filename);
+          final uuid =
+              await widget.notifier.uploadMemoryPhoto(memId, p.bytes, p.filename);
+          if (uuid == null) failedPhotos++;
         }
 
         // Final reload to pick up all changes
@@ -189,7 +200,7 @@ class _MemoryDialogState extends State<MemoryDialog> {
       } else {
         // Create mode — we need the new memory's ID to upload photos.
         // Create first, then use _silentReload to get the ID, then upload.
-        await widget.notifier.createMemory(
+        final ok = await widget.notifier.createMemory(
           date: dateStr,
           geoMode: _geoMode,
           name: name,
@@ -199,6 +210,11 @@ class _MemoryDialogState extends State<MemoryDialog> {
           lon: _geoMode == 'custom' ? _customLon : null,
           insertAfterIndex: widget.insertAfterIndex,
         );
+        if (!ok) {
+          setState(() =>
+              _saveError = widget.notifier.error ?? 'Failed to save memory');
+          return;
+        }
 
         // If there are pending photos, find the newly created memory ID
         if (_pendingPhotos.isNotEmpty) {
@@ -214,13 +230,22 @@ class _MemoryDialogState extends State<MemoryDialog> {
           if (newMemory != null) {
             final memId = newMemory['id']?.toString() ?? '';
             for (final p in _pendingPhotos) {
-              await widget.notifier.uploadMemoryPhoto(memId, p.bytes, p.filename);
+              final uuid = await widget.notifier
+                  .uploadMemoryPhoto(memId, p.bytes, p.filename);
+              if (uuid == null) failedPhotos++;
             }
           }
         }
       }
 
       if (mounted) Navigator.of(context).pop();
+      if (failedPhotos > 0) {
+        messenger.showSnackBar(SnackBar(
+          content: Text(failedPhotos == 1
+              ? 'Memory saved — 1 photo failed to upload'
+              : 'Memory saved — $failedPhotos photos failed to upload'),
+        ));
+      }
       final quota = widget.notifier.takeQuotaError();
       if (hostContext.mounted) {
         await maybeShowUpgradeSheet(hostContext, quota);
@@ -482,6 +507,31 @@ class _MemoryDialogState extends State<MemoryDialog> {
                 label: const Text('Add photos'),
                 onPressed: _pickPhotos,
               ),
+              if (_saveError != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.error_outline, size: 18,
+                          color: theme.colorScheme.onErrorContainer),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _saveError!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onErrorContainer),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),

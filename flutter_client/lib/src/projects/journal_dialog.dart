@@ -36,6 +36,10 @@ class _JournalDialogState extends State<JournalDialog> {
   double? _customLat;
   double? _customLon;
   bool _saving = false;
+  // Create-failure error, shown inline inside the dialog while it stays open
+  // for a retry — the root ScaffoldMessenger would render a SnackBar behind
+  // the modal, where the user never sees it (issue #20's fix, applied here).
+  String? _saveError;
 
   List<String> _existingPhotos = [];
   final List<({Uint8List bytes, String filename})> _pendingPhotos = [];
@@ -129,11 +133,16 @@ class _JournalDialogState extends State<JournalDialog> {
     // Captured before the dialog pops: an upload refused on a plan limit opens
     // the upgrade sheet afterwards, and this dialog's context is gone by then.
     final hostContext = Navigator.of(context, rootNavigator: true).context;
-    setState(() => _saving = true);
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _saveError = null;
+      _saving = true;
+    });
     try {
       final dateStr = _toIso(_date!);
       final timeStr = _time != null ? _fmtTime(_time!) : null;
       final desc = _descCtrl.text.trim().isEmpty ? null : _descCtrl.text.trim();
+      var failedPhotos = 0;
 
       final j = widget.editEntry;
       if (j != null) {
@@ -151,10 +160,12 @@ class _JournalDialogState extends State<JournalDialog> {
           lon: _geoMode == 'custom' ? _customLon : null,
         );
         for (final p in _pendingPhotos) {
-          await widget.notifier.uploadJournalPhoto(jId, p.bytes, p.filename);
+          final uuid =
+              await widget.notifier.uploadJournalPhoto(jId, p.bytes, p.filename);
+          if (uuid == null) failedPhotos++;
         }
       } else {
-        await widget.notifier.createJournal(
+        final ok = await widget.notifier.createJournal(
           date: dateStr,
           geoMode: _geoMode,
           time: timeStr,
@@ -163,6 +174,11 @@ class _JournalDialogState extends State<JournalDialog> {
           lon: _geoMode == 'custom' ? _customLon : null,
           insertAfterIndex: widget.insertAfterIndex,
         );
+        if (!ok) {
+          setState(() => _saveError =
+              widget.notifier.error ?? 'Failed to save journal entry');
+          return;
+        }
         if (_pendingPhotos.isNotEmpty) {
           final newEntry = widget.notifier.items
               .where((i) => i['item_type'] == 'journal')
@@ -175,13 +191,22 @@ class _JournalDialogState extends State<JournalDialog> {
           if (newEntry != null) {
             final jId = newEntry['id']?.toString() ?? '';
             for (final p in _pendingPhotos) {
-              await widget.notifier.uploadJournalPhoto(jId, p.bytes, p.filename);
+              final uuid = await widget.notifier
+                  .uploadJournalPhoto(jId, p.bytes, p.filename);
+              if (uuid == null) failedPhotos++;
             }
           }
         }
       }
 
       if (mounted) Navigator.of(context).pop();
+      if (failedPhotos > 0) {
+        messenger.showSnackBar(SnackBar(
+          content: Text(failedPhotos == 1
+              ? 'Journal entry saved — 1 photo failed to upload'
+              : 'Journal entry saved — $failedPhotos photos failed to upload'),
+        ));
+      }
       final quota = widget.notifier.takeQuotaError();
       if (hostContext.mounted) {
         await maybeShowUpgradeSheet(hostContext, quota);
@@ -427,6 +452,31 @@ class _JournalDialogState extends State<JournalDialog> {
                 label: const Text('Add photos'),
                 onPressed: _pickPhotos,
               ),
+              if (_saveError != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.error_outline, size: 18,
+                          color: theme.colorScheme.onErrorContainer),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _saveError!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onErrorContainer),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),

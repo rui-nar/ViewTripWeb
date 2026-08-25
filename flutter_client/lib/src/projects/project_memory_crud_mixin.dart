@@ -18,6 +18,11 @@ import 'project_quota_mixin.dart';
 /// show a distinct message rather than the generic "please try again" (#27).
 class TranslationUnavailableException implements Exception {}
 
+/// Monotonic counter backing createMemory's optimistic placeholder ids — a
+/// counter (rather than a timestamp alone) guarantees two concurrent creates
+/// never collide even if they land in the same clock tick.
+int _optimisticMemoryIdCounter = 0;
+
 mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
   ProjectRef? get projectRef;
@@ -34,7 +39,10 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
 
   // ── Memory CRUD ───────────────────────────────────────────────────────────
 
-  Future<void> createMemory({
+  /// Creates a memory. Returns `true` on success, `false` on failure (in
+  /// which case the optimistic placeholder is rolled back and [error] is
+  /// set) — callers must check this before treating the save as done.
+  Future<bool> createMemory({
     required String date,
     required String geoMode,
     String? name,
@@ -45,11 +53,15 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     int? insertAfterIndex,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
+    // Unique per call so two concurrent creates never share a placeholder id
+    // (a literal '__optimistic__' would collide and produce duplicate
+    // ValueKeys in the map marker layer).
+    final tempId = 'optimistic-${_optimisticMemoryIdCounter++}';
     final placeholder = {
       'item_type': 'memory',
       'memory': {
-        'id': '__optimistic__',
+        'id': tempId,
         'name': name,
         'date': date,
         'time': time,
@@ -80,9 +92,17 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
+      // Roll back the placeholder so a failed create leaves no phantom item.
+      items = items
+          .where((item) =>
+              !(item['item_type'] == 'memory' &&
+                item['memory']?['id']?.toString() == tempId))
+          .toList();
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 
