@@ -1929,13 +1929,17 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   /// Save an edited track (trim/add/remove) for [activityId]. [payload] is
-  /// [TrackEditModel.toSavePayload]. Reloads geometry on success. Rethrows so
-  /// the editor page can surface the failure and keep the user's edits.
+  /// [TrackEditModel.toSavePayload]. [lockVersion], when given, is the
+  /// project's lock_version the editor last saw — a 409 means the activity
+  /// changed elsewhere since (issue #31); see ActivityEditorPage._save.
+  /// Reloads geometry on success. Rethrows so the editor page can surface the
+  /// failure and keep the user's edits.
   Future<void> saveActivityTrack(
-    int activityId, Map<String, dynamic> payload) async {
+    int activityId, Map<String, dynamic> payload, {int? lockVersion}) async {
     final ref = this.ref;
     if (ref == null) return;
-    await _service.saveActivityTrack(ref, activityId, payload);
+    await _service.saveActivityTrack(ref, activityId, payload,
+        lockVersion: lockVersion);
     await _silentReload(ref);
   }
 
@@ -1954,16 +1958,21 @@ class ProjectNotifier extends ChangeNotifier
   /// [payload] is the editor's TrackEditModel.toSavePayload, i.e. the point list
   /// [splitIndex] indexes into, so pending edits are cut along with the track
   /// rather than discarded (#127).
+  ///
+  /// [lockVersion], when given, is the project's lock_version the editor last
+  /// saw — a 409 means the activity changed elsewhere since (issue #31); see
+  /// ActivityEditorPage._confirmSplit.
   Future<void> splitActivity(
     int activityId,
     int splitIndex, {
     bool dropBoundary = false,
     Map<String, dynamic>? payload,
+    int? lockVersion,
   }) async {
     final ref = this.ref;
     if (ref == null) return;
     await _service.splitActivity(ref, activityId, splitIndex,
-        dropBoundary: dropBoundary, payload: payload);
+        dropBoundary: dropBoundary, payload: payload, lockVersion: lockVersion);
     await _silentReload(ref);
   }
 

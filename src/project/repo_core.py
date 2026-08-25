@@ -69,6 +69,32 @@ def bump_lock_version(sess: Session, project_id: int) -> None:
     )
 
 
+def check_and_bump_lock_version(
+    sess: Session, project_id: int, expected_version: int
+) -> None:
+    """Atomic compare-and-swap on lock_version for a payload write (issue #31).
+
+    Same CAS ``save_project(check_version=True)`` uses, for a caller that
+    advances the counter directly rather than going through a full project
+    save. Raises ``StaleWriteError`` if the project's lock_version no longer
+    matches *expected_version* — i.e. another writer committed since the
+    caller last loaded it — otherwise advances it to ``expected_version + 1``.
+    This both checks AND bumps in one step; callers must not also call
+    ``bump_lock_version``.
+    """
+    result = sess.execute(
+        update(DBProject)
+        .where(DBProject.id == project_id, DBProject.lock_version == expected_version)
+        .values(lock_version=expected_version + 1)
+    )
+    if result.rowcount == 0:
+        sess.rollback()
+        raise StaleWriteError(
+            f"Project {project_id} was modified concurrently "
+            f"(expected lock_version {expected_version})"
+        )
+
+
 class ProjectCoreMixin:
     """Project CRUD, stats caching, and row-to-domain reconstruction."""
 

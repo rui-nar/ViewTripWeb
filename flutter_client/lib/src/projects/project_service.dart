@@ -238,6 +238,11 @@ class ProjectService {
   /// PUT /api/projects/{name}/activities/{id}/track
   /// [payload] is [TrackEditModel.toSavePayload]. Returns the updated project.
   ///
+  /// [lockVersion], when given, is the project's lock_version the editor last
+  /// saw (from getActivityTrack) — the server rejects the save with a 409 if
+  /// the project changed since, e.g. this same activity edited from another
+  /// tab (issue #31). Omit it to save unconditionally.
+  ///
   /// Generous timeout: see splitActivity below — the same recompute +
   /// reload can run well over the client's default 30s on a large trip, and
   /// this response is discarded by the caller anyway (ProjectNotifier just
@@ -245,11 +250,15 @@ class ProjectService {
   Future<Map<String, dynamic>> saveActivityTrack(
     ProjectRef ref,
     int activityId,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    int? lockVersion,
+  }) async {
     final data = await api.put(
       ref.path('/activities/$activityId/track'),
-      payload,
+      {
+        ...payload,
+        if (lockVersion != null) 'lock_version': lockVersion,
+      },
       timeout: const Duration(minutes: 2),
     );
     return data as Map<String, dynamic>;
@@ -282,6 +291,11 @@ class ProjectService {
   /// the split instead of being discarded (#127). Omit it to split the stored
   /// geometry.
   ///
+  /// [lockVersion], when given, is the project's lock_version the editor last
+  /// saw (from getActivityTrack) — the server rejects the split with a 409 if
+  /// the project changed since, e.g. this same activity edited from another
+  /// tab (issue #31). Omit it to split unconditionally.
+  ///
   /// Generous timeout: on a large trip, committing the split + reloading and
   /// serialising the updated project can take well over the client's default
   /// 30s (this response is discarded by the caller anyway — see
@@ -292,6 +306,7 @@ class ProjectService {
     int splitIndex, {
     bool dropBoundary = false,
     Map<String, dynamic>? payload,
+    int? lockVersion,
   }) async {
     final data = await api.post(
       ref.path('/activities/$activityId/split'),
@@ -299,6 +314,7 @@ class ProjectService {
         'split_index': splitIndex,
         'drop_boundary': dropBoundary,
         if (payload != null) ...payload,
+        if (lockVersion != null) 'lock_version': lockVersion,
       },
       timeout: const Duration(minutes: 2),
     );

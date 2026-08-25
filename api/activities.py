@@ -13,6 +13,7 @@ Routes:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from models.db import get_session
 from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.deps import get_current_user
 from api.geo import bust_geo_cache, warm_geo_cache
@@ -36,6 +37,7 @@ from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.exceptions.errors import RateLimitError
 from src.models.activity import Activity, parse_activities_or_log
+from src.project.project_repo import bump_lock_version
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -213,6 +215,15 @@ def _enrich_activities_background(
             )
 
     if any_enriched:
+        with get_session() as sess:
+            # Advance the project's lock_version (issue #173) so a native
+            # client's on-disk cache — which only ever checks that counter —
+            # notices the newly enriched polyline/elevation instead of serving
+            # pre-enrichment data from disk indefinitely.
+            project_id = _repo.project_id_for(sess, owner_id, project_name)
+            if project_id is not None:
+                bump_lock_version(sess, project_id)
+                sess.commit()
         bust_geo_cache(owner_id, project_name)
         # Recompute now (still in the background task) so the user's next geo
         # load is a fast cache HIT rather than a cold recompute.
@@ -488,10 +499,44 @@ class TrackPointIn(BaseModel):
     lng: float
     elev: Optional[float] = None
 
+    # Raises HTTPException directly rather than the usual ValueError: a
+    # ValueError becomes a pydantic ValidationError, and FastAPI's default 422
+    # handler echoes the rejected value back as `input` in the response body —
+    # Starlette's JSONResponse renders with allow_nan=False, so a NaN/Infinity
+    # `input` would blow up turning this into a 500 instead of the clean 422
+    # this validation exists to produce. An HTTPException skips that path
+    # entirely (matches the plain-string 422s raised elsewhere in this file,
+    # e.g. edit_activity_track's "A track needs at least 2 points").
+    @field_validator("lat")
+    @classmethod
+    def _lat_in_range(cls, v: float) -> float:
+        if not math.isfinite(v) or not (-90.0 <= v <= 90.0):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="lat must be finite and within -90..90",
+            )
+        return v
+
+    @field_validator("lng")
+    @classmethod
+    def _lng_in_range(cls, v: float) -> float:
+        if not math.isfinite(v) or not (-180.0 <= v <= 180.0):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="lng must be finite and within -180..180",
+            )
+        return v
+
 
 class TrackEditRequest(BaseModel):
     points: List[TrackPointIn] = Field(
         description="Full edited track as an ordered list of {lat, lng, elev?} points")
+    lock_version: Optional[int] = Field(
+        default=None,
+        description="The project's lock_version last seen by the editor (from "
+                    "GET .../track). When given, the save is rejected with 409 "
+                    "if the project has changed since — e.g. the same activity "
+                    "edited from a second tab. Omit to save unconditionally.")
 
 
 def _project_contains_activity(project, activity_id: int) -> bool:
@@ -529,6 +574,8 @@ def get_activity_track(
     d = activity.to_strava_dict()
     ep = activity.elevation_profile or getattr(activity, "elevation_profile_low_res", None)
     d["elevation_profile"] = [list(pair) for pair in zip(ep[0], ep[1])] if ep else None
+    # So the editor can send it back on save/split — see TrackEditRequest.lock_version.
+    d["lock_version"] = project.lock_version
     return d
 
 
@@ -581,7 +628,9 @@ def edit_activity_track(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         if not _project_contains_activity(project, activity_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not in project")
-        if not _repo.edit_activity_track(sess, activity_id, points):
+        if not _repo.edit_activity_track(
+            sess, row.id, activity_id, points, expected_version=body.lock_version
+        ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
         # include_elevation=False: the client (see project_notifier.dart
         # saveActivityTrack) discards this response and immediately re-fetches
@@ -674,6 +723,12 @@ class SplitRequest(BaseModel):
                     "Issue #127: without this the editor's pending trims/deletes "
                     "were discarded by a split and split_index was applied to a "
                     "different point list than the one the user was looking at.")
+    lock_version: Optional[int] = Field(
+        default=None,
+        description="The project's lock_version last seen by the editor (from "
+                    "GET .../track). When given, the split is rejected with 409 "
+                    "if the project has changed since — e.g. the same activity "
+                    "edited from a second tab. Omit to split unconditionally.")
 
 
 @router.post("/{name}/activities/{activity_id}/split",
@@ -724,7 +779,8 @@ def split_activity(
         try:
             tail_id = _repo.split_activity(
                 sess, owner_id, row.id, activity_id, body.split_index,
-                drop_boundary=body.drop_boundary, points=edited_points)
+                drop_boundary=body.drop_boundary, points=edited_points,
+                expected_version=body.lock_version)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
