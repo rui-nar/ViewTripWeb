@@ -146,3 +146,30 @@ class TestGoogleAuthCounters:
         assert metric("viewtrip_logins_total",
                       provider="google", result="success") - logins_before == 1
         assert metric("viewtrip_registrations_total", provider="google") == regs_before
+
+
+class TestAppOpenedCounter:
+    """viewtrip_app_opens_total (issue: Grafana login graph undercounted
+    return visits that resumed a cached session instead of logging in)."""
+
+    def test_resumed_session_is_counted(self, client, metric):
+        before = metric("viewtrip_app_opens_total", session_state="resumed")
+
+        resp = client.post("/api/auth/app-opened", json={"session_state": "resumed"})
+
+        assert resp.status_code == 200
+        assert metric("viewtrip_app_opens_total", session_state="resumed") - before == 1
+
+    def test_login_required_is_counted_separately(self, client, metric):
+        before = metric("viewtrip_app_opens_total", session_state="login_required")
+
+        resp = client.post("/api/auth/app-opened", json={"session_state": "login_required"})
+
+        assert resp.status_code == 200
+        assert metric("viewtrip_app_opens_total",
+                      session_state="login_required") - before == 1
+
+    def test_unknown_session_state_is_rejected(self, client, metric):
+        resp = client.post("/api/auth/app-opened", json={"session_state": "bogus"})
+
+        assert resp.status_code == 422

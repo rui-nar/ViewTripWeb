@@ -165,6 +165,21 @@
       ],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "bars", "fillOpacity": 30}}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "App opens by session state",
+      "description": "\"Returnability\": every app launch, not just fresh credential submissions. resumed = cached session still valid, login_required = had to sign in from scratch.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 23},
+      "datasource": {"type": "prometheus", "uid": "$datasource"},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(viewtrip_app_opens_total{env=\"$env\"}[15m])) by (session_state)", "legendFormat": "{{session_state}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 10, "stacking": {"mode": "normal"}}}, "overrides": [
+        {"matcher": {"id": "byRegexp", "options": "/login_required/"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]}
+      ]},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["sum"]}, "tooltip": {"mode": "multi"}}
     }
   ]
 }

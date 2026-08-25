@@ -10,10 +10,11 @@ Routes:
     PUT    /api/auth/me              — update display name → refreshed JWT
     POST   /api/auth/change-password — change password (local accounts only)
     DELETE /api/auth/me              — delete account + all associated data
+    POST   /api/auth/app-opened      — record an app launch (metrics only)
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import bcrypt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -39,7 +40,7 @@ import os
 
 from src.config.settings import Config
 from src.utils.logging import get_logger
-from src.utils.metrics import LOGINS, REGISTRATIONS
+from src.utils.metrics import APP_OPENS, LOGINS, REGISTRATIONS
 
 _log = get_logger(__name__)
 
@@ -124,6 +125,12 @@ class VerifyEmailRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(description="Current password for verification")
     new_password: str = Field(description="New password to set")
+
+class AppOpenedRequest(BaseModel):
+    session_state: Literal["resumed", "login_required"] = Field(
+        description="'resumed' if a cached session was still valid on launch, "
+                    "'login_required' if the user had to sign in from scratch"
+    )
 
 class TokenResponse(BaseModel):
     access_token: str = Field(description="JWT bearer token")
@@ -382,6 +389,20 @@ def me(current_user: Annotated[dict, Depends(get_current_user)]):
         if user_info is not None:
             profile["email_verified"] = bool(user_info.email_verified)
     return profile
+
+
+@router.post("/app-opened", response_model=OkOut, summary="Record an app launch (metrics only)")
+def app_opened(body: AppOpenedRequest):
+    """Fired once per app launch by the client's startup path.
+
+    Unauthenticated: a launch with no valid cached session must still be
+    counted, and there is no token to attach in that case. Distinct from
+    ``viewtrip_logins_total`` — that only counts a fresh credential
+    submission, so it misses every launch where a cached session was simply
+    resumed, undercounting how often people actually come back to the app.
+    """
+    APP_OPENS.labels(body.session_state).inc()
+    return {"ok": True}
 
 
 @router.put("/me", response_model=TokenResponse, summary="Update display name")

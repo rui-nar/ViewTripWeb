@@ -51,11 +51,17 @@ class _FakeAuthService extends AuthService {
 
   int getMeCalls = 0;
   bool loggedOut = false;
+  final List<String> appOpenedCalls = [];
 
   @override
   Future<bool> restoreSession() async {
     api.setToken(token);
     return true;
+  }
+
+  @override
+  Future<void> appOpened(String sessionState) async {
+    appOpenedCalls.add(sessionState);
   }
 
   @override
@@ -70,6 +76,20 @@ class _FakeAuthService extends AuthService {
   Future<void> logout() async {
     loggedOut = true;
     api.clearToken();
+  }
+}
+
+/// Fake AuthService with no persisted token at all — restoreSession()
+/// returns false, as it does for a first-ever launch or after a logout.
+class _FakeNoSessionAuthService extends AuthService {
+  final List<String> appOpenedCalls = [];
+
+  @override
+  Future<bool> restoreSession() async => false;
+
+  @override
+  Future<void> appOpened(String sessionState) async {
+    appOpenedCalls.add(sessionState);
   }
 }
 
@@ -99,6 +119,8 @@ void main() {
         reason: 'the User.restored sentinel, not yet the real profile');
     expect(service.getMeCalls, 1,
         reason: 'getMe() is still fired — just not blocked on');
+    expect(service.appOpenedCalls, ['resumed'],
+        reason: 'an optimistic restore counts as a returning visit');
   });
 
   test('an expired token keeps the original blocking behavior', () async {
@@ -115,6 +137,8 @@ void main() {
     expect(notifier.user?.email, 'restored@example.com',
         reason: 'init() awaited getMe() and used the real profile it '
             'returned, not the sentinel');
+    expect(service.appOpenedCalls, ['resumed'],
+        reason: 'a blocking getMe() that succeeds is still a resumed session');
   });
 
   test('a token near expiry (inside the buffer) also blocks as before',
@@ -166,5 +190,28 @@ void main() {
     expect(notifier.user, isNotNull,
         reason: 'a network hiccup must not sign the user out mid-session');
     expect(service.loggedOut, isFalse);
+  });
+
+  test('a blocking 401 records login_required, not resumed', () async {
+    final token =
+        _fakeJwt(DateTime.now().toUtc().subtract(const Duration(minutes: 1)));
+    final service = _FakeAuthService(token,
+        getMeFuture: Future.error(ApiException(401, '{"detail":"expired"}')));
+    final notifier = AuthNotifier(service);
+
+    await notifier.init();
+
+    expect(notifier.user, isNull);
+    expect(service.appOpenedCalls, ['login_required']);
+  });
+
+  test('no persisted session at all records login_required', () async {
+    final service = _FakeNoSessionAuthService();
+    final notifier = AuthNotifier(service);
+
+    await notifier.init();
+
+    expect(notifier.user, isNull);
+    expect(service.appOpenedCalls, ['login_required']);
   });
 }

@@ -119,6 +119,7 @@ class AuthNotifier extends ChangeNotifier {
           // background (see _refreshMeInBackground) to catch server-side
           // revocation, email_verified changes, or a 401 forcing logout.
           _user = User.restored;
+          _recordAppOpened('resumed');
           unawaited(_refreshMeInBackground());
         } else {
           // Token missing/unparseable/at-or-near expiry — fall back to the
@@ -130,19 +131,24 @@ class AuthNotifier extends ChangeNotifier {
             final data = await _service.getMe();
             _user = User.fromMap(data);
             await _unlockEncryption();
+            _recordAppOpened('resumed');
           } on ApiException catch (e) {
             if (e.statusCode == 401) {
               await _service.logout();
               _user = null;
+              _recordAppOpened('login_required');
             } else {
               _user = User.restored;
+              _recordAppOpened('resumed');
             }
           } catch (_) {
             _user = User.restored;
+            _recordAppOpened('resumed');
           }
         }
       } else {
         _user = null;
+        _recordAppOpened('login_required');
       }
     } catch (_) {
       _user = null;
@@ -151,6 +157,17 @@ class AuthNotifier extends ChangeNotifier {
       _isRestoring = false;
       notifyListeners();
     }
+  }
+
+  /// Fires a one-way "app opened" metrics ping (see [init]). Best-effort and
+  /// non-blocking: a failure here must never affect the restore flow, so
+  /// errors are swallowed rather than surfaced.
+  void _recordAppOpened(String sessionState) {
+    unawaited(() async {
+      try {
+        await _service.appOpened(sessionState);
+      } catch (_) {}
+    }());
   }
 
   /// Reconciles an optimistically-restored session (see [init]) with the
