@@ -777,6 +777,25 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
+  /// Set by the map screen's camera-event listener while the map camera is
+  /// actively moving (drag, fling, programmatic fit animation, ...), so
+  /// [_loadFullGeoProgressively]'s background full-map rebuilds can defer
+  /// themselves until the camera settles instead of landing mid-gesture and
+  /// competing with it for the same frame budget — jerkiness/ANR while
+  /// panning shortly after a trip opens, since each geo upgrade forces
+  /// MapPanel to rebuild every polyline and marker.
+  bool _mapCameraActive = false;
+  void setMapCameraActive(bool active) => _mapCameraActive = active;
+
+  /// Waits until the camera is idle before returning, capped so a user who
+  /// never stops panning still eventually gets the full-res geo.
+  Future<void> _waitForCameraIdle() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (_mapCameraActive && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
   /// Fetches full-res GeoJSON and progressively replaces each activity's
   /// straight-line approximation with its real GPS trace (last activity first).
   Future<void> _loadFullGeoProgressively(ProjectRef ref) async {
@@ -795,6 +814,8 @@ class ProjectNotifier extends ChangeNotifier
       } catch (e) {
         error = _loadErrorMessage(e);
       }
+      await _waitForCameraIdle();
+      if (_loadKey != ref) return;
       notifyListeners();
       return;
     }
@@ -823,6 +844,8 @@ class ProjectNotifier extends ChangeNotifier
       } catch (e) {
         error = _loadErrorMessage(e);
       }
+      await _waitForCameraIdle();
+      if (_loadKey != ref) return;
       notifyListeners();
       return;
     }
@@ -899,6 +922,8 @@ class ProjectNotifier extends ChangeNotifier
         if (idx >= 0) batchFeatures[idx] = full;
         batchCount++;
         if (batchCount % batchSize == 0) {
+          await _waitForCameraIdle();
+          if (_loadKey != ref) return;
           geo = {'type': 'FeatureCollection', 'features': batchFeatures};
           batchFeatures = null; // re-read next batch so concurrent CRUD is picked up
           notifyListeners();
@@ -914,6 +939,8 @@ class ProjectNotifier extends ChangeNotifier
       // single deterministic merge replaces the old ad-hoc "safety net".
       final features = mergePendingSegmentPatches(
           List<dynamic>.from(fullGeo['features'] as List? ?? []));
+      await _waitForCameraIdle();
+      if (_loadKey != ref) return;
       geo = {'type': 'FeatureCollection', 'features': features};
       _buildFullTrack();
       isGeoLoaded = true;

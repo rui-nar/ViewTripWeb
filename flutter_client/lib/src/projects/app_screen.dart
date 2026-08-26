@@ -120,9 +120,18 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   // over from the last mode-toggle switch.
   StreamSubscription<MapEvent>? _mapEventSub;
   Timer? _viewportSyncTimer;
+  // Tells ProjectNotifier the camera is moving so its background full-res geo
+  // upgrade can hold off on a rebuild until panning actually pauses (see
+  // ProjectNotifier.setMapCameraActive).
+  Timer? _cameraIdleTimer;
 
   void _onMapEvent(MapEvent event) {
     if (!shouldSyncViewport(event)) return;
+    context.read<ProjectNotifier>().setMapCameraActive(true);
+    _cameraIdleTimer?.cancel();
+    _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
+      if (mounted) context.read<ProjectNotifier>().setMapCameraActive(false);
+    });
     _viewportSyncTimer?.cancel();
     _viewportSyncTimer = Timer(const Duration(milliseconds: 700), () {
       // Guards against a missing GoRouter ancestor (e.g. this widget under
@@ -260,6 +269,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   void dispose() {
     _mapEventSub?.cancel();
     _viewportSyncTimer?.cancel();
+    _cameraIdleTimer?.cancel();
     _mapController.dispose();
     _mapFitted.dispose();
     _activityScrollController.dispose();
