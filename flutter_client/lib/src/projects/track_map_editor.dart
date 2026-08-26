@@ -10,6 +10,8 @@
 /// Scaffold/AppBar/Save/Reset chrome; only the map body lives here.
 library;
 
+import 'dart:async' show Timer;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -78,6 +80,15 @@ class _TrackMapEditorState extends State<TrackMapEditor> {
   bool _addMode = false;
   // Current visible map bounds; drives which vertex handles are materialised.
   LatLngBounds? _bounds;
+  // Debounces onPositionChanged → _bounds updates: flutter_map fires that
+  // callback continuously (once per frame) during a drag, and each update
+  // forces a rebuild that rescans every point in the track
+  // (_visibleVertexIndices) and reconstructs a handle Marker for each one
+  // visible — on a thousands-point track, doing that every single pan frame
+  // is enough to ANR. Committing _bounds only once panning pauses keeps that
+  // work off the drag's hot path; the full polyline (not gated on _bounds)
+  // still tracks the finger immediately, so the pan itself never looks stalled.
+  Timer? _boundsDebounce;
   // Live drag state: the vertex being dragged and its provisional position, so
   // the handle and its adjacent polyline segments follow the finger before the
   // move is committed on drop via [TrackEditorController.moveVertex]. The drag is
@@ -115,6 +126,7 @@ class _TrackMapEditorState extends State<TrackMapEditor> {
   @override
   void dispose() {
     widget.controller.removeListener(_onChange);
+    _boundsDebounce?.cancel();
     super.dispose();
   }
 
@@ -324,8 +336,12 @@ class _TrackMapEditorState extends State<TrackMapEditor> {
                         : InteractiveFlag.all & ~InteractiveFlag.rotate,
                   ),
                   onTap: (_, latlng) => _onMapTap(latlng),
-                  onPositionChanged: (camera, _) =>
-                      setState(() => _bounds = camera.visibleBounds),
+                  onPositionChanged: (camera, _) {
+                    _boundsDebounce?.cancel();
+                    _boundsDebounce = Timer(const Duration(milliseconds: 120), () {
+                      if (mounted) setState(() => _bounds = camera.visibleBounds);
+                    });
+                  },
                 ),
                 children: [
                   TileLayer(
