@@ -269,25 +269,54 @@ def add_activities(
 
     activities: List[Activity] = parse_activities_or_log(body.activities, "activities_add")
 
+    # Permission/ownership check runs once, outside the retry loop below: the
+    # caller and the project's ownership/membership can't change mid-request,
+    # so — unlike the quota check below — re-running this on every retry
+    # attempt would just repeat the same answer (see resolve_project's
+    # docstring; same pattern as delete_item/reorder_items in
+    # api/project_items.py).
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_id = row.id
+
+    added_holder: Dict[str, int] = {}
+
+    def _add(project) -> None:
         # Plan limit on trip length (issue #121) — an import that reaches
-        # outside the trip's current span stretches it.
-        ensure_trip_days_quota(
-            sess, row.id, owner_id,
-            *[a.start_date_local for a in activities],
-        )
-        added = project.add_activities(activities)
-        # New activity rows record the IMPORTER (the caller), not the project
-        # owner — a companion's imports must stay tied to their Strava account.
-        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+        # outside the trip's current span stretches it. Re-checked from
+        # scratch on EVERY retry attempt, in its own short-lived read-only
+        # session (separate from save_project_with_retry's per-attempt write
+        # session — this only reads, so it doesn't need to share it), against
+        # the *current* DB state rather than the stale snapshot from a
+        # previous failed attempt: a concurrent writer may have lengthened or
+        # shortened the trip since this request started, and quota must
+        # reflect reality at save time, not at request-start time. Reusing
+        # the result from attempt 1 on a later retry could let an import
+        # through that a concurrent change should have blocked, or the
+        # reverse.
+        with get_session() as qsess:
+            ensure_trip_days_quota(
+                qsess, project_id, owner_id,
+                *[a.start_date_local for a in activities],
+            )
+        added_holder["added"] = project.add_activities(activities)
+
+    # New activity rows record the IMPORTER (the caller), not the project
+    # owner — a companion's imports must stay tied to their Strava account.
+    # save_project_with_retry (src/project/repo_retry.py) reloads the project
+    # fresh on each attempt and retries under check_version=True on a 409
+    # conflict, instead of the blind check_version=False overwrite this used
+    # to do — which could silently clobber a concurrent writer's already-
+    # committed changes with no error at all.
+    project = _repo.save_project_with_retry(
+        owner_id, name, _add,
+        legacy_path=_legacy_path(str(owner_id), name),
+        activity_user_id=user_info_id,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    added = added_holder["added"]
 
     bust_geo_cache(owner_id, name)
 
