@@ -182,6 +182,7 @@ def place_cards_perimeter(
     route: Optional[RouteIndex] = None,
     margin: float = 0.0,
     gutter: float = 0.0,
+    obstacles: Sequence[Rect] = (),
 ) -> List[CardPlacement]:
     """Place each pin's card along the page border, clear of the map area.
 
@@ -202,6 +203,12 @@ def place_cards_perimeter(
         margin: Keep cards this far inside the canvas edge. The border track
             runs along this inset rectangle.
         gutter: Minimum gap to maintain between two cards.
+        obstacles: Extra rectangles treated exactly like already-placed cards
+            — a track slot overlapping one is skipped past, same as a card
+            already on the border. Used to keep memory cards off the
+            user-placed title/trip-summary card (which need not itself sit on
+            the border track — the overlap check is a plain 2D rectangle test,
+            not limited to on-track rectangles).
     """
     track = _Track(canvas_size, margin)
     center_x, center_y = track.center
@@ -221,7 +228,7 @@ def place_cards_perimeter(
 
     ordered = sorted(pins, key=track_fraction)
 
-    placed_rects: List[Rect] = []
+    placed_rects: List[Rect] = list(obstacles)
     results: List[CardPlacement] = []
     cursor = 0.0
 
@@ -251,7 +258,7 @@ def place_cards_perimeter(
         )
         _log.debug(
             "Perimeter placement: %d/%d cards placed, %d leader line(s) cross the route",
-            len(placed_rects), len(results), crossings,
+            sum(1 for r in results if r.placed), len(results), crossings,
         )
 
     return results

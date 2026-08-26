@@ -124,6 +124,43 @@ class TestFontAvailability:
             )
 
 
+class TestScaleOverrides:
+    """`overrides` (poster title-scale slider): a per-instance multiplier on
+    one role's size_pt, without disturbing that role on an un-overridden
+    TypeScale or any other role on the overridden one."""
+
+    def test_no_overrides_behaves_exactly_like_before(self):
+        assert TypeScale(150.0).style("hero_title") == TYPE_SCALE["hero_title"]
+
+    def test_a_factor_of_one_is_a_no_op(self):
+        scale = TypeScale(150.0, overrides={"hero_title": 1.0})
+        assert scale.style("hero_title") == TYPE_SCALE["hero_title"]
+
+    def test_overridden_role_scales_size_pt_and_everything_size_derived(self):
+        plain = TypeScale(150.0)
+        doubled = TypeScale(150.0, overrides={"hero_title": 2.0})
+        assert doubled.style("hero_title").size_pt == pytest.approx(
+            plain.style("hero_title").size_pt * 2.0)
+        assert doubled.px(doubled.style("hero_title").size_pt) == pytest.approx(
+            plain.px(plain.style("hero_title").size_pt) * 2.0, abs=1)
+        assert doubled.line_height("hero_title") > plain.line_height("hero_title")
+
+    def test_overridden_role_keeps_its_weight_color_and_role(self):
+        doubled = TypeScale(150.0, overrides={"hero_title": 1.5})
+        style = doubled.style("hero_title")
+        base = TYPE_SCALE["hero_title"]
+        assert style.weight == base.weight
+        assert style.color == base.color
+        assert style.role == base.role
+
+    def test_other_roles_are_unaffected_by_a_hero_title_override(self):
+        plain = TypeScale(150.0)
+        overridden = TypeScale(150.0, overrides={"hero_title": 2.0})
+        for name in ("title", "body", "date", "stat_value", "label"):
+            assert overridden.style(name) == plain.style(name), name
+            assert overridden.line_height(name) == plain.line_height(name), name
+
+
 class TestEmojiFallback:
     """Emoji are *rendered*, not suppressed, when an emoji face is available.
 

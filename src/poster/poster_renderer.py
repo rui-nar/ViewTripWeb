@@ -676,7 +676,8 @@ def _draw_legend(
 # its title, the period it covered, and its totals.
 
 def _trip_summary_blocks(
-    project: Any, span: Tuple[Optional[str], Optional[str]]
+    project: Any, span: Tuple[Optional[str], Optional[str]],
+    title_text: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Content blocks for the trip summary card.
 
@@ -688,12 +689,17 @@ def _trip_summary_blocks(
     Totals come from ``repo_core._compute_stats``, which already sums across
     *all* of the project's activities — unlike ``compute_day_metrics``, which
     is scoped to a single date.
+
+    ``title_text`` overrides the card's title (a poster may cover only part of
+    a larger trip, so the trip's own name is not always what belongs on it);
+    ``None`` or empty falls back to the project's name, exactly as before this
+    override existed.
     """
     start, end = span
     stats = _compute_stats(project)
 
     blocks: List[Dict[str, Any]] = [
-        {"kind": "name", "text": getattr(project, "name", "") or "Trip"},
+        {"kind": "name", "text": title_text or getattr(project, "name", "") or "Trip"},
     ]
     if start and end:
         blocks.append({
@@ -705,25 +711,77 @@ def _trip_summary_blocks(
     return blocks
 
 
-def _draw_trip_summary(
-    canvas: Image.Image,
+# Safe range for the title-scale slider's multiplier on the "hero_title"
+# style. Clamped here regardless of what a caller sends — the API layer
+# (api/poster.py's PosterRequest validator) already clamps on the way in, but
+# this is the renderer's own trust boundary against any other caller (a
+# direct render call, a stale/adversarial request_json row).
+_TITLE_SCALE_MIN = 0.5
+_TITLE_SCALE_MAX = 2.0
+
+
+def _clamp_title_scale(value: float) -> float:
+    return max(_TITLE_SCALE_MIN, min(_TITLE_SCALE_MAX, value))
+
+
+def _trip_summary_layout(
     project: Any,
     span: Tuple[Optional[str], Optional[str]],
     scale: TypeScale,
+    title_text: Optional[str],
+) -> Any:
+    """Measure the trip summary card's content at *scale*.
+
+    *scale* already carries any "hero_title" override the title-scale slider
+    asked for (see ``_compose_poster_image``) — this function just measures,
+    it does not decide the scale.
+    """
+    return layout_card(
+        _trip_summary_blocks(project, span, title_text),
+        scale, width=card_width_px(scale.dpi),
+    )
+
+
+def _trip_summary_rect(
+    layout: Any, target_w: int, target_h: int, dpi: float,
+    position: Optional[Dict[str, float]],
+) -> Rect:
+    """Resolve the trip summary card's rect from a normalized (0-1) position.
+
+    ``position`` is ``{"x": .., "y": ..}``, the fraction of the way across the
+    page-margin-inset usable area the card's top-left corner sits at.
+    ``(0, 0)`` (and ``None``, for a request that predates this feature) is
+    today's fixed top-left corner — byte-for-byte the same rect as before this
+    feature existed. Values are clamped to ``[0, 1]`` so a dragged-off-page or
+    adversarial position can't push the card outside the margin.
+    """
+    margin = mm_to_px(_PAGE_MARGIN_MM, dpi)
+    px = max(0.0, min(1.0, float((position or {}).get("x", 0.0))))
+    py = max(0.0, min(1.0, float((position or {}).get("y", 0.0))))
+    max_left = max(margin, target_w - margin - layout.width)
+    max_top = max(margin, target_h - margin - layout.height)
+    left = margin + px * (max_left - margin)
+    top = margin + py * (max_top - margin)
+    return Rect(left, top, left + layout.width, top + layout.height)
+
+
+def _draw_trip_summary(
+    canvas: Image.Image,
+    rect: Rect,
+    layout: Any,
+    scale: TypeScale,
     theme: PosterTheme,
 ) -> None:
-    """Draw the trip summary card in the top-left corner.
+    """Draw the trip summary card at its already-resolved *rect*.
 
-    It has no pin and no leader line, so it is not part of the pin-based
-    placement search — it is pinned to the corner, inset by the same page
-    margin the legend uses bottom-left, and sized to its own content by the
-    ordinary card measure pass.
+    Position, text and scale are all resolved earlier by
+    ``_trip_summary_rect``/``_trip_summary_layout`` — before card placement
+    runs, so memory cards can be routed around the title (see
+    ``_compose_poster_image``) — this just executes the chrome + ops pass
+    every other card uses. *scale* must be the same ``TypeScale`` instance
+    ``layout`` was measured with, or drawing will use different font sizes
+    than the positions were measured for.
     """
-    layout = layout_card(
-        _trip_summary_blocks(project, span), scale, width=card_width_px(scale.dpi)
-    )
-    margin = mm_to_px(_PAGE_MARGIN_MM, scale.dpi)
-    rect = Rect(margin, margin, margin + layout.width, margin + layout.height)
     _draw_card_chrome(canvas, rect, scale.dpi, theme)
     _draw_card_ops(canvas, rect, layout, scale, theme)
 
@@ -846,6 +904,25 @@ def _compose_poster_image(
                             sort_key=memory.get("date", ""),
                             size=(layout.width, layout.height)))
 
+    # The title/trip-summary card's placement must be resolved before card
+    # placement runs, so memory cards can be routed around it exactly like
+    # they already are around the route and each other (see place_cards'/
+    # place_cards_perimeter's `obstacles`). It is drawn later, once placement
+    # is done, using this same layout/rect/scale so measurement and drawing
+    # never disagree.
+    show_trip_summary = project is not None and config.get("trip_summary", True)
+    title_layout: Optional[Any] = None
+    title_rect: Optional[Rect] = None
+    title_scale = scale
+    if show_trip_summary:
+        title_factor = _clamp_title_scale(request.get("title_scale", 1.0))
+        if title_factor != 1.0:
+            title_scale = TypeScale(dpi, overrides={"hero_title": title_factor})
+        title_layout = _trip_summary_layout(
+            project, trip_span, title_scale, request.get("title_text"))
+        title_rect = _trip_summary_rect(
+            title_layout, target_w, target_h, dpi, request.get("title_position"))
+
     _notify(progress, "placing cards")
     # "perimeter" is an opt-in prototype (src/poster/perimeter_placement.py);
     # anything else keeps the radial search that has always been the default.
@@ -855,6 +932,7 @@ def _compose_poster_image(
         pins, (target_w, target_h), route=route,
         margin=mm_to_px(_PAGE_MARGIN_MM, dpi),
         gutter=mm_to_px(_CARD_GUTTER_MM, dpi),
+        obstacles=[title_rect] if title_rect is not None else (),
     )
 
     _notify(progress, "rendering cards")
@@ -886,8 +964,8 @@ def _compose_poster_image(
     for pin_id, (x, y) in pin_xy.items():
         _draw_pin(ImageDraw.Draw(canvas), x, y, dpi)
 
-    if project is not None and config.get("trip_summary", True):
-        _draw_trip_summary(canvas, project, trip_span, scale, theme)
+    if show_trip_summary:
+        _draw_trip_summary(canvas, title_rect, title_layout, title_scale, theme)
 
     if legend_entries:
         _draw_legend(canvas, legend_entries, pin_xy, scale, target_w, target_h, theme)

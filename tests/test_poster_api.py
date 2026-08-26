@@ -155,6 +155,61 @@ def test_paper_size_rejects_an_unknown_value(env, monkeypatch):
     assert client.post("/api/projects/My Trip/poster", json=body).status_code == 422
 
 
+def test_title_fields_default_to_top_left_project_name_and_unscaled(env, monkeypatch):
+    """Omitting title_position/title_text/title_scale entirely must store
+    defaults that reproduce the pre-feature hardcoded placement exactly
+    (top-left corner, the project's own name, unscaled hero_title)."""
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    job_id = client.post("/api/projects/My Trip/poster", json=_BODY).json()["job_id"]
+    with Session(engine) as sess:
+        stored = json.loads(sess.get(DBPosterJob, job_id).request_json)
+    assert stored["title_position"] == {"x": 0.0, "y": 0.0}
+    assert stored["title_text"] is None
+    assert stored["title_scale"] == 1.0
+
+
+def test_title_fields_are_stored_when_given(env, monkeypatch):
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    body = {
+        **_BODY,
+        "title_position": {"x": 0.3, "y": 0.7},
+        "title_text": "A slice of the trip",
+        "title_scale": 1.4,
+    }
+    job_id = client.post("/api/projects/My Trip/poster", json=body).json()["job_id"]
+    with Session(engine) as sess:
+        stored = json.loads(sess.get(DBPosterJob, job_id).request_json)
+    assert stored["title_position"] == {"x": 0.3, "y": 0.7}
+    assert stored["title_text"] == "A slice of the trip"
+    assert stored["title_scale"] == 1.4
+
+
+def test_title_scale_is_clamped_not_rejected(env, monkeypatch):
+    """Out-of-range title_scale must be silently clamped to 0.5-2.0, not
+    bounced with a 422/500 — the API is the trust boundary, the Flutter
+    slider's own clamping is not relied on."""
+    client, engine, _, _ = env
+    monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)
+
+    too_big = client.post(
+        "/api/projects/My Trip/poster", json={**_BODY, "title_scale": 999.0})
+    assert too_big.status_code == 201, too_big.text
+    with Session(engine) as sess:
+        stored = json.loads(sess.get(DBPosterJob, too_big.json()["job_id"]).request_json)
+    assert stored["title_scale"] == 2.0
+
+    too_small = client.post(
+        "/api/projects/My Trip/poster", json={**_BODY, "title_scale": -3.0})
+    assert too_small.status_code == 201, too_small.text
+    with Session(engine) as sess:
+        stored = json.loads(sess.get(DBPosterJob, too_small.json()["job_id"]).request_json)
+    assert stored["title_scale"] == 0.5
+
+
 def test_config_layout_rejects_an_unknown_value(env, monkeypatch):
     client, _, _, _ = env
     monkeypatch.setattr(poster_module, "run_poster_job", lambda job_id: None)

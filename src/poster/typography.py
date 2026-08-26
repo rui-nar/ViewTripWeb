@@ -26,7 +26,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -233,8 +233,15 @@ class TypeScale:
     and the small preview — only the pixel numbers differ.
     """
 
-    def __init__(self, dpi: float):
+    def __init__(self, dpi: float, overrides: Optional[Dict[str, float]] = None):
+        """*overrides* maps a type-scale role name to a multiplier on that
+        role's ``size_pt`` alone (leaving weight/colour/role untouched), for
+        the one caller that needs a single role resized without disturbing
+        every other card sharing the same ``TypeScale`` instance — the
+        poster's title-scale slider (``poster_renderer``'s trip-summary card),
+        which must resize only "hero_title", not a memory card's."""
         self.dpi = dpi
+        self._overrides = overrides or {}
         self._fonts: Dict[str, ImageFont.ImageFont] = {}
         self._stacks: Dict[str, "FontStack"] = {}
 
@@ -242,12 +249,17 @@ class TypeScale:
         """Convert *points* to device pixels at this render's DPI."""
         return max(1, round(points * self.dpi / 72.0))
 
+    def _resolved(self, name: str) -> TextStyle:
+        style = TYPE_SCALE[name]
+        factor = self._overrides.get(name, 1.0)
+        return style if factor == 1.0 else replace(style, size_pt=style.size_pt * factor)
+
     def style(self, name: str) -> TextStyle:
-        return TYPE_SCALE[name]
+        return self._resolved(name)
 
     def font(self, name: str) -> ImageFont.ImageFont:
         if name not in self._fonts:
-            style = TYPE_SCALE[name]
+            style = self._resolved(name)
             self._fonts[name] = load_face(style.weight, self.px(style.size_pt))
         return self._fonts[name]
 
@@ -260,7 +272,7 @@ class TypeScale:
         with the face that actually covers it.
         """
         if name not in self._stacks:
-            size = self.px(TYPE_SCALE[name].size_pt)
+            size = self.px(self._resolved(name).size_pt)
             faces = [self.font(name)]
             scales = [1.0]
             loaded = load_emoji_face(size)
@@ -276,7 +288,7 @@ class TypeScale:
         return self._stacks[name]
 
     def line_height(self, name: str) -> int:
-        style = TYPE_SCALE[name]
+        style = self._resolved(name)
         return max(1, round(self.px(style.size_pt) * style.line_height))
 
     def space_after(self, name: str) -> int:
