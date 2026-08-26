@@ -269,25 +269,54 @@ def add_activities(
 
     activities: List[Activity] = parse_activities_or_log(body.activities, "activities_add")
 
+    # Permission/ownership check runs once, outside the retry loop below: the
+    # caller and the project's ownership/membership can't change mid-request,
+    # so — unlike the quota check below — re-running this on every retry
+    # attempt would just repeat the same answer (see resolve_project's
+    # docstring; same pattern as delete_item/reorder_items in
+    # api/project_items.py).
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_id = row.id
+
+    added_holder: Dict[str, int] = {}
+
+    def _add(project) -> None:
         # Plan limit on trip length (issue #121) — an import that reaches
-        # outside the trip's current span stretches it.
-        ensure_trip_days_quota(
-            sess, row.id, owner_id,
-            *[a.start_date_local for a in activities],
-        )
-        added = project.add_activities(activities)
-        # New activity rows record the IMPORTER (the caller), not the project
-        # owner — a companion's imports must stay tied to their Strava account.
-        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+        # outside the trip's current span stretches it. Re-checked from
+        # scratch on EVERY retry attempt, in its own short-lived read-only
+        # session (separate from save_project_with_retry's per-attempt write
+        # session — this only reads, so it doesn't need to share it), against
+        # the *current* DB state rather than the stale snapshot from a
+        # previous failed attempt: a concurrent writer may have lengthened or
+        # shortened the trip since this request started, and quota must
+        # reflect reality at save time, not at request-start time. Reusing
+        # the result from attempt 1 on a later retry could let an import
+        # through that a concurrent change should have blocked, or the
+        # reverse.
+        with get_session() as qsess:
+            ensure_trip_days_quota(
+                qsess, project_id, owner_id,
+                *[a.start_date_local for a in activities],
+            )
+        added_holder["added"] = project.add_activities(activities)
+
+    # New activity rows record the IMPORTER (the caller), not the project
+    # owner — a companion's imports must stay tied to their Strava account.
+    # save_project_with_retry (src/project/repo_retry.py) reloads the project
+    # fresh on each attempt and retries under check_version=True on a 409
+    # conflict, instead of the blind check_version=False overwrite this used
+    # to do — which could silently clobber a concurrent writer's already-
+    # committed changes with no error at all.
+    project = _repo.save_project_with_retry(
+        owner_id, name, _add,
+        legacy_path=_legacy_path(str(owner_id), name),
+        activity_user_id=user_info_id,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    added = added_holder["added"]
 
     bust_geo_cache(owner_id, name)
 
@@ -397,14 +426,20 @@ def _refresh_activity_job(
 
         # 3. Overwrite the DB row (all columns, including enrichment)
         with get_session() as sess:
-            _repo.force_update_activity(sess, user_info_id, act)
+            # Advance the project's lock_version (issue #173) so a native
+            # client's on-disk cache — which only ever checks that counter —
+            # notices the re-fetched polyline/elevation instead of serving
+            # the pre-refresh data from disk indefinitely.
+            project_id = _repo.project_id_for(sess, owner_id, name)
+            _repo.force_update_activity(sess, user_info_id, act, project_id)
         _set_refresh_state(activity_id, "resolved")
         _log.info("refresh activity=%s status=resolved", activity_id)
     except Exception as exc:  # noqa: BLE001
         # The row was marked "pending" synchronously by the trigger. If the job
         # crashes anywhere above, nothing writes a terminal status and the tile
-        # spins forever. Best-effort flip it to "failed" and log the cause —
-        # same reasoning as _resolve_route_job's crash guard.
+        # spins forever. Best-effort flip it to "failed" and log the cause.
+        # (Unlike api.segments._resolve_route_job, this refresh job has no RQ
+        # retry to preserve, so it still recovers locally rather than raising.)
         _log.exception("refresh activity=%s crashed before persisting a verdict", activity_id)
         try:
             _set_refresh_state(activity_id, "failed", error=str(exc)[:200] or "Re-fetch failed")
@@ -889,6 +924,19 @@ def update_activity_fields(
         row = sess.get(DBActivity, activity_id)
         if row is None or row.user_info_id != user_info_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+
+        # Every project this activity appears in — needed both to bust the geo
+        # cache below and to advance each one's lock_version (issue #173) so a
+        # native client's on-disk cache notices the ciphertext swap.
+        project_ids = sess.exec(
+            select(DBProjectItem.project_id).where(
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+            ).distinct()
+        ).all()
+        for project_id in project_ids:
+            bump_lock_version(sess, project_id)
+
         for field, value in data.items():
             setattr(row, field, value)
         sess.add(row)
@@ -898,12 +946,6 @@ def update_activity_fields(
         # in — same as every other activity-mutating endpoint above — so a
         # subsequent (non-E2EE-client) geo load doesn't serve a stale cached
         # response built from the pre-migration plaintext.
-        project_ids = sess.exec(
-            select(DBProjectItem.project_id).where(
-                DBProjectItem.item_type == "activity",
-                DBProjectItem.activity_id == activity_id,
-            ).distinct()
-        ).all()
         project_names = sess.exec(
             select(DBProject.name).where(DBProject.id.in_(project_ids))
         ).all() if project_ids else []

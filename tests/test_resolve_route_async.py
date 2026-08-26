@@ -22,7 +22,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import models.db as db_module
 import api.segments as segments_mod
@@ -66,6 +66,24 @@ def _load_segment(engine, user_id: int, name: str, seg_id: str) -> ConnectingSeg
 
 def _open(engine) -> Session:
     return Session(engine)
+
+
+def _read_segment_row(engine, project_id: int, seg_id: str) -> ConnectingSegment:
+    """Read a segment straight off its DBProjectItem row, bypassing
+    ProjectRepo.get_project — needed by tests that monkeypatch get_project
+    itself and must inspect state without going back through it."""
+    with Session(engine) as sess:
+        row = sess.exec(
+            select(DBProjectItem).where(
+                DBProjectItem.project_id == project_id,
+                DBProjectItem.item_type == "segment",
+            )
+        ).all()
+    for item in row:
+        seg = ConnectingSegment.from_dict(json.loads(item.segment_json or "{}"))
+        if seg.id == seg_id:
+            return seg
+    raise AssertionError(f"segment {seg_id} not found")
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -176,13 +194,20 @@ def test_job_success_writes_resolved(env, monkeypatch):
 
 
 # ── 3. Background job failure ────────────────────────────────────────────────────
+#
+# HafasError/OverpassError from _compute_segment_geometry are the *expected*
+# "we tried, no route exists" outcome and must still resolve to a clean
+# "failed" write, exactly as before this fix (see the "unexpected exception"
+# tests below for what changed).
 
 def test_job_failure_marks_failed_and_keeps_great_circle(env, monkeypatch):
+    from src.services.overpass_service import OverpassError
+
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _train_segment())
 
     def _boom(seg, params):
-        raise RuntimeError("overpass exploded")
+        raise OverpassError("overpass exploded")
 
     monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _boom)
 
@@ -237,14 +262,47 @@ def test_mark_segment_failed_leaves_terminal_state_untouched(env):
     assert seg.route_error is None
 
 
-def test_job_crash_marks_failed_not_stuck_pending(env, monkeypatch):
-    """If the job crashes before persisting a verdict, the segment must end up
-    "failed" (with the error) — never frozen on "pending" forever."""
+def test_job_unexpected_exception_propagates_for_rq_retry(env, monkeypatch):
+    """An unexpected failure (a DB hiccup, unrelated to route lookup — here the
+    project load raises a plain RuntimeError) must NOT be written as a clean
+    "failed" verdict on the spot. It must propagate out of _resolve_route_job
+    so RQ's configured retry/backoff (src/jobs/queue.py) actually gets a
+    chance to retry a transient failure, rather than every such failure being
+    silently converted into a permanent result before RQ ever sees it.
+
+    The segment is left "pending" (untouched) rather than "failed" — a
+    still-pending segment plus a non-terminal DBRouteJob row is exactly what
+    sweep_orphaned_jobs (src/jobs/route_jobs.py) re-queues at the next
+    startup, the final backstop this fix must not weaken."""
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _pending_segment())
 
-    # The job's first get_project (its load step) raises once; the retry inside
-    # _mark_segment_failed then succeeds and flips the segment to failed.
+    def _boom(*a, **k):
+        raise RuntimeError("transient load crash")
+
+    monkeypatch.setattr(segments_mod._repo, "get_project", _boom)
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError, match="transient load crash"):
+        _resolve_route_job(user_id, "My Trip", "seg-1",
+                           {"hafas_provider": "vr", "train_number": "273"})
+
+    # get_project itself is monkeypatched above, so read the row directly
+    # rather than through the (now permanently broken) _load_segment helper.
+    seg = _read_segment_row(engine, project_id, "seg-1")
+    assert seg.route_status == "pending"          # NOT prematurely failed
+    assert seg.route_started_at == "2026-06-14T10:00:00Z"
+
+
+def test_job_recovers_on_a_later_retry_after_an_unexpected_crash(env, monkeypatch):
+    """A concrete demonstration of the retry this fix enables: the first
+    attempt crashes on an unrelated DB hiccup and propagates (previous test);
+    a later attempt — standing in for RQ's automatic retry — succeeds and
+    resolves the segment normally, having never been marked "failed" in
+    between."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _pending_segment())
+
     real_get = segments_mod._repo.get_project
     state = {"n": 0}
 
@@ -256,14 +314,22 @@ def test_job_crash_marks_failed_not_stuck_pending(env, monkeypatch):
 
     monkeypatch.setattr(segments_mod._repo, "get_project", flaky_get)
     monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+    fake_line = [[24.94, 60.17], [25.73, 66.50]]
+    monkeypatch.setattr(segments_mod, "_compute_segment_geometry",
+                        lambda seg, params: (fake_line, 2, False, "relation_endpoints"))
 
+    with pytest.raises(RuntimeError):
+        _resolve_route_job(user_id, "My Trip", "seg-1",
+                           {"hafas_provider": "vr", "train_number": "273"})
+    assert _load_segment(engine, user_id, "My Trip", "seg-1").route_status == "pending"
+
+    # RQ's retry re-invokes the same job — the second attempt succeeds.
     _resolve_route_job(user_id, "My Trip", "seg-1",
                        {"hafas_provider": "vr", "train_number": "273"})
 
     seg = _load_segment(engine, user_id, "My Trip", "seg-1")
-    assert seg.route_status == "failed"          # NOT stuck on "pending"
-    assert "transient load crash" in (seg.route_error or "")
-    assert seg.route_started_at is None
+    assert seg.route_status == "resolved"
+    assert json.loads(seg.route_polyline) == fake_line
 
 
 def test_job_degraded_straight_line_is_flagged(env, monkeypatch):

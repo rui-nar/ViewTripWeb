@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse
 from models.db import get_session
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -55,6 +56,10 @@ _log = get_logger(__name__)
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
+
+# Per-file cap on a photo upload, checked before the (CPU-bound) decode/resize
+# work — see api/memories.py's _MAX_PHOTO_UPLOAD_BYTES for why 25MB.
+_MAX_PHOTO_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 # ── Response schemas ──────────────────────────────────────────────────────────
@@ -100,6 +105,16 @@ def _get_owned_journal(
     if author != user_info_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     return row
+
+
+def _find_by_client_token(sess, project_id: int, client_token: str) -> Optional[DBJournalEntry]:
+    """Existing entry already carrying this idempotency token, if any."""
+    return sess.exec(
+        select(DBJournalEntry).where(
+            DBJournalEntry.project_id == project_id,
+            DBJournalEntry.client_token == client_token,
+        )
+    ).first()
 
 
 def _resolve_geo(sess, project_id: int, date: str, geo_mode: str):
@@ -218,6 +233,10 @@ class JournalBody(BaseModel):
     lat: Optional[float] = Field(None, description="Latitude (required when geo_mode='custom')")
     lon: Optional[float] = Field(None, description="Longitude (required when geo_mode='custom')")
     insert_after_index: Optional[int] = Field(None, description="Position in the project item list to insert after")
+    client_token: Optional[str] = Field(
+        None, description="Idempotency token: retrying a save with the same token "
+                           "returns the entry already created for it instead of a duplicate",
+    )
 
 
 class JournalUpdateBody(BaseModel):
@@ -253,6 +272,14 @@ def create_journal(
         project_id = project_row.id
         owner_id = project_row.user_info_id
 
+        if body.client_token is not None:
+            # A retry of the same save action (client timeout, user tapping
+            # Save again) resends the same token: return the entry already
+            # created for it instead of a duplicate.
+            existing = _find_by_client_token(sess, project_id, body.client_token)
+            if existing is not None:
+                return {"id": existing.id}
+
         # Plan limit on trip length (issue #121) — an entry dated outside the
         # trip's current span stretches it.
         ensure_trip_days_quota(sess, project_id, owner_id, body.date)
@@ -271,9 +298,27 @@ def create_journal(
             geo_mode=body.geo_mode,
             lat=lat,
             lon=lon,
+            client_token=body.client_token,
         )
         sess.add(row)
-        sess.flush()
+        try:
+            # This flush is where the partial unique index actually fires the
+            # INSERT (needed early to get row.id for the project item below)
+            # — not the later sess.commit(). Two concurrent requests carrying
+            # the same client_token can both pass the _find_by_client_token
+            # check above; the loser lands here. Recover the same "already
+            # created" response the check would have given had it run a
+            # moment later (mirrors api/memories.py's Polarsteps race fix).
+            # Any other integrity error is a real bug and must still surface.
+            sess.flush()
+        except IntegrityError as exc:
+            sess.rollback()
+            if body.client_token is None or "client_token" not in str(exc.orig):
+                raise
+            winner = _find_by_client_token(sess, project_id, body.client_token)
+            if winner is None:
+                raise
+            return {"id": winner.id}
 
         existing_items = sess.exec(
             select(DBProjectItem)
@@ -391,6 +436,11 @@ async def upload_photo(
     with get_session() as sess:
         _get_owned_journal(sess, journal_id, user_info_id)
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     photo_uuid = str(uuid_lib.uuid4())
@@ -468,6 +518,11 @@ async def replace_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     new_uuid = str(uuid_lib.uuid4())

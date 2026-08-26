@@ -489,6 +489,32 @@ class TestActivityFieldsUpdateEndpoint:
         with Session(engine) as sess:
             assert sess.get(DBActivity, 777).name == "Bob's Ride"
 
+    def test_bumps_lock_version_for_every_project_containing_the_activity(self, repo_env):
+        """A native client's on-disk cache only ever checks lock_version, so
+        the ciphertext swap must advance it (issue #173) — same signal every
+        other activity-mutating path already bumps."""
+        engine, uid, repo = repo_env
+        with Session(engine) as sess:
+            sess.add(DBActivity(id=999, user_info_id=uid, name="Plain", type="Ride",
+                                 start_date="2026-01-01T00:00:00Z",
+                                 start_date_local="2026-01-01T00:00:00Z"))
+            proj = DBProject(user_info_id=uid, name="Trip")
+            sess.add(proj)
+            sess.commit()
+            sess.refresh(proj)
+            project_id = proj.id
+            sess.add(DBProjectItem(project_id=project_id, position=0,
+                                   item_type="activity", activity_id=999))
+            sess.commit()
+            before = proj.lock_version
+
+        client = _client(engine, uid, activity_fields_router)
+        resp = client.put("/api/activities/999", json={"name": _ENC_NAME})
+        assert resp.status_code == 200, resp.text
+
+        with Session(engine) as sess:
+            assert sess.get(DBProject, project_id).lock_version == before + 1
+
     def test_original_snapshot_columns_can_be_scrubbed(self, repo_env):
         engine, uid, repo = repo_env
         with Session(engine) as sess:

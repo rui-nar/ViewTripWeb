@@ -66,6 +66,13 @@ _log = logging.getLogger(__name__)
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
 
+# Per-file cap on a photo upload, checked before the (CPU-bound) decode/resize
+# work. The flutter_client photo picker (flutter_client/lib/src/photos) applies
+# no size limit of its own, so this is the only backstop against an
+# arbitrarily large upload; 25MB is generous for a phone camera JPEG (typically
+# a few MB) while still bounding the memory/CPU one request can consume.
+_MAX_PHOTO_UPLOAD_BYTES = 25 * 1024 * 1024
+
 # A burst of concurrent thumbnail requests — e.g. opening the trip map for a
 # photo-heavy project, which fires one request per marker with no throttling
 # on the client — repeatedly OOM-killed the production API container. Sync
@@ -612,6 +619,11 @@ async def upload_photo(
         mem_row = _get_owned_memory(sess, memory_id, user_info_id)
         owner_dir = _owner_dir_id(sess, mem_row)
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     # The bytes land in the owner's tree, so it is the owner's quota that
     # applies — a companion uploading to a shared trip spends the owner's space.
     with get_session() as sess:
@@ -690,6 +702,11 @@ async def replace_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     with get_session() as sess:
         ensure_storage_quota(sess, int(owner_dir), len(raw))
     new_uuid = str(uuid_lib.uuid4())
