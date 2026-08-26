@@ -397,14 +397,20 @@ def _refresh_activity_job(
 
         # 3. Overwrite the DB row (all columns, including enrichment)
         with get_session() as sess:
-            _repo.force_update_activity(sess, user_info_id, act)
+            # Advance the project's lock_version (issue #173) so a native
+            # client's on-disk cache — which only ever checks that counter —
+            # notices the re-fetched polyline/elevation instead of serving
+            # the pre-refresh data from disk indefinitely.
+            project_id = _repo.project_id_for(sess, owner_id, name)
+            _repo.force_update_activity(sess, user_info_id, act, project_id)
         _set_refresh_state(activity_id, "resolved")
         _log.info("refresh activity=%s status=resolved", activity_id)
     except Exception as exc:  # noqa: BLE001
         # The row was marked "pending" synchronously by the trigger. If the job
         # crashes anywhere above, nothing writes a terminal status and the tile
-        # spins forever. Best-effort flip it to "failed" and log the cause —
-        # same reasoning as _resolve_route_job's crash guard.
+        # spins forever. Best-effort flip it to "failed" and log the cause.
+        # (Unlike api.segments._resolve_route_job, this refresh job has no RQ
+        # retry to preserve, so it still recovers locally rather than raising.)
         _log.exception("refresh activity=%s crashed before persisting a verdict", activity_id)
         try:
             _set_refresh_state(activity_id, "failed", error=str(exc)[:200] or "Re-fetch failed")
@@ -889,6 +895,19 @@ def update_activity_fields(
         row = sess.get(DBActivity, activity_id)
         if row is None or row.user_info_id != user_info_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+
+        # Every project this activity appears in — needed both to bust the geo
+        # cache below and to advance each one's lock_version (issue #173) so a
+        # native client's on-disk cache notices the ciphertext swap.
+        project_ids = sess.exec(
+            select(DBProjectItem.project_id).where(
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+            ).distinct()
+        ).all()
+        for project_id in project_ids:
+            bump_lock_version(sess, project_id)
+
         for field, value in data.items():
             setattr(row, field, value)
         sess.add(row)
@@ -898,12 +917,6 @@ def update_activity_fields(
         # in — same as every other activity-mutating endpoint above — so a
         # subsequent (non-E2EE-client) geo load doesn't serve a stale cached
         # response built from the pre-migration plaintext.
-        project_ids = sess.exec(
-            select(DBProjectItem.project_id).where(
-                DBProjectItem.item_type == "activity",
-                DBProjectItem.activity_id == activity_id,
-            ).distinct()
-        ).all()
         project_names = sess.exec(
             select(DBProject.name).where(DBProject.id.in_(project_ids))
         ).all() if project_ids else []

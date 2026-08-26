@@ -590,7 +590,8 @@ class ActivityMixin:
         return True
 
     def force_update_activity(
-        self, sess: Session, user_info_id: int, act: Activity
+        self, sess: Session, user_info_id: int, act: Activity,
+        project_id: Optional[int] = None,
     ) -> None:
         """Overwrite ALL columns of an existing activity row (used for re-fetch).
 
@@ -600,6 +601,13 @@ class ActivityMixin:
         value is already an encrypted envelope: a "force refresh from Strava"
         still refreshes plaintext stats (distance, counts, ...) normally, but
         must not clobber ciphertext back to plaintext geometry/name.
+
+        Advances *project_id*'s lock_version (issue #173) so a native client's
+        on-disk cache — which only ever checks that counter — notices the
+        re-fetched polyline/elevation. Optional (defaults to no bump) because
+        an activity row is shared across every project that references it, so
+        only a caller that knows which project's cache this refresh should
+        invalidate can supply it.
         """
         if act.id is None:
             return
@@ -620,6 +628,9 @@ class ActivityMixin:
         if existing is None:
             self._upsert_activity(sess, user_info_id, act)
             return
+
+        if project_id is not None:
+            bump_lock_version(sess, project_id)
 
         existing.user_info_id = user_info_id
         if not is_encrypted_envelope(existing.name):
