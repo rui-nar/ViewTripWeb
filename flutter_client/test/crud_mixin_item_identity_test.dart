@@ -104,7 +104,7 @@ void main() {
     // immediately when called, so the identity change is observable before
     // the returned Future is even awaited.
 
-    ApiClient _mockedApi() => ApiClient(
+    ApiClient mockedApi() => ApiClient(
         baseUrl: '',
         httpClient: MockClient((req) async {
           if (req.url.path == '/api/projects/Trip/meta') {
@@ -118,7 +118,7 @@ void main() {
 
     test('createMemory reassigns items before the network call resolves',
         () async {
-      api = _mockedApi();
+      api = mockedApi();
       final notifier = ProjectNotifier(ProjectService())..ref = _ref;
       final before = notifier.items = [];
 
@@ -131,7 +131,7 @@ void main() {
 
     test('reorderItems reassigns items before the network call resolves',
         () async {
-      api = _mockedApi();
+      api = mockedApi();
       final notifier = ProjectNotifier(ProjectService())
         ..ref = _ref
         ..items = [_memoryItem('a'), _memoryItem('b'), _memoryItem('c')];
