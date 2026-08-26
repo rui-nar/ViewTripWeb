@@ -60,6 +60,9 @@ Future<PosterPreview> fetchPosterPreview({
   required String orientation,
   required Map<String, dynamic> config,
   required List<Map<String, dynamic>> memories,
+  // Matches `PosterRequest.paper_size` in `api/poster.py`; 'A0' preserves
+  // existing behavior for any caller that doesn't pass this yet.
+  String paperSize = 'A0',
   ApiClient? client,
   // The server caps its own basemap fetch at an 8s wall-clock budget
   // (poster_renderer._PREVIEW_BASEMAP_BUDGET_S) and degrades to a warning
@@ -69,7 +72,13 @@ Future<PosterPreview> fetchPosterPreview({
 }) async {
   final res = await (client ?? api).postRaw(
     ref.path('/poster/preview'),
-    {'bounds': bounds, 'orientation': orientation, 'config': config, 'memories': memories},
+    {
+      'bounds': bounds,
+      'orientation': orientation,
+      'paper_size': paperSize,
+      'config': config,
+      'memories': memories,
+    },
     timeout: timeout,
   );
   // Dart's http package lower-cases response header names.
@@ -97,11 +106,15 @@ Future<int> createPosterJob({
   required String orientation,
   required Map<String, dynamic> config,
   required List<Map<String, dynamic>> memories,
+  // Matches `PosterRequest.paper_size` in `api/poster.py`; 'A0' preserves
+  // existing behavior for any caller that doesn't pass this yet.
+  String paperSize = 'A0',
   ApiClient? client,
 }) async {
   final result = await (client ?? api).post(ref.path('/poster'), {
     'bounds': bounds,
     'orientation': orientation,
+    'paper_size': paperSize,
     'config': config,
     'memories': memories,
   }) as Map<String, dynamic>;

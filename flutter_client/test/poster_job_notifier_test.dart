@@ -47,9 +47,31 @@ void main() {
       expect(capturedBody, {
         'bounds': {'north': 1, 'south': 0, 'east': 1, 'west': 0},
         'orientation': 'landscape',
+        'paper_size': 'A0',
         'config': {'distance': true},
         'memories': [],
       });
+    });
+
+    test('POSTs the given paper_size when one is provided', () async {
+      Map<String, dynamic>? capturedBody;
+      final mock = MockClient((req) async {
+        capturedBody = jsonDecode(req.body) as Map<String, dynamic>;
+        return _json(201, {'job_id': 42});
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      await createPosterJob(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: {'north': 1, 'south': 0, 'east': 1, 'west': 0},
+        orientation: 'landscape',
+        config: {'distance': true},
+        memories: const [],
+        paperSize: 'A3',
+        client: client,
+      );
+
+      expect(capturedBody?['paper_size'], 'A3');
     });
 
     test('a job-creation API error is thrown as ApiException', () async {
@@ -101,11 +123,34 @@ void main() {
       expect(capturedBody, {
         'bounds': {'north': 1, 'south': 0, 'east': 1, 'west': 0},
         'orientation': 'landscape',
+        'paper_size': 'A0',
         'config': {'distance': true},
         'memories': [
           {'id': 1, 'lat': 0.5, 'lon': 0.5, 'date': '2024-01-01'}
         ],
       });
+    });
+
+    test('POSTs the given paper_size when one is provided', () async {
+      Map<String, dynamic>? capturedBody;
+      final mock = MockClient((req) async {
+        capturedBody = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response.bytes([0x89, 0x50, 0x4E, 0x47], 200,
+            headers: {'content-type': 'image/png'});
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      await fetchPosterPreview(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: const {},
+        orientation: 'portrait',
+        config: const {},
+        memories: const [],
+        paperSize: 'A2',
+        client: client,
+      );
+
+      expect(capturedBody?['paper_size'], 'A2');
     });
 
     test('a non-2xx response throws ApiException rather than returning bytes',
