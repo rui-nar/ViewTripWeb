@@ -559,17 +559,22 @@ List<Marker> _styleSegmentMarkers(
   return markers;
 }
 
+/// Everything about a journal marker that doesn't depend on selection: point
+/// and the raw journal map (needed by the tap handler). See
+/// _styleJournalMarkers.
+class _JournalMarkerSpec {
+  final LatLng point;
+  final String jId;
+  final Map<String, dynamic> j;
+  const _JournalMarkerSpec({required this.point, required this.jId, required this.j});
+}
+
 // Shared by _MapPanelState and ManageMapPanelState — unlike memory markers,
 // journal-marker rendering (including the tap handler) has no mode-specific
 // affordance, so this stayed byte-for-byte identical between the two classes
 // and is hoisted here rather than duplicated.
-List<Marker> _buildJournalMarkers(
-  List<Map<String, dynamic>> items,
-  dynamic selectedJournalId,
-  bool hasSelection,
-  ProjectNotifier notifier,
-) {
-  final markers = <Marker>[];
+List<_JournalMarkerSpec> _buildJournalMarkerSpecs(List<Map<String, dynamic>> items) {
+  final specs = <_JournalMarkerSpec>[];
   for (final item in items) {
     if (item['item_type'] != 'journal') continue;
     final j = item['journal'] as Map<String, dynamic>?;
@@ -577,8 +582,28 @@ List<Marker> _buildJournalMarkers(
     final lat = (j['lat'] as num?)?.toDouble();
     final lon = (j['lon'] as num?)?.toDouble();
     if (lat == null || lon == null) continue;
-    final jId = j['id']?.toString() ?? '';
-    final isSelected = selectedJournalId?.toString() == jId;
+    specs.add(_JournalMarkerSpec(
+      point: LatLng(lat, lon),
+      jId: j['id']?.toString() ?? '',
+      j: j,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs] — just the bgColor/border pick;
+/// no item-list scan or field extraction, which is what a selection change
+/// used to redo here on every rebuild (see map_panel.dart's buildDayIndex
+/// doc comment for the ANR this pattern fixes generally).
+List<Marker> _styleJournalMarkers(
+  List<_JournalMarkerSpec> specs,
+  dynamic selectedJournalId,
+  bool hasSelection,
+  ProjectNotifier notifier,
+) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedJournalId?.toString() == spec.jId;
     const size = 22.0;
     final bgColor = isSelected
         ? const Color(0xFF44AAFF)
@@ -586,12 +611,12 @@ List<Marker> _buildJournalMarkers(
             ? const Color(0xA064748B)
             : const Color(0xFF64748B);
     markers.add(Marker(
-      key: ValueKey('journal-$jId'),
-      point: LatLng(lat, lon),
+      key: ValueKey('journal-${spec.jId}'),
+      point: spec.point,
       width: size,
       height: size,
       child: GestureDetector(
-        onTap: () => notifier.selectJournal(j['id']),
+        onTap: () => notifier.selectJournal(spec.j['id']),
         child: Container(
           decoration: BoxDecoration(
             color: bgColor,
@@ -601,6 +626,115 @@ List<Marker> _buildJournalMarkers(
           child: const Center(
             child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
           ),
+        ),
+      ),
+    ));
+  }
+  return markers;
+}
+
+/// Everything about a memory marker that doesn't depend on selection: point,
+/// thumbnail URL, the day it belongs to (for the day-highlight check), and
+/// the raw memory map (needed by the tap handler). See _styleMemoryMarkers.
+class _MemoryMarkerSpec {
+  final LatLng point;
+  final String memId;
+  final String? thumbUrl;
+  final String? memDate;
+  final Map<String, dynamic> mem;
+  const _MemoryMarkerSpec({
+    required this.point,
+    required this.memId,
+    required this.thumbUrl,
+    required this.memDate,
+    required this.mem,
+  });
+}
+
+// Shared by _MapPanelState and ManageMapPanelState — the two modes only
+// differ in what tapping a marker opens (view mode's memory detail is
+// read-only), so that's a callback ([showDetail]) rather than two
+// near-duplicate copies of this loop.
+List<_MemoryMarkerSpec> _buildMemoryMarkerSpecs(
+  List<Map<String, dynamic>> items,
+  ProjectNotifier notifier,
+) {
+  final specs = <_MemoryMarkerSpec>[];
+  for (final item in items) {
+    if (item['item_type'] != 'memory') continue;
+    final mem = item['memory'] as Map<String, dynamic>?;
+    if (mem == null) continue;
+    final lat = (mem['lat'] as num?)?.toDouble();
+    final lon = (mem['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) continue;
+    final memId = mem['id']?.toString() ?? '';
+    final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
+    specs.add(_MemoryMarkerSpec(
+      point: LatLng(lat, lon),
+      memId: memId,
+      thumbUrl: photos.isNotEmpty ? notifier.photoThumbUrl(memId, photos.first) : null,
+      memDate: mem['date'] as String?,
+      mem: mem,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs]: only bgColor/size/border/
+/// day-highlight change with selection. The thumbnail widget keeps its
+/// stable `ValueKey(thumbUrl)`, so Flutter's reconciliation reuses it across
+/// a resize instead of re-fetching (see _MarkerThumbImage). [showDetail]
+/// lets each mode wire its own memory-detail affordance without duplicating
+/// this loop — see map_panel.dart's buildDayIndex doc comment for the ANR
+/// this general pattern (full rebuild on every selection change) fixes.
+List<Marker> _styleMemoryMarkers(
+  List<_MemoryMarkerSpec> specs,
+  dynamic selectedMemoryId,
+  bool hasSelection,
+  Set<String> effectiveDays,
+  Map<String, String> authHeaders,
+  ProjectNotifier notifier,
+  void Function(Map<String, dynamic> mem) showDetail,
+) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedMemoryId?.toString() == spec.memId;
+    final isDayHighlighted = effectiveDays.isEmpty ||
+        (spec.memDate != null && effectiveDays.contains(spec.memDate));
+    final size = isSelected ? 34.0 : 28.0;
+    final bgColor = isSelected
+        ? const Color(0xFF333333)
+        : (hasSelection && !isDayHighlighted)
+            ? const Color(0xA0000000)
+            : Colors.black;
+    final thumbUrl = spec.thumbUrl;
+    final Widget inner = thumbUrl != null
+        ? ClipOval(
+            child: _MarkerThumbImage(
+              key: ValueKey(thumbUrl),
+              url: thumbUrl,
+              headers: authHeaders,
+              size: size,
+            ),
+          )
+        : Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
+    markers.add(Marker(
+      key: ValueKey('memory-${spec.memId}'),
+      point: spec.point,
+      width: size,
+      height: size,
+      child: GestureDetector(
+        onTap: () {
+          notifier.selectMemory(spec.mem['id']);
+          showDetail(spec.mem);
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: bgColor,
+            shape: BoxShape.circle,
+            border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+          ),
+          child: Center(child: inner),
         ),
       ),
     ));
@@ -1128,6 +1262,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   List<_PolylineSpec> _polylineSpecs = const [];
   List<_ActivityMarkerSpec> _activityMarkerSpecs = const [];
   List<_SegmentMarkerSpec> _segmentMarkerSpecs = const [];
+  List<_MemoryMarkerSpec> _memoryMarkerSpecs = const [];
+  List<_JournalMarkerSpec> _journalMarkerSpecs = const [];
   List<Marker> _cachedDayBreakpointMarkers = const [];
   Map<String, ({Set<String> actIds, Set<String> segIds})> _dayIndex = const {};
   List<Polyline> _cachedPolylines = [];
@@ -1186,73 +1322,6 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       pts.addAll(memoCoordsToLatLng(coords));
     }
     return pts;
-  }
-
-  List<Marker> _buildMemoryMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedMemoryId,
-    bool hasSelection,
-    Set<String> effectiveDays,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
-    for (final item in items) {
-      if (item['item_type'] != 'memory') continue;
-      final mem = item['memory'] as Map<String, dynamic>?;
-      if (mem == null) continue;
-      final lat = (mem['lat'] as num?)?.toDouble();
-      final lon = (mem['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
-      final isSelected = selectedMemoryId?.toString() == memId;
-      final memDate = mem['date'] as String?;
-      final isDayHighlighted = effectiveDays.isEmpty ||
-          (memDate != null && effectiveDays.contains(memDate));
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFF333333)
-          : (hasSelection && !isDayHighlighted)
-              ? const Color(0xA0000000)
-              : Colors.black;
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: _MarkerThumbImage(
-            key: ValueKey(thumbUrl),
-            url: thumbUrl,
-            headers: authHeaders,
-            size: size,
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
-      markers.add(Marker(
-        key: ValueKey('memory-$memId'),
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () {
-            widget.notifier.selectMemory(mem['id']);
-            showMemoryDetail(context, widget.notifier, mem, readOnly: true,
-                shareContentKey: widget.notifier.shareContentKey);
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: Center(child: inner),
-          ),
-        ),
-      ));
-    }
-    return markers;
   }
 
   List<LatLng> _allPoints(List<Polyline> polylines) {
@@ -1444,6 +1513,8 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
             ? buildDayBreakpointMarkers(
                 geo, dayStartActivityIds(items, actById), trackColor)
             : const [];
+        _memoryMarkerSpecs = _buildMemoryMarkerSpecs(items, notifier);
+        _journalMarkerSpecs = _buildJournalMarkerSpecs(items);
       }
       Set<String>? dayActIds;
       Set<String>? daySegIds;
@@ -1469,10 +1540,13 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           dayBreakpointMarkers: _cachedDayBreakpointMarkers);
       _cachedSegmentMarkers =
           _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
-      _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
+      _cachedMemoryMarkers = _styleMemoryMarkers(
+          _memoryMarkerSpecs, selMemId, hasSelection, effectiveDays,
+          notifier.photoAuthHeaders, notifier,
+          (mem) => showMemoryDetail(context, notifier, mem,
+              readOnly: true, shareContentKey: notifier.shareContentKey));
       _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId, hasSelection, notifier);
+          _styleJournalMarkers(_journalMarkerSpecs, selJournalId, hasSelection, notifier);
       _cachedEncounterMarkers = widget.showEncounters
           ? buildEncounterMarkers(items, context, notifier,
               onLocationTap: widget.onLocationTap)
@@ -2004,6 +2078,8 @@ class ManageMapPanelState extends State<ManageMapPanel>
   List<_PolylineSpec> _polylineSpecs = const [];
   List<_ActivityMarkerSpec> _activityMarkerSpecs = const [];
   List<_SegmentMarkerSpec> _segmentMarkerSpecs = const [];
+  List<_MemoryMarkerSpec> _memoryMarkerSpecs = const [];
+  List<_JournalMarkerSpec> _journalMarkerSpecs = const [];
   List<Marker> _cachedDayBreakpointMarkers = const [];
   Map<String, ({Set<String> actIds, Set<String> segIds})> _dayIndex = const {};
   List<Polyline> _cachedPolylines = [];
@@ -2027,76 +2103,6 @@ class ManageMapPanelState extends State<ManageMapPanel>
 
   static bool setEquals(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
-
-  List<Marker> _buildMemoryMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedMemoryId,
-    bool hasSelection,
-    Set<String> effectiveDays,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
-    for (final item in items) {
-      if (item['item_type'] != 'memory') continue;
-      final mem = item['memory'] as Map<String, dynamic>?;
-      if (mem == null) continue;
-      final lat = (mem['lat'] as num?)?.toDouble();
-      final lon = (mem['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
-      final isSelected = selectedMemoryId?.toString() == memId;
-      final memDate = mem['date'] as String?;
-      final isDayHighlighted = effectiveDays.isEmpty ||
-          (memDate != null && effectiveDays.contains(memDate));
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFF333333)
-          : (hasSelection && !isDayHighlighted)
-              ? const Color(0xA0000000)
-              : Colors.black;
-
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: _MarkerThumbImage(
-            key: ValueKey(thumbUrl),
-            url: thumbUrl,
-            headers: authHeaders,
-            size: size,
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
-
-      markers.add(Marker(
-        key: ValueKey('memory-$memId'),
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () {
-            widget.notifier.selectMemory(mem['id']);
-            showMemoryDetail(context, widget.notifier, mem);
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected
-                  ? Border.all(color: Colors.white, width: 2)
-                  : null,
-            ),
-            child: Center(child: inner),
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
 
   @override
   void initState() {
@@ -2341,6 +2347,8 @@ class ManageMapPanelState extends State<ManageMapPanel>
             ? buildDayBreakpointMarkers(
                 geo, dayStartActivityIds(items, actById), trackColor)
             : const [];
+        _memoryMarkerSpecs = _buildMemoryMarkerSpecs(items, notifier);
+        _journalMarkerSpecs = _buildJournalMarkerSpecs(items);
       }
       // For day selection, union ids across all selected days.
       Set<String>? dayActIds;
@@ -2364,10 +2372,12 @@ class ManageMapPanelState extends State<ManageMapPanel>
           dayBreakpointMarkers: _cachedDayBreakpointMarkers);
       _cachedSegmentMarkers =
           _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
-      _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
-      _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId2, hasSelection, notifier);
+      _cachedMemoryMarkers = _styleMemoryMarkers(
+          _memoryMarkerSpecs, selMemId, hasSelection, effectiveDays,
+          notifier.photoAuthHeaders, notifier,
+          (mem) => showMemoryDetail(context, notifier, mem));
+      _cachedJournalMarkers = _styleJournalMarkers(
+          _journalMarkerSpecs, selJournalId2, hasSelection, notifier);
       _cachedEncounterMarkers = buildEncounterMarkers(items, context,
           widget.notifier, onLocationTap: widget.onLocationTap);
 
