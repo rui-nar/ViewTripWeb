@@ -218,7 +218,12 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     final insertAt = insertAfterIndex != null
         ? (insertAfterIndex + 1).clamp(0, items.length)
         : items.length;
-    items.insert(insertAt, placeholder);
+    // New list object, not an in-place insert: map_panel's marker cache and
+    // ProjectNotifier's dayStats/orderedDayKeys caches invalidate via
+    // identical(items, _last...), which a same-object mutation never trips.
+    final newItems = List.of(items);
+    newItems.insert(insertAt, placeholder);
+    items = newItems;
     notifyListeners();
     try {
       await api.post(ref.withOwner('/api/encounters/'), {
@@ -285,13 +290,24 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     }
   }
 
+  /// Removes an encounter from local state only — no API call. Used both by
+  /// [deleteEncounter]'s optimistic step and directly by the swipe-to-dismiss
+  /// undo flow (activity_panel.dart), which needs the map pin gone
+  /// immediately, before the undo window's delayed confirm ever calls
+  /// [deleteEncounter] itself.
+  void removeEncounterLocally(String encounterId) {
+    items = items
+        .where((item) =>
+            !(item['item_type'] == 'encounter' &&
+              item['encounter']?['id']?.toString() == encounterId))
+        .toList();
+    notifyListeners();
+  }
+
   Future<void> deleteEncounter(String encounterId) async {
     final ref = projectRef;
     if (ref == null) return;
-    items.removeWhere((item) =>
-        item['item_type'] == 'encounter' &&
-        item['encounter']?['id']?.toString() == encounterId);
-    notifyListeners();
+    removeEncounterLocally(encounterId);
     try {
       await api.delete('/api/encounters/$encounterId');
       await reloadDetailsOnly(ref);

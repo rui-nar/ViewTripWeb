@@ -77,7 +77,12 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     final insertAt = insertAfterIndex != null
         ? (insertAfterIndex + 1).clamp(0, items.length)
         : items.length;
-    items.insert(insertAt, placeholder);
+    // New list object, not an in-place insert: map_panel's marker cache and
+    // ProjectNotifier's dayStats/orderedDayKeys caches invalidate via
+    // identical(items, _last...), which a same-object mutation never trips.
+    final newItems = List.of(items);
+    newItems.insert(insertAt, placeholder);
+    items = newItems;
     notifyListeners();
     try {
       final encDescription = await encryption.protect(description);
@@ -118,7 +123,11 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   }) async {
     final ref = projectRef;
     if (ref == null) return;
-    for (final item in items) {
+    // New list + new item map, not an in-place mutation of the existing
+    // item — see createJournal's comment above for why identity matters here.
+    final newItems = List.of(items);
+    for (var i = 0; i < newItems.length; i++) {
+      final item = newItems[i];
       if (item['item_type'] == 'journal' &&
           item['journal']?['id']?.toString() == journalId) {
         final j = Map<String, dynamic>.from(item['journal'] as Map);
@@ -128,10 +137,11 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         j['geo_mode'] = geoMode;
         j['lat'] = lat;
         j['lon'] = lon;
-        item['journal'] = j;
+        newItems[i] = {...item, 'journal': j};
         break;
       }
     }
+    items = newItems;
     notifyListeners();
     try {
       final encDescription = await encryption.protect(description);
@@ -162,10 +172,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   Future<void> deleteJournal(String journalId) async {
     final ref = projectRef;
     if (ref == null) return;
-    items.removeWhere((item) =>
-        item['item_type'] == 'journal' &&
-        item['journal']?['id']?.toString() == journalId);
-    notifyListeners();
+    removeJournalLocally(journalId);
     try {
       await api.delete('/api/journal/$journalId');
       await reloadDetailsOnly(ref);

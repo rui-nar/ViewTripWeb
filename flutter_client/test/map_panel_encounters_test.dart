@@ -103,4 +103,53 @@ void main() {
     expect(find.text('Encounters'), findsNothing);
     expect(find.byIcon(Icons.person), findsNothing);
   });
+
+  testWidgets(
+      'a people/groups change is picked up on the next rebuild even when '
+      'nothing selection-related changed — guards the encounter cache '
+      'against staleness now that it no longer rides along with every '
+      'selection change', (tester) async {
+    final notifier = _notifierWithEncounter();
+    final controller = AnimatedMapController(vsync: const TestVSync());
+    addTearDown(controller.dispose);
+
+    tester.view.physicalSize = const Size(800, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ListenableBuilder(
+          listenable: notifier,
+          builder: (_, __) => MapPanel(
+            notifier: notifier,
+            mapController: controller,
+            basemapUrl: 'https://example.invalid/{z}/{x}/{y}.png',
+            showEncounters: true,
+          ),
+        ),
+      ),
+    ));
+    await tester.pump();
+
+    expect(find.byIcon(Icons.person), findsOneWidget);
+    expect(find.byIcon(Icons.groups), findsNothing);
+
+    // Alice now belongs to a group — new list objects, same convention the
+    // rest of ProjectNotifier's mutations follow (never mutate in place).
+    notifier.people = [
+      {'id': 1, 'name': 'Alice', 'group_id': 5},
+    ];
+    notifier.groups = [
+      {'id': 5, 'name': 'Hikers'},
+    ];
+    notifier.notifyListeners();
+    await tester.pump();
+
+    expect(find.byIcon(Icons.groups), findsOneWidget,
+        reason: 'the encounter marker must reclassify once people/groups '
+            'change, not stay stuck on whatever it cached before');
+    expect(find.byIcon(Icons.person), findsNothing);
+  });
 }

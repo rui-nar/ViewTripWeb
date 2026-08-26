@@ -1043,9 +1043,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
           context: context,
           notifier: notifier,
           label: 'Removed encounter with "$name"',
-          onOptimistic: () => notifier.items.removeWhere((it) =>
-              it['item_type'] == 'encounter' &&
-              it['encounter']?['id']?.toString() == encId),
+          onOptimistic: () => notifier.removeEncounterLocally(encId),
           onConfirm: () => notifier.deleteEncounter(encId),
         );
         return true;
