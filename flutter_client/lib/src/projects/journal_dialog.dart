@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../billing/upgrade_sheet.dart';
 import 'location_picker_dialog.dart';
+import 'project_journal_crud_mixin.dart' show generateJournalClientToken;
 import 'project_notifier.dart';
 
 /// Dialog to create or edit a journal entry.
@@ -44,6 +45,12 @@ class _JournalDialogState extends State<JournalDialog> {
   List<String> _existingPhotos = [];
   final List<({Uint8List bytes, String filename})> _pendingPhotos = [];
   final Set<String> _photosToDelete = {};
+
+  // Generated once, lazily, on the first Save tap for a new entry, then
+  // reused on every retry of that same save (error-and-retap, or an
+  // automatic retry) so the server can dedupe a genuine double-submit.
+  // A new dialog instance (a separate entry) gets its own fresh token.
+  String? _createClientToken;
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -165,6 +172,7 @@ class _JournalDialogState extends State<JournalDialog> {
           if (uuid == null) failedPhotos++;
         }
       } else {
+        _createClientToken ??= generateJournalClientToken();
         final ok = await widget.notifier.createJournal(
           date: dateStr,
           geoMode: _geoMode,
@@ -173,6 +181,7 @@ class _JournalDialogState extends State<JournalDialog> {
           lat: _geoMode == 'custom' ? _customLat : null,
           lon: _geoMode == 'custom' ? _customLon : null,
           insertAfterIndex: widget.insertAfterIndex,
+          clientToken: _createClientToken,
         );
         if (!ok) {
           setState(() => _saveError =

@@ -1,6 +1,8 @@
 /// Mixin providing Journal Entry CRUD operations to ProjectNotifier.
 library;
 
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
@@ -13,6 +15,19 @@ import 'project_quota_mixin.dart';
 /// counter (rather than a timestamp alone) guarantees two concurrent creates
 /// never collide even if they land in the same clock tick.
 int _optimisticJournalIdCounter = 0;
+
+final Random _tokenRandom = Random.secure();
+
+/// A fresh idempotency token for one journal-entry save action.
+///
+/// The caller generates this once per save action (see journal_dialog.dart's
+/// `_save`) and resends the same value on every retry of that action, so
+/// [createJournal] can dedupe a client-perceived timeout followed by a
+/// manual retry. A new value must be used for each genuinely new entry.
+String generateJournalClientToken() =>
+    List.generate(16, (_) => _tokenRandom.nextInt(256))
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
 
 mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
   // ── Abstract: project state (satisfied by ProjectNotifier fields) ─────────
@@ -38,6 +53,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     double? lat,
     double? lon,
     int? insertAfterIndex,
+    String? clientToken,
   }) async {
     final ref = projectRef;
     if (ref == null) return false;
@@ -74,6 +90,7 @@ mixin ProjectJournalCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         if (lat != null) 'lat': lat,
         if (lon != null) 'lon': lon,
         if (insertAfterIndex != null) 'insert_after_index': insertAfterIndex,
+        if (clientToken != null) 'client_token': clientToken,
       });
       await reloadDetailsOnly(ref);
       return true;
