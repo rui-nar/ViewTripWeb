@@ -35,6 +35,7 @@ import 'image_download.dart';
 import 'poster_config_dialog.dart';
 import 'poster_job_notifier.dart';
 import 'poster_status_card.dart';
+import 'poster_title_dialog.dart';
 import 'social_share_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'sync_import_dialog.dart';
@@ -428,7 +429,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   // ── Poster generation flow (issue #14, unit F) ────────────────────────────
   // Frame picker (region + orientation) -> config dialog (which sections to
-  // include) -> preview -> job kicked off, user notified by email when ready.
+  // include) -> title dialog (position/text/size of the title card) ->
+  // preview -> job kicked off, user notified by email when ready.
 
   void _cancelFramePicker() {
     if (!mounted) return;
@@ -444,7 +446,22 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       barrierDismissible: false,
       builder: (_) => PosterConfigDialog(
         onConfirm: (opts) =>
-            _showPosterPreview(bounds, orientation, paperSize, opts),
+            _showPosterTitleDialog(bounds, orientation, paperSize, opts),
+      ),
+    );
+  }
+
+  Future<void> _showPosterTitleDialog(LatLngBounds bounds, String orientation,
+      String paperSize, PosterConfigOptions opts) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PosterTitleDialog(
+        orientation: orientation,
+        initialTitle: widget.projectName,
+        onConfirm: (titleOpts) => _showPosterPreview(
+            bounds, orientation, paperSize, opts, titleOpts),
       ),
     );
   }
@@ -458,8 +475,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     ];
   }
 
-  Future<void> _showPosterPreview(LatLngBounds bounds, String orientation,
-      String paperSize, PosterConfigOptions opts) async {
+  Future<void> _showPosterPreview(
+      LatLngBounds bounds,
+      String orientation,
+      String paperSize,
+      PosterConfigOptions opts,
+      PosterTitleOptions titleOpts) async {
     if (!mounted) return;
     final memories = _posterMemoriesPayload();
     await showDialog<void>(
@@ -471,9 +492,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         orientation: orientation,
         paperSize: paperSize,
         opts: opts,
+        titleOpts: titleOpts,
         memories: memories,
-        onGenerate: () =>
-            _startPosterJob(bounds, orientation, paperSize, opts, memories),
+        onGenerate: () => _startPosterJob(
+            bounds, orientation, paperSize, opts, titleOpts, memories),
       ),
     );
   }
@@ -489,6 +511,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       String orientation,
       String paperSize,
       PosterConfigOptions opts,
+      PosterTitleOptions titleOpts,
       List<Map<String, dynamic>> memories) async {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
@@ -500,6 +523,9 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         paperSize: paperSize,
         config: opts.toJson(),
         memories: memories,
+        titlePosition: {'x': titleOpts.positionX, 'y': titleOpts.positionY},
+        titleText: titleOpts.titleText,
+        titleScale: titleOpts.titleScale,
       );
       // Ambient status card (issue #14, unit G) picks up from here — the
       // SnackBar below is a one-off confirmation, the card is what actually
@@ -1190,6 +1216,7 @@ class _PosterPreviewDialog extends StatefulWidget {
   final String orientation;
   final String paperSize;
   final PosterConfigOptions opts;
+  final PosterTitleOptions titleOpts;
   final List<Map<String, dynamic>> memories;
   final VoidCallback onGenerate;
 
@@ -1199,6 +1226,7 @@ class _PosterPreviewDialog extends StatefulWidget {
     required this.orientation,
     required this.paperSize,
     required this.opts,
+    required this.titleOpts,
     required this.memories,
     required this.onGenerate,
   });
@@ -1232,6 +1260,12 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
         paperSize: widget.paperSize,
         config: widget.opts.toJson(),
         memories: widget.memories,
+        titlePosition: {
+          'x': widget.titleOpts.positionX,
+          'y': widget.titleOpts.positionY,
+        },
+        titleText: widget.titleOpts.titleText,
+        titleScale: widget.titleOpts.titleScale,
       );
       if (!mounted) return;
       setState(() {
