@@ -388,6 +388,22 @@ class DBJournalEntry(sqlmodel.SQLModel, table=True):
     """
 
     __tablename__ = "journalentry"
+    # A client-supplied idempotency token may be used at most once per project:
+    # a client-perceived timeout followed by a manual retry must dedupe rather
+    # than create a second entry. Partial so the many rows with no token
+    # (older clients, or none supplied) stay exempt. Mirrors migration
+    # c9d0e1f2a3b4 / uq_memory_project_polarsteps_step_id. Kept here so the
+    # constraint travels with the model metadata.
+    __table_args__ = (
+        Index(
+            "uq_journalentry_project_client_token",
+            "project_id",
+            "client_token",
+            unique=True,
+            sqlite_where=text("client_token IS NOT NULL"),
+            postgresql_where=text("client_token IS NOT NULL"),
+        ),
+    )
 
     id: Optional[int] = sqlmodel.Field(default=None, primary_key=True)
     project_id: int = sqlmodel.Field(foreign_key="project.id", index=True)
@@ -401,6 +417,13 @@ class DBJournalEntry(sqlmodel.SQLModel, table=True):
     lon: Optional[float] = sqlmodel.Field(default=None)
     # E2EE marker (issue #26): 0 = plaintext `description`; >=1 = ciphertext blob.
     enc_version: int = sqlmodel.Field(default=0)
+    # Client-generated idempotency token: a save action's retries all resend
+    # the same value, while a genuinely new entry gets a fresh one (issue:
+    # journal entries had no duplicate guard, found during a mutation-
+    # propagation audit). None for older clients that don't send it. No plain
+    # index: every lookup is scoped by project_id too, already covered by the
+    # partial unique index above.
+    client_token: Optional[str] = sqlmodel.Field(default=None)
 
 
 class DBPerson(sqlmodel.SQLModel, table=True):
