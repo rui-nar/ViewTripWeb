@@ -1273,6 +1273,15 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
   List<Marker> _cachedEncounterMarkers = [];
+  // Encounter markers have no selection-dependent styling at all (unlike
+  // every other marker type above), so they get their own narrower cache
+  // check — see the encounter-cache block in build() — instead of riding
+  // along with geoOrStyleChanged/selectionChanged, which used to rebuild
+  // them on every selection change for no reason.
+  List<Map<String, dynamic>>? _lastEncounterItems;
+  List<Map<String, dynamic>>? _lastEncounterPeople;
+  List<Map<String, dynamic>>? _lastEncounterGroups;
+  bool? _lastEncounterShowEncounters;
   bool _showMemories = true;
   bool _showEncounters = true;
   bool _showActivities = true;
@@ -1547,10 +1556,6 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               readOnly: true, shareContentKey: notifier.shareContentKey));
       _cachedJournalMarkers =
           _styleJournalMarkers(_journalMarkerSpecs, selJournalId, hasSelection, notifier);
-      _cachedEncounterMarkers = widget.showEncounters
-          ? buildEncounterMarkers(items, context, notifier,
-              onLocationTap: widget.onLocationTap)
-          : const [];
       // Auto-zoom to selection (issue #34). Previously this always did
       // `_fittedBounds = false` on any selection change, which re-fit the map to
       // the WHOLE trip every time — so view mode "reset to full trip zoom"
@@ -1564,6 +1569,23 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       } else if (selectionChanged) {
         _pendingAutoZoomPts = null;
       }
+    }
+    // Encounter markers have no selection-dependent styling (unlike every
+    // other marker type above) — checked independently of
+    // geoOrStyleChanged/selectionChanged so a day/activity/segment/memory
+    // selection never redoes this classification pass for nothing.
+    if (!identical(items, _lastEncounterItems) ||
+        !identical(notifier.people, _lastEncounterPeople) ||
+        !identical(notifier.groups, _lastEncounterGroups) ||
+        widget.showEncounters != _lastEncounterShowEncounters) {
+      _lastEncounterItems = items;
+      _lastEncounterPeople = notifier.people;
+      _lastEncounterGroups = notifier.groups;
+      _lastEncounterShowEncounters = widget.showEncounters;
+      _cachedEncounterMarkers = widget.showEncounters
+          ? buildEncounterMarkers(items, context, notifier,
+              onLocationTap: widget.onLocationTap)
+          : const [];
     }
     final polylines = _cachedPolylines;
     final allPoints = _cachedAllPoints;
@@ -2088,6 +2110,13 @@ class ManageMapPanelState extends State<ManageMapPanel>
   List<Marker> _cachedMemoryMarkers = [];
   List<Marker> _cachedJournalMarkers = [];
   List<Marker> _cachedEncounterMarkers = [];
+  // Encounter markers have no selection-dependent styling at all (unlike
+  // every other marker type above), so they get their own narrower cache
+  // check — see the encounter-cache block in build() — instead of riding
+  // along with geoOrStyleChanged2/selectionChanged2.
+  List<Map<String, dynamic>>? _lastEncounterItems;
+  List<Map<String, dynamic>>? _lastEncounterPeople;
+  List<Map<String, dynamic>>? _lastEncounterGroups;
   bool _showMemories = true;
   // Points queued for auto-zoom on the next frame; null = nothing pending.
   List<LatLng>? _pendingAutoZoomPts;
@@ -2378,8 +2407,6 @@ class ManageMapPanelState extends State<ManageMapPanel>
           (mem) => showMemoryDetail(context, notifier, mem));
       _cachedJournalMarkers = _styleJournalMarkers(
           _journalMarkerSpecs, selJournalId2, hasSelection, notifier);
-      _cachedEncounterMarkers = buildEncounterMarkers(items, context,
-          widget.notifier, onLocationTap: widget.onLocationTap);
 
       // Queue auto-zoom only when selection genuinely changed (not on geo updates
       // from progressive loading) so it doesn't fight _fitBoundsOnce mid-load.
@@ -2390,6 +2417,19 @@ class ManageMapPanelState extends State<ManageMapPanel>
       } else if (selectionChanged2) {
         _pendingAutoZoomPts = null;
       }
+    }
+    // Encounter markers have no selection-dependent styling (unlike every
+    // other marker type above) — checked independently of
+    // geoOrStyleChanged2/selectionChanged2 so a day/activity/segment/memory
+    // selection never redoes this classification pass for nothing.
+    if (!identical(items, _lastEncounterItems) ||
+        !identical(notifier.people, _lastEncounterPeople) ||
+        !identical(notifier.groups, _lastEncounterGroups)) {
+      _lastEncounterItems = items;
+      _lastEncounterPeople = notifier.people;
+      _lastEncounterGroups = notifier.groups;
+      _cachedEncounterMarkers = buildEncounterMarkers(items, context,
+          widget.notifier, onLocationTap: widget.onLocationTap);
     }
 
     // Guard on fittedNotifier before flattening every polyline's points: once
