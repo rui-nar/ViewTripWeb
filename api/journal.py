@@ -56,6 +56,10 @@ _log = get_logger(__name__)
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _THUMB_SIZE = (400, 400)
 
+# Per-file cap on a photo upload, checked before the (CPU-bound) decode/resize
+# work — see api/memories.py's _MAX_PHOTO_UPLOAD_BYTES for why 25MB.
+_MAX_PHOTO_UPLOAD_BYTES = 25 * 1024 * 1024
+
 
 # ── Response schemas ──────────────────────────────────────────────────────────
 
@@ -391,6 +395,11 @@ async def upload_photo(
     with get_session() as sess:
         _get_owned_journal(sess, journal_id, user_info_id)
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     photo_uuid = str(uuid_lib.uuid4())
@@ -468,6 +477,11 @@ async def replace_photo(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
     raw = await file.read()
+    if len(raw) > _MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Photo exceeds the {_MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+        )
     with get_session() as sess:
         ensure_storage_quota(sess, user_info_id, len(raw))
     new_uuid = str(uuid_lib.uuid4())

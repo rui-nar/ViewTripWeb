@@ -1,13 +1,15 @@
 """Tests for photo-upload processing safety on memories and journal entries.
 
-Covers two fixes to `upload_photo`/`replace_photo` in api/memories.py and
+Covers three fixes to `upload_photo`/`replace_photo` in api/memories.py and
 api/journal.py:
 
   * the CPU-bound `_save_photo_files` call (JPEG decode + LANCZOS thumbnail
     resize + disk writes) is offloaded to a thread via `run_in_threadpool`
     instead of blocking the shared asyncio event loop inline;
   * a corrupt/non-image upload returns a clean 422, not a raw 500 from an
-    uncaught PIL.UnidentifiedImageError.
+    uncaught PIL.UnidentifiedImageError;
+  * an oversized upload is rejected with a clean 413 before the decode work,
+    instead of accepting an arbitrarily large file.
 """
 from __future__ import annotations
 
@@ -219,3 +221,81 @@ class TestCorruptImageUpload:
         with Session(engine) as sess:
             row = sess.get(DBJournalEntry, journal_id)
         assert json.loads(row.photos_json) == ["old-uuid"]
+
+
+# ── Fix: an oversized upload is rejected before the decode work ───────────────
+#
+# Both routers lower the module's byte cap to a tiny value so the test doesn't
+# have to allocate a real 25MB payload — only the "over the configured limit"
+# behaviour is under test, not the specific number.
+
+class TestOversizedImageUpload:
+    def test_memory_upload_rejects_oversized_file(self, env, monkeypatch, tmp_path):
+        client, user_id, project_id, engine = env
+        monkeypatch.setattr(mem_mod, "_MAX_PHOTO_UPLOAD_BYTES", 10)
+        memory_id = _insert_memory(engine, project_id)
+
+        resp = client.post(
+            f"/api/memories/{memory_id}/photos",
+            files={"file": ("p.jpg", _jpeg_bytes(), "image/jpeg")},
+        )
+        assert resp.status_code == 413
+
+        # Rejected before any decode/disk-write work happened.
+        photo_dir = tmp_path / "users" / str(user_id) / "memories" / str(memory_id)
+        assert list(photo_dir.glob("*.jpg")) == []
+
+    def test_memory_replace_rejects_oversized_file(self, env, monkeypatch):
+        client, _, project_id, engine = env
+        monkeypatch.setattr(mem_mod, "_MAX_PHOTO_UPLOAD_BYTES", 10)
+        memory_id = _insert_memory(engine, project_id, ["old-uuid"])
+
+        resp = client.put(
+            f"/api/memories/{memory_id}/photos/old-uuid/replace",
+            files={"file": ("p.jpg", _jpeg_bytes(), "image/jpeg")},
+        )
+        assert resp.status_code == 413
+
+        with Session(engine) as sess:
+            row = sess.get(DBMemory, memory_id)
+        assert json.loads(row.photos_json) == ["old-uuid"]  # untouched
+
+    def test_journal_upload_rejects_oversized_file(self, env, monkeypatch, tmp_path):
+        client, user_id, project_id, engine = env
+        monkeypatch.setattr(journal_mod, "_MAX_PHOTO_UPLOAD_BYTES", 10)
+        journal_id = _insert_journal(engine, project_id)
+
+        resp = client.post(
+            f"/api/journal/{journal_id}/photos",
+            files={"file": ("p.jpg", _jpeg_bytes(), "image/jpeg")},
+        )
+        assert resp.status_code == 413
+
+        photo_dir = tmp_path / "users" / str(user_id) / "journal" / str(journal_id)
+        assert list(photo_dir.glob("*.jpg")) == []
+
+    def test_journal_replace_rejects_oversized_file(self, env, monkeypatch):
+        client, _, project_id, engine = env
+        monkeypatch.setattr(journal_mod, "_MAX_PHOTO_UPLOAD_BYTES", 10)
+        journal_id = _insert_journal(engine, project_id, ["old-uuid"])
+
+        resp = client.put(
+            f"/api/journal/{journal_id}/photos/old-uuid/replace",
+            files={"file": ("p.jpg", _jpeg_bytes(), "image/jpeg")},
+        )
+        assert resp.status_code == 413
+
+        with Session(engine) as sess:
+            row = sess.get(DBJournalEntry, journal_id)
+        assert json.loads(row.photos_json) == ["old-uuid"]  # untouched
+
+    def test_memory_upload_accepts_file_under_the_limit(self, env):
+        """Sanity check: the cap doesn't false-positive on an ordinary photo."""
+        client, _, project_id, engine = env
+        memory_id = _insert_memory(engine, project_id)
+
+        resp = client.post(
+            f"/api/memories/{memory_id}/photos",
+            files={"file": ("p.jpg", _jpeg_bytes(), "image/jpeg")},
+        )
+        assert resp.status_code == 201, resp.text

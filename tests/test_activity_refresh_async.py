@@ -29,7 +29,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import api.activities as activities_module
 import models.db as db_module
@@ -302,6 +302,37 @@ def test_refresh_state_is_visible_through_meta(env, monkeypatch):
     act = next(a for a in after["activities"] if a["id"] == 111)
     assert act["refresh_status"] == "resolved"
     assert act["refresh_error"] is None
+
+
+def _lock_version(engine, name="Trip") -> int:
+    with Session(engine) as sess:
+        return sess.exec(
+            select(DBProject).where(DBProject.name == name)
+        ).one().lock_version
+
+
+def test_job_bumps_lock_version_on_success(env, monkeypatch):
+    """A native client's on-disk cache only ever checks lock_version, so a
+    re-fetched polyline/elevation must advance it (issue #173) — the same
+    signal edit_activity_track/split_activity/etc. already bump on every
+    other activity-mutating path."""
+    client, engine, _ = env
+    before = _lock_version(engine)
+    fake = _FakeClient(
+        raw=_raw(name="Fresh name"),
+        streams={
+            "latlng": {"data": [[49.0, 3.0], [49.1, 3.1]]},
+            "altitude": {"data": [200.0, 250.0]},
+            "distance": {"data": [0.0, 1000.0]},
+        },
+    )
+    _use_client(monkeypatch, fake)
+
+    r = client.post("/api/projects/Trip/activities/111/refresh")
+    assert r.status_code == 202, r.text
+
+    assert _row(engine).refresh_status == "resolved"
+    assert _lock_version(engine) == before + 1
 
 
 def test_force_update_does_not_clobber_refresh_bookkeeping(env, monkeypatch):

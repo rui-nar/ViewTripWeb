@@ -30,7 +30,7 @@ from api.project_access import (
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh, warm_meta_cache
 from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
-from src.jobs.route_jobs import create_job, mark_done, mark_failed, mark_running
+from src.jobs.route_jobs import create_job, mark_done, mark_running
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.utils.logging import get_logger
 
@@ -176,6 +176,9 @@ def _resolve_route_job(
         if seg is None:
             mark_done(job_id)  # deleted before we got to it
             return
+        from src.services.hafas_service import HafasError
+        from src.services.overpass_service import OverpassError
+
         try:
             polyline, _stops, degraded, strategy = _compute_segment_geometry(seg, params)
             fields = {
@@ -204,9 +207,14 @@ def _resolve_route_job(
                 "hafas_failed=%s status=resolved",
                 seg_id, seg.segment_type, strategy, len(polyline), degraded,
                 seg.route_hafas_failed)
-        except Exception as exc:  # noqa: BLE001 — any failure marks the segment failed
-            # Leave route_mode/route_polyline so geo still renders the
-            # great-circle arc; surface a short error for the UI.
+        except (HafasError, OverpassError) as exc:
+            # "We tried, no route exists" — a clean, expected verdict, not a
+            # crash. Leave route_mode/route_polyline so geo still renders the
+            # great-circle arc; surface a short error for the UI. Anything
+            # else (a DB hiccup, a network timeout unrelated to route lookup)
+            # is NOT caught here — it propagates below so RQ's retry/backoff
+            # (src/jobs/queue.py) gets a real chance at a transient failure
+            # instead of it being written as a permanent "failed" on the spot.
             fields = {
                 "route_status": "failed",
                 "route_error": str(exc)[:200] or "Route resolution failed",
@@ -228,16 +236,21 @@ def _resolve_route_job(
         # Terminal either way: the job ran to completion. A discarded verdict
         # means someone else owns the outcome, not that this job must be retried.
         mark_done(job_id)
-    except Exception as exc:  # noqa: BLE001
-        # The segment was marked "pending" synchronously by the trigger. If the
-        # job crashes anywhere above (a load/save error, an unexpected raise),
-        # nothing writes a terminal status and the segment stays "pending"
-        # forever — a frozen spinner the client's stale-recovery only re-triggers
-        # into the same crash. Best-effort flip it to "failed" so the user sees an
-        # error they can retry, and log the cause (the prod 500/stuck-pending bug).
+    except Exception:  # noqa: BLE001
+        # Everything reaching here is an unanticipated failure (a load/save
+        # error, a bug) — not the expected "no route exists" outcome, which
+        # the inner except above already resolved cleanly and returned from.
+        # Re-raise rather than writing a "failed" verdict here: this leaves
+        # the segment "pending" and the job row "running" so RQ's retry/backoff
+        # (src/jobs/queue.py) actually gets to retry a transient failure,
+        # instead of it being permanently — and prematurely — marked failed on
+        # the first attempt. If every retry is exhausted (or there is no
+        # broker), the job stays non-terminal and sweep_orphaned_jobs
+        # (src/jobs/route_jobs.py, run at API startup) is the backstop that
+        # eventually re-queues or gives up on it — same as any other crash it
+        # recovers from.
         _log.exception("resolve seg=%s crashed before persisting a verdict", seg_id)
-        _mark_segment_failed(user_info_id, name, seg_id, str(exc)[:200], started_at)
-        mark_failed(job_id, str(exc)[:200])
+        raise
     finally:
         bust_geo_cache(user_info_id, name)
         # Warm the cache while still off the request path so returning to the
