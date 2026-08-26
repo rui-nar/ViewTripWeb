@@ -44,7 +44,11 @@ from api.project_access import OwnerParam, resolve_project
 from models.project_db import DBPosterJob
 from src.poster.poster_job_runner import run_poster_job
 from src.jobs.queue import QUEUE_POSTER, enqueue
-from src.poster.poster_renderer import render_poster_preview
+from src.poster.poster_renderer import (
+    _TITLE_SCALE_MAX,
+    _TITLE_SCALE_MIN,
+    render_poster_preview,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
 poster_public_router = APIRouter(prefix="/api/poster", tags=["poster"])
@@ -125,8 +129,9 @@ class PosterRequest(BaseModel):
     @classmethod
     def _clamp_title_scale(cls, v: float) -> float:
         """Clamp rather than reject: the client-side slider already limits to
-        0.5-2.0, but the API is the trust boundary, not the Flutter widget."""
-        return max(0.5, min(2.0, v))
+        this same range, but the API is the trust boundary, not the Flutter
+        widget. Reuses poster_renderer's bounds so the two can't drift apart."""
+        return max(_TITLE_SCALE_MIN, min(_TITLE_SCALE_MAX, v))
 
 
 class JobIdOut(BaseModel):
