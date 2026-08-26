@@ -75,7 +75,12 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     final insertAt = insertAfterIndex != null
         ? (insertAfterIndex + 1).clamp(0, items.length)
         : items.length;
-    items.insert(insertAt, placeholder);
+    // New list object, not an in-place insert: map_panel's marker cache and
+    // ProjectNotifier's dayStats/orderedDayKeys caches invalidate via
+    // identical(items, _last...), which a same-object mutation never trips.
+    final newItems = List.of(items);
+    newItems.insert(insertAt, placeholder);
+    items = newItems;
     notifyListeners();
     try {
       final encName = await encryption.protect(name);
@@ -117,7 +122,11 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     double? lon,
   }) async {
     if (projectRef == null) return;
-    for (final item in items) {
+    // New list + new item map, not an in-place mutation of the existing
+    // item — see createMemory's comment above for why identity matters here.
+    final newItems = List.of(items);
+    for (var i = 0; i < newItems.length; i++) {
+      final item = newItems[i];
       if (item['item_type'] == 'memory' &&
           item['memory']?['id']?.toString() == memoryId) {
         final mem = Map<String, dynamic>.from(item['memory'] as Map);
@@ -128,10 +137,11 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         mem['geo_mode'] = geoMode;
         mem['lat'] = lat;
         mem['lon'] = lon;
-        item['memory'] = mem;
+        newItems[i] = {...item, 'memory': mem};
         break;
       }
     }
+    items = newItems;
     notifyListeners();
     try {
       final encName = await encryption.protect(name);
@@ -163,10 +173,7 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
 
   Future<void> deleteMemory(String memoryId) async {
     if (projectRef == null) return;
-    items.removeWhere((item) =>
-        item['item_type'] == 'memory' &&
-        item['memory']?['id']?.toString() == memoryId);
-    notifyListeners();
+    removeMemoryLocally(memoryId);
     try {
       await api.delete('/api/memories/$memoryId');
       // No reload needed — memory already removed locally above.
@@ -247,7 +254,9 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
       final newUuid = match?.group(1);
       if (newUuid == null) return null;
 
-      for (final item in items) {
+      final newItems = List.of(items);
+      for (var i = 0; i < newItems.length; i++) {
+        final item = newItems[i];
         if (item['item_type'] == 'memory' &&
             item['memory']?['id']?.toString() == memoryId) {
           final mem = Map<String, dynamic>.from(item['memory'] as Map);
@@ -256,10 +265,11 @@ mixin ProjectMemoryCrudMixin on ChangeNotifier, ProjectQuotaMixin {
           final idx = photos.indexOf(oldPhotoUuid);
           if (idx != -1) photos[idx] = newUuid;
           mem['photos'] = photos;
-          item['memory'] = mem;
+          newItems[i] = {...item, 'memory': mem};
           break;
         }
       }
+      items = newItems;
       notifyListeners();
       return newUuid;
     } catch (_) {

@@ -1951,9 +1951,14 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> reorderItems(int fromIndex, int toIndex) async {
     final ref = this.ref;
     if (ref == null) return;
-    // Immediate local update so the list responds without a blank flash.
-    final moved = items.removeAt(fromIndex);
-    items.insert(toIndex, moved);
+    // Immediate local update so the list responds without a blank flash. New
+    // list object, not an in-place removeAt/insert: map_panel's marker cache
+    // and dayStats/orderedDayKeys above invalidate via
+    // identical(items, _last...), which a same-object mutation never trips.
+    final newItems = List.of(items);
+    final moved = newItems.removeAt(fromIndex);
+    newItems.insert(toIndex, moved);
+    items = newItems;
     notifyListeners();
     try {
       await api.put(
