@@ -383,14 +383,16 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     }
   }
 
-  Future<void> updateGroup(
+  /// Update a group. Returns `true` on success, `false` on failure (with
+  /// [error] set) — callers must check this before treating the save as done.
+  Future<bool> updateGroup(
     int groupId, {
     String? name,
     List<String>? nationalities,
     List<Map<String, String>>? socials,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
     try {
       await api.put('/api/groups/$groupId', {
         'name': name,
@@ -398,9 +400,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         'socials': socials,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 
@@ -427,16 +431,20 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     }
   }
 
-  /// Set the group's member list to exactly [personIds] (assigns them, clears others).
-  Future<void> setGroupMembers(int groupId, List<int> personIds) async {
+  /// Set the group's member list to exactly [personIds] (assigns them, clears
+  /// others). Returns `true` on success, `false` on failure (with [error]
+  /// set) — callers must check this before treating the save as done.
+  Future<bool> setGroupMembers(int groupId, List<int> personIds) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
     try {
       await api.put('/api/groups/$groupId/members', {'person_ids': personIds});
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 

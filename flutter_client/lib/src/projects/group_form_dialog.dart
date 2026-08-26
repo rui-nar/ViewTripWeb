@@ -10,6 +10,7 @@ import 'nationality_field.dart';
 import 'people_search.dart';
 import 'person_form_dialog.dart';
 import 'project_notifier.dart';
+import 'save_error_banner.dart';
 import 'social_links_field.dart';
 
 /// Show the create/edit group dialog. Returns the group id on success, or null.
@@ -41,9 +42,15 @@ class _GroupFormDialogState extends State<_GroupFormDialog> {
       TextEditingController(text: widget.group?['name'] as String? ?? '');
   late final Set<int> _memberIds = _initialMembers();
   bool _saving = false;
+  String? _saveError;
+
+  // Set once createGroup succeeds, so that a retry after a setGroupMembers
+  // failure (group created, but its member list didn't get set) updates the
+  // already-created group instead of creating a second one.
+  int? _savedGroupId;
 
   bool get _isEdit => widget.group != null;
-  int? get _groupId => (widget.group?['id'] as num?)?.toInt();
+  int? get _groupId => (widget.group?['id'] as num?)?.toInt() ?? _savedGroupId;
 
   Set<int> _initialMembers() {
     final gid = _groupId;
@@ -86,25 +93,50 @@ class _GroupFormDialogState extends State<_GroupFormDialog> {
   }
 
   Future<void> _save() async {
-    setState(() => _saving = true);
+    setState(() {
+      _saveError = null;
+      _saving = true;
+    });
     final navigator = Navigator.of(context);
     final name = _name.text.trim().isEmpty ? null : _name.text.trim();
     final socials = _socialsKey.currentState?.value ?? const [];
     final nationalities = _nationalityKey.currentState?.value ?? const [];
 
-    int? id = _groupId;
-    if (_isEdit) {
-      await widget.notifier.updateGroup(id!,
-          name: name, nationalities: nationalities, socials: socials);
-    } else {
-      id = await widget.notifier.createGroup(
-          name: name, nationalities: nationalities, socials: socials);
+    try {
+      int? id = _groupId;
+      if (id != null) {
+        final ok = await widget.notifier.updateGroup(id,
+            name: name, nationalities: nationalities, socials: socials);
+        if (!ok) {
+          setState(() =>
+              _saveError = widget.notifier.error ?? 'Failed to save group');
+          return;
+        }
+      } else {
+        id = await widget.notifier.createGroup(
+            name: name, nationalities: nationalities, socials: socials);
+        if (id == null) {
+          setState(() =>
+              _saveError = widget.notifier.error ?? 'Failed to save group');
+          return;
+        }
+        _savedGroupId = id;
+      }
+
+      final membersOk =
+          await widget.notifier.setGroupMembers(id, _memberIds.toList());
+      if (!membersOk) {
+        setState(() => _saveError = 'Group saved, but the member list may '
+            'not have updated (${widget.notifier.error ?? 'unknown error'}). '
+            'Try again.');
+        return;
+      }
+
+      if (!mounted) return;
+      navigator.pop(id);
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
-    if (id != null) {
-      await widget.notifier.setGroupMembers(id, _memberIds.toList());
-    }
-    if (!mounted) return;
-    navigator.pop(id);
   }
 
   @override
@@ -162,6 +194,10 @@ class _GroupFormDialogState extends State<_GroupFormDialog> {
               const SizedBox(height: 12),
               NationalityField(
                   key: _nationalityKey, initial: _initialNationalities()),
+              if (_saveError != null) ...[
+                const SizedBox(height: 12),
+                SaveErrorBanner(message: _saveError!),
+              ],
             ],
           ),
         ),
