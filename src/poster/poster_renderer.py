@@ -75,11 +75,17 @@ _repo = ProjectRepo()
 _MEASURE = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
 # ── Resolution ────────────────────────────────────────────────────────────────
-# A0 paper: 841mm x 1189mm = 33.11in x 46.81in.
-_A0_SHORT_IN = 841.0 / 25.4
-_A0_LONG_IN = 1189.0 / 25.4
-_A0_SHORT_MM = 841.0
-_A0_LONG_MM = 1189.0
+# ISO 216 A-series (short edge x long edge, mm). Only the *canvas*/PDF page
+# size varies by paper size — every physical drawing metric below (card
+# widths, margins, type scale, route width, ...) stays exactly as-is
+# regardless of paper size; see _target_size/_pdf_resolution.
+_PAPER_SIZES_MM: Dict[str, Tuple[float, float]] = {
+    "A0": (841.0, 1189.0),
+    "A1": (594.0, 841.0),
+    "A2": (420.0, 594.0),
+    "A3": (297.0, 420.0),
+    "A4": (210.0, 297.0),
+}
 
 # 150 DPI (~4967x7022 px) rather than a "true" 300 DPI A0 (~9933x14043,
 # ~140M px): still genuinely print-quality at poster viewing distance, keeps a
@@ -158,19 +164,21 @@ class BasemapUnavailable(RuntimeError):
     """The basemap could not be fetched for a preview render."""
 
 
-def _target_size(orientation: str, dpi: float = _DPI) -> Tuple[int, int]:
+def _target_size(orientation: str, dpi: float = _DPI, paper_size: str = "A0") -> Tuple[int, int]:
     """Pixel (width, height) for *orientation* at *dpi*."""
-    long_px = round(_A0_LONG_IN * dpi)
-    short_px = round(_A0_SHORT_IN * dpi)
+    short_mm, long_mm = _PAPER_SIZES_MM[paper_size]
+    long_px = round(long_mm / 25.4 * dpi)
+    short_px = round(short_mm / 25.4 * dpi)
     if orientation == "portrait":
         return short_px, long_px
     return long_px, short_px
 
 
-def _pdf_resolution(width_px: int, orientation: str) -> float:
+def _pdf_resolution(width_px: int, orientation: str, paper_size: str = "A0") -> float:
     """DPI to pass to ``Image.save(..., "PDF", resolution=...)`` so the saved
-    PDF's physical page size is exactly A0."""
-    width_in = _A0_LONG_IN if orientation == "landscape" else _A0_SHORT_IN
+    PDF's physical page size is exactly *paper_size*."""
+    short_mm, long_mm = _PAPER_SIZES_MM[paper_size]
+    width_in = (long_mm if orientation == "landscape" else short_mm) / 25.4
     return width_px / width_in
 
 
@@ -921,7 +929,8 @@ def render_poster(
     tiles), tests inject a fake to avoid network calls.
     """
     orientation = request.get("orientation", "landscape")
-    target_w, target_h = _target_size(orientation)
+    paper_size = request.get("paper_size", "A0")
+    target_w, target_h = _target_size(orientation, paper_size=paper_size)
 
     canvas, _ = _compose_poster_image(
         project_id, user_info_id, request, target_w, target_h,
@@ -932,7 +941,8 @@ def render_poster(
     png_path = poster_dir / "poster.png"
     pdf_path = poster_dir / "poster.pdf"
     canvas.save(str(png_path), "PNG")
-    canvas.save(str(pdf_path), "PDF", resolution=_pdf_resolution(target_w, orientation))
+    canvas.save(str(pdf_path), "PDF",
+                resolution=_pdf_resolution(target_w, orientation, paper_size))
 
     return png_path, pdf_path
 
@@ -970,7 +980,8 @@ def render_poster_preview(
     Returns ``(png_bytes, warning_or_None)``.
     """
     orientation = request.get("orientation", "landscape")
-    real_w, real_h = _target_size(orientation)
+    paper_size = request.get("paper_size", "A0")
+    real_w, real_h = _target_size(orientation, paper_size=paper_size)
     ratio = max_dimension / max(real_w, real_h)
     preview_w = max(1, round(real_w * ratio))
     preview_h = max(1, round(real_h * ratio))
