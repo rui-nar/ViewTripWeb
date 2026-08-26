@@ -60,6 +60,7 @@ AREAS: dict[str, tuple[str, str]] = {
     "activity-panel": ("Activity panel", APP),
     "strava": ("Strava", APP),
     "polarsteps": ("Polarsteps", APP),
+    "gpx": ("GPX import", APP),
     "map": ("Map", APP),
     "geo": ("Map", APP),
     "view": ("Map", APP),

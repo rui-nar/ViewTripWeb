@@ -2,6 +2,7 @@
 
 Routes:
     POST   /api/projects/{name}/activities                          — add activities to project
+    POST   /api/projects/{name}/activities/import-gpx                — import a single activity from a GPX file
     POST   /api/projects/{name}/activities/{activity_id}/refresh    — trigger async activity refresh from Strava
     GET    /api/projects/{name}/activities/{activity_id}/track      — get editable track geometry
     PUT    /api/projects/{name}/activities/{activity_id}/track      — replace track geometry
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import secrets
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional
@@ -23,7 +25,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from sqlmodel import select
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
 from api.deps import get_current_user
@@ -36,7 +38,9 @@ from src.api.strava_client import RateLimiter, StravaAPI
 from src.billing.entitlements import ensure_trip_days_quota
 from src.config.settings import Config
 from src.exceptions.errors import RateLimitError
+from src.gpx.importer import GPXImportError, gpx_track_to_points, parse_gpx_bytes, validate_for_import
 from src.models.activity import Activity, parse_activities_or_log
+from src.models.track_edit import points_to_elevation_profile, points_to_polyline, recompute_track_metrics
 from src.project.project_repo import bump_lock_version
 from src.utils.logging import get_logger
 
@@ -56,6 +60,11 @@ class ActivitiesAddedOut(BaseModel):
     added: int = Field(description="Number of new activities added")
     total: int = Field(description="Total activities in the project after add")
     pending_enrichment: int = Field(description="Activities queued for GPS stream enrichment in background")
+
+
+class GPXImportOut(BaseModel):
+    activity_id: int = Field(description="ID assigned to the newly imported activity")
+    total: int = Field(description="Total activities in the project after import")
 
 
 # ── Strava stream enrichment ───────────────────────────────────────────────────
@@ -336,6 +345,135 @@ def add_activities(
         "total": len(project.activities),
         "pending_enrichment": len(activity_ids),
     }
+
+
+@router.post("/{name}/activities/import-gpx", response_model=GPXImportOut,
+             summary="Import a single activity from a GPX file")
+async def import_gpx_activity(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
+    file: Annotated[UploadFile, File()],
+    date: Annotated[str, Form()],
+    start_time: Annotated[str, Form()],
+    end_time: Annotated[str, Form()],
+    activity_type: Annotated[str, Form()],
+    owner: OwnerParam = None,
+):
+    """Import a GPX track as a new local activity — no Strava involved.
+
+    Unlike ``add_activities``, the geometry is already final (it comes straight
+    off the uploaded track), so nothing is queued for background enrichment.
+    """
+    user_info_id = int(current_user["sub"])
+
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
+        owner_id = row.user_info_id
+        project_row_id = row.id
+
+    contents = await file.read()
+
+    try:
+        gpx = parse_gpx_bytes(contents)
+    except GPXImportError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                             detail={"errors": exc.errors})
+
+    problems = validate_for_import(gpx)
+    if problems:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                             detail={"errors": problems})
+
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").date()
+        start_clock = datetime.strptime(start_time, "%H:%M").time()
+        end_clock = datetime.strptime(end_time, "%H:%M").time()
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"errors": ["date must be YYYY-MM-DD and start_time/end_time must be HH:MM."]},
+        )
+    start_dt = datetime.combine(day, start_clock, tzinfo=timezone.utc)
+    end_dt = datetime.combine(day, end_clock, tzinfo=timezone.utc)
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                             detail={"errors": ["End time must be after start time."]})
+    elapsed_time = int((end_dt - start_dt).total_seconds())
+
+    points = gpx_track_to_points(gpx)
+    metrics = recompute_track_metrics(points)
+
+    raw_fname = os.path.basename(file.filename or "")
+    base_name, _ext = os.path.splitext(raw_fname)
+    activity_name = base_name or "GPX Import"
+
+    activity = Activity(
+        id=None,
+        name=activity_name,
+        type=activity_type,
+        distance=metrics.distance,
+        moving_time=elapsed_time,
+        elapsed_time=elapsed_time,
+        total_elevation_gain=metrics.total_elevation_gain,
+        start_date=start_dt,
+        start_date_local=start_dt,
+        timezone="UTC",
+        achievement_count=0,
+        kudos_count=0,
+        comment_count=0,
+        athlete_count=0,
+        photo_count=0,
+        trainer=False,
+        commute=False,
+        manual=True,
+        private=False,
+        flagged=False,
+        average_speed=metrics.distance / elapsed_time if elapsed_time > 0 else 0.0,
+        max_speed=0.0,
+        has_heartrate=False,
+        pr_count=0,
+        total_photo_count=0,
+        has_kudoed=False,
+        elev_high=metrics.elev_high,
+        elev_low=metrics.elev_low,
+        start_latlng=metrics.start_latlng,
+        end_latlng=metrics.end_latlng,
+        summary_polyline=points_to_polyline(points),
+        elevation_profile=points_to_elevation_profile(points),
+        source="gpx",
+    )
+
+    with get_session() as sess:
+        candidate_id = None
+        for _ in range(5):
+            cid = -secrets.randbits(62)
+            if sess.get(DBActivity, cid) is None:
+                candidate_id = cid
+                break
+        if candidate_id is None:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                 detail="Could not allocate a unique activity id.")
+        activity.id = candidate_id
+
+        ensure_trip_days_quota(sess, project_row_id, owner_id, activity.start_date_local)
+
+        project = _repo.get_project(
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project.add_activities([activity])
+        # New activity rows record the IMPORTER (the caller), not the project
+        # owner — see add_activities.
+        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+
+    bust_geo_cache(owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
+
+    return {"activity_id": activity.id, "total": len(project.activities)}
 
 
 # ── Single-activity refresh ────────────────────────────────────────────────────

@@ -335,6 +335,10 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     refresh_started_at: Optional[str] = sqlmodel.Field(default=None)  # ISO-8601 UTC
     refresh_error: Optional[str] = sqlmodel.Field(default=None)
 
+    # Import origin. NULL = from Strava (today's implicit default), "gpx" = imported
+    # from a GPX file.
+    source: Optional[str] = sqlmodel.Field(default=None)
+
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")
 

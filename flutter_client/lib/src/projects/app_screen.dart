@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'basemaps.dart';
 import 'download_stub.dart' if (dart.library.html) 'download_web.dart';
 import 'elevation_chart.dart';
+import 'gpx_import_dialog.dart';
 import '../api/client.dart' show ApiException;
 import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
@@ -533,6 +534,18 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     });
   }
 
+  Future<void> _openGpxImportDialog(BuildContext context) async {
+    final notifier = context.read<ProjectNotifier>();
+    final imported = await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (_) => GpxImportDialog(projectRef: widget.projectRef),
+    );
+    if (imported == true && mounted) {
+      notifier.load(widget.projectRef);
+    }
+  }
+
   void _showFilterSheet(BuildContext context, ProjectNotifier notifier,
       {required bool readOnly}) {
     showModalBottomSheet<void>(
@@ -700,12 +713,13 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   case 0: if (!_isExporting) _exportOptions();
                   case 1: context.push(
                       _route('/polarsteps-import'));
-                  case 2: _showShareDialog();
-                  case 3: context.push(
+                  case 2: _openGpxImportDialog(context);
+                  case 3: _showShareDialog();
+                  case 4: context.push(
                     _route('/project-settings'),
                   );
-                  case 4: context.push('/settings');
-                  case 5: context.go('/projects');
+                  case 5: context.push('/settings');
+                  case 6: context.go('/projects');
                 }
               },
               itemBuilder: (_) => [
@@ -731,12 +745,19 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                 const PopupMenuItem(
                   value: 2,
                   child: ListTile(
+                    leading: Icon(Icons.upload_file),
+                    title: Text('Import GPX file'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 3,
+                  child: ListTile(
                     leading: Icon(Icons.share_outlined),
                     title: Text('Share'),
                   ),
                 ),
                 PopupMenuItem(
-                  value: 3,
+                  value: 4,
                   enabled: !isLoading,
                   child: ListTile(
                     leading: const Icon(Icons.tune),
@@ -745,14 +766,14 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 4,
+                  value: 5,
                   child: ListTile(
                     leading: Icon(Icons.settings_outlined),
                     title: Text('Settings'),
                   ),
                 ),
                 const PopupMenuItem(
-                  value: 5,
+                  value: 6,
                   child: ListTile(
                     leading: Icon(Icons.arrow_back),
                     title: Text('Back to projects'),
@@ -781,6 +802,11 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
               tooltip: 'Import steps from Polarsteps',
               onPressed: () => context.push(
                   _route('/polarsteps-import')),
+            ),
+            IconButton(
+              icon: const Icon(Icons.upload_file),
+              tooltip: 'Import GPX file',
+              onPressed: () => _openGpxImportDialog(context),
             ),
             IconButton(
               icon: const Icon(Icons.share_outlined),
