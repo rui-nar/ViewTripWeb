@@ -2411,7 +2411,14 @@ class ManageMapPanelState extends State<ManageMapPanel>
 // a pixel-exact crop of the frame rectangle.
 
 /// A0 paper aspect ratio (width / height) in portrait orientation (841×1189 mm).
+/// Every ISO 216 A-series size (A0-A4) shares this same aspect ratio (1:√2),
+/// so the on-screen frame doesn't need to change per paper size — only the
+/// paper size value sent downstream does.
 const double kA0PortraitAspect = 841 / 1189;
+
+/// Paper sizes offered by the frame picker's paper-size selector, in the
+/// order shown. Matches `PosterRequest.paper_size` in `api/poster.py`.
+const List<String> kPosterPaperSizes = ['A0', 'A1', 'A2', 'A3', 'A4'];
 
 /// The frame rectangle centered in [size] with the given orientation's A0
 /// aspect ratio, inset by [padding] on all sides (shrunk to fit if needed).
@@ -2483,9 +2490,10 @@ class _FrameMaskPainter extends CustomPainter {
 class FramePickerOverlay extends StatefulWidget {
   final AnimatedMapController mapController;
 
-  /// Invoked with the map's current viewport bounds and the chosen
-  /// orientation ('landscape'/'portrait') when the user taps "Next".
-  final void Function(LatLngBounds bounds, String orientation) onNext;
+  /// Invoked with the map's current viewport bounds, the chosen orientation
+  /// ('landscape'/'portrait') and the chosen paper size (see
+  /// [kPosterPaperSizes]) when the user taps "Next".
+  final void Function(LatLngBounds bounds, String orientation, String paperSize) onNext;
   final VoidCallback onCancel;
 
   const FramePickerOverlay({
@@ -2501,13 +2509,14 @@ class FramePickerOverlay extends StatefulWidget {
 
 class _FramePickerOverlayState extends State<FramePickerOverlay> {
   String _orientation = 'landscape';
+  String _paperSize = 'A0';
 
   void _toggleOrientation() => setState(() =>
       _orientation = _orientation == 'landscape' ? 'portrait' : 'landscape');
 
   void _confirm() {
     final bounds = widget.mapController.mapController.camera.visibleBounds;
-    widget.onNext(bounds, _orientation);
+    widget.onNext(bounds, _orientation, _paperSize);
   }
 
   @override
@@ -2552,6 +2561,18 @@ class _FramePickerOverlayState extends State<FramePickerOverlay> {
                           ? Icons.crop_landscape
                           : Icons.crop_portrait),
                       onPressed: _toggleOrientation,
+                    ),
+                    const SizedBox(width: 4),
+                    DropdownButton<String>(
+                      value: _paperSize,
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        for (final size in kPosterPaperSizes)
+                          DropdownMenuItem(value: size, child: Text(size)),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) setState(() => _paperSize = value);
+                      },
                     ),
                     const SizedBox(width: 4),
                     TextButton(

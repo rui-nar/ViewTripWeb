@@ -100,6 +100,7 @@ class PosterMemoryIn(BaseModel):
 class PosterRequest(BaseModel):
     bounds: BoundsIn
     orientation: str = Field(description="'landscape' or 'portrait'")
+    paper_size: Literal["A0", "A1", "A2", "A3", "A4"] = "A0"
     config: PosterConfigIn
     memories: List[PosterMemoryIn] = Field(default_factory=list)
 

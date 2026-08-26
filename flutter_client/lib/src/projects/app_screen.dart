@@ -435,14 +435,16 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     setState(() => _framePickerActive = false);
   }
 
-  Future<void> _onFrameConfirmed(LatLngBounds bounds, String orientation) async {
+  Future<void> _onFrameConfirmed(
+      LatLngBounds bounds, String orientation, String paperSize) async {
     if (!mounted) return;
     setState(() => _framePickerActive = false);
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => PosterConfigDialog(
-        onConfirm: (opts) => _showPosterPreview(bounds, orientation, opts),
+        onConfirm: (opts) =>
+            _showPosterPreview(bounds, orientation, paperSize, opts),
       ),
     );
   }
@@ -456,8 +458,8 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
     ];
   }
 
-  Future<void> _showPosterPreview(
-      LatLngBounds bounds, String orientation, PosterConfigOptions opts) async {
+  Future<void> _showPosterPreview(LatLngBounds bounds, String orientation,
+      String paperSize, PosterConfigOptions opts) async {
     if (!mounted) return;
     final memories = _posterMemoriesPayload();
     await showDialog<void>(
@@ -467,9 +469,11 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         projectRef: widget.projectRef,
         bounds: bounds,
         orientation: orientation,
+        paperSize: paperSize,
         opts: opts,
         memories: memories,
-        onGenerate: () => _startPosterJob(bounds, orientation, opts, memories),
+        onGenerate: () =>
+            _startPosterJob(bounds, orientation, paperSize, opts, memories),
       ),
     );
   }
@@ -480,8 +484,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
   /// legitimately run longer, even though the server kept working. Now the
   /// client only needs to confirm the job was *created* — the render happens
   /// server-side and the user is emailed a download link when it's ready.
-  Future<void> _startPosterJob(LatLngBounds bounds, String orientation,
-      PosterConfigOptions opts, List<Map<String, dynamic>> memories) async {
+  Future<void> _startPosterJob(
+      LatLngBounds bounds,
+      String orientation,
+      String paperSize,
+      PosterConfigOptions opts,
+      List<Map<String, dynamic>> memories) async {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -489,6 +497,7 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
         ref: widget.projectRef,
         bounds: posterBoundsFromLatLngBounds(bounds),
         orientation: orientation,
+        paperSize: paperSize,
         config: opts.toJson(),
         memories: memories,
       );
@@ -1179,6 +1188,7 @@ class _PosterPreviewDialog extends StatefulWidget {
   final ProjectRef projectRef;
   final LatLngBounds bounds;
   final String orientation;
+  final String paperSize;
   final PosterConfigOptions opts;
   final List<Map<String, dynamic>> memories;
   final VoidCallback onGenerate;
@@ -1187,6 +1197,7 @@ class _PosterPreviewDialog extends StatefulWidget {
     required this.projectRef,
     required this.bounds,
     required this.orientation,
+    required this.paperSize,
     required this.opts,
     required this.memories,
     required this.onGenerate,
@@ -1218,6 +1229,7 @@ class _PosterPreviewDialogState extends State<_PosterPreviewDialog> {
         ref: widget.projectRef,
         bounds: posterBoundsFromLatLngBounds(widget.bounds),
         orientation: widget.orientation,
+        paperSize: widget.paperSize,
         config: widget.opts.toJson(),
         memories: widget.memories,
       );

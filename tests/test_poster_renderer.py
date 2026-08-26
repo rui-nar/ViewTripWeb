@@ -230,6 +230,10 @@ def test_target_size_landscape_matches_a0_at_150dpi():
     assert (w, h) == (7022, 4967)
 
 
+def test_target_size_defaults_to_a0_when_paper_size_omitted():
+    assert _target_size("landscape") == _target_size("landscape", paper_size="A0")
+
+
 def test_target_size_portrait_is_landscape_transposed():
     assert _target_size("portrait") == _target_size("landscape")[::-1]
 
@@ -239,6 +243,35 @@ def test_pdf_resolution_is_close_to_150_dpi_for_both_orientations():
     assert _pdf_resolution(w, "landscape") == pytest.approx(150.0, abs=0.1)
     w, h = _target_size("portrait")
     assert _pdf_resolution(w, "portrait") == pytest.approx(150.0, abs=0.1)
+
+
+# Every physical drawing metric (card widths, margins, type scale, route
+# width, ...) stays exactly as-is regardless of paper size — paper size only
+# changes the output canvas's target pixel dimensions and hence the PDF's
+# physical page size. Expected px values from ISO 216 short/long edge (mm) *
+# 150 DPI, rounded.
+@pytest.mark.parametrize("paper_size, landscape_px, portrait_px", [
+    ("A0", (7022, 4967), (4967, 7022)),
+    ("A1", (4967, 3508), (3508, 4967)),
+    ("A2", (3508, 2480), (2480, 3508)),
+    ("A3", (2480, 1754), (1754, 2480)),
+    ("A4", (1754, 1240), (1240, 1754)),
+])
+def test_target_size_for_every_paper_size(paper_size, landscape_px, portrait_px):
+    assert _target_size("landscape", paper_size=paper_size) == landscape_px
+    assert _target_size("portrait", paper_size=paper_size) == portrait_px
+
+
+@pytest.mark.parametrize("paper_size", ["A0", "A1", "A2", "A3", "A4"])
+def test_pdf_resolution_is_close_to_150_dpi_for_every_paper_size(paper_size):
+    for orientation in ("landscape", "portrait"):
+        w, h = _target_size(orientation, paper_size=paper_size)
+        assert _pdf_resolution(w, orientation, paper_size) == pytest.approx(150.0, abs=0.1)
+
+
+def test_pdf_resolution_defaults_to_a0_when_paper_size_omitted():
+    w, _ = _target_size("landscape")
+    assert _pdf_resolution(w, "landscape") == _pdf_resolution(w, "landscape", "A0")
 
 
 # ── _Projector ────────────────────────────────────────────────────────────────
@@ -421,6 +454,48 @@ def test_render_poster_portrait_orientation_transposes_size(tmp_path, project_id
         assert img.size == _target_size("portrait")
 
 
+def test_render_poster_honors_a_non_default_paper_size(tmp_path, project_id):
+    """paper_size only changes the canvas/PDF page size — every physical
+    drawing metric (card widths, margins, type scale, ...) stays as-is, so
+    this only asserts on the output dimensions, not on layout."""
+    body = {**_BODY, "paper_size": "A4"}
+    png_path, pdf_path = render_poster(
+        job_id=3,
+        user_info_id=1,
+        project_id=project_id,
+        request=body,
+        poster_dir=tmp_path,
+        progress=lambda s: None,
+        tile_fetcher=_fake_tile_fetcher,
+    )
+    with Image.open(png_path) as img:
+        assert img.size == _target_size("landscape", paper_size="A4")
+        assert img.size != _target_size("landscape")  # not A0
+    # Pillow can't re-open a saved PDF as an image to check its physical
+    # page size directly, so assert the resolution passed to save() (the
+    # actual mechanism render_poster uses to fix the PDF's page size) is
+    # still ~150 DPI for A4, same as it is for A0.
+    assert pdf_path.read_bytes()[:5] == b"%PDF-"
+    w_px, _ = _target_size("landscape", paper_size="A4")
+    assert _pdf_resolution(w_px, "landscape", "A4") == pytest.approx(150.0, abs=0.1)
+
+
+def test_render_poster_defaults_to_a0_when_paper_size_omitted(tmp_path, project_id):
+    """A request with no paper_size at all (an old client) must render
+    byte-for-byte the same size as an explicit 'A0' — the regression bar."""
+    png_path, _ = render_poster(
+        job_id=4,
+        user_info_id=1,
+        project_id=project_id,
+        request=_BODY,  # no paper_size key
+        poster_dir=tmp_path,
+        progress=lambda s: None,
+        tile_fetcher=_fake_tile_fetcher,
+    )
+    with Image.open(png_path) as img:
+        assert img.size == _target_size("landscape", paper_size="A0")
+
+
 def test_render_poster_raises_when_mapbox_token_missing(tmp_path, project_id, monkeypatch):
     """No tile_fetcher injected and no MAPBOX_TOKEN configured -> the render
     must fail with an actionable error, not silently complete on a grey
@@ -481,6 +556,20 @@ def test_preview_portrait_is_taller_than_wide(project_id):
     with Image.open(io.BytesIO(png_bytes)) as img:
         w, h = img.size
         assert h > w
+
+
+def test_preview_honors_a_non_default_paper_size(project_id):
+    """All ISO A-series sizes share the same aspect ratio, so the preview's
+    shape doesn't change — this instead guards that render_poster_preview
+    actually reads paper_size at all (a regression here would silently keep
+    behaving as A0 for every request)."""
+    body = {**_BODY, "paper_size": "A3"}
+    png_bytes, _ = render_poster_preview(project_id, 1, body)
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        w, h = img.size
+        assert max(w, h) == _PREVIEW_MAX_DIMENSION
+        real_w, real_h = _target_size("landscape", paper_size="A3")
+        assert abs(w / h - real_w / real_h) < 0.01
 
 
 def test_preview_renders_the_real_basemap(project_id):
