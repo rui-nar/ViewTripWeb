@@ -16,6 +16,7 @@ import 'dart:convert' show jsonDecode, jsonEncode, utf8;
 import 'dart:io' show GZipCodec;
 import 'dart:typed_data' show Uint8List;
 
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:sqflite/sqflite.dart';
 
 const _kTable = 'project_cache';
@@ -67,17 +68,36 @@ Future<void> cacheStoreClearAll() async {
   } catch (_) {}
 }
 
-Uint8List? _gz(Map<String, dynamic>? value) =>
+/// Pure gzip+JSON encode, split out so it can run via [compute] on a
+/// background isolate instead of the UI isolate: full-res geo/elevation
+/// payloads can be several MB (see project_service.dart), and jsonEncode +
+/// gzip of that size synchronously on the UI isolate was enough to trip an
+/// Android ANR the moment the caller (a fire-and-forget cache write right
+/// after project load) landed while the user started interacting with the
+/// map. Exposed for testing the codec directly without a real sqflite
+/// backend.
+@visibleForTesting
+Uint8List? gzEncode(Map<String, dynamic>? value) =>
     value == null ? null : Uint8List.fromList(GZipCodec().encode(utf8.encode(jsonEncode(value))));
 
-Map<String, dynamic>? _ungz(Object? blob) {
-  if (blob is! List<int> || blob.isEmpty) return null;
+Future<Uint8List?> _gz(Map<String, dynamic>? value) =>
+    value == null ? Future.value(null) : compute(gzEncode, value);
+
+/// Pure gzip+JSON decode — see [gzEncode] for why this runs via [compute].
+@visibleForTesting
+Map<String, dynamic>? gzDecode(List<int> blob) {
+  if (blob.isEmpty) return null;
   try {
     final decoded = jsonDecode(utf8.decode(GZipCodec().decode(blob)));
     return decoded is Map<String, dynamic> ? decoded : null;
   } catch (_) {
     return null; // corrupt row — treated as a cache miss by the caller
   }
+}
+
+Future<Map<String, dynamic>?> _ungz(Object? blob) {
+  if (blob is! List<int> || blob.isEmpty) return Future.value(null);
+  return compute(gzDecode, blob);
 }
 
 Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
@@ -90,10 +110,10 @@ Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
     return {
       'lockVersion': row['lock_version'] as int,
       'schemaVersion': row['schema_version'] as int,
-      'meta': _ungz(row['meta_gz']),
-      'lowResGeo': _ungz(row['low_res_geo_gz']),
-      'fullGeo': _ungz(row['full_geo_gz']),
-      'fullDetails': _ungz(row['full_details_gz']),
+      'meta': await _ungz(row['meta_gz']),
+      'lowResGeo': await _ungz(row['low_res_geo_gz']),
+      'fullGeo': await _ungz(row['full_geo_gz']),
+      'fullDetails': await _ungz(row['full_details_gz']),
       'updatedAt': row['updated_at'] as int,
     };
   } catch (_) {
@@ -124,10 +144,10 @@ Future<void> cacheStoreWrite(String key, Map<String, dynamic> row) async {
         'cache_key': key,
         'lock_version': merged['lockVersion'],
         'schema_version': merged['schemaVersion'],
-        'meta_gz': _gz(merged['meta'] as Map<String, dynamic>?),
-        'low_res_geo_gz': _gz(merged['lowResGeo'] as Map<String, dynamic>?),
-        'full_geo_gz': _gz(merged['fullGeo'] as Map<String, dynamic>?),
-        'full_details_gz': _gz(merged['fullDetails'] as Map<String, dynamic>?),
+        'meta_gz': await _gz(merged['meta'] as Map<String, dynamic>?),
+        'low_res_geo_gz': await _gz(merged['lowResGeo'] as Map<String, dynamic>?),
+        'full_geo_gz': await _gz(merged['fullGeo'] as Map<String, dynamic>?),
+        'full_details_gz': await _gz(merged['fullDetails'] as Map<String, dynamic>?),
         'updated_at': DateTime.now().millisecondsSinceEpoch,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
