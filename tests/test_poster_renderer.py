@@ -36,12 +36,14 @@ from src.poster.poster_renderer import (
     _PREVIEW_MAX_DIMENSION,
     _PREVIEW_MAX_TILES,
     _PREVIEW_TOTAL_BUDGET_S,
+    _ROUTE_SUPERSAMPLE,
     _Projector,
     _day_number,
     _decimate_pixels,
     _draw_card,
     _draw_card_chrome,
     _draw_legend,
+    _draw_route,
     _paste_cover,
     _pdf_resolution,
     _target_size,
@@ -361,6 +363,78 @@ def test_a_dense_synthetic_track_collapses_to_a_small_fraction_of_its_points():
     decimated = _decimate_pixels(points, threshold=1.0)
     assert len(decimated) < len(points) / 20, (
         f"only {len(points)} -> {len(decimated)}, expected a much larger drop")
+
+
+# ── _draw_route (anti-aliasing) ──────────────────────────────────────────────
+# At the preview's much lower effective DPI, the route's physical width floors
+# to a literal 1px line (see render_poster_preview's docstring), and plain
+# ImageDraw is never anti-aliased — so every diagonal segment came out as a
+# hard on/off staircase. supersample=1 (the full render's path) is unchanged;
+# supersample>1 (the preview's path) draws onto a larger scratch layer and
+# box-filters it back down, which should leave real, partial-coverage alpha
+# values along a diagonal edge instead of pure 0/255.
+
+_DIAGONAL = [(10.0, 10.0), (190.0, 150.0)]
+# 19.2 DPI matches the actual preview's effective DPI at A0 (measured from
+# _PREVIEW_MAX_DIMENSION / _target_size("landscape")), where the route floors
+# to a 1px line -- the exact case this fix targets. 50 DPI is only used below
+# where a test needs the line a couple of px wide (e.g. to see a fully-opaque
+# core survive AA) -- a thin 1px diagonal stroke legitimately never reaches
+# 100% coverage in any single output pixel once anti-aliased, since the
+# stroke itself is narrower than the box filter's downsampling block.
+
+
+def _diagonal_alpha_values(supersample: int, dpi: float = 19.2) -> set:
+    canvas = Image.new("RGBA", (200, 160), (0, 0, 0, 0))
+    _draw_route(canvas, [_DIAGONAL], dpi=dpi, supersample=supersample)
+    pixels = canvas.load()
+    return {pixels[x, y][3] for x in range(canvas.width) for y in range(canvas.height)
+            if pixels[x, y][3] > 0}
+
+
+def test_supersample_1_leaves_a_hard_edged_line():
+    """The full render's path (supersample=1) is exactly the old behaviour:
+    a plain ImageDraw line is either fully opaque or fully transparent."""
+    alphas = _diagonal_alpha_values(supersample=1)
+    assert alphas == {255}
+
+
+def test_supersampling_produces_intermediate_alpha_on_a_diagonal():
+    """The preview's path (supersample>1), at the preview's actual effective
+    DPI: a diagonal edge must show partial coverage, not just on/off -- that
+    partial coverage *is* the anti-aliasing."""
+    alphas = _diagonal_alpha_values(supersample=_ROUTE_SUPERSAMPLE)
+    assert any(0 < a < 255 for a in alphas), (
+        f"expected intermediate alpha values, got only {sorted(alphas)}")
+
+
+def test_supersampling_keeps_the_route_visible_at_full_opacity_somewhere():
+    """With a couple of px of width to work with, the line's core should still
+    hit full coverage -- supersampling must not thin the whole stroke into
+    translucency."""
+    alphas = _diagonal_alpha_values(supersample=_ROUTE_SUPERSAMPLE, dpi=50.0)
+    assert 255 in alphas
+
+
+def test_supersampling_does_not_shift_the_line_s_position():
+    """Anti-aliasing should soften the edge, not move the route: the two
+    renders' opaque cores should occupy essentially the same pixels."""
+    def opaque_pixels(supersample):
+        canvas = Image.new("RGBA", (200, 160), (0, 0, 0, 0))
+        _draw_route(canvas, [_DIAGONAL], dpi=50.0, supersample=supersample)
+        pixels = canvas.load()
+        return {(x, y) for x in range(canvas.width) for y in range(canvas.height)
+                if pixels[x, y][3] == 255}
+
+    hard = opaque_pixels(1)
+    soft = opaque_pixels(_ROUTE_SUPERSAMPLE)
+    assert hard and soft
+    # Every fully-opaque pixel in the anti-aliased version should be at most a
+    # pixel away from some fully-opaque pixel in the hard-edged version.
+    for x, y in soft:
+        assert any((x + dx, y + dy) in hard
+                   for dx in (-1, 0, 1) for dy in (-1, 0, 1)), (
+            f"AA pixel {(x, y)} has no hard-edged neighbour — line moved")
 
 
 # ── Golden-path render_poster test ───────────────────────────────────────────
@@ -761,6 +835,40 @@ def test_full_render_still_measures_real_card_content(project_id, tmp_path, monk
         poster_dir=tmp_path, progress=lambda stage: None, tile_fetcher=_fake_tile_fetcher,
     )
     assert calls, "the full render must still measure real card content"
+
+
+def test_preview_draws_the_route_with_supersampling(project_id, monkeypatch):
+    """render_poster_preview must be the caller that actually asks for
+    anti-aliasing -- the unit tests above only prove _draw_route's own
+    behaviour, not that the preview requests it."""
+    import src.poster.poster_renderer as renderer_module
+
+    calls = []
+    real_draw_route = renderer_module._draw_route
+    monkeypatch.setattr(
+        renderer_module, "_draw_route",
+        lambda *a, **k: (calls.append(k.get("supersample")), real_draw_route(*a, **k))[-1],
+    )
+    render_poster_preview(project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+    assert calls == [_ROUTE_SUPERSAMPLE]
+
+
+def test_full_render_draws_the_route_without_supersampling(project_id, tmp_path, monkeypatch):
+    """The counterpart: the full render must keep the old, unsupersampled
+    path -- see _draw_route's docstring for why (memory cost at A0)."""
+    import src.poster.poster_renderer as renderer_module
+
+    calls = []
+    real_draw_route = renderer_module._draw_route
+    monkeypatch.setattr(
+        renderer_module, "_draw_route",
+        lambda *a, **k: (calls.append(k.get("supersample")), real_draw_route(*a, **k))[-1],
+    )
+    render_poster(
+        job_id=1, user_info_id=1, project_id=project_id, request=_BODY,
+        poster_dir=tmp_path, progress=lambda stage: None, tile_fetcher=_fake_tile_fetcher,
+    )
+    assert calls == [1]
 
 
 def test_full_render_still_fails_hard_when_the_basemap_fails(project_id, tmp_path):

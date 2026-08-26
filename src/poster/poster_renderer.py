@@ -96,6 +96,19 @@ _DPI = 150.0
 # Longest side (px) of the low-res layout preview.
 _PREVIEW_MAX_DIMENSION = 900
 
+# At the preview's much lower effective DPI, _ROUTE_WIDTH_MM/_ROUTE_CASING_MM
+# round down to a literal 1px line (see _draw_route), so plain ImageDraw's lack
+# of anti-aliasing shows up as a hard staircase on every diagonal segment. The
+# route is drawn at this many times the preview's own resolution and box-
+# filtered back down (see _draw_route) so it comes out with real edge
+# anti-aliasing instead. Cheap specifically because the preview canvas is
+# small: at the actual preview ceiling (_PREVIEW_MAX_DIMENSION x its A-series
+# counterpart, ~900x637), a 4x scratch layer is ~3600x2548 RGBA, ~37MB — the
+# full A0 render's ~4967x7022 canvas is left alone (see _draw_route) because
+# the same factor there would be a further ~2.2GB on top of an already ~140MB
+# buffer.
+_ROUTE_SUPERSAMPLE = 4
+
 # The preview fetches a real basemap, but at a deliberately small tile budget —
 # it must stay fast and cheap. If the fetch fails it degrades to a flat colour
 # and reports a warning rather than pretending the poster will look like that.
@@ -447,16 +460,50 @@ def _project_route(project: Any, projector: _Projector) -> List[List[Tuple[float
     return lines
 
 
-def _draw_route(draw: ImageDraw.ImageDraw, lines: Sequence[Sequence[Tuple[float, float]]],
-                dpi: float) -> None:
+def _draw_route(canvas: Image.Image, lines: Sequence[Sequence[Tuple[float, float]]],
+                dpi: float, *, supersample: int = 1) -> None:
     """Draw the track as a white-cased coloured line, so it stays legible over
-    both bright and dark satellite imagery."""
+    both bright and dark satellite imagery.
+
+    Plain ``ImageDraw`` is never anti-aliased, so a straight ``draw.line()``
+    produces a hard, stair-stepped edge on any diagonal segment. At the full
+    render's DPI the line is wide enough (~5px, ~9px cased at 150 DPI) that
+    those steps are a minor fraction of the stroke's own width — consistent
+    with this module's "still genuinely print-quality at poster viewing
+    distance" tradeoff for ``_DPI`` — so ``supersample`` is left at 1 there.
+    The preview is the case that actually needs it: its much lower effective
+    DPI can floor the same physical width to a literal 1px line, where every
+    stair-step *is* the whole line (see ``_ROUTE_SUPERSAMPLE``'s comment for
+    the numbers).
+
+    With ``supersample`` > 1, the casing and route are instead drawn onto a
+    scratch layer that many times larger, then box-filtered back down to the
+    canvas's own size — an exact area-average per output pixel, so a diagonal
+    edge comes out with real intermediate alpha instead of a hard on/off
+    transition.
+    """
     casing = mm_to_px(_ROUTE_CASING_MM, dpi)
     width = mm_to_px(_ROUTE_WIDTH_MM, dpi)
+
+    if supersample <= 1:
+        draw = ImageDraw.Draw(canvas)
+        for line in lines:
+            draw.line(list(line), fill=_ROUTE_CASING, width=casing, joint="curve")
+        for line in lines:
+            draw.line(list(line), fill=_ROUTE_COLOR, width=width, joint="curve")
+        return
+
+    ss = supersample
+    layer = Image.new("RGBA", (canvas.width * ss, canvas.height * ss), (0, 0, 0, 0))
+    layer_draw = ImageDraw.Draw(layer)
     for line in lines:
-        draw.line(list(line), fill=_ROUTE_CASING, width=casing, joint="curve")
+        scaled = [(x * ss, y * ss) for x, y in line]
+        layer_draw.line(scaled, fill=_ROUTE_CASING, width=casing * ss, joint="curve")
     for line in lines:
-        draw.line(list(line), fill=_ROUTE_COLOR, width=width, joint="curve")
+        scaled = [(x * ss, y * ss) for x, y in line]
+        layer_draw.line(scaled, fill=_ROUTE_COLOR, width=width * ss, joint="curve")
+    layer = layer.resize((canvas.width, canvas.height), Image.BOX)
+    canvas.alpha_composite(layer)
 
 
 def _draw_pin(draw: ImageDraw.ImageDraw, x: float, y: float, dpi: float) -> None:
@@ -862,7 +909,8 @@ def _compose_poster_image(
     if project is not None:
         _notify(progress, "plotting route")
         route_lines = _project_route(project, projector)
-        _draw_route(draw, route_lines, dpi)
+        _draw_route(canvas, route_lines, dpi,
+                    supersample=_ROUTE_SUPERSAMPLE if basemap_optional else 1)
     route = RouteIndex(route_lines, (target_w, target_h))
 
     _notify(progress, "measuring cards")
