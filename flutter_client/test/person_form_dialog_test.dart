@@ -31,7 +31,7 @@ class _FakeNotifier extends ProjectNotifier {
   }
 
   @override
-  Future<void> updatePerson(
+  Future<bool> updatePerson(
     int personId, {
     String? name,
     String? email,
@@ -45,6 +45,7 @@ class _FakeNotifier extends ProjectNotifier {
       'id': personId, 'name': name, 'socials': socials,
       'nationalities': nationalities, 'residence': residence,
     };
+    return true;
   }
 
   @override

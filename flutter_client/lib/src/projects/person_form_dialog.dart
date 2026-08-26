@@ -16,6 +16,7 @@ import '../core/design_tokens.dart';
 import 'nationality_field.dart';
 import 'note_field_actions.dart';
 import 'project_notifier.dart';
+import 'save_error_banner.dart';
 import 'social_links_field.dart';
 
 /// Show the create/edit person dialog. Returns the person id on success (the new
@@ -61,6 +62,7 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
       widget.person?['residence'] as String? ?? '';
 
   bool _saving = false;
+  String? _saveError;
 
   bool get _isEdit => widget.person != null;
 
@@ -97,39 +99,56 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
 
   Future<void> _save() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    setState(() => _saving = true);
+    setState(() {
+      _saveError = null;
+      _saving = true;
+    });
     final navigator = Navigator.of(context);
 
     final socials = _socialsKey.currentState?.value ?? const [];
     final nationalities = _nationalityKey.currentState?.value ?? const [];
     final residence = _residenceController?.text.trim();
 
-    int? id;
-    if (_isEdit) {
-      id = (widget.person!['id'] as num).toInt();
-      await widget.notifier.updatePerson(
-        id,
-        name: _t(_name),
-        email: _t(_email),
-        phone: _t(_phone),
-        notes: _t(_notes),
-        socials: socials,
-        nationalities: nationalities,
-        residence: (residence == null || residence.isEmpty) ? null : residence,
-      );
-    } else {
-      id = await widget.notifier.createPerson(
-        name: _t(_name),
-        email: _t(_email),
-        phone: _t(_phone),
-        notes: _t(_notes),
-        socials: socials,
-        nationalities: nationalities,
-        residence: (residence == null || residence.isEmpty) ? null : residence,
-      );
+    try {
+      int? id;
+      if (_isEdit) {
+        id = (widget.person!['id'] as num).toInt();
+        final ok = await widget.notifier.updatePerson(
+          id,
+          name: _t(_name),
+          email: _t(_email),
+          phone: _t(_phone),
+          notes: _t(_notes),
+          socials: socials,
+          nationalities: nationalities,
+          residence: (residence == null || residence.isEmpty) ? null : residence,
+        );
+        if (!ok) {
+          setState(() =>
+              _saveError = widget.notifier.error ?? 'Failed to save person');
+          return;
+        }
+      } else {
+        id = await widget.notifier.createPerson(
+          name: _t(_name),
+          email: _t(_email),
+          phone: _t(_phone),
+          notes: _t(_notes),
+          socials: socials,
+          nationalities: nationalities,
+          residence: (residence == null || residence.isEmpty) ? null : residence,
+        );
+        if (id == null) {
+          setState(() =>
+              _saveError = widget.notifier.error ?? 'Failed to save person');
+          return;
+        }
+      }
+      if (!mounted) return;
+      navigator.pop(id);
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
-    if (!mounted) return;
-    navigator.pop(id);
   }
 
   @override
@@ -165,6 +184,10 @@ class _PersonFormDialogState extends State<PersonFormDialog> {
                     maxLines: 3,
                     capitalization: TextCapitalization.sentences,
                     clipboardActions: true),
+                if (_saveError != null) ...[
+                  const SizedBox(height: 12),
+                  SaveErrorBanner(message: _saveError!),
+                ],
               ],
             ),
           ),

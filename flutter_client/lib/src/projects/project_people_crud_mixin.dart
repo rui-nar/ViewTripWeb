@@ -71,7 +71,9 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     }
   }
 
-  Future<void> updatePerson(
+  /// Update a person. Returns `true` on success, `false` on failure (with
+  /// [error] set) — callers must check this before treating the save as done.
+  Future<bool> updatePerson(
     int personId, {
     String? name,
     String? email,
@@ -82,7 +84,7 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
     String? residence,
   }) async {
     final ref = projectRef;
-    if (ref == null) return;
+    if (ref == null) return false;
     try {
       await api.put('/api/people/$personId', {
         'name': name,
@@ -94,9 +96,11 @@ mixin ProjectPeopleCrudMixin on ChangeNotifier, ProjectQuotaMixin {
         'residence': residence,
       });
       await reloadDetailsOnly(ref);
+      return true;
     } on Exception catch (e) {
       error = errorMessage(e);
       notifyListeners();
+      return false;
     }
   }
 
