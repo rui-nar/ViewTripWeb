@@ -4,6 +4,7 @@ import 'dart:math' show pow;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show Path, PathFillType;
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_map_animations/flutter_map_animations.dart';
@@ -1227,6 +1228,123 @@ class MapPanel extends StatefulWidget {
   State<MapPanel> createState() => _MapPanelState();
 }
 
+/// Result of [hitTestMapTap]: either an activity/segment hit (select it), or
+/// — when nothing was within the tap threshold — a point on the full track
+/// to park the elevation cursor at, or neither (empty tap, empty track).
+typedef MapTapHitTest = ({
+  dynamic hitActivityId,
+  String? hitSegmentId,
+  GeoPoint? cursorPoint,
+  double? cursorDist,
+});
+
+/// Pure activity/segment + elevation-cursor hit-test for a map tap — every
+/// tap, not just a marker tap, used to run this synchronously on the UI
+/// isolate: a single pass over every point of every activity/segment
+/// feature in [geo], and — if nothing was within [thresholdSq] (squared
+/// degrees) — a second full pass over [track] to place the elevation
+/// cursor. Neither scan has a spatial index or a viewport prefilter, so
+/// cost is O(every coordinate in the trip) on every tap, including taps
+/// that hit nothing (open water, a gap between tracks): the most common
+/// post-load interaction, paying the same "big computation on the UI
+/// isolate" cost the day-carousel ANR fix addressed elsewhere in this file
+/// (see buildDayIndex's doc comment) — just per tap instead of per
+/// selection. Pure and top-level so it can run via [compute] on a
+/// background isolate for a large trip; see totalMapTapPoints and the
+/// _kInlineHitTestThreshold split in _MapPanelState/ManageMapPanelState's
+/// _onMapTap for when that's actually worth it.
+MapTapHitTest hitTestMapTap(({
+  Map<String, dynamic>? geo,
+  double tapLat,
+  double tapLon,
+  double thresholdSq,
+  List<(double, GeoPoint)> track,
+}) args) {
+  final geo = args.geo;
+  if (geo != null) {
+    final features = geo['features'];
+    if (features is List) {
+      double minHit = args.thresholdSq;
+      dynamic hitActivityId;
+      String? hitSegmentId;
+      for (final f in features) {
+        if (f is! Map) continue;
+        final props = f['properties'] as Map? ?? {};
+        final type = props['type'] as String?;
+        if (type != 'activity' && type != 'segment') continue;
+        final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+        if (coords is! List) continue;
+        for (final c in coords) {
+          if (c is! List || c.length < 2) continue;
+          final dLat = (c[1] as num).toDouble() - args.tapLat;
+          final dLon = (c[0] as num).toDouble() - args.tapLon;
+          final d = dLat * dLat + dLon * dLon;
+          if (d < minHit) {
+            minHit = d;
+            if (type == 'activity') {
+              hitActivityId = props['activity_id'];
+              hitSegmentId = null;
+            } else {
+              hitSegmentId = props['segment_id']?.toString();
+              hitActivityId = null;
+            }
+          }
+        }
+      }
+      if (hitActivityId != null || hitSegmentId != null) {
+        return (
+          hitActivityId: hitActivityId,
+          hitSegmentId: hitSegmentId,
+          cursorPoint: null,
+          cursorDist: null,
+        );
+      }
+    }
+  }
+
+  final track = args.track;
+  if (track.isEmpty) {
+    return (hitActivityId: null, hitSegmentId: null, cursorPoint: null, cursorDist: null);
+  }
+  int nearest = 0;
+  double minDist = double.infinity;
+  for (int i = 0; i < track.length; i++) {
+    final dLat = track[i].$2.lat - args.tapLat;
+    final dLon = track[i].$2.lon - args.tapLon;
+    final d = dLat * dLat + dLon * dLon;
+    if (d < minDist) { minDist = d; nearest = i; }
+  }
+  return (
+    hitActivityId: null,
+    hitSegmentId: null,
+    cursorPoint: track[nearest].$2,
+    cursorDist: track[nearest].$1,
+  );
+}
+
+/// Cheap O(features) precheck for whether [hitTestMapTap]'s cost is worth
+/// moving off the UI isolate — reads `coordinates.length` per feature plus
+/// `track.length`, no per-point math.
+int totalMapTapPoints(Map<String, dynamic>? geo, List<(double, GeoPoint)> track) {
+  var total = track.length;
+  final features = geo?['features'];
+  if (features is List) {
+    for (final f in features) {
+      if (f is! Map) continue;
+      final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is List) total += coords.length;
+    }
+  }
+  return total;
+}
+
+/// Above this many combined geo + track points, _onMapTap moves the hit
+/// test to a background isolate instead of running it inline. Below it, the
+/// isolate hop isn't worth the tap-to-selection latency it adds — most
+/// trips never get close to this, so the overwhelming majority of taps stay
+/// perfectly synchronous/instant.
+const _kInlineHitTestThreshold = 20000;
+
 class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   // Seeded true when an initial camera position was carried over from the
   // other mode (view/edit toggle) — skips the fit-all-bounds animation.
@@ -1377,71 +1495,51 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     }
   }
 
+  // Bumped on every _onMapTap call; guards a stale async hit-test result
+  // (from a superseded tap — e.g. two rapid taps) from overwriting a newer
+  // one, or from landing after the widget is gone.
+  int _hitTestGen = 0;
+
   void _onMapTap(LatLng latlng) {
     widget.onClearFocusedLocation?.call();
-    // ── Activity + segment hit-test ──────────────────────────────────────────
-    // Single pass over all GeoJSON features; pick the closest one within a
-    // 15-pixel radius. Activity and segment hits both select their panel item.
     final geo = widget.notifier.geo;
-    if (geo != null) {
-      final zoom = widget.mapController.mapController.camera.zoom;
-      final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
-      final threshold = pow(15.0 * pixelDeg, 2).toDouble();
-      double minHit = threshold;
-      dynamic hitActivityId;
-      String? hitSegmentId;
-
-      final features = geo['features'];
-      if (features is List) {
-        for (final f in features) {
-          if (f is! Map) continue;
-          final props = f['properties'] as Map? ?? {};
-          final type = props['type'] as String?;
-          if (type != 'activity' && type != 'segment') continue;
-          final coords = (f['geometry'] as Map? ?? {})['coordinates'];
-          if (coords is! List) continue;
-          for (final c in coords) {
-            if (c is! List || c.length < 2) continue;
-            final dLat = (c[1] as num).toDouble() - latlng.latitude;
-            final dLon = (c[0] as num).toDouble() - latlng.longitude;
-            final d = dLat * dLat + dLon * dLon;
-            if (d < minHit) {
-              minHit = d;
-              if (type == 'activity') {
-                hitActivityId = props['activity_id'];
-                hitSegmentId = null;
-              } else {
-                hitSegmentId = props['segment_id']?.toString();
-                hitActivityId = null;
-              }
-            }
-          }
-        }
-      }
-
-      if (hitActivityId != null) {
-        widget.notifier.selectActivity(hitActivityId);
-        return;
-      }
-      if (hitSegmentId != null) {
-        widget.notifier.selectSegment(hitSegmentId);
-        return;
-      }
+    final zoom = widget.mapController.mapController.camera.zoom;
+    final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
+    final args = (
+      geo: geo,
+      tapLat: latlng.latitude,
+      tapLon: latlng.longitude,
+      thresholdSq: pow(15.0 * pixelDeg, 2).toDouble(),
+      track: widget.notifier.fullTrack,
+    );
+    // See hitTestMapTap's doc comment: most taps are cheap enough to just
+    // handle inline (instant selection/cursor feedback); only a trip large
+    // enough to make the scan itself slow needs the isolate hop.
+    if (totalMapTapPoints(geo, args.track) <= _kInlineHitTestThreshold) {
+      _applyMapTapHit(hitTestMapTap(args));
+      return;
     }
+    final gen = ++_hitTestGen;
+    compute(hitTestMapTap, args).then((result) {
+      if (!mounted || gen != _hitTestGen) return;
+      _applyMapTapHit(result);
+    });
+  }
 
-    // ── Elevation cursor ─────────────────────────────────────────────────────
-    final track = widget.notifier.fullTrack;
-    if (track.isEmpty) return;
-    int nearest = 0;
-    double minDist = double.infinity;
-    for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.lat - latlng.latitude;
-      final dLon = track[i].$2.lon - latlng.longitude;
-      final d = dLat * dLat + dLon * dLon;
-      if (d < minDist) { minDist = d; nearest = i; }
+  void _applyMapTapHit(MapTapHitTest hit) {
+    if (hit.hitActivityId != null) {
+      widget.notifier.selectActivity(hit.hitActivityId);
+      return;
     }
-    widget.notifier.elevationCursorNotifier.value = track[nearest].$2;
-    widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
+    if (hit.hitSegmentId != null) {
+      widget.notifier.selectSegment(hit.hitSegmentId!);
+      return;
+    }
+    final cursorPoint = hit.cursorPoint;
+    if (cursorPoint != null) {
+      widget.notifier.elevationCursorNotifier.value = cursorPoint;
+      widget.notifier.mapCursorDistNotifier.value = hit.cursorDist;
+    }
   }
 
   @override
@@ -2190,69 +2288,51 @@ class ManageMapPanelState extends State<ManageMapPanel>
     });
   }
 
+  // Bumped on every _onMapTap call; guards a stale async hit-test result
+  // (from a superseded tap — e.g. two rapid taps) from overwriting a newer
+  // one, or from landing after the widget is gone.
+  int _hitTestGen = 0;
+
   void _onMapTap(LatLng latlng) {
     widget.onClearFocusedLocation?.call();
-    // ── Activity + segment hit-test ──────────────────────────────────────────
     final geo = widget.notifier.geo;
-    if (geo != null) {
-      final zoom = widget.mapController.mapController.camera.zoom;
-      final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
-      final threshold = pow(15.0 * pixelDeg, 2).toDouble();
-      double minHit = threshold;
-      dynamic hitActivityId;
-      String? hitSegmentId;
-
-      final features = geo['features'];
-      if (features is List) {
-        for (final f in features) {
-          if (f is! Map) continue;
-          final props = f['properties'] as Map? ?? {};
-          final type = props['type'] as String?;
-          if (type != 'activity' && type != 'segment') continue;
-          final coords = (f['geometry'] as Map? ?? {})['coordinates'];
-          if (coords is! List) continue;
-          for (final c in coords) {
-            if (c is! List || c.length < 2) continue;
-            final dLat = (c[1] as num).toDouble() - latlng.latitude;
-            final dLon = (c[0] as num).toDouble() - latlng.longitude;
-            final d = dLat * dLat + dLon * dLon;
-            if (d < minHit) {
-              minHit = d;
-              if (type == 'activity') {
-                hitActivityId = props['activity_id'];
-                hitSegmentId = null;
-              } else {
-                hitSegmentId = props['segment_id']?.toString();
-                hitActivityId = null;
-              }
-            }
-          }
-        }
-      }
-
-      if (hitActivityId != null) {
-        widget.notifier.selectActivity(hitActivityId);
-        return;
-      }
-      if (hitSegmentId != null) {
-        widget.notifier.selectSegment(hitSegmentId);
-        return;
-      }
+    final zoom = widget.mapController.mapController.camera.zoom;
+    final pixelDeg = 360.0 / (pow(2.0, zoom) * 256.0);
+    final args = (
+      geo: geo,
+      tapLat: latlng.latitude,
+      tapLon: latlng.longitude,
+      thresholdSq: pow(15.0 * pixelDeg, 2).toDouble(),
+      track: widget.notifier.fullTrack,
+    );
+    // See hitTestMapTap's doc comment: most taps are cheap enough to just
+    // handle inline (instant selection/cursor feedback); only a trip large
+    // enough to make the scan itself slow needs the isolate hop.
+    if (totalMapTapPoints(geo, args.track) <= _kInlineHitTestThreshold) {
+      _applyMapTapHit(hitTestMapTap(args));
+      return;
     }
+    final gen = ++_hitTestGen;
+    compute(hitTestMapTap, args).then((result) {
+      if (!mounted || gen != _hitTestGen) return;
+      _applyMapTapHit(result);
+    });
+  }
 
-    // ── Elevation cursor ─────────────────────────────────────────────────────
-    final track = widget.notifier.fullTrack;
-    if (track.isEmpty) return;
-    int nearest = 0;
-    double minDist = double.infinity;
-    for (int i = 0; i < track.length; i++) {
-      final dLat = track[i].$2.lat - latlng.latitude;
-      final dLon = track[i].$2.lon - latlng.longitude;
-      final d = dLat * dLat + dLon * dLon;
-      if (d < minDist) { minDist = d; nearest = i; }
+  void _applyMapTapHit(MapTapHitTest hit) {
+    if (hit.hitActivityId != null) {
+      widget.notifier.selectActivity(hit.hitActivityId);
+      return;
     }
-    widget.notifier.elevationCursorNotifier.value = track[nearest].$2;
-    widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
+    if (hit.hitSegmentId != null) {
+      widget.notifier.selectSegment(hit.hitSegmentId!);
+      return;
+    }
+    final cursorPoint = hit.cursorPoint;
+    if (cursorPoint != null) {
+      widget.notifier.elevationCursorNotifier.value = cursorPoint;
+      widget.notifier.mapCursorDistNotifier.value = hit.cursorDist;
+    }
   }
 
   /// Points of the currently-selected activity/segment (or all activities/
