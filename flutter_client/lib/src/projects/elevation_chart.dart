@@ -1,9 +1,125 @@
 library;
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/material.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
+
+/// Maximum number of FlSpot points rendered by fl_chart.
+/// LTTB downsampling preserves visual shape; cursor uses the full-resolution
+/// [ElevationChart.track] so accuracy is unaffected.
+const _kMaxChartPoints = 300;
+
+/// Above this many raw (pre-downsample) elevation points, _compute moves the
+/// concatenate+LTTB work to a background isolate instead of running it
+/// inline. Below it, the isolate hop (and the single frame of "No elevation
+/// data" before the result lands) isn't worth it — comfortably above
+/// [_kMaxChartPoints] and typical single/few-activity cases, comfortably
+/// below what makes the synchronous path itself take user-visible time.
+const _kInlineComputeThreshold = 5000;
+
+/// Cheap O(activities) precheck for [_kInlineComputeThreshold] — just reads
+/// `elevation_profile.length`, no per-point work.
+int _totalProfilePoints(List<Map<String, dynamic>> activities) {
+  var total = 0;
+  for (final a in activities) {
+    final profile = a['elevation_profile'];
+    if (profile is List) total += profile.length;
+  }
+  return total;
+}
+
+/// Concatenates the elevation_profile of every activity in [args.activities]
+/// (or just the one matching [args.selectedId], when set) into one spot
+/// series, then LTTB-downsamples it. Pure and top-level so it can run via
+/// [compute] on a background isolate — a long trip's *full* elevation
+/// payload (every activity's profile concatenated, with no activity
+/// selected) can be tens of thousands of points, and doing that
+/// concatenation + downsampling synchronously on the UI isolate is the same
+/// "big computation on the UI isolate" mistake that caused the day-carousel
+/// ANR (see map_panel.dart's buildDayIndex doc comment). A single selected
+/// activity's profile is bounded and cheap, so that path stays synchronous —
+/// see _ElevationChartState._compute. Exposed (not `_`-prefixed) only for
+/// testing this computation directly; every real caller is in this file.
+@visibleForTesting
+({List<FlSpot> spots, double minY, double maxY}) computeElevationSpots(
+  ({List<Map<String, dynamic>> activities, dynamic selectedId}) args,
+) {
+  final source = args.selectedId == null
+      ? args.activities
+      : args.activities
+          .where((a) => a['id']?.toString() == args.selectedId.toString())
+          .toList();
+
+  final spots = <FlSpot>[];
+  double offsetKm = 0;
+  for (final a in source) {
+    final profile = a['elevation_profile'];
+    if (profile is! List || profile.isEmpty) continue;
+    final lastPt = profile.last;
+    final elevTotalKm = (lastPt is List && lastPt.isNotEmpty)
+        ? (lastPt[0] as num).toDouble()
+        : 0.0;
+    for (int i = 0; i < profile.length; i++) {
+      final point = profile[i];
+      if (point is! List || point.length < 2) continue;
+      spots.add(FlSpot(
+          (point[0] as num).toDouble() + offsetKm,
+          (point[1] as num).toDouble()));
+    }
+    if (elevTotalKm > 0) offsetKm += elevTotalKm;
+  }
+
+  double minY = 0, maxY = 0;
+  if (spots.isNotEmpty) {
+    // Compute min/max over full data before downsampling — LTTB may not
+    // select the global peak or valley, but the y-axis must contain them.
+    minY = spots.first.y;
+    maxY = spots.first.y;
+    for (final s in spots) {
+      if (s.y < minY) minY = s.y;
+      if (s.y > maxY) maxY = s.y;
+    }
+  }
+  final downsampled =
+      spots.length > _kMaxChartPoints ? _lttb(spots, _kMaxChartPoints) : spots;
+  return (spots: downsampled, minY: minY, maxY: maxY);
+}
+
+/// Largest-Triangle-Three-Buckets downsampling.  O(n) — selects [threshold]
+/// points from [data] that best preserve the visual shape of the series.
+List<FlSpot> _lttb(List<FlSpot> data, int threshold) {
+  final n = data.length;
+  assert(n > threshold);
+  final out = <FlSpot>[data.first];
+  int a = 0;
+  final every = (n - 2) / (threshold - 2);
+  for (int i = 0; i < threshold - 2; i++) {
+    // Centroid of the next bucket — used as the "future" anchor.
+    final nS = ((i + 1) * every + 1).floor();
+    final nE = ((i + 2) * every + 1).floor().clamp(0, n);
+    double avgX = 0, avgY = 0;
+    for (int j = nS; j < nE; j++) { avgX += data[j].x; avgY += data[j].y; }
+    final cnt = nE - nS;
+    avgX /= cnt; avgY /= cnt;
+    // Current bucket — pick the point that forms the largest triangle
+    // with the previously selected point (a) and the next-bucket centroid.
+    final cS = (i * every + 1).floor();
+    final cE = ((i + 1) * every + 1).floor().clamp(0, n);
+    final ax = data[a].x, ay = data[a].y;
+    double maxArea = -1; int best = cS;
+    for (int j = cS; j < cE; j++) {
+      final area = ((ax - avgX) * (data[j].y - ay)
+                  - (ax - data[j].x) * (avgY - ay)).abs();
+      if (area > maxArea) { maxArea = area; best = j; }
+    }
+    out.add(data[best]);
+    a = best;
+  }
+  out.add(data.last);
+  return out;
+}
 
 class ElevationChart extends StatefulWidget {
   final List<Map<String, dynamic>> activities;
@@ -47,6 +163,10 @@ class _ElevationChartState extends State<ElevationChart> {
   List<FlSpot> _spots = const [];
   double _minY = 0;
   double _maxY = 0;
+  // Bumped on every _compute call; guards a stale async result (from a
+  // superseded call — e.g. two rapid activity de-selections) from
+  // overwriting a newer one.
+  int _computeGen = 0;
 
   @override
   void initState() {
@@ -101,81 +221,33 @@ class _ElevationChartState extends State<ElevationChart> {
   }
 
   void _compute(List<Map<String, dynamic>> activities, dynamic selectedId) {
-    final source = selectedId == null
-        ? activities
-        : activities
-            .where((a) => a['id']?.toString() == selectedId.toString())
-            .toList();
-
-    final spots = <FlSpot>[];
-    double offsetKm = 0;
-    for (final a in source) {
-      final profile = a['elevation_profile'];
-      if (profile is! List || profile.isEmpty) continue;
-      final lastPt = profile.last;
-      final elevTotalKm = (lastPt is List && lastPt.isNotEmpty)
-          ? (lastPt[0] as num).toDouble()
-          : 0.0;
-      for (int i = 0; i < profile.length; i++) {
-        final point = profile[i];
-        if (point is! List || point.length < 2) continue;
-        spots.add(FlSpot(
-            (point[0] as num).toDouble() + offsetKm,
-            (point[1] as num).toDouble()));
-      }
-      if (elevTotalKm > 0) offsetKm += elevTotalKm;
+    final args = (activities: activities, selectedId: selectedId);
+    // A single selected activity's profile is always bounded — and the
+    // common case (map/panel activity click) shouldn't pay an isolate-hop
+    // latency or flash "No elevation data" for a frame. Only the unfiltered
+    // full-trip aggregate can get big enough to need moving off the UI
+    // isolate — see computeElevationSpots's doc comment.
+    if (selectedId != null || _totalProfilePoints(activities) <= _kInlineComputeThreshold) {
+      // No setState here: called synchronously from initState (too early —
+      // Flutter forbids setState there) and from didUpdateWidget (already
+      // part of the build Flutter is about to run for this widget) — both
+      // read these fields via the build() that follows, same as before this
+      // split existed.
+      final result = computeElevationSpots(args);
+      _spots = result.spots;
+      _minY = result.minY;
+      _maxY = result.maxY;
+      return;
     }
-    if (spots.isNotEmpty) {
-      // Compute min/max over full data before downsampling — LTTB may not
-      // select the global peak or valley, but the y-axis must contain them.
-      double minY = spots.first.y, maxY = spots.first.y;
-      for (final s in spots) {
-        if (s.y < minY) minY = s.y;
-        if (s.y > maxY) maxY = s.y;
-      }
-      _minY = minY;
-      _maxY = maxY;
-    }
-    _spots = spots.length > _kMaxChartPoints ? _lttb(spots, _kMaxChartPoints) : spots;
-  }
-
-  /// Maximum number of FlSpot points rendered by fl_chart.
-  /// LTTB downsampling preserves visual shape; cursor uses the full-resolution
-  /// [widget.track] so accuracy is unaffected.
-  static const _kMaxChartPoints = 300;
-
-  /// Largest-Triangle-Three-Buckets downsampling.  O(n) — selects [threshold]
-  /// points from [data] that best preserve the visual shape of the series.
-  static List<FlSpot> _lttb(List<FlSpot> data, int threshold) {
-    final n = data.length;
-    assert(n > threshold);
-    final out = <FlSpot>[data.first];
-    int a = 0;
-    final every = (n - 2) / (threshold - 2);
-    for (int i = 0; i < threshold - 2; i++) {
-      // Centroid of the next bucket — used as the "future" anchor.
-      final nS = ((i + 1) * every + 1).floor();
-      final nE = ((i + 2) * every + 1).floor().clamp(0, n);
-      double avgX = 0, avgY = 0;
-      for (int j = nS; j < nE; j++) { avgX += data[j].x; avgY += data[j].y; }
-      final cnt = nE - nS;
-      avgX /= cnt; avgY /= cnt;
-      // Current bucket — pick the point that forms the largest triangle
-      // with the previously selected point (a) and the next-bucket centroid.
-      final cS = (i * every + 1).floor();
-      final cE = ((i + 1) * every + 1).floor().clamp(0, n);
-      final ax = data[a].x, ay = data[a].y;
-      double maxArea = -1; int best = cS;
-      for (int j = cS; j < cE; j++) {
-        final area = ((ax - avgX) * (data[j].y - ay)
-                    - (ax - data[j].x) * (avgY - ay)).abs();
-        if (area > maxArea) { maxArea = area; best = j; }
-      }
-      out.add(data[best]);
-      a = best;
-    }
-    out.add(data.last);
-    return out;
+    final gen = ++_computeGen;
+    compute(computeElevationSpots, args).then((result) {
+      if (!mounted || gen != _computeGen) return;
+      setState(() {
+        _spots = result.spots;
+        _minY = result.minY;
+        _maxY = result.maxY;
+      });
+    });
   }
 
   void _onTouch(FlTouchEvent event, LineTouchResponse? response) {

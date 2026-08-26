@@ -252,6 +252,53 @@ Set<String> dayStartActivityIds(
   return starts;
 }
 
+/// Every day's activity_ids and segment_ids, in one pass over [items].
+///
+/// The day carousel (issue #199) selects a day via `notifier.selectDays()`,
+/// which used to trigger a *full* re-derivation of the map: this index was
+/// recomputed with one O(items) scan per selected day (via the old
+/// `_dayItemIds` helper), on top of re-parsing every GeoJSON feature and
+/// re-resolving every marker's type/icon/colour from scratch — all synchronous
+/// work on the UI isolate. A single tap was slow but tolerable; a second tap
+/// shortly after (still well within Android's ANR window) stacked another
+/// full pass on top and blocked the UI isolate long enough to trip an ANR.
+///
+/// This index and the geometry specs in [_buildPolylineSpecs] /
+/// [_buildActivityMarkerSpecs] / [_buildSegmentMarkerSpecs] depend only on
+/// [items] (and, for the specs, geo/track style) — never on which day is
+/// currently selected — so callers cache them and only rebuild when those
+/// actually change. A selection change alone then only needs an O(1) lookup
+/// per selected day here, plus the cheap restyle passes in
+/// [_stylePolylines] / [_styleActivityMarkers] / [_styleSegmentMarkers].
+Map<String, ({Set<String> actIds, Set<String> segIds})> buildDayIndex(
+  List<Map<String, dynamic>> items,
+  Map<dynamic, Map<String, dynamic>> activityById,
+) {
+  final index = <String, ({Set<String> actIds, Set<String> segIds})>{};
+  String? lastDate;
+  for (final item in items) {
+    if (item['item_type'] == 'activity') {
+      final a = activityById[item['activity_id']];
+      final ds = (a?['start_date_local'] as String?)?.split('T').first;
+      if (ds != null) lastDate = ds;
+      final day = ds ?? lastDate;
+      final id = item['activity_id']?.toString();
+      if (day == null || id == null) continue;
+      index.putIfAbsent(day, () => (actIds: <String>{}, segIds: <String>{}))
+          .actIds
+          .add(id);
+    } else {
+      final day = item['segment']?['date'] as String? ?? lastDate;
+      final id = item['segment']?['id']?.toString();
+      if (day == null || id == null) continue;
+      index.putIfAbsent(day, () => (actIds: <String>{}, segIds: <String>{}))
+          .segIds
+          .add(id);
+    }
+  }
+  return index;
+}
+
 /// A solid coloured disc with a white ring — used for the selected activity's
 /// start (green) / end (red) markers so they read on any basemap.
 Marker _dotMarker(LatLng point, Color color, {double size = 16}) => Marker(
@@ -313,18 +360,39 @@ List<Marker> buildDayBreakpointMarkers(
   return markers;
 }
 
-List<Marker> _buildActivityMarkersFromGeo(
+/// Everything about an activity marker that doesn't depend on selection:
+/// point, icon, and base (pre-highlight) colour. See [_buildActivityMarkerSpecs]
+/// / [_styleActivityMarkers].
+class _ActivityMarkerSpec {
+  final LatLng point;
+  final String? actId;
+  final IconData icon;
+  final Color baseColor;
+  final LatLng? startPoint;
+  final LatLng? endPoint;
+  const _ActivityMarkerSpec({
+    required this.point,
+    required this.actId,
+    required this.icon,
+    required this.baseColor,
+    required this.startPoint,
+    required this.endPoint,
+  });
+}
+
+/// Builds one spec per activity feature in [geo] — the geometry/icon/colour
+/// resolution work that used to run again, from scratch, on every selection
+/// change (see [buildDayIndex]'s doc comment). Independent of selection;
+/// callers cache this and only rerun it when geo/items/style change.
+List<_ActivityMarkerSpec> _buildActivityMarkerSpecs(
   Map<String, dynamic> geo,
-  dynamic selectedActivityId,
-  bool hasSelection,
   Color trackColor, {
-  Set<String> dayStartActivityIds = const {},
   bool colorByType = false,
   Map<String, Map<String, dynamic>> typeStyles = const {},
 }) {
   final features = geo['features'];
   if (features is! List) return const [];
-  final markers = <Marker>[];
+  final specs = <_ActivityMarkerSpec>[];
   for (final feature in features) {
     if (feature is! Map) continue;
     final props = feature['properties'] as Map? ?? {};
@@ -335,46 +403,67 @@ List<Marker> _buildActivityMarkersFromGeo(
     final point = memoArcMidpoint(coords);
     if (point == null) continue;
 
-    final actId = props['activity_id']?.toString();
     final sportType = props['sport_type'] as String?;
-    final isSelected = selectedActivityId != null &&
-        actId == selectedActivityId.toString();
-
     final baseColor = colorByType
         ? resolveTypeStyle(activityTypeBucket(sportType), isSegment: false,
             overrides: typeStyles[activityTypeBucket(sportType)]).color
         : trackColor;
+
+    specs.add(_ActivityMarkerSpec(
+      point: point,
+      actId: props['activity_id']?.toString(),
+      icon: _iconForActivityType(sportType),
+      baseColor: baseColor,
+      startPoint: _coordToLatLng(coords.first),
+      endPoint: _coordToLatLng(coords.last),
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs] — just choosing a colour and
+/// whether to add the selected activity's start/end dots, no GeoJSON parsing
+/// or type-bucket resolution. This is what a selection change should cost.
+List<Marker> _styleActivityMarkers(
+  List<_ActivityMarkerSpec> specs,
+  dynamic selectedActivityId,
+  bool hasSelection, {
+  required List<Marker> dayBreakpointMarkers,
+}) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedActivityId != null &&
+        spec.actId == selectedActivityId.toString();
     final bgColor = isSelected
-        ? baseColor
+        ? spec.baseColor
         : hasSelection
-            ? baseColor.withAlpha(0x60)
-            : baseColor;
+            ? spec.baseColor.withAlpha(0x60)
+            : spec.baseColor;
 
     markers.add(Marker(
-      key: actId != null ? ValueKey('activity-$actId') : null,
-      point: point,
+      key: spec.actId != null ? ValueKey('activity-${spec.actId}') : null,
+      point: spec.point,
       width: 22,
       height: 22,
       alignment: Alignment.center,
       child: Container(
         decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-        child: Icon(_iconForActivityType(sportType), color: Colors.white, size: 13),
+        child: Icon(spec.icon, color: Colors.white, size: 13),
       ),
     ));
 
     // Start (green) / end (red) markers for the selected activity (#19).
     if (isSelected) {
-      final start = _coordToLatLng(coords.first);
-      final end = _coordToLatLng(coords.last);
-      if (start != null) markers.add(_dotMarker(start, _kStartMarkerColor, size: 18));
-      if (end != null) markers.add(_dotMarker(end, _kEndMarkerColor, size: 18));
+      if (spec.startPoint != null) {
+        markers.add(_dotMarker(spec.startPoint!, _kStartMarkerColor, size: 18));
+      }
+      if (spec.endPoint != null) {
+        markers.add(_dotMarker(spec.endPoint!, _kEndMarkerColor, size: 18));
+      }
     }
   }
   // Day breakpoints sit beneath the sport icons / selected endpoints (so prepend).
-  return [
-    ...buildDayBreakpointMarkers(geo, dayStartActivityIds, trackColor),
-    ...markers,
-  ];
+  return [...dayBreakpointMarkers, ...markers];
 }
 
 IconData _iconForSegmentType(String? type) {
@@ -387,19 +476,32 @@ IconData _iconForSegmentType(String? type) {
   }
 }
 
+/// Everything about a segment marker that doesn't depend on selection — see
+/// [_ActivityMarkerSpec], which this mirrors.
+class _SegmentMarkerSpec {
+  final LatLng point;
+  final String? segId;
+  final IconData icon;
+  final Color baseColor;
+  const _SegmentMarkerSpec({
+    required this.point,
+    required this.segId,
+    required this.icon,
+    required this.baseColor,
+  });
+}
+
 // Shared by _MapPanelState and ManageMapPanelState (mirrors
-// _buildActivityMarkersFromGeo above).
-List<Marker> _buildSegmentMarkers(
+// _buildActivityMarkerSpecs above).
+List<_SegmentMarkerSpec> _buildSegmentMarkerSpecs(
   Map<String, dynamic> geo,
-  dynamic selectedSegmentId,
-  bool hasSelection,
   Color trackColor, {
   bool colorByType = false,
   Map<String, Map<String, dynamic>> typeStyles = const {},
 }) {
   final features = geo['features'];
-  if (features is! List) return [];
-  final markers = <Marker>[];
+  if (features is! List) return const [];
+  final specs = <_SegmentMarkerSpec>[];
   for (final feature in features) {
     if (feature is! Map) continue;
     final props = feature['properties'] as Map? ?? {};
@@ -410,51 +512,69 @@ List<Marker> _buildSegmentMarkers(
     final point = memoArcMidpoint(coords);
     if (point == null) continue;
 
-    final segId = props['segment_id']?.toString();
-    final isSelected = selectedSegmentId != null &&
-        segId == selectedSegmentId.toString();
     final segType = (props['segment_type'] as String?) ??
         (props['route_mode'] == 'rail' ? 'train' : null);
-
     final baseColor = colorByType
         ? resolveTypeStyle(segmentTypeBucket(segType), isSegment: true,
             overrides: typeStyles[segmentTypeBucket(segType)]).color
         : trackColor;
+
+    specs.add(_SegmentMarkerSpec(
+      point: point,
+      segId: props['segment_id']?.toString(),
+      icon: _iconForSegmentType(segType),
+      baseColor: baseColor,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs] — see [_styleActivityMarkers].
+List<Marker> _styleSegmentMarkers(
+  List<_SegmentMarkerSpec> specs,
+  dynamic selectedSegmentId,
+  bool hasSelection,
+) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedSegmentId != null &&
+        spec.segId == selectedSegmentId.toString();
     final bgColor = isSelected
-        ? baseColor
+        ? spec.baseColor
         : hasSelection
-            ? baseColor.withAlpha(0x60)
-            : baseColor;
+            ? spec.baseColor.withAlpha(0x60)
+            : spec.baseColor;
 
     markers.add(Marker(
-      key: segId != null ? ValueKey('segment-$segId') : null,
-      point: point,
+      key: spec.segId != null ? ValueKey('segment-${spec.segId}') : null,
+      point: spec.point,
       width: 22,
       height: 22,
       child: Container(
         decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
-        child: Icon(
-          _iconForSegmentType(segType),
-          color: Colors.white,
-          size: 13,
-        ),
+        child: Icon(spec.icon, color: Colors.white, size: 13),
       ),
     ));
   }
   return markers;
 }
 
+/// Everything about a journal marker that doesn't depend on selection: point
+/// and the raw journal map (needed by the tap handler). See
+/// _styleJournalMarkers.
+class _JournalMarkerSpec {
+  final LatLng point;
+  final String jId;
+  final Map<String, dynamic> j;
+  const _JournalMarkerSpec({required this.point, required this.jId, required this.j});
+}
+
 // Shared by _MapPanelState and ManageMapPanelState — unlike memory markers,
 // journal-marker rendering (including the tap handler) has no mode-specific
 // affordance, so this stayed byte-for-byte identical between the two classes
 // and is hoisted here rather than duplicated.
-List<Marker> _buildJournalMarkers(
-  List<Map<String, dynamic>> items,
-  dynamic selectedJournalId,
-  bool hasSelection,
-  ProjectNotifier notifier,
-) {
-  final markers = <Marker>[];
+List<_JournalMarkerSpec> _buildJournalMarkerSpecs(List<Map<String, dynamic>> items) {
+  final specs = <_JournalMarkerSpec>[];
   for (final item in items) {
     if (item['item_type'] != 'journal') continue;
     final j = item['journal'] as Map<String, dynamic>?;
@@ -462,8 +582,28 @@ List<Marker> _buildJournalMarkers(
     final lat = (j['lat'] as num?)?.toDouble();
     final lon = (j['lon'] as num?)?.toDouble();
     if (lat == null || lon == null) continue;
-    final jId = j['id']?.toString() ?? '';
-    final isSelected = selectedJournalId?.toString() == jId;
+    specs.add(_JournalMarkerSpec(
+      point: LatLng(lat, lon),
+      jId: j['id']?.toString() ?? '',
+      j: j,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs] — just the bgColor/border pick;
+/// no item-list scan or field extraction, which is what a selection change
+/// used to redo here on every rebuild (see map_panel.dart's buildDayIndex
+/// doc comment for the ANR this pattern fixes generally).
+List<Marker> _styleJournalMarkers(
+  List<_JournalMarkerSpec> specs,
+  dynamic selectedJournalId,
+  bool hasSelection,
+  ProjectNotifier notifier,
+) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedJournalId?.toString() == spec.jId;
     const size = 22.0;
     final bgColor = isSelected
         ? const Color(0xFF44AAFF)
@@ -471,12 +611,12 @@ List<Marker> _buildJournalMarkers(
             ? const Color(0xA064748B)
             : const Color(0xFF64748B);
     markers.add(Marker(
-      key: ValueKey('journal-$jId'),
-      point: LatLng(lat, lon),
+      key: ValueKey('journal-${spec.jId}'),
+      point: spec.point,
       width: size,
       height: size,
       child: GestureDetector(
-        onTap: () => notifier.selectJournal(j['id']),
+        onTap: () => notifier.selectJournal(spec.j['id']),
         child: Container(
           decoration: BoxDecoration(
             color: bgColor,
@@ -486,6 +626,115 @@ List<Marker> _buildJournalMarkers(
           child: const Center(
             child: Icon(Icons.book_outlined, size: 12, color: Colors.white),
           ),
+        ),
+      ),
+    ));
+  }
+  return markers;
+}
+
+/// Everything about a memory marker that doesn't depend on selection: point,
+/// thumbnail URL, the day it belongs to (for the day-highlight check), and
+/// the raw memory map (needed by the tap handler). See _styleMemoryMarkers.
+class _MemoryMarkerSpec {
+  final LatLng point;
+  final String memId;
+  final String? thumbUrl;
+  final String? memDate;
+  final Map<String, dynamic> mem;
+  const _MemoryMarkerSpec({
+    required this.point,
+    required this.memId,
+    required this.thumbUrl,
+    required this.memDate,
+    required this.mem,
+  });
+}
+
+// Shared by _MapPanelState and ManageMapPanelState — the two modes only
+// differ in what tapping a marker opens (view mode's memory detail is
+// read-only), so that's a callback ([showDetail]) rather than two
+// near-duplicate copies of this loop.
+List<_MemoryMarkerSpec> _buildMemoryMarkerSpecs(
+  List<Map<String, dynamic>> items,
+  ProjectNotifier notifier,
+) {
+  final specs = <_MemoryMarkerSpec>[];
+  for (final item in items) {
+    if (item['item_type'] != 'memory') continue;
+    final mem = item['memory'] as Map<String, dynamic>?;
+    if (mem == null) continue;
+    final lat = (mem['lat'] as num?)?.toDouble();
+    final lon = (mem['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) continue;
+    final memId = mem['id']?.toString() ?? '';
+    final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
+    specs.add(_MemoryMarkerSpec(
+      point: LatLng(lat, lon),
+      memId: memId,
+      thumbUrl: photos.isNotEmpty ? notifier.photoThumbUrl(memId, photos.first) : null,
+      memDate: mem['date'] as String?,
+      mem: mem,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs]: only bgColor/size/border/
+/// day-highlight change with selection. The thumbnail widget keeps its
+/// stable `ValueKey(thumbUrl)`, so Flutter's reconciliation reuses it across
+/// a resize instead of re-fetching (see _MarkerThumbImage). [showDetail]
+/// lets each mode wire its own memory-detail affordance without duplicating
+/// this loop — see map_panel.dart's buildDayIndex doc comment for the ANR
+/// this general pattern (full rebuild on every selection change) fixes.
+List<Marker> _styleMemoryMarkers(
+  List<_MemoryMarkerSpec> specs,
+  dynamic selectedMemoryId,
+  bool hasSelection,
+  Set<String> effectiveDays,
+  Map<String, String> authHeaders,
+  ProjectNotifier notifier,
+  void Function(Map<String, dynamic> mem) showDetail,
+) {
+  final markers = <Marker>[];
+  for (final spec in specs) {
+    final isSelected = selectedMemoryId?.toString() == spec.memId;
+    final isDayHighlighted = effectiveDays.isEmpty ||
+        (spec.memDate != null && effectiveDays.contains(spec.memDate));
+    final size = isSelected ? 34.0 : 28.0;
+    final bgColor = isSelected
+        ? const Color(0xFF333333)
+        : (hasSelection && !isDayHighlighted)
+            ? const Color(0xA0000000)
+            : Colors.black;
+    final thumbUrl = spec.thumbUrl;
+    final Widget inner = thumbUrl != null
+        ? ClipOval(
+            child: _MarkerThumbImage(
+              key: ValueKey(thumbUrl),
+              url: thumbUrl,
+              headers: authHeaders,
+              size: size,
+            ),
+          )
+        : Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
+    markers.add(Marker(
+      key: ValueKey('memory-${spec.memId}'),
+      point: spec.point,
+      width: size,
+      height: size,
+      child: GestureDetector(
+        onTap: () {
+          notifier.selectMemory(spec.mem['id']);
+          showDetail(spec.mem);
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: bgColor,
+            shape: BoxShape.circle,
+            border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
+          ),
+          child: Center(child: inner),
         ),
       ),
     ));
@@ -1005,6 +1254,18 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   bool? _lastShowJournals;
   bool? _lastColorByType;
   Map<String, Map<String, dynamic>>? _lastTypeStyles;
+  // Selection-independent geometry/style specs — rebuilt only when geo,
+  // items, or track style changes (never by a day/activity/segment/memory
+  // selection alone). See buildDayIndex's doc comment for why this split
+  // exists: two day-carousel taps in a row used to redo this parsing work
+  // twice back to back, blocking the UI isolate long enough to ANR.
+  List<_PolylineSpec> _polylineSpecs = const [];
+  List<_ActivityMarkerSpec> _activityMarkerSpecs = const [];
+  List<_SegmentMarkerSpec> _segmentMarkerSpecs = const [];
+  List<_MemoryMarkerSpec> _memoryMarkerSpecs = const [];
+  List<_JournalMarkerSpec> _journalMarkerSpecs = const [];
+  List<Marker> _cachedDayBreakpointMarkers = const [];
+  Map<String, ({Set<String> actIds, Set<String> segIds})> _dayIndex = const {};
   List<Polyline> _cachedPolylines = [];
   List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedActivityMarkers = [];
@@ -1061,73 +1322,6 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       pts.addAll(memoCoordsToLatLng(coords));
     }
     return pts;
-  }
-
-  List<Marker> _buildMemoryMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedMemoryId,
-    bool hasSelection,
-    Set<String> effectiveDays,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
-    for (final item in items) {
-      if (item['item_type'] != 'memory') continue;
-      final mem = item['memory'] as Map<String, dynamic>?;
-      if (mem == null) continue;
-      final lat = (mem['lat'] as num?)?.toDouble();
-      final lon = (mem['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
-      final isSelected = selectedMemoryId?.toString() == memId;
-      final memDate = mem['date'] as String?;
-      final isDayHighlighted = effectiveDays.isEmpty ||
-          (memDate != null && effectiveDays.contains(memDate));
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFF333333)
-          : (hasSelection && !isDayHighlighted)
-              ? const Color(0xA0000000)
-              : Colors.black;
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: _MarkerThumbImage(
-            key: ValueKey(thumbUrl),
-            url: thumbUrl,
-            headers: authHeaders,
-            size: size,
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
-      markers.add(Marker(
-        key: ValueKey('memory-$memId'),
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () {
-            widget.notifier.selectMemory(mem['id']);
-            showMemoryDetail(context, widget.notifier, mem, readOnly: true,
-                shareContentKey: widget.notifier.shareContentKey);
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected ? Border.all(color: Colors.white, width: 2) : null,
-            ),
-            child: Center(child: inner),
-          ),
-        ),
-      ));
-    }
-    return markers;
   }
 
   List<LatLng> _allPoints(List<Polyline> polylines) {
@@ -1269,8 +1463,14 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
         trackWidth != _lastTrackWidth || alternating != _lastAlternating ||
         notifier.colorByType != _lastColorByType ||
         !identical(notifier.typeStyles, _lastTypeStyles);
-    if (!identical(geo, _lastGeo) || selectionChanged || styleChanged ||
-        !identical(items, _lastItems) || showJournals != _lastShowJournals) {
+    // Geometry (points, base colours, icons — everything a day/activity/
+    // segment/memory selection doesn't change) only needs rebuilding when
+    // geo, items, or track style actually change. A selection change alone
+    // now only re-styles the specs already cached below — see buildDayIndex's
+    // doc comment for why this split exists.
+    final geoOrStyleChanged = !identical(geo, _lastGeo) || styleChanged ||
+        !identical(items, _lastItems) || showJournals != _lastShowJournals;
+    if (geoOrStyleChanged || selectionChanged) {
       _lastGeo = geo;
       _lastSelectedId = selActId;
       _lastSelectedSegId = selSegId;
@@ -1291,46 +1491,62 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       final effectiveDays = selDays.isNotEmpty
           ? selDays
           : (selDay != null ? {selDay} : <String>{});
-      final actById = <dynamic, Map<String, dynamic>>{
-        for (final a in notifier.activities) a['id']: a
-      };
+      if (geoOrStyleChanged) {
+        final actById = <dynamic, Map<String, dynamic>>{
+          for (final a in notifier.activities) a['id']: a
+        };
+        _dayIndex = buildDayIndex(items, actById);
+        _polylineSpecs = geo != null
+            ? _buildPolylineSpecs(geo, items, trackColor,
+                trackSecondaryColor: trackSecondaryColor, alternating: alternating,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _activityMarkerSpecs = geo != null
+            ? _buildActivityMarkerSpecs(geo, trackColor,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _segmentMarkerSpecs = geo != null
+            ? _buildSegmentMarkerSpecs(geo, trackColor,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _cachedDayBreakpointMarkers = geo != null
+            ? buildDayBreakpointMarkers(
+                geo, dayStartActivityIds(items, actById), trackColor)
+            : const [];
+        _memoryMarkerSpecs = _buildMemoryMarkerSpecs(items, notifier);
+        _journalMarkerSpecs = _buildJournalMarkerSpecs(items);
+      }
       Set<String>? dayActIds;
       Set<String>? daySegIds;
       if (effectiveDays.isNotEmpty) {
         dayActIds = {};
         daySegIds = {};
         for (final dk in effectiveDays) {
-          final r = ManageMapPanelState._dayItemIds(items, actById, dk);
+          final r = _dayIndex[dk];
+          if (r == null) continue;
           dayActIds.addAll(r.actIds);
           daySegIds.addAll(r.segIds);
         }
       }
-      _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
-              alternating, items,
-              selectedOnly: tilesActive, trackSecondaryColor: trackSecondaryColor,
-              dayActIds: dayActIds, daySegIds: daySegIds,
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
+      _cachedPolylines = _stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
+          selectedOnly: tilesActive, dayActIds: dayActIds, daySegIds: daySegIds);
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
           : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId != null;
-      final dayStartIds = dayStartActivityIds(items, actById);
-      _cachedActivityMarkers = geo != null
-          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
-              dayStartActivityIds: dayStartIds,
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
-      _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor,
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
-      _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
+      _cachedActivityMarkers = _styleActivityMarkers(
+          _activityMarkerSpecs, selActId, hasSelection,
+          dayBreakpointMarkers: _cachedDayBreakpointMarkers);
+      _cachedSegmentMarkers =
+          _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
+      _cachedMemoryMarkers = _styleMemoryMarkers(
+          _memoryMarkerSpecs, selMemId, hasSelection, effectiveDays,
+          notifier.photoAuthHeaders, notifier,
+          (mem) => showMemoryDetail(context, notifier, mem,
+              readOnly: true, shareContentKey: notifier.shareContentKey));
       _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId, hasSelection, notifier);
+          _styleJournalMarkers(_journalMarkerSpecs, selJournalId, hasSelection, notifier);
       _cachedEncounterMarkers = widget.showEncounters
           ? buildEncounterMarkers(items, context, notifier,
               onLocationTap: widget.onLocationTap)
@@ -1608,28 +1824,41 @@ class _MapToggleRow extends StatelessWidget {
   }
 }
 
-// Shared by _MapPanelState and ManageMapPanelState. Highlighting is either a
-// single selected activity/segment, or (dayActIds/daySegIds set) the union of
-// items across one or more selected days — callers resolve day membership via
-// ManageMapPanelState._dayItemIds before calling in, so this stays agnostic to
-// which widget is asking.
-List<Polyline> _buildPolylines(
+/// Everything about a polyline that doesn't depend on selection: points,
+/// base (pre-highlight) colour, and line style. See [_buildPolylineSpecs] /
+/// [_stylePolylines] — the split that fixed the day-carousel ANR (see
+/// [buildDayIndex]'s doc comment).
+class _PolylineSpec {
+  final List<LatLng> points;
+  final bool isSegment;
+  final String? featureId;
+  final Color baseColor;
+  final LineStyleKind lineStyle;
+  const _PolylineSpec({
+    required this.points,
+    required this.isSegment,
+    required this.featureId,
+    required this.baseColor,
+    required this.lineStyle,
+  });
+}
+
+// Shared by _MapPanelState and ManageMapPanelState. Builds the geometry/style
+// half of each polyline — everything except which one is highlighted, which
+// depends only on selection and is applied separately by [_stylePolylines].
+// Independent of selection; callers cache this and only rerun it when
+// geo/items/style change.
+List<_PolylineSpec> _buildPolylineSpecs(
   Map<String, dynamic> geo,
-  dynamic selectedActivityId,
-  dynamic selectedSegmentId,
-  Color trackColor,
-  double trackWidth,
-  bool alternating,
-  List<Map<String, dynamic>> items, {
-  bool selectedOnly = false,
+  List<Map<String, dynamic>> items,
+  Color trackColor, {
   Color? trackSecondaryColor,
-  Set<String>? dayActIds,
-  Set<String>? daySegIds,
+  required bool alternating,
   bool colorByType = false,
   Map<String, Map<String, dynamic>> typeStyles = const {},
 }) {
   final features = geo['features'];
-  if (features is! List) return [];
+  if (features is! List) return const [];
 
   // Build activity-index map for alternating colours.
   final actIdx = <String, int>{};
@@ -1642,11 +1871,7 @@ List<Polyline> _buildPolylines(
   }
   final altColor = trackSecondaryColor ?? _MapPanelState._alternateColor(trackColor);
 
-  final usingDaySelection = dayActIds != null || daySegIds != null;
-  final polylines = <Polyline>[];
-  final hasSelection = selectedActivityId != null ||
-      selectedSegmentId != null ||
-      usingDaySelection;
+  final specs = <_PolylineSpec>[];
   for (final feature in features) {
     if (feature is! Map) continue;
     final props = feature['properties'] as Map? ?? {};
@@ -1664,21 +1889,6 @@ List<Polyline> _buildPolylines(
         ? props['segment_id']?.toString()
         : props['activity_id']?.toString();
 
-    final bool isHighlighted;
-    if (usingDaySelection) {
-      isHighlighted = isSegment
-          ? (daySegIds?.contains(featureId) ?? false)
-          : (dayActIds?.contains(featureId) ?? false);
-    } else if (isSegment) {
-      isHighlighted = selectedSegmentId != null &&
-          featureId == selectedSegmentId.toString();
-    } else {
-      isHighlighted = selectedActivityId != null &&
-          featureId == selectedActivityId.toString();
-    }
-
-    // When tile layer handles the base rendering, only draw the selected item.
-    if (selectedOnly && !isHighlighted) continue;
     // Alternating is a stand-in for per-type colour, so it's superseded once
     // a project opts into colorByType (issue #95).
     final isOdd = !colorByType && alternating && !isSegment && featureId != null &&
@@ -1706,23 +1916,70 @@ List<Polyline> _buildPolylines(
             ? _kFailedRouteColor
             : baseColor;
 
+    specs.add(_PolylineSpec(
+      points: points,
+      isSegment: isSegment,
+      featureId: featureId,
+      baseColor: effectiveBaseColor,
+      lineStyle: lineStyle,
+    ));
+  }
+  return specs;
+}
+
+/// Cheap per-selection restyle over [specs] — highlighting is either a
+/// single selected activity/segment, or (dayActIds/daySegIds set) the union
+/// of items across one or more selected days. No GeoJSON parsing or
+/// type-bucket resolution here — just picking a colour/width per spec, which
+/// is what a selection change should cost.
+List<Polyline> _stylePolylines(
+  List<_PolylineSpec> specs,
+  dynamic selectedActivityId,
+  dynamic selectedSegmentId,
+  double trackWidth, {
+  bool selectedOnly = false,
+  Set<String>? dayActIds,
+  Set<String>? daySegIds,
+}) {
+  final usingDaySelection = dayActIds != null || daySegIds != null;
+  final hasSelection = selectedActivityId != null ||
+      selectedSegmentId != null ||
+      usingDaySelection;
+  final polylines = <Polyline>[];
+  for (final spec in specs) {
+    final bool isHighlighted;
+    if (usingDaySelection) {
+      isHighlighted = spec.isSegment
+          ? (daySegIds?.contains(spec.featureId) ?? false)
+          : (dayActIds?.contains(spec.featureId) ?? false);
+    } else if (spec.isSegment) {
+      isHighlighted = selectedSegmentId != null &&
+          spec.featureId == selectedSegmentId.toString();
+    } else {
+      isHighlighted = selectedActivityId != null &&
+          spec.featureId == selectedActivityId.toString();
+    }
+
+    // When tile layer handles the base rendering, only draw the selected item.
+    if (selectedOnly && !isHighlighted) continue;
+
     final Color color;
     final double strokeWidth;
     if (isHighlighted) {
-      color = effectiveBaseColor;
+      color = spec.baseColor;
       strokeWidth = (trackWidth * 1.9).clamp(4.0, 8.0);
     } else if (hasSelection) {
-      color = effectiveBaseColor.withAlpha(0x60);
+      color = spec.baseColor.withAlpha(0x60);
       strokeWidth = trackWidth;
     } else {
-      color = effectiveBaseColor;
+      color = spec.baseColor;
       strokeWidth = trackWidth;
     }
     polylines.add(Polyline(
-      points: points,
+      points: spec.points,
       color: color,
       strokeWidth: strokeWidth,
-      pattern: switch (lineStyle) {
+      pattern: switch (spec.lineStyle) {
         LineStyleKind.dashed => StrokePattern.dashed(segments: const [12, 8]),
         LineStyleKind.dotted => const StrokePattern.dotted(),
         LineStyleKind.solid  => const StrokePattern.solid(),
@@ -1815,6 +2072,16 @@ class ManageMapPanelState extends State<ManageMapPanel>
   dynamic _lastSelectedMemId = _sentinel;
   dynamic _lastSelectedJournalId = _sentinel;
   List<Map<String, dynamic>>? _lastItems;
+  // Selection-independent geometry/style specs — see the matching fields on
+  // _MapPanelState and buildDayIndex's doc comment for why this is split
+  // from the final, selection-styled Polyline/Marker lists below.
+  List<_PolylineSpec> _polylineSpecs = const [];
+  List<_ActivityMarkerSpec> _activityMarkerSpecs = const [];
+  List<_SegmentMarkerSpec> _segmentMarkerSpecs = const [];
+  List<_MemoryMarkerSpec> _memoryMarkerSpecs = const [];
+  List<_JournalMarkerSpec> _journalMarkerSpecs = const [];
+  List<Marker> _cachedDayBreakpointMarkers = const [];
+  Map<String, ({Set<String> actIds, Set<String> segIds})> _dayIndex = const {};
   List<Polyline> _cachedPolylines = [];
   List<Marker> _cachedActivityMarkers = [];
   List<Marker> _cachedSegmentMarkers = [];
@@ -1836,76 +2103,6 @@ class ManageMapPanelState extends State<ManageMapPanel>
 
   static bool setEquals(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
-
-  List<Marker> _buildMemoryMarkers(
-    List<Map<String, dynamic>> items,
-    dynamic selectedMemoryId,
-    bool hasSelection,
-    Set<String> effectiveDays,
-    BuildContext context,
-  ) {
-    final markers = <Marker>[];
-    final authHeaders = widget.notifier.photoAuthHeaders;
-    for (final item in items) {
-      if (item['item_type'] != 'memory') continue;
-      final mem = item['memory'] as Map<String, dynamic>?;
-      if (mem == null) continue;
-      final lat = (mem['lat'] as num?)?.toDouble();
-      final lon = (mem['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
-      final memId = mem['id']?.toString() ?? '';
-      final photos = (mem['photos'] as List?)?.cast<String>() ?? [];
-      final isSelected = selectedMemoryId?.toString() == memId;
-      final memDate = mem['date'] as String?;
-      final isDayHighlighted = effectiveDays.isEmpty ||
-          (memDate != null && effectiveDays.contains(memDate));
-      final size = isSelected ? 34.0 : 28.0;
-      final bgColor = isSelected
-          ? const Color(0xFF333333)
-          : (hasSelection && !isDayHighlighted)
-              ? const Color(0xA0000000)
-              : Colors.black;
-
-      Widget inner;
-      if (photos.isNotEmpty) {
-        final thumbUrl = widget.notifier.photoThumbUrl(memId, photos.first);
-        inner = ClipOval(
-          child: _MarkerThumbImage(
-            key: ValueKey(thumbUrl),
-            url: thumbUrl,
-            headers: authHeaders,
-            size: size,
-          ),
-        );
-      } else {
-        inner = Icon(Icons.photo_camera, size: size * 0.45, color: Colors.white);
-      }
-
-      markers.add(Marker(
-        key: ValueKey('memory-$memId'),
-        point: LatLng(lat, lon),
-        width: size,
-        height: size,
-        child: GestureDetector(
-          onTap: () {
-            widget.notifier.selectMemory(mem['id']);
-            showMemoryDetail(context, widget.notifier, mem);
-          },
-          child: Container(
-            decoration: BoxDecoration(
-              color: bgColor,
-              shape: BoxShape.circle,
-              border: isSelected
-                  ? Border.all(color: Colors.white, width: 2)
-                  : null,
-            ),
-            child: Center(child: inner),
-          ),
-        ),
-      ));
-    }
-    return markers;
-  }
 
   @override
   void initState() {
@@ -2029,35 +2226,6 @@ class ManageMapPanelState extends State<ManageMapPanel>
     widget.notifier.mapCursorDistNotifier.value   = track[nearest].$1;
   }
 
-  /// Compute the set of activity_ids and segment_ids that belong to [dateKey].
-  static ({Set<String> actIds, Set<String> segIds}) _dayItemIds(
-    List<Map<String, dynamic>> items,
-    Map<dynamic, Map<String, dynamic>> activityById,
-    String dateKey,
-  ) {
-    final actIds = <String>{};
-    final segIds = <String>{};
-    String? lastDate;
-    for (final item in items) {
-      if (item['item_type'] == 'activity') {
-        final a = activityById[item['activity_id']];
-        final ds = (a?['start_date_local'] as String?)?.split('T').first;
-        if (ds != null) lastDate = ds;
-        if ((ds ?? lastDate) == dateKey) {
-          final id = item['activity_id']?.toString();
-          if (id != null) actIds.add(id);
-        }
-      } else {
-        final ds = item['segment']?['date'] as String? ?? lastDate;
-        if (ds == dateKey) {
-          final id = item['segment']?['id']?.toString();
-          if (id != null) segIds.add(id);
-        }
-      }
-    }
-    return (actIds: actIds, segIds: segIds);
-  }
-
   /// Points of the currently-selected activity/segment (or all activities/
   /// segments of the selected day(s)), used to compute the auto-zoom target.
   /// Public + static so the view-mode [MapPanel] and tests can reuse it.
@@ -2129,9 +2297,13 @@ class ManageMapPanelState extends State<ManageMapPanel>
     final perfGeoChg = !identical(geo, _lastGeo);
     final perfItemsChg = !identical(items, _lastItems);
     final perfJournalsChg = showJournals2 != _lastShowJournals;
-    if (perfGeoChg || selectionChanged2 ||
-        perfItemsChg || styleChanged2 ||
-        perfJournalsChg) {
+    // Geometry (points, base colours, icons) only needs rebuilding when geo,
+    // items, or track style actually change — a selection change alone just
+    // re-styles the specs already cached below. See buildDayIndex's doc
+    // comment for why this split exists.
+    final geoOrStyleChanged2 =
+        perfGeoChg || perfItemsChg || styleChanged2 || perfJournalsChg;
+    if (geoOrStyleChanged2 || selectionChanged2) {
       perfRebuiltLayers = true;
       if (selectionChanged2 && widget.autoZoom) widget.fittedNotifier.value = false;
       _lastGeo = geo;
@@ -2152,10 +2324,32 @@ class ManageMapPanelState extends State<ManageMapPanel>
       final effectiveDays = selDays.isNotEmpty
           ? selDays
           : (selDay != null ? {selDay} : <String>{});
-      // Build activityById for day-selection polyline colouring.
-      final actById = <dynamic, Map<String, dynamic>>{
-        for (final a in notifier.activities) a['id']: a
-      };
+      if (geoOrStyleChanged2) {
+        // Build activityById for the day index below.
+        final actById = <dynamic, Map<String, dynamic>>{
+          for (final a in notifier.activities) a['id']: a
+        };
+        _dayIndex = buildDayIndex(items, actById);
+        _polylineSpecs = geo != null
+            ? _buildPolylineSpecs(geo, items, trackColor,
+                trackSecondaryColor: trackSecondaryColor2, alternating: alternating,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _activityMarkerSpecs = geo != null
+            ? _buildActivityMarkerSpecs(geo, trackColor,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _segmentMarkerSpecs = geo != null
+            ? _buildSegmentMarkerSpecs(geo, trackColor,
+                colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
+            : const [];
+        _cachedDayBreakpointMarkers = geo != null
+            ? buildDayBreakpointMarkers(
+                geo, dayStartActivityIds(items, actById), trackColor)
+            : const [];
+        _memoryMarkerSpecs = _buildMemoryMarkerSpecs(items, notifier);
+        _journalMarkerSpecs = _buildJournalMarkerSpecs(items);
+      }
       // For day selection, union ids across all selected days.
       Set<String>? dayActIds;
       Set<String>? daySegIds;
@@ -2163,33 +2357,27 @@ class ManageMapPanelState extends State<ManageMapPanel>
         dayActIds = {};
         daySegIds = {};
         for (final dk in effectiveDays) {
-          final r = _dayItemIds(items, actById, dk);
+          final r = _dayIndex[dk];
+          if (r == null) continue;
           dayActIds.addAll(r.actIds);
           daySegIds.addAll(r.segIds);
         }
       }
-      _cachedPolylines = geo != null
-          ? _buildPolylines(geo, selActId, selSegId, trackColor, trackWidth,
-              alternating, items,
-              trackSecondaryColor: trackSecondaryColor2,
-              dayActIds: dayActIds, daySegIds: daySegIds,
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
+      _cachedPolylines = _stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
+          dayActIds: dayActIds, daySegIds: daySegIds);
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
-      _cachedActivityMarkers = geo != null
-          ? _buildActivityMarkersFromGeo(geo, selActId, hasSelection, trackColor,
-              dayStartActivityIds: dayStartActivityIds(items, actById),
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
-      _cachedSegmentMarkers = geo != null
-          ? _buildSegmentMarkers(geo, selSegId, hasSelection, trackColor,
-              colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
-          : [];
-      _cachedMemoryMarkers =
-          _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
-      _cachedJournalMarkers =
-          _buildJournalMarkers(items, selJournalId2, hasSelection, notifier);
+      _cachedActivityMarkers = _styleActivityMarkers(
+          _activityMarkerSpecs, selActId, hasSelection,
+          dayBreakpointMarkers: _cachedDayBreakpointMarkers);
+      _cachedSegmentMarkers =
+          _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
+      _cachedMemoryMarkers = _styleMemoryMarkers(
+          _memoryMarkerSpecs, selMemId, hasSelection, effectiveDays,
+          notifier.photoAuthHeaders, notifier,
+          (mem) => showMemoryDetail(context, notifier, mem));
+      _cachedJournalMarkers = _styleJournalMarkers(
+          _journalMarkerSpecs, selJournalId2, hasSelection, notifier);
       _cachedEncounterMarkers = buildEncounterMarkers(items, context,
           widget.notifier, onLocationTap: widget.onLocationTap);
 

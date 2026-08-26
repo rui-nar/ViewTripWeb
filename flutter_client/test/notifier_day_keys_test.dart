@@ -53,6 +53,32 @@ void main() {
         ['2025-06-01', '2025-06-02', '2025-06-03'],
       );
     });
+
+    test('reflects a later reassignment of activities/items/dayMeta — '
+        'guards the identical()-based cache against staleness', () {
+      final n = _notifier(activities: [
+        {'start_date_local': '2025-06-01T08:30:00'},
+      ]);
+      expect(n.orderedDayKeys(), ['2025-06-01']);
+
+      n.activities = [
+        {'start_date_local': '2025-06-01T08:30:00'},
+        {'start_date_local': '2025-06-09T08:30:00'},
+      ];
+      expect(n.orderedDayKeys(), ['2025-06-01', '2025-06-09']);
+
+      n.dayMeta = {'2025-06-15': {}};
+      expect(n.orderedDayKeys(), ['2025-06-01', '2025-06-09', '2025-06-15']);
+
+      n.items = [
+        {
+          'item_type': 'memory',
+          'memory': {'date': '2025-06-20'},
+        },
+      ];
+      expect(n.orderedDayKeys(),
+          ['2025-06-01', '2025-06-09', '2025-06-15', '2025-06-20']);
+    });
   });
 
   group('activeDayKey', () {

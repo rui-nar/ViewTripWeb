@@ -970,25 +970,51 @@ class ProjectNotifier extends ChangeNotifier
     totalElevationGainM = elev;
   }
 
+  // Raw (pre-/1000) meters per day — divided down to km only when read, so
+  // caching this can't shift the float rounding of the original single
+  // divide-at-the-end computation below.
+  Map<String, ({double distanceM, double elevationM})>? _dayStatsCache;
+  List<Map<String, dynamic>>? _dayStatsCacheItems;
+  List<Map<String, dynamic>>? _dayStatsCacheActivities;
+
   /// Distance (km) and climb (m) summed over the activities on [dateKey]
   /// ("YYYY-MM-DD"). An activity belongs to the day of its
   /// `start_date_local` — the same rule the activity panel groups by — so the
   /// totals match what the day header shows. Returns zeros for a day with no
   /// activities (the Edit Day hero then hides its stat strip).
+  ///
+  /// The day carousel calls this once per visible day on every rebuild —
+  /// including every rebuild a day *selection* triggers — so recomputing it
+  /// with a fresh O(activities) scan of `items` each time compounds with the
+  /// map's own per-selection rebuild cost (see map_panel.dart's
+  /// buildDayIndex). Cached here instead: one O(items) pass builds stats for
+  /// every day at once, reused until `items`/`activities` actually change.
   ({double distanceKm, double elevationM}) dayStats(String dateKey) {
-    final byId = {for (final a in activities) a['id']?.toString(): a};
-    double dist = 0;
-    double elev = 0;
-    for (final item in items) {
-      if (item['item_type'] != 'activity') continue;
-      final a = byId[item['activity_id']?.toString()];
-      if (a == null) continue;
-      final ds = (a['start_date_local'] as String?)?.split('T').first;
-      if (ds != dateKey) continue;
-      dist += (a['distance']             as num? ?? 0).toDouble();
-      elev += (a['total_elevation_gain'] as num? ?? 0).toDouble();
+    if (!identical(items, _dayStatsCacheItems) ||
+        !identical(activities, _dayStatsCacheActivities)) {
+      final byId = {for (final a in activities) a['id']?.toString(): a};
+      final cache = <String, ({double distanceM, double elevationM})>{};
+      for (final item in items) {
+        if (item['item_type'] != 'activity') continue;
+        final a = byId[item['activity_id']?.toString()];
+        if (a == null) continue;
+        final ds = (a['start_date_local'] as String?)?.split('T').first;
+        if (ds == null) continue;
+        final prev = cache[ds] ?? (distanceM: 0.0, elevationM: 0.0);
+        cache[ds] = (
+          distanceM: prev.distanceM + (a['distance'] as num? ?? 0).toDouble(),
+          elevationM: prev.elevationM +
+              (a['total_elevation_gain'] as num? ?? 0).toDouble(),
+        );
+      }
+      _dayStatsCache = cache;
+      _dayStatsCacheItems = items;
+      _dayStatsCacheActivities = activities;
     }
-    return (distanceKm: dist / 1000.0, elevationM: elev);
+    final entry = _dayStatsCache![dateKey];
+    return entry == null
+        ? (distanceKm: 0.0, elevationM: 0.0)
+        : (distanceKm: entry.distanceM / 1000.0, elevationM: entry.elevationM);
   }
 
   static String _ymd(DateTime d) =>
@@ -996,23 +1022,41 @@ class ProjectNotifier extends ChangeNotifier
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
 
+  List<String>? _orderedDayKeysCache;
+  Map<String, Map<String, dynamic>>? _orderedDayKeysCacheDayMeta;
+  List<Map<String, dynamic>>? _orderedDayKeysCacheActivities;
+  List<Map<String, dynamic>>? _orderedDayKeysCacheItems;
+
   /// Every day key ("YYYY-MM-DD") the project touches, ascending: the union of
   /// day-meta days, activity dates and memory dates. This is the full-trip day
   /// list regardless of any active filter (unlike the activity panel's
   /// display-derived list), so it's safe to use from the add-FAB.
+  ///
+  /// Called from several places on every selection-triggered rebuild — the
+  /// day carousel, computeSelectionStats, activeDayKey — each a fresh
+  /// O(activities + items) scan before this cache existed. Same
+  /// identical()-based convention as dayStats above.
   List<String> orderedDayKeys() {
-    final keys = <String>{...dayMeta.keys};
-    for (final a in activities) {
-      final ds = (a['start_date_local'] as String?)?.split('T').first;
-      if (ds != null && ds.isNotEmpty) keys.add(ds);
+    if (!identical(dayMeta, _orderedDayKeysCacheDayMeta) ||
+        !identical(activities, _orderedDayKeysCacheActivities) ||
+        !identical(items, _orderedDayKeysCacheItems)) {
+      final keys = <String>{...dayMeta.keys};
+      for (final a in activities) {
+        final ds = (a['start_date_local'] as String?)?.split('T').first;
+        if (ds != null && ds.isNotEmpty) keys.add(ds);
+      }
+      for (final item in items) {
+        if (item['item_type'] != 'memory') continue;
+        final m = item['memory'] as Map<String, dynamic>?;
+        final ds = (m?['date'] as String?)?.split('T').first;
+        if (ds != null && ds.isNotEmpty) keys.add(ds);
+      }
+      _orderedDayKeysCache = keys.toList()..sort();
+      _orderedDayKeysCacheDayMeta = dayMeta;
+      _orderedDayKeysCacheActivities = activities;
+      _orderedDayKeysCacheItems = items;
     }
-    for (final item in items) {
-      if (item['item_type'] != 'memory') continue;
-      final m = item['memory'] as Map<String, dynamic>?;
-      final ds = (m?['date'] as String?)?.split('T').first;
-      if (ds != null && ds.isNotEmpty) keys.add(ds);
-    }
-    return keys.toList()..sort();
+    return _orderedDayKeysCache!;
   }
 
   /// The day the add-FAB should default to: today while the trip is still
@@ -1849,10 +1893,17 @@ class ProjectNotifier extends ChangeNotifier
 
   void removeItemLocally(int index) {
     if (index >= 0 && index < items.length) {
-      final removed = items.removeAt(index);
+      // New list identity, not an in-place removeAt/removeWhere: map_panel's
+      // marker/polyline cache and ProjectNotifier.dayStats both invalidate
+      // via `identical(items/activities, _last...)`, which a same-object
+      // in-place mutation would never trip (see the memory-refresh path
+      // above for the same convention).
+      final next = List.of(items);
+      final removed = next.removeAt(index);
+      items = next;
       if (removed['item_type'] == 'activity') {
         final actId = removed['activity_id']?.toString();
-        activities.removeWhere((a) => a['id']?.toString() == actId);
+        activities = activities.where((a) => a['id']?.toString() != actId).toList();
       }
     }
     notifyListeners();
