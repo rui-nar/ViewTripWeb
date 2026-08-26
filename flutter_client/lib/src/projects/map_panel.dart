@@ -263,13 +263,13 @@ Set<String> dayStartActivityIds(
 /// shortly after (still well within Android's ANR window) stacked another
 /// full pass on top and blocked the UI isolate long enough to trip an ANR.
 ///
-/// This index and the geometry specs in [buildPolylineSpecs] /
-/// [buildActivityMarkerSpecs] / [buildSegmentMarkerSpecs] depend only on
+/// This index and the geometry specs in [_buildPolylineSpecs] /
+/// [_buildActivityMarkerSpecs] / [_buildSegmentMarkerSpecs] depend only on
 /// [items] (and, for the specs, geo/track style) — never on which day is
 /// currently selected — so callers cache them and only rebuild when those
 /// actually change. A selection change alone then only needs an O(1) lookup
 /// per selected day here, plus the cheap restyle passes in
-/// [stylePolylines] / [styleActivityMarkers] / [styleSegmentMarkers].
+/// [_stylePolylines] / [_styleActivityMarkers] / [_styleSegmentMarkers].
 Map<String, ({Set<String> actIds, Set<String> segIds})> buildDayIndex(
   List<Map<String, dynamic>> items,
   Map<dynamic, Map<String, dynamic>> activityById,
@@ -361,8 +361,8 @@ List<Marker> buildDayBreakpointMarkers(
 }
 
 /// Everything about an activity marker that doesn't depend on selection:
-/// point, icon, and base (pre-highlight) colour. See [buildActivityMarkerSpecs]
-/// / [styleActivityMarkers].
+/// point, icon, and base (pre-highlight) colour. See [_buildActivityMarkerSpecs]
+/// / [_styleActivityMarkers].
 class _ActivityMarkerSpec {
   final LatLng point;
   final String? actId;
@@ -384,7 +384,7 @@ class _ActivityMarkerSpec {
 /// resolution work that used to run again, from scratch, on every selection
 /// change (see [buildDayIndex]'s doc comment). Independent of selection;
 /// callers cache this and only rerun it when geo/items/style change.
-List<_ActivityMarkerSpec> buildActivityMarkerSpecs(
+List<_ActivityMarkerSpec> _buildActivityMarkerSpecs(
   Map<String, dynamic> geo,
   Color trackColor, {
   bool colorByType = false,
@@ -424,7 +424,7 @@ List<_ActivityMarkerSpec> buildActivityMarkerSpecs(
 /// Cheap per-selection restyle over [specs] — just choosing a colour and
 /// whether to add the selected activity's start/end dots, no GeoJSON parsing
 /// or type-bucket resolution. This is what a selection change should cost.
-List<Marker> styleActivityMarkers(
+List<Marker> _styleActivityMarkers(
   List<_ActivityMarkerSpec> specs,
   dynamic selectedActivityId,
   bool hasSelection, {
@@ -492,8 +492,8 @@ class _SegmentMarkerSpec {
 }
 
 // Shared by _MapPanelState and ManageMapPanelState (mirrors
-// buildActivityMarkerSpecs above).
-List<_SegmentMarkerSpec> buildSegmentMarkerSpecs(
+// _buildActivityMarkerSpecs above).
+List<_SegmentMarkerSpec> _buildSegmentMarkerSpecs(
   Map<String, dynamic> geo,
   Color trackColor, {
   bool colorByType = false,
@@ -529,8 +529,8 @@ List<_SegmentMarkerSpec> buildSegmentMarkerSpecs(
   return specs;
 }
 
-/// Cheap per-selection restyle over [specs] — see [styleActivityMarkers].
-List<Marker> styleSegmentMarkers(
+/// Cheap per-selection restyle over [specs] — see [_styleActivityMarkers].
+List<Marker> _styleSegmentMarkers(
   List<_SegmentMarkerSpec> specs,
   dynamic selectedSegmentId,
   bool hasSelection,
@@ -1428,16 +1428,16 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
         };
         _dayIndex = buildDayIndex(items, actById);
         _polylineSpecs = geo != null
-            ? buildPolylineSpecs(geo, items, trackColor,
+            ? _buildPolylineSpecs(geo, items, trackColor,
                 trackSecondaryColor: trackSecondaryColor, alternating: alternating,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _activityMarkerSpecs = geo != null
-            ? buildActivityMarkerSpecs(geo, trackColor,
+            ? _buildActivityMarkerSpecs(geo, trackColor,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _segmentMarkerSpecs = geo != null
-            ? buildSegmentMarkerSpecs(geo, trackColor,
+            ? _buildSegmentMarkerSpecs(geo, trackColor,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _cachedDayBreakpointMarkers = geo != null
@@ -1457,18 +1457,18 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           daySegIds.addAll(r.segIds);
         }
       }
-      _cachedPolylines = stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
+      _cachedPolylines = _stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
           selectedOnly: tilesActive, dayActIds: dayActIds, daySegIds: daySegIds);
       _cachedAllPoints = tilesActive && geo != null
           ? _allPointsFromGeo(geo)
           : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId != null;
-      _cachedActivityMarkers = styleActivityMarkers(
+      _cachedActivityMarkers = _styleActivityMarkers(
           _activityMarkerSpecs, selActId, hasSelection,
           dayBreakpointMarkers: _cachedDayBreakpointMarkers);
       _cachedSegmentMarkers =
-          styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
+          _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
@@ -1751,8 +1751,8 @@ class _MapToggleRow extends StatelessWidget {
 }
 
 /// Everything about a polyline that doesn't depend on selection: points,
-/// base (pre-highlight) colour, and line style. See [buildPolylineSpecs] /
-/// [stylePolylines] — the split that fixed the day-carousel ANR (see
+/// base (pre-highlight) colour, and line style. See [_buildPolylineSpecs] /
+/// [_stylePolylines] — the split that fixed the day-carousel ANR (see
 /// [buildDayIndex]'s doc comment).
 class _PolylineSpec {
   final List<LatLng> points;
@@ -1771,10 +1771,10 @@ class _PolylineSpec {
 
 // Shared by _MapPanelState and ManageMapPanelState. Builds the geometry/style
 // half of each polyline — everything except which one is highlighted, which
-// depends only on selection and is applied separately by [stylePolylines].
+// depends only on selection and is applied separately by [_stylePolylines].
 // Independent of selection; callers cache this and only rerun it when
 // geo/items/style change.
-List<_PolylineSpec> buildPolylineSpecs(
+List<_PolylineSpec> _buildPolylineSpecs(
   Map<String, dynamic> geo,
   List<Map<String, dynamic>> items,
   Color trackColor, {
@@ -1858,7 +1858,7 @@ List<_PolylineSpec> buildPolylineSpecs(
 /// of items across one or more selected days. No GeoJSON parsing or
 /// type-bucket resolution here — just picking a colour/width per spec, which
 /// is what a selection change should cost.
-List<Polyline> stylePolylines(
+List<Polyline> _stylePolylines(
   List<_PolylineSpec> specs,
   dynamic selectedActivityId,
   dynamic selectedSegmentId,
@@ -2325,16 +2325,16 @@ class ManageMapPanelState extends State<ManageMapPanel>
         };
         _dayIndex = buildDayIndex(items, actById);
         _polylineSpecs = geo != null
-            ? buildPolylineSpecs(geo, items, trackColor,
+            ? _buildPolylineSpecs(geo, items, trackColor,
                 trackSecondaryColor: trackSecondaryColor2, alternating: alternating,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _activityMarkerSpecs = geo != null
-            ? buildActivityMarkerSpecs(geo, trackColor,
+            ? _buildActivityMarkerSpecs(geo, trackColor,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _segmentMarkerSpecs = geo != null
-            ? buildSegmentMarkerSpecs(geo, trackColor,
+            ? _buildSegmentMarkerSpecs(geo, trackColor,
                 colorByType: notifier.colorByType, typeStyles: notifier.typeStyles)
             : const [];
         _cachedDayBreakpointMarkers = geo != null
@@ -2355,15 +2355,15 @@ class ManageMapPanelState extends State<ManageMapPanel>
           daySegIds.addAll(r.segIds);
         }
       }
-      _cachedPolylines = stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
+      _cachedPolylines = _stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
           dayActIds: dayActIds, daySegIds: daySegIds);
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId2 != null;
-      _cachedActivityMarkers = styleActivityMarkers(
+      _cachedActivityMarkers = _styleActivityMarkers(
           _activityMarkerSpecs, selActId, hasSelection,
           dayBreakpointMarkers: _cachedDayBreakpointMarkers);
       _cachedSegmentMarkers =
-          styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
+          _styleSegmentMarkers(_segmentMarkerSpecs, selSegId, hasSelection);
       _cachedMemoryMarkers =
           _buildMemoryMarkers(items, selMemId, hasSelection, effectiveDays, context);
       _cachedJournalMarkers =
