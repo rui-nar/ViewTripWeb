@@ -249,5 +249,49 @@ class TestEdgeCases:
         assert result.placed
 
 
+# ---------------------------------------------------------------------------
+# Title/trip-summary obstacle avoidance (title-config feature): the resolved
+# title rect is passed in as an extra `obstacles` entry, treated exactly like
+# an already-placed card — checked with a plain 2D overlap, not limited to
+# rectangles that themselves sit on the border track.
+# ---------------------------------------------------------------------------
+
+class TestObstacleAvoidance:
+    def test_card_does_not_overlap_an_obstacle_covering_its_natural_spot(self):
+        pin = PinSpec(id="only", x=1000, y=400, sort_key=1, size=(200, 120))
+        naive = place_cards_perimeter([pin], CANVAS, margin=MARGIN)[0].card_rect
+
+        result = place_cards_perimeter(
+            [pin], CANVAS, margin=MARGIN, obstacles=[naive])[0]
+        assert result.placed
+        assert not result.card_rect.overlaps(naive)
+
+    def test_placed_cards_still_avoid_each_other_alongside_an_obstacle(self):
+        pins = _ring_pins(6, radius=300, size=(150, 90))
+        # The top-left corner, where the border track (and several of this
+        # ring's natural positions) start.
+        obstacle = Rect(MARGIN, MARGIN, MARGIN + 220, MARGIN + 160)
+        results = place_cards_perimeter(
+            pins, CANVAS, margin=MARGIN, obstacles=[obstacle])
+
+        rects = _placed(results)
+        assert rects, "expected at least one card to still be placeable"
+        _assert_disjoint(rects)
+        for rect in rects:
+            assert not rect.overlaps(obstacle)
+
+    def test_obstacles_never_appear_as_a_result(self):
+        pins = _ring_pins(4)
+        results = place_cards_perimeter(
+            pins, CANVAS, margin=MARGIN, obstacles=[Rect(0, 0, 100, 100)])
+        assert {r.pin_id for r in results} == {p.id for p in pins}
+
+    def test_no_obstacles_behaves_exactly_like_before(self):
+        pins = _ring_pins(10)
+        with_empty = place_cards_perimeter(pins, CANVAS, margin=MARGIN, obstacles=[])
+        without_kwarg = place_cards_perimeter(pins, CANVAS, margin=MARGIN)
+        assert with_empty == without_kwarg
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

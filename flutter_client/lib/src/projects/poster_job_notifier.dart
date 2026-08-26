@@ -63,6 +63,13 @@ Future<PosterPreview> fetchPosterPreview({
   // Matches `PosterRequest.paper_size` in `api/poster.py`; 'A0' preserves
   // existing behavior for any caller that doesn't pass this yet.
   String paperSize = 'A0',
+  // Title/trip-summary card placement (poster_title_dialog.dart). Matches
+  // `PosterRequest.title_position`/`title_text`/`title_scale`; the defaults
+  // here preserve the pre-feature hardcoded top-left corner, the project's
+  // own name, and the unscaled title size.
+  Map<String, double> titlePosition = const {'x': 0.0, 'y': 0.0},
+  String? titleText,
+  double titleScale = 1.0,
   ApiClient? client,
   // The server caps its own basemap fetch at an 8s wall-clock budget
   // (poster_renderer._PREVIEW_BASEMAP_BUDGET_S) and degrades to a warning
@@ -78,6 +85,9 @@ Future<PosterPreview> fetchPosterPreview({
       'paper_size': paperSize,
       'config': config,
       'memories': memories,
+      'title_position': titlePosition,
+      'title_text': titleText,
+      'title_scale': titleScale,
     },
     timeout: timeout,
   );
@@ -109,6 +119,13 @@ Future<int> createPosterJob({
   // Matches `PosterRequest.paper_size` in `api/poster.py`; 'A0' preserves
   // existing behavior for any caller that doesn't pass this yet.
   String paperSize = 'A0',
+  // Title/trip-summary card placement (poster_title_dialog.dart). Matches
+  // `PosterRequest.title_position`/`title_text`/`title_scale`; the defaults
+  // here preserve the pre-feature hardcoded top-left corner, the project's
+  // own name, and the unscaled title size.
+  Map<String, double> titlePosition = const {'x': 0.0, 'y': 0.0},
+  String? titleText,
+  double titleScale = 1.0,
   ApiClient? client,
 }) async {
   final result = await (client ?? api).post(ref.path('/poster'), {
@@ -117,6 +134,9 @@ Future<int> createPosterJob({
     'paper_size': paperSize,
     'config': config,
     'memories': memories,
+    'title_position': titlePosition,
+    'title_text': titleText,
+    'title_scale': titleScale,
   }) as Map<String, dynamic>;
   return result['job_id'] as int;
 }

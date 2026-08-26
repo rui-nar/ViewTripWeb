@@ -50,6 +50,9 @@ void main() {
         'paper_size': 'A0',
         'config': {'distance': true},
         'memories': [],
+        'title_position': {'x': 0.0, 'y': 0.0},
+        'title_text': null,
+        'title_scale': 1.0,
       });
     });
 
@@ -72,6 +75,31 @@ void main() {
       );
 
       expect(capturedBody?['paper_size'], 'A3');
+    });
+
+    test('POSTs the given title position/text/scale when provided', () async {
+      Map<String, dynamic>? capturedBody;
+      final mock = MockClient((req) async {
+        capturedBody = jsonDecode(req.body) as Map<String, dynamic>;
+        return _json(201, {'job_id': 42});
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      await createPosterJob(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: {'north': 1, 'south': 0, 'east': 1, 'west': 0},
+        orientation: 'landscape',
+        config: {'distance': true},
+        memories: const [],
+        titlePosition: const {'x': 0.3, 'y': 0.6},
+        titleText: 'Alps Only',
+        titleScale: 1.5,
+        client: client,
+      );
+
+      expect(capturedBody?['title_position'], {'x': 0.3, 'y': 0.6});
+      expect(capturedBody?['title_text'], 'Alps Only');
+      expect(capturedBody?['title_scale'], 1.5);
     });
 
     test('a job-creation API error is thrown as ApiException', () async {
@@ -128,6 +156,9 @@ void main() {
         'memories': [
           {'id': 1, 'lat': 0.5, 'lon': 0.5, 'date': '2024-01-01'}
         ],
+        'title_position': {'x': 0.0, 'y': 0.0},
+        'title_text': null,
+        'title_scale': 1.0,
       });
     });
 
@@ -151,6 +182,32 @@ void main() {
       );
 
       expect(capturedBody?['paper_size'], 'A2');
+    });
+
+    test('POSTs the given title position/text/scale when provided', () async {
+      Map<String, dynamic>? capturedBody;
+      final mock = MockClient((req) async {
+        capturedBody = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response.bytes([0x89, 0x50, 0x4E, 0x47], 200,
+            headers: {'content-type': 'image/png'});
+      });
+      final client = ApiClient(httpClient: mock)..setToken('jwt');
+
+      await fetchPosterPreview(
+        ref: const ProjectRef(name: 'Trip'),
+        bounds: const {},
+        orientation: 'landscape',
+        config: const {},
+        memories: const [],
+        titlePosition: const {'x': 0.1, 'y': 0.2},
+        titleText: 'Alps Only',
+        titleScale: 0.75,
+        client: client,
+      );
+
+      expect(capturedBody?['title_position'], {'x': 0.1, 'y': 0.2});
+      expect(capturedBody?['title_text'], 'Alps Only');
+      expect(capturedBody?['title_scale'], 0.75);
     });
 
     test('a non-2xx response throws ApiException rather than returning bytes',

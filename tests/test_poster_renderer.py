@@ -1420,3 +1420,152 @@ class TestTripSummaryRendering:
         assert (rect.left, rect.top) == (margin, margin)
         assert rect.right - rect.left == card_width_px(dpi)
         assert rect.bottom - rect.top > 0  # sized to content, not a fixed box
+
+
+class TestTripSummaryTitleOverrides:
+    """title_position / title_text / title_scale (title-config feature): the
+    trip-summary card's position, text and size are all overridable from the
+    top-level request, threaded through before card placement runs so memory
+    cards can avoid the resolved rect (see TestTitleAvoidsMemoryCards below)."""
+
+    def _spy_on_summary(self, monkeypatch):
+        """Wraps _draw_trip_summary and records every (rect, layout) it was
+        called with, still calling through to the real implementation."""
+        import src.poster.poster_renderer as renderer_module
+
+        calls = []
+        real_summary = renderer_module._draw_trip_summary
+
+        def spy(canvas, rect, layout, scale, theme):
+            calls.append((rect, layout))
+            return real_summary(canvas, rect, layout, scale, theme)
+
+        monkeypatch.setattr(renderer_module, "_draw_trip_summary", spy)
+        return calls
+
+    def test_omitted_title_fields_render_byte_for_byte_identical(self, project_id):
+        """The regression bar: a request shaped like it predates this feature
+        (no title_position/title_text/title_scale keys at all) must render
+        pixel-for-pixel the same as one carrying the new fields at the values
+        that are supposed to be their defaults."""
+        new_style = {
+            **_BODY,
+            "title_position": {"x": 0.0, "y": 0.0},
+            "title_text": None,
+            "title_scale": 1.0,
+        }
+        old_png, old_warning = render_poster_preview(
+            project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+        new_png, new_warning = render_poster_preview(
+            project_id, 1, new_style, tile_fetcher=_fake_tile_fetcher)
+        assert old_png == new_png
+        assert old_warning == new_warning
+
+    def test_title_position_moves_the_card_off_the_corner(self, project_id, monkeypatch):
+        calls = self._spy_on_summary(monkeypatch)
+        body = {**_BODY, "title_position": {"x": 0.5, "y": 0.5}}
+        render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+
+        ratio = _PREVIEW_MAX_DIMENSION / max(*_target_size("landscape"))
+        dpi = 150.0 * ratio
+        margin = mm_to_px(_PAGE_MARGIN_MM, dpi)
+        assert len(calls) == 1
+        rect, _layout = calls[0]
+        assert rect.left > margin
+        assert rect.top > margin
+
+    def test_title_position_is_clamped_to_the_poster(self, project_id, monkeypatch):
+        """An out-of-[0,1] position (a stale/adversarial request) must not
+        push the card outside the page margin."""
+        calls = self._spy_on_summary(monkeypatch)
+        body = {**_BODY, "title_position": {"x": 5.0, "y": -5.0}}
+        render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+
+        ratio = _PREVIEW_MAX_DIMENSION / max(*_target_size("landscape"))
+        dpi = 150.0 * ratio
+        margin = mm_to_px(_PAGE_MARGIN_MM, dpi)
+        target_w, target_h = [round(d * ratio) for d in _target_size("landscape")]
+        rect, _layout = calls[0]
+        assert rect.left >= margin and rect.top >= margin
+        assert rect.right <= target_w - margin
+        assert rect.bottom <= target_h - margin
+
+    def test_title_text_overrides_the_project_name(self, project_id, monkeypatch):
+        calls = self._spy_on_summary(monkeypatch)
+        body = {**_BODY, "title_text": "Alps Only"}
+        render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+
+        _rect, layout = calls[0]
+        texts = [op.text for op in layout.ops if hasattr(op, "text")]
+        assert "Alps Only" in texts
+        assert "My Trip" not in texts  # the project's own name, overridden
+
+    def test_no_title_text_falls_back_to_the_project_name(self, project_id, monkeypatch):
+        calls = self._spy_on_summary(monkeypatch)
+        render_poster_preview(project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+
+        _rect, layout = calls[0]
+        texts = [op.text for op in layout.ops if hasattr(op, "text")]
+        assert "My Trip" in texts
+
+    def test_title_scale_changes_the_rendered_output(self, project_id):
+        small_png, _ = render_poster_preview(
+            project_id, 1, {**_BODY, "title_scale": 0.5}, tile_fetcher=_fake_tile_fetcher)
+        big_png, _ = render_poster_preview(
+            project_id, 1, {**_BODY, "title_scale": 2.0}, tile_fetcher=_fake_tile_fetcher)
+        assert small_png != big_png
+
+    def test_title_scale_is_clamped_regardless_of_the_caller(self, project_id, monkeypatch):
+        """Defence in depth: api/poster.py's validator is the primary trust
+        boundary, but a request dict reaching the renderer directly (a test,
+        a stale request_json row) must still be clamped, not trusted."""
+        import src.poster.poster_renderer as renderer_module
+        from src.poster.typography import TYPE_SCALE
+
+        seen_sizes = []
+        real_layout = renderer_module._trip_summary_layout
+
+        def layout_spy(project, span, scale, title_text):
+            seen_sizes.append(scale.style("hero_title").size_pt)
+            return real_layout(project, span, scale, title_text)
+
+        monkeypatch.setattr(renderer_module, "_trip_summary_layout", layout_spy)
+        render_poster_preview(
+            project_id, 1, {**_BODY, "title_scale": 999.0}, tile_fetcher=_fake_tile_fetcher)
+
+        base = TYPE_SCALE["hero_title"].size_pt
+        assert seen_sizes[0] == pytest.approx(base * 2.0)  # clamped to 2.0x, not 999x
+
+    def test_memory_cards_avoid_the_title_rect(self, project_id, monkeypatch):
+        """Proves the renderer actually wires the resolved title rect into
+        place_cards as an obstacle; the avoidance geometry itself is covered
+        directly in tests/test_card_placement.py."""
+        import src.poster.poster_renderer as renderer_module
+
+        captured = {}
+        real_place = renderer_module.place_cards
+
+        def spy(*args, **kwargs):
+            captured["obstacles"] = kwargs.get("obstacles")
+            return real_place(*args, **kwargs)
+
+        monkeypatch.setattr(renderer_module, "place_cards", spy)
+        render_poster_preview(project_id, 1, _BODY, tile_fetcher=_fake_tile_fetcher)
+
+        assert captured["obstacles"] and len(list(captured["obstacles"])) == 1
+
+    def test_no_title_obstacle_when_trip_summary_is_off(self, project_id, monkeypatch):
+        import src.poster.poster_renderer as renderer_module
+
+        captured = {}
+        real_place = renderer_module.place_cards
+
+        def spy(*args, **kwargs):
+            captured["obstacles"] = kwargs.get("obstacles")
+            return real_place(*args, **kwargs)
+
+        monkeypatch.setattr(renderer_module, "place_cards", spy)
+        body = {**_BODY, "config": {**_BODY["config"], "trip_summary": False}}
+        render_poster_preview(project_id, 1, body, tile_fetcher=_fake_tile_fetcher)
+
+        assert not captured["obstacles"]

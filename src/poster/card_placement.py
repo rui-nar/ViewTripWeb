@@ -179,6 +179,7 @@ def place_cards(
     min_radius: Optional[float] = None,
     max_radius: Optional[float] = None,
     radius_step: Optional[float] = None,
+    obstacles: Sequence[Rect] = (),
 ) -> List[CardPlacement]:
     """Place each pin's card without overlaps, avoiding the route where possible.
 
@@ -201,6 +202,11 @@ def place_cards(
         max_radius: Longest leader length to try. Defaults to 6x ``min_radius``.
         radius_step: Distance between successive radii. Defaults to a twelfth
             of the (max - min) span.
+        obstacles: Extra rectangles treated exactly like already-placed cards
+            — a candidate overlapping one is rejected outright, and a leader
+            line crossing one is penalised. Used to keep memory cards off the
+            user-placed title/trip-summary card, which is resolved before
+            placement runs and is not itself one of ``pins``.
 
     Returns:
         One ``CardPlacement`` per input pin, in processing (sorted) order.
@@ -208,7 +214,7 @@ def place_cards(
     sorted_pins = sorted(pins, key=lambda p: p.sort_key)
     pin_points = [(p.x, p.y) for p in sorted_pins]
 
-    placed_rects: List[Rect] = []
+    placed_rects: List[Rect] = list(obstacles)
     results: List[CardPlacement] = []
 
     for pin in sorted_pins:

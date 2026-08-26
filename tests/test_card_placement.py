@@ -309,5 +309,83 @@ class TestLeaderAnchor:
                 assert r.anchor is None
 
 
+# ---------------------------------------------------------------------------
+# Title/trip-summary obstacle avoidance (title-config feature): the resolved
+# title rect is passed in as an extra `obstacles` entry, treated exactly like
+# an already-placed card.
+# ---------------------------------------------------------------------------
+
+class TestObstacleAvoidance:
+    def test_card_does_not_overlap_an_obstacle_covering_its_natural_spot(self):
+        # The pin's naive placement (north first) would land squarely on this
+        # obstacle if it were ignored.
+        pin = PinSpec(id="p", x=1000, y=500, sort_key=1, size=(200, 120))
+        obstacle = Rect(900, 300, 1100, 460)
+        results = place_cards([pin], canvas_size=(2000, 2000), obstacles=[obstacle])
+
+        assert results[0].placed
+        rect = results[0].card_rect
+        assert not _rects_overlap(rect, obstacle)
+
+    def test_without_the_obstacle_the_card_would_have_landed_there(self):
+        """Control pairing the test above: proves the obstacle is actually
+        doing something, not just that the search happened to land elsewhere."""
+        pin = PinSpec(id="p", x=1000, y=500, sort_key=1, size=(200, 120))
+        obstacle = Rect(900, 300, 1100, 460)
+        naive = place_cards([pin], canvas_size=(2000, 2000))[0].card_rect
+        assert _rects_overlap(naive, obstacle), (
+            "expected the obstacle-unaware placement to land on the obstacle; "
+            "if this stops holding, the avoidance test above proves nothing"
+        )
+
+    def test_multiple_obstacles_are_all_avoided(self):
+        pin = PinSpec(id="p", x=1000, y=1000, sort_key=1, size=(150, 100))
+        obstacles = [
+            Rect(900, 800, 1100, 960),
+            Rect(1120, 900, 1320, 1060),
+            Rect(700, 1020, 900, 1180),
+        ]
+        results = place_cards([pin], canvas_size=(2000, 2000), obstacles=obstacles)
+
+        assert results[0].placed
+        rect = results[0].card_rect
+        for obstacle in obstacles:
+            assert not _rects_overlap(rect, obstacle)
+
+    def test_obstacles_never_appear_as_a_result(self):
+        """Obstacles are extra geometry, not extra pins — the output must
+        still have exactly one CardPlacement per input pin."""
+        pins = [
+            PinSpec(id="a", x=200, y=200, sort_key=1, size=(100, 60)),
+            PinSpec(id="b", x=800, y=800, sort_key=2, size=(100, 60)),
+        ]
+        results = place_cards(
+            pins, canvas_size=(2000, 2000), obstacles=[Rect(400, 400, 600, 500)])
+        assert {r.pin_id for r in results} == {"a", "b"}
+
+    def test_placed_cards_still_avoid_each_other_alongside_an_obstacle(self):
+        pins = [
+            PinSpec(id="a", x=400, y=400, sort_key=1, size=(100, 60)),
+            PinSpec(id="b", x=460, y=400, sort_key=2, size=(100, 60)),
+        ]
+        obstacle = Rect(0, 0, 300, 300)
+        results = place_cards(pins, canvas_size=(2000, 2000), obstacles=[obstacle])
+        rects = _placed_rects(results)
+        assert len(rects) == 2
+        assert not _rects_overlap(rects[0], rects[1])
+        for rect in rects:
+            assert not _rects_overlap(rect, obstacle)
+
+    def test_no_obstacles_behaves_exactly_like_before(self):
+        pins = [
+            PinSpec(id=f"p{i}", x=300 + (i % 5) * 15, y=300 + (i // 5) * 15,
+                    sort_key=date(2025, 1, 1 + i), size=(90, 50))
+            for i in range(10)
+        ]
+        with_empty = place_cards(pins, canvas_size=(1500, 1500), obstacles=[])
+        without_kwarg = place_cards(pins, canvas_size=(1500, 1500))
+        assert with_empty == without_kwarg
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

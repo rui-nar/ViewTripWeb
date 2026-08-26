@@ -36,7 +36,7 @@ from typing import Annotated, List, Literal, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from models.db import get_session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -44,7 +44,11 @@ from api.project_access import OwnerParam, resolve_project
 from models.project_db import DBPosterJob
 from src.poster.poster_job_runner import run_poster_job
 from src.jobs.queue import QUEUE_POSTER, enqueue
-from src.poster.poster_renderer import render_poster_preview
+from src.poster.poster_renderer import (
+    _TITLE_SCALE_MAX,
+    _TITLE_SCALE_MIN,
+    render_poster_preview,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["poster"])
 poster_public_router = APIRouter(prefix="/api/poster", tags=["poster"])
@@ -61,6 +65,15 @@ class BoundsIn(BaseModel):
     south: float
     east: float
     west: float
+
+
+class TitlePositionIn(BaseModel):
+    """Normalized (0-1) position of the title/trip-summary card's top-left
+    corner within the poster's drawable area. ``(0, 0)`` is the pre-feature
+    hardcoded top-left corner, so an omitted position preserves today's
+    placement exactly."""
+    x: float = 0.0
+    y: float = 0.0
 
 
 class PosterConfigIn(BaseModel):
@@ -103,6 +116,22 @@ class PosterRequest(BaseModel):
     paper_size: Literal["A0", "A1", "A2", "A3", "A4"] = "A0"
     config: PosterConfigIn
     memories: List[PosterMemoryIn] = Field(default_factory=list)
+    # Trip-summary/title card placement (poster_title_dialog.dart, between the
+    # config dialog and the layout preview). Defaults reproduce the
+    # pre-feature hardcoded top-left corner, the project's own name, and the
+    # unscaled "hero_title" size exactly, so a request that omits them renders
+    # byte-for-byte the same as before this feature existed.
+    title_position: TitlePositionIn = Field(default_factory=TitlePositionIn)
+    title_text: Optional[str] = None
+    title_scale: float = 1.0
+
+    @field_validator("title_scale")
+    @classmethod
+    def _clamp_title_scale(cls, v: float) -> float:
+        """Clamp rather than reject: the client-side slider already limits to
+        this same range, but the API is the trust boundary, not the Flutter
+        widget. Reuses poster_renderer's bounds so the two can't drift apart."""
+        return max(_TITLE_SCALE_MIN, min(_TITLE_SCALE_MAX, v))
 
 
 class JobIdOut(BaseModel):
