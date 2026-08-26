@@ -18,7 +18,7 @@ import 'package:viewtrip_client/src/projects/gpx_import_dialog.dart';
 
 const _ref = ProjectRef(name: 'Trip');
 
-final Uint8List _gpxBytes = utf8.encode('<gpx></gpx>') as Uint8List;
+final Uint8List _gpxBytes = utf8.encode('<gpx></gpx>');
 
 /// Fakes the file_picker plugin so tests can pick a .gpx file without a real
 /// platform channel — mirrors memory_dialog_save_result_test.dart's fake.
