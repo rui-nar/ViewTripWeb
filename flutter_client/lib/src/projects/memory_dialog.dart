@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../billing/upgrade_sheet.dart';
+import '../core/picked_file_bytes.dart';
 import 'location_picker_dialog.dart';
 import 'project_notifier.dart';
 
@@ -109,18 +110,13 @@ class _MemoryDialogState extends State<MemoryDialog> {
   }
 
   Future<void> _pickPhotos() async {
-    final result = await FilePicker.pickFiles(
-      allowMultiple: true,
-      type: FileType.image,
-      withData: true,
-    );
-    if (result == null) return;
-    for (final f in result.files) {
-      if (f.bytes != null) {
-        setState(() {
-          _pendingPhotos.add((bytes: f.bytes!, filename: f.name));
-        });
-      }
+    final files = await FilePicker.pickFiles(type: FileType.image);
+    for (final f in files) {
+      final bytes = await f.readAsBytesOrNull();
+      if (bytes == null) continue;
+      setState(() {
+        _pendingPhotos.add((bytes: bytes, filename: f.name));
+      });
     }
   }
 

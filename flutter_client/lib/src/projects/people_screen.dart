@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import '../billing/upgrade_sheet.dart';
 import '../core/countries.dart';
 import '../core/design_tokens.dart';
+import '../core/picked_file_bytes.dart';
 import 'encounter_dialog.dart';
 import 'group_form_dialog.dart';
 import 'people_search.dart';
@@ -554,11 +555,12 @@ class _PersonDetailSheetState extends State<_PersonDetailSheet> {
   }
 
   Future<void> _pickAvatar() async {
-    final result = await FilePicker.pickFiles(type: FileType.image, withData: true);
-    final f = result?.files.firstOrNull;
-    if (f?.bytes == null) return;
+    final f = await FilePicker.pickFile(type: FileType.image);
+    if (f == null) return;
+    final bytes = await f.readAsBytesOrNull();
+    if (bytes == null) return;
     final ok = await widget.notifier.uploadPersonAvatar(
-        _personId, f!.bytes!, f.name);
+        _personId, bytes, f.name);
     if (!ok && mounted) {
       // Refused on a plan limit (issue #121) — offer the upgrade rather than
       // leaving the avatar silently unchanged.
