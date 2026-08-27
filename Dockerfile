@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Build-time version (the git tag), exposed at runtime so /api/version can report
 # it and the web client can detect a stale cached bundle. Defaults to "dev".
