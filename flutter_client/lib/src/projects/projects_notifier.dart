@@ -94,26 +94,19 @@ class ProjectsNotifier extends ChangeNotifier {
     _error = null;
     notifyListeners();
     try {
-      final result = await FilePicker.pickFiles(
+      final picked = await FilePicker.pickFile(
         type: FileType.custom,
         allowedExtensions: ['viewtrip', 'gettracks'],
-        withData: true,
       );
-      if (result == null || result.files.isEmpty) return null;
-      final picked = result.files.first;
-      final bytes = picked.bytes;
-      if (bytes == null) {
-        _error = 'Could not read file data. Try again.';
-        notifyListeners();
-        return null;
-      }
+      if (picked == null) return null;
+      final bytes = await picked.readAsBytes();
       final rawName = picked.name;
       final defaultName = rawName.endsWith('.viewtrip')
           ? rawName.substring(0, rawName.length - '.viewtrip'.length)
           : rawName.endsWith('.gettracks')
               ? rawName.substring(0, rawName.length - '.gettracks'.length)
               : rawName;
-      return (bytes: bytes as List<int>, defaultName: defaultName);
+      return (bytes: bytes, defaultName: defaultName);
     } on Exception catch (e) {
       _error = _msg(e);
       notifyListeners();

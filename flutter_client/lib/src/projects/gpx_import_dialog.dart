@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 
 import '../api/client.dart';
 import '../core/design_tokens.dart';
+import '../core/picked_file_bytes.dart';
 import '../core/project_ref.dart';
 
 /// (value, label) pairs for the activity-type selector — concrete lowercase
@@ -70,16 +71,15 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   Future<void> _pickFile() async {
-    final result = await FilePicker.pickFiles(
+    final picked = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: ['gpx'],
-      withData: true,
     );
-    if (result == null || result.files.isEmpty) return;
-    final picked = result.files.first;
-    if (picked.bytes == null) return;
+    if (picked == null) return;
+    final bytes = await picked.readAsBytesOrNull();
+    if (bytes == null) return;
     setState(() {
-      _fileBytes = picked.bytes;
+      _fileBytes = bytes;
       _fileName = picked.name;
     });
   }

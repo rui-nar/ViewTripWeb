@@ -20,7 +20,7 @@ dependencies:
   http: ^1.2.2
 
   # Navigation
-  go_router: ^17.1.0
+  go_router: ^18.0.0
 
   # State management
   provider: ^6.1.2
@@ -30,7 +30,7 @@ dependencies:
   google_sign_in_web: ^1.1.3
 
   # File picking (web + native)
-  file_picker: ^11.0.2
+  file_picker: ^12.1.1
 
   # Open URLs in browser (Strava OAuth connect)
   url_launcher: ^6.3.0
@@ -38,7 +38,7 @@ dependencies:
   web: ^1.1.0
 
   # Native / Web Share API hand-off for social sharing
-  share_plus: ^12.0.2
+  share_plus: ^13.3.0
 
   # Persist user preferences (theme mode)
   shared_preferences: ^2.3.2
@@ -72,6 +72,9 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Referenced directly by the file_picker fakes: PlatformFile.xFile is part of
+  # the abstract interface tests have to implement since file_picker 12.
+  cross_file: ^0.3.5
   flutter_lints: ^6.0.0
   # Regenerates the Android launcher icons from the assets/app_icon*.png layers.
   # Not part of any build — run by hand when the brand mark changes:

@@ -15,6 +15,7 @@ import 'package:exif/exif.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image/image.dart' as img;
 
+import '../core/picked_file_bytes.dart';
 import 'photo_match.dart';
 
 /// EXIF capture timestamp and GPS location extracted from a photo's bytes,
@@ -50,16 +51,11 @@ class PickedPhoto {
 /// [PickedPhoto] per selected file, with EXIF/pHash metadata already
 /// extracted. Returns an empty list if the user cancels the picker.
 Future<List<PickedPhoto>> pickPhotosForUpgrade() async {
-  final result = await FilePicker.pickFiles(
-    allowMultiple: true,
-    type: FileType.image,
-    withData: true,
-  );
-  if (result == null) return [];
+  final files = await FilePicker.pickFiles(type: FileType.image);
 
   final photos = <PickedPhoto>[];
-  for (final f in result.files) {
-    final bytes = f.bytes;
+  for (final f in files) {
+    final bytes = await f.readAsBytesOrNull();
     if (bytes == null) continue;
     photos.add(await buildPickedPhoto(bytes: bytes, filename: f.name));
   }
@@ -70,15 +66,11 @@ Future<List<PickedPhoto>> pickPhotosForUpgrade() async {
 /// resulting [PickedPhoto] with EXIF/pHash metadata already extracted, or
 /// null if the user cancels the picker.
 Future<PickedPhoto?> pickSinglePhotoForUpgrade() async {
-  final result = await FilePicker.pickFiles(
-    allowMultiple: false,
-    type: FileType.image,
-    withData: true,
-  );
-  if (result == null || result.files.isEmpty) return null;
-  final bytes = result.files.single.bytes;
+  final file = await FilePicker.pickFile(type: FileType.image);
+  if (file == null) return null;
+  final bytes = await file.readAsBytesOrNull();
   if (bytes == null) return null;
-  return buildPickedPhoto(bytes: bytes, filename: result.files.single.name);
+  return buildPickedPhoto(bytes: bytes, filename: file.name);
 }
 
 /// Builds a [PickedPhoto] from already-read bytes: extracts EXIF and

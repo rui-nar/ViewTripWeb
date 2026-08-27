@@ -19,8 +19,8 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cross_file/cross_file.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:file_picker/src/platform/file_picker_platform_interface.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -47,23 +47,63 @@ class _FakeFilePickerPlatform extends FilePickerPlatform {
   final List<PlatformFile> Function() filesToReturn;
 
   @override
-  Future<FilePickerResult?> pickFiles({
+  Future<List<PlatformFile>> pickFiles({
     String? dialogTitle,
     String? initialDirectory,
     FileType type = FileType.any,
     List<String>? allowedExtensions,
     Function(FilePickerStatus)? onFileLoading,
     int compressionQuality = 0,
-    bool allowMultiple = false,
-    bool withData = false,
-    bool withReadStream = false,
-    bool lockParentWindow = false,
-    bool readSequential = false,
-    bool cancelUploadOnWindowBlur = true,
+    AndroidOptions androidOptions = const AndroidOptions(),
+    WindowsOptions windowsOptions = const WindowsOptions(),
+    LinuxOptions linuxOptions = const LinuxOptions(),
+    WebOptions webOptions = const WebOptions(),
+  }) async =>
+      filesToReturn();
+
+  @override
+  Future<PlatformFile?> pickFile({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    int compressionQuality = 0,
+    AndroidOptions androidOptions = const AndroidOptions(),
+    WindowsOptions windowsOptions = const WindowsOptions(),
+    LinuxOptions linuxOptions = const LinuxOptions(),
+    WebOptions webOptions = const WebOptions(),
   }) async {
     final files = filesToReturn();
-    return files.isEmpty ? null : FilePickerResult(files);
+    return files.isEmpty ? null : files.first;
   }
+}
+
+/// file_picker 12 made [PlatformFile] abstract and moved the bytes behind
+/// readAsBytes(), so tests supply their own in-memory file rather than
+/// constructing one from a byte list.
+final class _FakePlatformFile extends PlatformFile {
+  _FakePlatformFile({required this.name, required this.bytes});
+
+  @override
+  final String name;
+
+  final Uint8List bytes;
+
+  @override
+  Uri get uri => Uri.dataFromBytes(bytes);
+
+  @override
+  XFile get xFile => XFile.fromData(bytes, name: name);
+
+  @override
+  Future<int> length() async => bytes.length;
+
+  @override
+  Future<Uint8List> readAsBytes() async => bytes;
+
+  @override
+  Stream<Uint8List> readAsByteStream() => Stream.value(bytes);
 }
 
 // Opens JournalDialog via a real showDialog(), like the app does — pushing
@@ -123,8 +163,7 @@ void main() {
       'a successful create still saves when a pending photo upload fails, and the failure is reported',
       (tester) async {
     FilePickerPlatform.instance = _FakeFilePickerPlatform(() => [
-          PlatformFile(
-              name: 'photo.png', size: _tinyPng.length, bytes: _tinyPng),
+          _FakePlatformFile(name: 'photo.png', bytes: _tinyPng),
         ]);
     api = ApiClient(
         baseUrl: '',
