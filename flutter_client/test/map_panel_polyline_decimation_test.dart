@@ -79,5 +79,13 @@ void main() {
     await tester.pump();
 
     expect(_totalRenderedPoints(tester), 8000);
+
+    // Let _fitBoundsOnce's animatedFitCamera (scheduled from a post-frame
+    // callback) finish before the test ends — mirrors
+    // map_panel_fit_bounds_test.dart's _settleFit. Without this the
+    // AnimationController's ticker is still registered when the widget tree
+    // is torn down, which the scheduler flags as a leaked animation.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
   });
 }
