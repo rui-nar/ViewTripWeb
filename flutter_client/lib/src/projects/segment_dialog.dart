@@ -509,37 +509,17 @@ class _SegmentDialogState extends State<SegmentDialog> {
         return;
       }
       final stopCount = result['stop_count'] as int? ?? 0;
-      // Rail can "resolve" to a straight endpoint chord when OSM has no usable
-      // track (e.g. Overpass returned nothing). Say so plainly instead of
-      // claiming a detailed route the user can see isn't there.
-      if (result['degraded'] == true) {
-        messenger.showSnackBar(const SnackBar(
-          content: Text(
-              'Approximate route shown — no detailed track found for this segment'),
-          duration: Duration(seconds: 6),
-        ));
-        return;
-      }
-      // The selected train's own HAFAS lookup failed, but OSM still resolved a
-      // real route via the generic two-point fallback — a successful resolve,
-      // but not the one the user asked for by train number.
-      if (result['hafas_failed'] == true) {
-        messenger.showSnackBar(const SnackBar(
-          content: Text(
-              'Route resolved, but the selected train could not be looked up — '
-              'showing a generic route instead'),
-          duration: Duration(seconds: 6),
-        ));
-        return;
-      }
-      final msg = switch (routeMode) {
-        'ferry' => 'Ferry route resolved',
-        'bus'   => 'Bus route resolved',
-        _       => 'Rail route resolved · $stopCount stops',
-      };
+      final degraded = result['degraded'] == true;
+      final hafasFailed = result['hafas_failed'] == true;
       messenger.showSnackBar(SnackBar(
-        content: Text(msg),
-        duration: const Duration(seconds: 5),
+        content: Text(resolveOutcomeMessage(
+          degraded: degraded,
+          hafasFailed: hafasFailed,
+          routeMode: routeMode,
+          stopCount: stopCount,
+          routeError: result['route_error'] as String?,
+        )),
+        duration: Duration(seconds: degraded || hafasFailed ? 6 : 5),
       ));
     } catch (e) {
       if (!notifier.isAlive) return;
@@ -940,6 +920,41 @@ class _SegmentDialogState extends State<SegmentDialog> {
 /// imply nothing is selected.
 String endpointClearOptionLabel({required bool hasCoords}) =>
     hasCoords ? 'Custom' : '— clear —';
+
+/// The snackbar message for a resolve that came back `resolved`.
+///
+/// Rail can "resolve" to a straight endpoint chord when OSM has no usable
+/// track ([degraded]), and the selected train's own schedule lookup can fail
+/// so the geometry is a generic two-point route ([hafasFailed]). Both happen
+/// together whenever the train provider is down (issue #277) — reporting only
+/// the approximate route there hides the real cause, so the train failure is
+/// named first and both are said in one message. [routeError] is the
+/// provider's own reason, when the server kept one.
+String resolveOutcomeMessage({
+  required bool degraded,
+  required bool hafasFailed,
+  required String routeMode,
+  required int stopCount,
+  String? routeError,
+}) {
+  if (hafasFailed) {
+    final reason =
+        (routeError == null || routeError.isEmpty) ? '' : ' ($routeError)';
+    return degraded
+        ? 'The selected train could not be looked up$reason — approximate '
+            'route shown, no detailed track found for this segment'
+        : 'Route resolved, but the selected train could not be looked up'
+            '$reason — showing a generic route instead';
+  }
+  if (degraded) {
+    return 'Approximate route shown — no detailed track found for this segment';
+  }
+  return switch (routeMode) {
+    'ferry' => 'Ferry route resolved',
+    'bus'   => 'Bus route resolved',
+    _       => 'Rail route resolved · $stopCount stops',
+  };
+}
 
 // ── Endpoint row (activity picker + map picker, no raw coord fields) ──────────
 

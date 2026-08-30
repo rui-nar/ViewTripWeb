@@ -330,6 +330,9 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
           // resolved via the generic two-point OSM fallback instead — distinct
           // from `degraded`.
           'hafas_failed': seg['route_hafas_failed'] == true,
+          // On a HAFAS fallback the server keeps the provider's own reason here
+          // so the UI can say *why* the train lookup failed (issue #277).
+          'route_error': seg['route_error'],
         };
       }
       if (stat == 'failed') {

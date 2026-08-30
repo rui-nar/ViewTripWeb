@@ -120,6 +120,28 @@ void main() {
       expect(n.error, isNull);
     });
 
+    test('the provider reason for a HAFAS fallback is reported back', () async {
+      // Issue #277: the server keeps route_error on the *resolved* segment so
+      // the UI can say why the chosen train never resolved.
+      final service = _PollService([
+        [
+          {
+            'id': 'seg-1',
+            'route_status': 'resolved',
+            'route_degraded': true,
+            'route_hafas_failed': true,
+            'route_error': 'Train lookup failed: HAFAS request failed: 503',
+          }
+        ],
+      ]);
+      final n = _notifier(service);
+
+      final result = await n.pollSegmentResolution('seg-1',
+          interval: _fast, timeout: const Duration(seconds: 5));
+
+      expect(result['route_error'], contains('503'));
+    });
+
     test('a clean resolve reports hafas_failed as false', () async {
       final service = _PollService([
         [
