@@ -1254,18 +1254,35 @@ class ProjectNotifier extends ChangeNotifier
   /// to a background isolate via [compute] instead of running inline on the
   /// UI isolate (issue #276).
   Future<void> _buildFullTrack() async {
+    // Bumped unconditionally (before the threshold check) so every call — not
+    // just the background-isolate branch — invalidates any still-in-flight
+    // compute() from a prior call, even one that itself took the inline
+    // branch (issue #276 follow-up: a superseded inline call used to leave
+    // the counter untouched, so a stale compute() result could still pass
+    // the staleness check below and clobber newer data).
+    final gen = ++_buildFullTrackGen;
     if (totalElevationProfilePoints(activities) <= kInlineFullTrackThreshold) {
       final r = buildFullTrackResult((geo: geo, activities: activities));
+      if (gen != _buildFullTrackGen) return; // superseded by a newer call
       _fullTrack = r.fullTrack;
       _perActivityTracks = r.perActivityTracks;
       return;
     }
-    final gen = ++_buildFullTrackGen;
     final r = await compute(buildFullTrackResult, (geo: geo, activities: activities));
     if (gen != _buildFullTrackGen) return; // superseded by a newer call
     _fullTrack = r.fullTrack;
     _perActivityTracks = r.perActivityTracks;
   }
+
+  /// Test-only seam for driving [_buildFullTrack] directly, without needing a
+  /// full [load] — see build_full_track_background_isolate_test.dart.
+  @visibleForTesting
+  Future<void> buildFullTrack() => _buildFullTrack();
+
+  /// Test-only peek at the staleness counter — see
+  /// build_full_track_background_isolate_test.dart.
+  @visibleForTesting
+  int get buildFullTrackGen => _buildFullTrackGen;
 
   void clear() {
     ref = null;
@@ -1290,6 +1307,10 @@ class ProjectNotifier extends ChangeNotifier
     mapCursorDistNotifier.value = null;
     _fullTrack = const [];
     _perActivityTracks = const {};
+    // Invalidate any _buildFullTrack() still in flight from before this
+    // clear() — without this, a stale compute() resolving afterward would
+    // pass the gen check and repopulate the track data this just wiped.
+    _buildFullTrackGen++;
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;
@@ -1977,6 +1998,7 @@ class ProjectNotifier extends ChangeNotifier
     if (this.ref != ref) return;
     _updateStats();
     await _buildFullTrack();
+    if (this.ref != ref) return;
     // Refresh GeoJSON so the map polylines reflect the updated track.
     geo = encryption.isUnlocked
         ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
@@ -2217,6 +2239,11 @@ class ProjectNotifier extends ChangeNotifier
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(ProjectRef ref) async {
+    // Set false only by the ref-check right after _buildFullTrack below, so a
+    // navigation that lands during that now-async call (issue #276 follow-up)
+    // suppresses the notify — every other path (success or the catch below)
+    // keeps notifying exactly as before.
+    var notify = true;
     try {
       if (encryption.isUnlocked) {
         // The server can't build geo for encrypted activities (issue #29) —
@@ -2237,10 +2264,14 @@ class ProjectNotifier extends ChangeNotifier
       }
       _updateStats();
       await _buildFullTrack();
+      if (this.ref != ref) {
+        notify = false;
+        return;
+      }
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
-      notifyListeners();
+      if (notify) notifyListeners();
     }
   }
 
