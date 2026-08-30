@@ -92,10 +92,11 @@ class ViewProjectNotifier extends ProjectNotifier {
       if (_disposed || currentLoadKey != ref) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
-        applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+        // applyFullActivities notifies internally (gated on camera-idle) —
+        // isElevationLoaded was already set true above, so no second notify
+        // is needed here just to surface it.
+        await applyFullActivities(rawActs.cast<Map<String, dynamic>>());
       }
-      isElevationLoaded = true;
-      notifyListeners(); // elevation chart renders
     } catch (_) {
       // Non-fatal — elevation placeholder stays visible
     }

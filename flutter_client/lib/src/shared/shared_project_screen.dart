@@ -1,9 +1,12 @@
 /// Read-only project view for users accessing a shared link (no auth required).
 library;
 
+import 'dart:async' show StreamSubscription, Timer;
+
 import 'package:cryptography_plus/cryptography_plus.dart';
 import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart' show MapEvent;
 import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -160,10 +163,11 @@ class SharedProjectNotifier extends ProjectNotifier {
       if (_disposed || currentLoadKey != tokenRef) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
-        applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+        // applyFullActivities notifies internally (gated on camera-idle) —
+        // isElevationLoaded was already set true above, so no second notify
+        // is needed here just to surface it.
+        await applyFullActivities(rawActs.cast<Map<String, dynamic>>());
       }
-      isElevationLoaded = true;
-      notifyListeners(); // elevation chart renders
     } catch (_) {
       // Non-fatal — elevation placeholder stays visible
     }
@@ -245,8 +249,35 @@ class _SharedProjectViewState extends State<_SharedProjectView>
 
   bool _deepLinkHandled = false;
 
+  // Tells ProjectNotifier the camera is moving so its background full-res
+  // geo/elevation upgrades can hold off on a rebuild until panning actually
+  // pauses (see ProjectNotifier.setMapCameraActive). Mirrors app_screen.dart /
+  // view_screen.dart's _onMapEvent — this screen has no route params to sync,
+  // so it only needs the camera-activity signal, not the URL-sync half of
+  // that pattern. Missing here before this fix meant shared/public trip
+  // viewers got none of that protection (issue #276 follow-up).
+  StreamSubscription<MapEvent>? _mapEventSub;
+  Timer? _cameraIdleTimer;
+
+  void _onMapEvent(MapEvent event) {
+    context.read<SharedProjectNotifier>().setMapCameraActive(true);
+    _cameraIdleTimer?.cancel();
+    _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
+      if (mounted) context.read<SharedProjectNotifier>().setMapCameraActive(false);
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _mapEventSub =
+        _mapController.mapController.mapEventStream.listen(_onMapEvent);
+  }
+
   @override
   void dispose() {
+    _mapEventSub?.cancel();
+    _cameraIdleTimer?.cancel();
     _mapController.dispose();
     super.dispose();
   }
