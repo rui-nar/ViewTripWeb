@@ -707,3 +707,73 @@ def test_job_hafas_fallback_flagged_distinctly_from_clean_resolve(env, monkeypat
     assert clean_seg.route_degraded is False
     assert fallback_seg.route_hafas_failed is True
     assert clean_seg.route_hafas_failed is False
+
+
+# ── The provider's own reason survives to the client (issue #277) ──
+#
+# A dead train-schedule provider used to reach the user as nothing but
+# "approximate route shown": the HafasError was logged and thrown away, so the
+# resolved segment carried no hint of *why* the chosen train never resolved.
+# The reason is now kept on the resolved segment's route_error.
+
+def test_hafas_failure_reason_is_persisted_on_the_resolved_segment(env, monkeypatch):
+    from src.services.hafas_service import HafasError
+
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _train_segment("seg-why"))
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+
+    with patch("src.services.hafas_service.get_stop_sequence",
+               side_effect=HafasError("HAFAS request failed: 503 Service Unavailable")), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": [[24.9414, 60.1719], [25.7294, 66.5039]],
+                      "degraded": True, "strategy": "straight"})()
+        _resolve_route_job(user_id, "My Trip", "seg-why",
+                           {"hafas_provider": "db", "train_number": "ICE 75"})
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-why")
+    assert seg.route_status == "resolved"
+    assert seg.route_hafas_failed is True
+    assert seg.route_error
+    assert "503" in seg.route_error
+    # Same 200-char cap the failure path already applies.
+    assert len(seg.route_error) <= 200
+
+
+def test_a_clean_resolve_leaves_route_error_empty(env, monkeypatch):
+    """The reason is specific to the fallback — a good resolve stays clean."""
+    client, user_id, project_id, engine = env
+    _add_segment(engine, project_id, _train_segment("seg-ok"))
+    monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+
+    hafas_stops = [
+        {"lat": 60.1719, "lon": 24.9414, "uic": "1"},
+        {"lat": 66.5039, "lon": 25.7294, "uic": "2"},
+    ]
+    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": [[1.0, 1.0], [2.0, 2.0]],
+                      "degraded": False, "strategy": "relation_uic"})()
+        _resolve_route_job(user_id, "My Trip", "seg-ok",
+                           {"hafas_provider": "vr", "train_number": "273"})
+
+    seg = _load_segment(engine, user_id, "My Trip", "seg-ok")
+    assert seg.route_status == "resolved"
+    assert seg.route_error is None
+
+
+def test_a_long_hafas_reason_is_truncated_to_200_chars():
+    """Matches the failure path's cap, so a provider's HTML dump can't flood the UI."""
+    from src.services.hafas_service import HafasError
+
+    seg = _train_segment()
+    with patch("src.services.hafas_service.get_stop_sequence",
+               side_effect=HafasError("x" * 500)), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        mock_rail.return_value = type(
+            "R", (), {"polyline": [[1.0, 1.0]], "degraded": True, "strategy": "straight"})()
+        _compute_segment_geometry(seg, {"hafas_provider": "db", "train_number": "ICE 75"})
+
+    assert len(seg.route_error) == 200

@@ -74,6 +74,10 @@ def _compute_segment_geometry(
     tuple; the caller reads it off *seg* after this returns. Always reset here
     (not just on failure) so a segment's stale flag from an earlier attempt
     doesn't leak into a fresh, fully-successful resolve.
+
+    Same for ``seg.route_error``: on a HAFAS failure it carries the provider's
+    own message, so the caller can persist *why* the train lookup failed rather
+    than only that it did (issue #277).
     """
     from src.services.overpass_service import (
         OverpassError,  # noqa: F401 — re-exported for callers' except clauses
@@ -83,6 +87,7 @@ def _compute_segment_geometry(
     )
 
     seg.route_hafas_failed = False
+    seg.route_error = None
 
     if seg.segment_type == "train":
         from src.services.hafas_service import HafasError, get_stop_sequence
@@ -108,6 +113,7 @@ def _compute_segment_geometry(
                     seg.id, params.get("hafas_provider"), params.get("train_number"), exc)
                 # fall back to two-point geometry
                 seg.route_hafas_failed = True
+                seg.route_error = f"Train lookup failed: {exc}"[:200]
         rail = get_rail_geometry(stops)
         return rail.polyline, len(stops), rail.degraded, rail.strategy
 
@@ -185,7 +191,10 @@ def _resolve_route_job(
                 "route_status": "resolved",
                 "route_polyline": json.dumps(polyline),
                 "route_mode": _mode_for_type.get(seg.segment_type, "great_circle"),
-                "route_error": None,
+                # Normally None. On a HAFAS fallback it carries the provider's
+                # own reason so the UI can say *why* the train lookup failed
+                # (issue #277) — a resolved segment, but not as asked for.
+                "route_error": seg.route_error,
                 "route_degraded": degraded,
                 # The specific train HAFAS lookup failed and this resolved via the
                 # generic two-point OSM fallback instead — distinct from `degraded`,
