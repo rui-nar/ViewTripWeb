@@ -16,9 +16,12 @@ from scripts.release_notes import (
     INTERNAL,
     SERVER,
     Change,
+    looks_non_english,
     parse_commits,
     polish,
     render,
+    translate,
+    warn_non_english,
 )
 
 
@@ -284,6 +287,162 @@ class TestPolish:
         prompt = create.call_args.kwargs["messages"][0]["content"]
         assert "faster rendering" in prompt
         assert "tidy docs" not in prompt
+
+
+class TestLanguageDetection:
+    """v0.48.0 shipped with sixty Portuguese bullets between the English ones,
+    because a `Release-Note:` trailer is written in whatever language the author
+    was thinking in. The fixtures below are lines from that release."""
+
+    @pytest.mark.parametrize("text", [
+        "You can now hide activity icons on the trip map with a new toggle, "
+        "next to the Memories and Encounters ones — handy when the map gets "
+        "crowded.",
+        "Fixed a bug where opening the map for a trip with many photos could "
+        "overload the server and cause connection timeouts.",
+        "Photos imported from Polarsteps now keep the same order they had on "
+        "Polarsteps, instead of sometimes appearing scrambled.",
+        "Poster generation now emails you a download link as soon as it's "
+        "ready (or lets you know if it failed).",
+    ])
+    def test_english_is_not_flagged(self, text):
+        assert not looks_non_english(text)
+
+    @pytest.mark.parametrize("text", [
+        "As fotos das memórias no mapa carregam agora instantaneamente ao "
+        "reabrir a app, em vez de mostrarem círculos pretos.",
+        "A app agora ocupa uma fração do espaço a descarregar e a instalar.",
+        "Painel do Grafana \"Host Resources\" passou a mostrar CPU, carga e "
+        "disco, e todos os dashboards permitem escolher entre produção e "
+        "validação.",
+        "Adiciona suporte para escolher fotos de substituição a partir de uma "
+        "biblioteca Immich ligada.",
+    ])
+    def test_portuguese_is_flagged(self, text):
+        assert looks_non_english(text)
+
+    @pytest.mark.parametrize("text", [
+        "add PR template",
+        "raise marker thumbnail concurrency from 6 to 8",
+        "regenerate pubspec.lock for sqflite",
+        "Connect your Immich server from Settings.",
+    ])
+    def test_short_technical_english_is_not_flagged(self, text):
+        """A bullet with no function words at all must stay quiet — a warning
+        that fires on good English is worse than one that misses a line."""
+        assert not looks_non_english(text)
+
+    def test_a_url_is_not_a_romance_marker(self):
+        """"com" and "de" look Portuguese and appear in English text and URLs,
+        which is why they are left out of the marker set."""
+        assert not looks_non_english(
+            "See https://github.com/rui-nar/ViewTripWeb for the de-duplication "
+            "rules that apply when a step is imported twice.")
+
+
+class TestNonEnglishWarning:
+    def _pt(self, subject="fix(map): x"):
+        return parse_commits(_log((
+            subject,
+            "Release-Note: A app agora ocupa uma fração do espaço a instalar.",
+            "flutter_client/a.dart",
+        )))
+
+    def test_reports_the_stray_entries(self, capsys):
+        assert warn_non_english(self._pt()) == 1
+        err = capsys.readouterr().err
+        assert "1 entry" in err
+        assert "docs/RELEASING.md" in err
+        assert "ocupa uma fração" in err
+
+    def test_silent_when_everything_is_english(self, capsys):
+        changes = parse_commits(_log(
+            ("fix(map): stop the day carousel from freezing", "",
+             "flutter_client/a.dart")))
+        assert warn_non_english(changes) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_internal_changes_are_not_checked(self, capsys):
+        """The internal block is raw commit subjects by design — nobody reads
+        it for the prose, so a Portuguese one there is not worth a warning."""
+        changes = parse_commits(_log(
+            ("chore(ci): corrige a autenticação do scrape do Alloy", "",
+             "docker-compose.yml")))
+        assert warn_non_english(changes) == 0
+
+
+class TestTranslate:
+    """Same contract as :func:`polish`: every failure path leaves the
+    deterministic notes intact rather than blocking the release."""
+
+    def _pt(self):
+        return parse_commits(_log((
+            "fix(map): x",
+            "Release-Note: A app agora ocupa uma fração do espaço a instalar.",
+            "flutter_client/a.dart",
+        )))
+
+    def _reply(self, text):
+        block = MagicMock(type="text", text=text)
+        fake = MagicMock()
+        fake.Anthropic.return_value.messages.create.return_value = MagicMock(
+            stop_reason="end_turn", content=[block])
+        return fake
+
+    def test_replaces_the_flagged_entry(self):
+        fake = self._reply("1. The app now takes a fraction of the space to install.")
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            out = translate(self._pt())
+        assert out[0].text == "The app now takes a fraction of the space to install."
+
+    def test_translates_upgrade_notes_too(self):
+        changes = parse_commits(_log((
+            "feat(api): x",
+            "Upgrade-Note: Define a variável LOG_LEVEL antes de reiniciar.",
+            "api/x.py",
+        )))
+        fake = self._reply("1. Set the LOG_LEVEL variable before restarting.")
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            out = translate(changes)
+        assert out[0].upgrade_note == "Set the LOG_LEVEL variable before restarting."
+
+    def test_skips_the_call_entirely_when_everything_is_english(self):
+        fake = MagicMock()
+        changes = parse_commits(_log(
+            ("fix(map): stop the day carousel from freezing", "",
+             "flutter_client/a.dart")))
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            assert translate(changes) == changes
+        fake.Anthropic.assert_not_called()
+
+    def test_sends_only_the_flagged_lines(self):
+        changes = parse_commits(_log(
+            ("fix(map): stop the day carousel from freezing", "",
+             "flutter_client/a.dart"),
+            ("fix(map): y", "Release-Note: A app agora ocupa uma fração.",
+             "flutter_client/b.dart"),
+        ))
+        fake = self._reply("1. The app now takes a fraction.")
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            translate(changes)
+
+        prompt = fake.Anthropic.return_value.messages.create.call_args \
+            .kwargs["messages"][0]["content"]
+        assert "ocupa uma fração" in prompt
+        assert "day carousel" not in prompt
+
+    def test_keeps_the_originals_on_a_count_mismatch(self):
+        fake = self._reply("1. One line.\n2. An extra line nobody asked for.")
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            changes = self._pt()
+            assert translate(changes) == changes
+
+    def test_keeps_the_originals_on_api_failure(self):
+        fake = MagicMock()
+        fake.Anthropic.side_effect = RuntimeError("no API key")
+        with patch.dict("sys.modules", {"anthropic": fake}):
+            changes = self._pt()
+            assert translate(changes) == changes
 
 
 @pytest.mark.parametrize("subject,expected_area", [

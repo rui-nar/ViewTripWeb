@@ -14,9 +14,10 @@ notes. Three layers, each degrading to the one below:
 2. **Trailers** — a ``Release-Note:`` trailer in the commit body wins over the
    subject line. No parser can turn "enforce the API quota process-wide" into a
    user benefit; only the author knows that, so this is where they write it.
-3. **Highlights** (``--polish``) — asks Claude for a short intro paragraph.
-   Entirely optional: no API key, no network, or any error means the notes are
-   rendered without it.
+3. **Polish** (``--polish``) — asks Claude to translate any entry that isn't in
+   English and to write a short intro paragraph. Entirely optional: no API key,
+   no network, or any error means the notes are rendered without it. Whether or
+   not it runs, non-English entries are reported on stderr.
 
 Standalone use, to preview any range without cutting a release::
 
@@ -29,7 +30,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Optional
 
 REPO_URL = "https://github.com/rui-nar/ViewTripWeb"
@@ -369,15 +370,114 @@ def git_log(from_ref: Optional[str], to_ref: str = "HEAD") -> str:
     )
 
 
-# ── Optional: LLM highlights ──────────────────────────────────────────────────
+# ── Language ──────────────────────────────────────────────────────────────────
+
+# The notes are published in English, but a `Release-Note:` trailer is written
+# in whatever language the author was thinking in — v0.48.0 shipped with sixty
+# Portuguese bullets between the English ones. Detection is deliberately blunt:
+# it only has to spot a whole sentence in another language, and a warning that
+# fires on good English would be worse than one that occasionally stays quiet.
+
+# Function words that are common in Portuguese/Spanish/French and are not
+# English words. Ambiguous ones are left out on purpose: "no", "a", "de", "os"
+# and "com" all appear in English text (or in "github.com") and would flag it.
+_ROMANCE_MARKERS = frozenset("""
+    não nao já ja agora também tambem uma umas uns que quando como para por
+    pelo pela dos das aos num numa mais muito mas sem depois antes onde porque
+    ainda apenas está estão esta este esse essa isso seu sua seus suas cada
+    entre sempre todos todas les une dans pour avec cette aux nous vous los las
+    pero ahora desde hasta muy della delle sono anche
+""".split())
+
+# English function words, to weigh against the above: a bullet naming a
+# Portuguese-looking product or place is still English if it reads as English.
+_ENGLISH_MARKERS = frozenset("""
+    the and is are was were when with from this that these those now longer
+    instead you your of to for but on in at it its has have been will would
+    could than while after before every any
+""".split())
+
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+# Accents English doesn't use. One anywhere in the sentence counts as a marker,
+# which is what catches a short bullet like "produção e validação" that carries
+# no function word at all.
+_ACCENT_RE = re.compile(r"[áàâãéèêíìóòôõúùûçñ]", re.IGNORECASE)
+
+
+def looks_non_english(text: str) -> bool:
+    """True when *text* reads as Portuguese/Spanish/French rather than English.
+
+    Ties go to "non-English": a sentence with markers of both is usually a
+    translated line with an English product name in it, and the cost of a false
+    positive is one line re-checked, not a broken release.
+    """
+    words = {w.lower() for w in _WORD_RE.findall(text)}
+    romance = len(words & _ROMANCE_MARKERS) + bool(_ACCENT_RE.search(text))
+    return romance > 0 and romance >= len(words & _ENGLISH_MARKERS)
+
+
+def _reader_fields(changes: list[Change]) -> list[tuple[int, str]]:
+    """(index, attribute) for every string the reader actually sees.
+
+    The internal-changes block is raw commit subjects by design, so it is left
+    alone — nobody reads it for the prose.
+    """
+    fields: list[tuple[int, str]] = []
+    for i, change in enumerate(changes):
+        if change.audience != INTERNAL and change.section != "Internal":
+            fields.append((i, "release_note" if change.release_note else "subject"))
+        if change.upgrade_note:
+            fields.append((i, "upgrade_note"))
+    return fields
+
+
+def _stray_fields(changes: list[Change]) -> list[tuple[int, str]]:
+    return [(i, f) for i, f in _reader_fields(changes)
+            if looks_non_english(getattr(changes[i], f))]
+
+
+def warn_non_english(changes: list[Change]) -> int:
+    """Report entries that aren't in English. Returns how many there were."""
+    stray = _stray_fields(changes)
+    if not stray:
+        return 0
+    print(f"warning: {len(stray)} entr{'y' if len(stray) == 1 else 'ies'} "
+          f"look non-English — release notes are published in English "
+          f"(see docs/RELEASING.md); re-run with --polish to translate them:",
+          file=sys.stderr)
+    for i, field in stray[:5]:
+        print(f"  - {getattr(changes[i], field)[:90]}", file=sys.stderr)
+    if len(stray) > 5:
+        print(f"  ... and {len(stray) - 5} more", file=sys.stderr)
+    return len(stray)
+
+
+# ── Optional: LLM polish ──────────────────────────────────────────────────────
+
+_TRANSLATE_PROMPT = """\
+Below are release-note lines for ViewTrip, an app for mapping and sharing \
+multi-week trips. Some are not in English.
+
+Translate each line into English. Keep the meaning exactly — do not add, drop, \
+merge or reorder anything, and do not change the tone. Leave product, brand and \
+feature names as they are (Strava, Polarsteps, Immich, Grafana, Alloy, ...), and \
+keep any markdown, numbers and units untouched. A line already in English must \
+be returned unchanged.
+
+Return exactly {count} line(s), numbered "1." to "{count}." in the same order, \
+one per line, and nothing else.
+
+Lines:
+{lines}
+"""
 
 _HIGHLIGHTS_PROMPT = """\
 Write the "Highlights" paragraph for a release of ViewTrip, an app for mapping \
 and sharing multi-week trips (Flutter client, FastAPI server).
 
-Below are the changes in this release, already grouped. Write 2-3 sentences for \
-someone who uses the app, in plain language: what is now possible or fixed, and \
-why it matters. Lead with whatever is most significant.
+Below are the changes in this release, already grouped. Write 2-3 sentences in \
+English for someone who uses the app, in plain language: what is now possible \
+or fixed, and why it matters. Lead with whatever is most significant.
 
 Do not use a heading, a bullet list, issue numbers, or the words "this release". \
 Do not invent anything that is not in the list. If the changes are all minor, \
@@ -388,45 +488,86 @@ Changes:
 """
 
 
-def polish(changes: list[Change], *, model: str = "claude-opus-5") -> Optional[str]:
-    """Ask Claude for a short highlights paragraph; None if unavailable.
+def _ask(prompt: str, *, model: str, max_tokens: int, what: str) -> Optional[str]:
+    """Send one prompt to Claude; None if the answer is unavailable.
 
     Every failure path returns None so the caller renders the deterministic
     notes instead. A release must never be blocked by a missing API key, an
-    offline machine, or a bad day at the API — the highlights are a garnish,
+    offline machine, or a bad day at the API — this whole layer is a garnish,
     not the notes.
     """
-    visible = [c for c in changes if c.audience != INTERNAL and c.section != "Internal"]
-    if not visible:
-        return None
-
     try:
         import anthropic
     except ImportError:
         print("note: `pip install anthropic` to enable --polish", file=sys.stderr)
         return None
 
-    listing = "\n".join(f"- [{c.section}] {c.area}: {c.text}" for c in visible)
     try:
         client = anthropic.Anthropic()
         response = client.messages.create(
             model=model,
-            max_tokens=1024,
-            messages=[{"role": "user",
-                       "content": _HIGHLIGHTS_PROMPT.format(changes=listing)}],
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
         )
     except Exception as exc:  # noqa: BLE001 — never fail a release over a garnish
-        print(f"note: highlights unavailable ({exc.__class__.__name__}); "
-              f"continuing without them", file=sys.stderr)
+        print(f"note: {what} unavailable ({exc.__class__.__name__}); "
+              f"continuing without", file=sys.stderr)
         return None
 
     if response.stop_reason == "refusal":
-        print("note: highlights declined by the model; continuing without them",
+        print(f"note: {what} declined by the model; continuing without",
               file=sys.stderr)
         return None
 
     text = "".join(b.text for b in response.content if b.type == "text").strip()
     return text or None
+
+
+_NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s*")
+
+
+def translate(changes: list[Change], *, model: str = "claude-opus-5") -> list[Change]:
+    """Return *changes* with every non-English reader-facing entry in English.
+
+    Only the entries :func:`looks_non_english` flags are sent, so a line that
+    already reads as English is never rewritten. Anything unexpected in the
+    answer — a short count, a blank line — means the originals are kept, and
+    :func:`warn_non_english` still reports them.
+    """
+    stray = _stray_fields(changes)
+    if not stray:
+        return changes
+
+    lines = "\n".join(f"{n}. {getattr(changes[i], f)}"
+                      for n, (i, f) in enumerate(stray, 1))
+    answer = _ask(_TRANSLATE_PROMPT.format(count=len(stray), lines=lines),
+                  model=model, max_tokens=8192, what="translation")
+    if answer is None:
+        return changes
+
+    translated = [_NUMBERED_RE.sub("", line).strip()
+                  for line in answer.splitlines() if line.strip()]
+    if len(translated) != len(stray) or not all(translated):
+        print(f"note: translation returned {len(translated)} usable lines for "
+              f"{len(stray)} entries; keeping the originals", file=sys.stderr)
+        return changes
+
+    updates: dict[int, dict[str, str]] = {}
+    for (index, field), text in zip(stray, translated):
+        updates.setdefault(index, {})[field] = text
+    return [replace(c, **updates[i]) if i in updates else c
+            for i, c in enumerate(changes)]
+
+
+def polish(changes: list[Change], *, model: str = "claude-opus-5") -> Optional[str]:
+    """Ask Claude for a short highlights paragraph; None if unavailable."""
+    visible = [c for c in changes if c.audience != INTERNAL and c.section != "Internal"]
+    if not visible:
+        return None
+
+    listing = "\n".join(f"- [{c.section}] {c.area}: {c.text}" for c in visible)
+    return _ask(_HIGHLIGHTS_PROMPT.format(changes=listing),
+                model=model, max_tokens=1024, what="highlights")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -441,12 +582,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="version being released (default: the --to ref)")
     parser.add_argument("--repo-url", default=REPO_URL)
     parser.add_argument("--polish", action="store_true",
-                        help="add an LLM-written highlights paragraph")
+                        help="translate non-English entries and add an "
+                             "LLM-written highlights paragraph")
     parser.add_argument("--model", default="claude-opus-5")
     args = parser.parse_args(argv)
 
+    # The warnings quote the offending entries, which are exactly the ones full
+    # of accented characters; a Windows console defaults to cp1252 and would
+    # mangle them. Same reason the body is written as UTF-8 bytes below.
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+
     from_ref = args.from_ref or previous_tag(args.to_ref)
     changes = parse_commits(git_log(from_ref, args.to_ref))
+    if args.polish:
+        # Before the highlights, so the paragraph is written from English notes.
+        changes = translate(changes, model=args.model)
+    warn_non_english(changes)
     highlights = polish(changes, model=args.model) if args.polish else None
 
     body = render(
