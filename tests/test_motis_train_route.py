@@ -100,9 +100,9 @@ class _Motis:
 
 @pytest.fixture(autouse=True)
 def _clear_stop_cache():
-    svc._nearest_stop_cached.cache_clear()
+    svc._stop_cache.clear()
     yield
-    svc._nearest_stop_cached.cache_clear()
+    svc._stop_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -143,7 +143,9 @@ class TestIssue277HamburgOffenburg:
         with patch("src.services.hafas_service.requests.get", api):
             route = _resolve()
 
-        assert len(route.polyline) > 5000, "expected real track geometry"
+        # Real track, simplified (see _SIMPLIFY_TOLERANCE_M) but nothing like a
+        # 2-point chord: hundreds of shape points still describe the line.
+        assert 1000 < len(route.polyline) < 4000, "expected simplified real track"
         # [lon, lat] like every other polyline in this codebase.
         lon, lat = route.polyline[0]
         assert 9.5 < lon < 10.5 and 53.0 < lat < 54.0
@@ -212,19 +214,37 @@ class TestServiceDayWindow:
             _resolve()
 
         params = api.params_for("/stoptimes")
-        # 3 h before 00:00 UTC — local midnight anywhere in UTC+1…+3. Not the
-        # old hardcoded "{date}T06:00:00+01:00".
-        assert params["time"] == "2026-08-31T21:00:00Z"
+        # Local midnight at the anchor's own zone (the Hamburg fixture carries
+        # tz "Europe/Berlin", CEST in September), not the old hardcoded
+        # "{date}T06:00:00+01:00" and not a fixed UTC guess either.
+        assert params["time"] == "2026-08-31T22:00:00Z"
         assert params["n"] == 500
         assert params["radius"] == 2000
 
-    def test_window_covers_the_whole_local_day(self):
-        start, end = svc._service_window(_DATE)
-        assert start.isoformat() == "2026-08-31T21:00:00+00:00"
-        assert end.isoformat() == "2026-09-02T00:00:00+00:00"
-        # Berlin (UTC+2 in September) local day = 31st 22:00Z → 1st 22:00Z.
-        assert start.isoformat() <= "2026-08-31T22:00:00+00:00"
-        assert end.isoformat() >= "2026-09-01T22:00:00+00:00"
+    @pytest.mark.parametrize("tz,start,end", [
+        # CEST (UTC+2) in September.
+        ("Europe/Berlin", "2026-08-31T22:00:00+00:00", "2026-09-01T22:00:00+00:00"),
+        # EEST (UTC+3).
+        ("Europe/Helsinki", "2026-08-31T21:00:00+00:00", "2026-09-01T21:00:00+00:00"),
+        # West of UTC. The fixed European window ended at 2026-09-02T00:00Z,
+        # which is 19:00 local — every Chicago evening departure tripped the
+        # "past the service day" guard and was reported as not running.
+        ("America/Chicago", "2026-09-01T05:00:00+00:00", "2026-09-02T05:00:00+00:00"),
+        # Half-hour offset, and south of the equator.
+        ("Australia/Adelaide", "2026-08-31T14:30:00+00:00", "2026-09-01T14:30:00+00:00"),
+    ])
+    def test_window_is_the_anchor_local_calendar_day(self, tz, start, end):
+        got_start, got_end = svc._service_window(_DATE, tz)
+        assert got_start.isoformat() == start
+        assert got_end.isoformat() == end
+
+    def test_window_falls_back_when_the_feed_gives_no_zone(self):
+        """An unusable tz must not crash the lookup — it degrades to the old
+        fixed span, which is still right for the European feeds."""
+        for tz in ("", "Not/AZone"):
+            start, end = svc._service_window(_DATE, tz)
+            assert start.isoformat() == "2026-08-31T21:00:00+00:00"
+            assert end.isoformat() == "2026-09-02T00:00:00+00:00"
 
     def test_stops_paging_once_the_board_runs_past_the_service_day(self):
         """A train that isn't running today must not be chased into tomorrow."""
@@ -244,6 +264,31 @@ class TestServiceDayWindow:
             with pytest.raises(HafasError, match="not found departing"):
                 _resolve()
         assert api.paths().count("stoptimes") == 1
+
+    def test_does_not_match_the_previous_local_days_train(self):
+        """The board opens before local midnight, and the scan takes the first
+        forward match — so a window that started too early silently returned
+        *yesterday*'s trip. Against this fixture a 2026-09-01 request for
+        train 11438 used to return the 2026-08-31 trip id.
+
+        "A train number repeats daily" does not rescue this: weekend, seasonal
+        and night services may not run on the requested day at all, and quietly
+        resolving the wrong day is worse than reporting nothing found.
+        """
+        board = _fx("motis_stoptimes_hamburg.json")
+        yesterday = [e for e in board["stopTimes"]
+                     if svc._entry_matches(e, "11438")
+                     and e["place"]["departure"] < "2026-08-31T22:00:00Z"]
+        assert yesterday, "fixture must contain a pre-midnight 11438"
+        assert yesterday[0]["tripId"].startswith("20260831_")
+
+        api = _Motis(boards=[board])
+        with patch("src.services.hafas_service.requests.get", api):
+            trip_id = svc._find_trip_id(
+                "x", "2026-09-01", "11438", "Europe/Berlin")
+
+        assert trip_id != yesterday[0]["tripId"]
+        assert trip_id is None or trip_id.startswith("20260901_")
 
     def test_pages_forward_with_the_cursor_when_the_day_is_not_covered(self):
         board = _fx("motis_stoptimes_hamburg.json")
@@ -347,6 +392,12 @@ class TestNameMatching:
         ("IC 63", "IC 63"),
         ("RJX 262", "RJX 262"),
         ("000393", "393"),          # Rejseplanen pads trip numbers
+        # German boards put the line and the trip number in one string.
+        # Normalising it in one pass fused the digits into "811438", so a user
+        # typing the line found nothing at all.
+        ("RE8 (11438)", "RE8"),
+        ("RE8 (11438)", "RE 8"),
+        ("RE8 (11438)", "11438"),
     ])
     def test_matches(self, candidate, query):
         assert svc._name_matches(candidate, query)
@@ -357,9 +408,29 @@ class TestNameMatching:
         ("IC 75", "ICE 75"),
         ("ICE 75", ""),
         ("", "ICE 75"),
+        # A named query must have its letters confirmed. Waiving that whenever
+        # the candidate carried no letters made a French TGV number match a
+        # Deutsche Bahn RE8, whose tripShortName is the bare "011438".
+        ("011438", "TGV 11438"),
+        ("011438", "ICE 11438"),
+        ("RE8 (11438)", "TGV 11438"),
     ])
     def test_does_not_match(self, candidate, query):
         assert not svc._name_matches(candidate, query)
+
+    @pytest.mark.parametrize("query,expected", [
+        ("RE8", True),          # regression: this found nothing at all
+        ("11438", True),
+        ("TGV 11438", False),   # regression: this matched the RE8
+        ("ICE 11438", False),
+        ("IC 11438", False),
+    ])
+    def test_regional_line_on_the_real_board(self, query, expected):
+        """Exercised against the recorded Hamburg board, where the entry really
+        is routeShortName "RE8 (11438)" / tripShortName "011438"."""
+        board = _fx("motis_stoptimes_hamburg.json")
+        hit = any(svc._entry_matches(e, query) for e in board["stopTimes"])
+        assert hit is expected
 
     def test_board_entry_matches_on_either_short_name(self):
         assert svc._entry_matches({"routeShortName": "ICE 75", "tripShortName": ""}, "ICE 75")
@@ -485,6 +556,20 @@ class TestRetryAndErrors:
             with pytest.raises(HafasError, match="does not stop near the end"):
                 _resolve(end_lat=41.9028, end_lon=12.4964)   # Rome
 
+    def test_train_that_does_not_serve_the_start_is_rejected(self):
+        """The end guard had a test; the start guard did not. A trip whose
+        nearest stop to the *start* pin is far away must be rejected too —
+        _trim_stops would otherwise happily snap to whatever is closest."""
+        board = _fx("motis_stoptimes_hamburg.json")
+        # Anchor near Hamburg so the board is found, but ask for a start pin
+        # the matched trip never goes near.
+        api = _Motis(boards=[board])
+        with patch("src.services.hafas_service.requests.get", api),              patch("src.services.hafas_service._nearest_stop",
+                   return_value={"id": "x", "name": "Hamburg Hbf",
+                                 "tz": "Europe/Berlin"}):
+            with pytest.raises(HafasError, match="does not stop near the start"):
+                _resolve(start_lat=41.9028, start_lon=12.4964)   # Rome
+
     def test_missing_date_raises_without_calling_the_api(self):
         api = _Motis()
         with patch("src.services.hafas_service.requests.get", api):
@@ -510,3 +595,83 @@ class TestReverseGeocodeCache:
             _resolve()
             _resolve()
         assert api.paths().count("reverse-geocode") == 1
+
+
+class TestGeometrySimplification:
+    """The polyline is persisted, re-served by /geo on every load, and turned
+    into one draggable marker per vertex by the track editor (which has no cap
+    of its own), so raw MOTIS shape density is not free."""
+
+    def test_geometry_is_simplified_before_it_leaves_the_service(self):
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            route = _resolve()
+
+        raw = svc._trim_polyline(
+            svc._decode_leg_geometry(_fx("motis_trip_ice75.json")["legs"][0]),
+            route.stops)
+        assert len(raw) > 9000, "the untrimmed source really is that dense"
+        assert len(route.polyline) < len(raw) / 4
+        assert len(json.dumps(route.polyline)) < 80_000
+
+    def test_every_dropped_point_stays_within_the_tolerance(self):
+        """RDP's contract, checked rather than assumed: no original point is
+        further than the tolerance from the line that replaces it."""
+        poly = svc._decode_leg_geometry(_fx("motis_trip_ice75.json")["legs"][0])
+        simple = svc._simplify(poly)
+        assert 2 <= len(simple) < len(poly)
+
+        # _simplify returns the surviving point objects from *poly*, so identity
+        # recovers exactly which indices it kept — no coordinate matching, which
+        # is what made an earlier version of this check walk the wrong segment.
+        by_id = {id(pt): i for i, pt in enumerate(poly)}
+        kept = [by_id[id(pt)] for pt in simple]
+        assert kept == sorted(kept) and kept[0] == 0 and kept[-1] == len(poly) - 1
+
+        worst = 0.0
+        for start, end in zip(kept, kept[1:]):
+            a, b = poly[start], poly[end]
+            for k in range(start + 1, end):
+                worst = max(worst, _perp_km(poly[k], a, b))
+        # The projection uses one cos(latitude) scale for the whole line, so
+        # over a 6-degree north-south route the effective tolerance drifts by a
+        # few percent (measured: 2.07 m for a nominal 2 m). Allow that margin
+        # rather than pretend the constant is exact.
+        assert worst * 1000 <= svc._SIMPLIFY_TOLERANCE_M * 1.10, f"{worst * 1000:.2f} m"
+
+    def test_a_short_line_is_left_alone(self):
+        assert svc._simplify([[0.0, 0.0], [1.0, 1.0]]) == [[0.0, 0.0], [1.0, 1.0]]
+
+    def test_endpoints_are_never_dropped(self):
+        poly = [[i * 1e-4, 0.0] for i in range(500)]
+        simple = svc._simplify(poly)
+        assert simple[0] == poly[0] and simple[-1] == poly[-1]
+
+
+class TestAnchorCache:
+    def test_a_failed_lookup_is_not_cached(self):
+        """The cache used to store None, so one transient reverse-geocode
+        failure pinned "no station here" for the worker's lifetime."""
+        empty = _Motis(geocode=[])
+        with patch("src.services.hafas_service.requests.get", empty):
+            assert svc._nearest_stop(_HH_LAT, _HH_LON) is None
+
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            assert svc._nearest_stop(_HH_LAT, _HH_LON)["name"] == "Hamburg Hauptbahnhof"
+
+    def test_the_cache_is_bounded(self):
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            for i in range(svc._STOP_CACHE_MAX + 5):
+                svc._nearest_stop(_HH_LAT + i * 0.01, _HH_LON)
+        assert len(svc._stop_cache) <= svc._STOP_CACHE_MAX
+
+
+def _perp_km(p, a, b):
+    """Perpendicular distance from *p* to segment a-b, in km (equirectangular)."""
+    scale = math.cos(math.radians(a[1]))
+    px, py = (p[0] - a[0]) * scale * 111.0, (p[1] - a[1]) * 111.0
+    bx, by = (b[0] - a[0]) * scale * 111.0, (b[1] - a[1]) * 111.0
+    den = math.hypot(bx, by)
+    return math.hypot(px, py) if den == 0 else abs(bx * py - by * px) / den

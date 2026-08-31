@@ -28,9 +28,9 @@ _LAT2, _LON2 = 48.8566, 2.3522   # Paris
 
 @pytest.fixture(autouse=True)
 def _clear_stop_cache():
-    svc._nearest_stop_cached.cache_clear()
+    svc._stop_cache.clear()
     yield
-    svc._nearest_stop_cached.cache_clear()
+    svc._stop_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +69,7 @@ class TestNoNearbyStops:
 class TestTrainNotOnTheBoard:
     def test_logs_warning_and_raises(self, caplog):
         with patch("src.services.hafas_service._nearest_stop",
-                   return_value={"id": "x", "name": "Berlin Hbf"}), \
+                   return_value={"id": "x", "name": "Berlin Hbf", "tz": "Europe/Berlin"}), \
              patch("src.services.hafas_service._find_trip_id", return_value=None):
             with caplog.at_level(logging.WARNING, logger="src.services.hafas_service"):
                 with pytest.raises(HafasError, match="not found departing"):

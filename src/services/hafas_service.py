@@ -52,8 +52,8 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import polyline as polyline_lib
 import requests
@@ -107,13 +107,23 @@ _BOARD_MAX_PAGES = 4  # hard stop; one page already spans ~23 h at Hamburg Hbf
 # instead of silently producing a plausible-looking wrong route.
 _MAX_ENDPOINT_SNAP_KM = 30.0
 
-# The stop's timezone isn't known before the first request and DE/AT/DK/FI all
-# sit at UTC+1…+3, so the service-day window is a fixed UTC span rather than a
-# tz-database lookup: start 3 h before 00:00 UTC (local midnight at UTC+3,
-# earlier elsewhere) through 00:00 UTC the next day (01:00-03:00 local). A train
-# number repeats daily on the same path, so over-reaching at the edges cannot
-# select a wrong *route*.
+# Fallback service-day window, used only when a feed gives no usable timezone.
+# The real window comes from the anchor stop's own IANA zone, which MOTIS
+# returns on the reverse-geocode hit we already make - see _service_window.
 _DAY_START_SLACK = timedelta(hours=3)
+
+# Track geometry is persisted and shipped to the client whole, so it is
+# simplified before it leaves here. MOTIS shape points sit ~74 m apart, far
+# finer than a map render or the track editor's draggable vertices need.
+# Ramer-Douglas-Peucker at this tolerance stays within it everywhere by
+# construction (measured: 2.07 m worst case on ICE 75, see _simplify) and takes
+# Hamburg-Offenburg from 9,717 points / 242 KiB of JSON to 2,023 / 49 KiB.
+_SIMPLIFY_TOLERANCE_M = 2.0
+
+# Bound on the anchor cache. A miss is never cached - a transient reverse-geocode
+# failure must not pin "no station here" for the worker's lifetime.
+_STOP_CACHE_MAX = 256
+_stop_cache: dict[tuple[float, float], tuple[str, str, str]] = {}
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -163,7 +173,7 @@ def get_train_route(
                 "(train=%r start=%s,%s)", name, start_lat, start_lon)
             raise HafasError("Could not locate a station near the start point")
 
-        trip_id = _find_trip_id(anchor["id"], date, name)
+        trip_id = _find_trip_id(anchor["id"], date, name, anchor["tz"])
         if not trip_id:
             _log.warning(
                 "train lookup failed: %r not on the %s departure board at %s",
@@ -184,7 +194,7 @@ def get_train_route(
                 f"Train {name!r} serves only one of this segment's endpoints")
         _check_serves_endpoints(trimmed, name, start_lat, start_lon, end_lat, end_lon)
 
-        return TrainRoute(trimmed, _trim_polyline(poly, trimmed))
+        return TrainRoute(trimmed, _simplify(_trim_polyline(poly, trimmed)))
 
     except HafasError:
         raise
@@ -224,17 +234,25 @@ def _get(path: str, params: dict) -> Any:
 
 
 def _nearest_stop(lat: float, lon: float) -> Optional[dict]:
-    """Board anchor for (lat, lon) — the nearest MOTIS stop, or None."""
-    # Round before caching: 4 dp is ~11 m, so repeated resolves of segments
-    # sharing a station reuse one reverse-geocode instead of one each.
-    found = _nearest_stop_cached(round(lat, 4), round(lon, 4))
-    return {"id": found[0], "name": found[1]} if found else None
+    """Board anchor for (lat, lon): id, display name and IANA timezone, or None.
+
+    Cached on coordinates rounded to 4 dp (~11 m) so segments sharing a station
+    reverse-geocode once. Only *hits* are cached: caching a miss would pin a
+    transient network failure as "no station here" for the worker's lifetime.
+    """
+    key = (round(lat, 4), round(lon, 4))
+    found = _stop_cache.get(key)
+    if found is None:
+        found = _lookup_stop(*key)
+        if found is None:
+            return None
+        if len(_stop_cache) >= _STOP_CACHE_MAX:
+            _stop_cache.clear()
+        _stop_cache[key] = found
+    return {"id": found[0], "name": found[1], "tz": found[2]}
 
 
-@lru_cache(maxsize=256)
-def _nearest_stop_cached(lat: float, lon: float) -> Optional[tuple[str, str]]:
-    """(id, name) of the anchor stop, cached. Returns a tuple so the cached
-    value can't be mutated by a caller."""
+def _lookup_stop(lat: float, lon: float) -> Optional[tuple[str, str, str]]:
     results = _get("/reverse-geocode", {"place": f"{lat},{lon}", "type": "STOP"})
     if not isinstance(results, list):
         return None
@@ -245,18 +263,25 @@ def _nearest_stop_cached(lat: float, lon: float) -> Optional[tuple[str, str]]:
             continue
         if _crow_km(lat, lon, r["lat"], r["lon"]) > _MAX_ENDPOINT_SNAP_KM:
             continue
-        return str(r["id"]), str(r.get("name", ""))
+        # ``tz`` is the stop's IANA zone; it is what makes the service-day
+        # window correct rather than a guess about which continent we are on.
+        return str(r["id"]), str(r.get("name", "")), str(r.get("tz", ""))
     return None
 
 
-def _find_trip_id(stop_id: str, date: str, train_name: str) -> Optional[str]:
+
+def _find_trip_id(stop_id: str, date: str, train_name: str,
+                  tz: str = "") -> Optional[str]:
     """First trip on *stop_id*'s board within *date*'s service day matching *train_name*.
 
     Pages forward with MOTIS's own ``pageCursor`` instead of brute-forcing a
-    huge ``n``: one 500-entry page already spans ~23 h of the 27 h window at
-    Germany's busiest station, so this is normally a single request.
+    huge ``n``: one 500-entry page already spans ~23 h at Germany's busiest
+    station, so this is normally a single request.
+
+    *tz* is the anchor stop's IANA zone, which fixes the window to the local
+    calendar day the user meant — see _service_window.
     """
-    start, end = _service_window(date)
+    start, end = _service_window(date, tz)
     cursor: Optional[str] = None
 
     for _page in range(_BOARD_MAX_PAGES):
@@ -353,10 +378,43 @@ def _decode_leg_geometry(leg: dict) -> list[list[float]]:
 # Matching and trimming
 # ---------------------------------------------------------------------------
 
-def _service_window(date: str) -> tuple[datetime, datetime]:
-    """UTC window covering the whole local service day of *date*. See _DAY_START_SLACK."""
-    day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    return day - _DAY_START_SLACK, day + timedelta(days=1)
+def _service_window(date: str, tz: str = "") -> tuple[datetime, datetime]:
+    """UTC window covering *date* as a local calendar day at the anchor stop.
+
+    The zone comes from the anchor's own ``tz`` field, so this is the day the
+    user meant rather than a guess. A fixed UTC span was wrong in both
+    directions. Too early: a window opening 3 h before 00:00 UTC put the
+    *previous* local day's departures on the board first, and the scan takes
+    the first forward match — a request for 2026-09-01 returned RE 11438's
+    2026-08-31 trip. Too narrow: ``hafas_provider`` no longer gates the lookup
+    and Transitous is worldwide, so at UTC-5 a window ending at 00:00 UTC cut
+    off everything from 19:00 local and reported "not found" for trains that do
+    run. "A train number repeats daily" rescues neither case — weekend,
+    seasonal and night services may not run on the requested day at all, and
+    silently resolving the wrong day is worse than failing.
+
+    Falls back to the old fixed span only when a feed offers no usable zone.
+    """
+    day = datetime.strptime(date, "%Y-%m-%d")
+    zone = _zone(tz)
+    if zone is None:
+        utc_day = day.replace(tzinfo=timezone.utc)
+        return utc_day - _DAY_START_SLACK, utc_day + timedelta(days=1)
+    start = day.replace(tzinfo=zone)
+    end = (day + timedelta(days=1)).replace(tzinfo=zone)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _zone(tz: str) -> Optional[ZoneInfo]:
+    """The IANA zone named by *tz*, or None if absent or unknown to the platform."""
+    if not tz:
+        return None
+    try:
+        return ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        _log.warning("unknown timezone %r from MOTIS — using the fallback window", tz)
+        return None
+
 
 
 def _iso_z(when: datetime) -> str:
@@ -385,6 +443,20 @@ def _entry_matches(entry: dict, train_name: str) -> bool:
 
 
 _NON_ALNUM_RE = re.compile(r"[^A-Z0-9]")
+_BRACKETS_RE = re.compile(r"[()\[\]{}]")
+
+
+def _name_variants(name: str) -> list[tuple[str, str]]:
+    """(letters, digits) for each bracket-delimited part of a service name.
+
+    German boards label a trip ``"RE8 (11438)"`` — the line and the trip number
+    in one string. Normalising that in one pass concatenates the two numbers
+    into ``811438``, which matches nothing a user could ever type, so ``RE8``
+    silently found no train at all. Splitting on the brackets keeps ``RE8`` and
+    ``11438`` separately addressable.
+    """
+    parts = [p for p in _BRACKETS_RE.split(name or "") if p.strip()]
+    return [_split_name(p) for p in parts]
 
 
 def _name_matches(line_name: str, query: str) -> bool:
@@ -395,19 +467,28 @@ def _name_matches(line_name: str, query: str) -> bool:
     (a real hazard now that whole departure boards are scanned). A bare number
     still matches a named service, and leading zeros are ignored so "393"
     matches Rejseplanen's "000393".
+
+    A *named* query always has its letters confirmed. Waiving that whenever the
+    candidate happened to carry no letters made "TGV 11438" match a Deutsche
+    Bahn RE8, because that board's ``tripShortName`` is the bare "011438"; the
+    split-name feeds ("ECE" + "000393") are served by the concatenated
+    candidate in _entry_matches, which does carry the letters.
     """
-    a_letters, a_digits = _split_name(line_name)
-    b_letters, b_digits = _split_name(query)
-    if not (a_letters or a_digits) or not (b_letters or b_digits):
-        return False
-    if a_digits.lstrip("0") != b_digits.lstrip("0"):
-        return False
-    return not b_letters or not a_letters or a_letters == b_letters
+    for a_letters, a_digits in _name_variants(line_name):
+        for b_letters, b_digits in _name_variants(query):
+            if not (a_letters or a_digits) or not (b_letters or b_digits):
+                continue
+            if a_digits.lstrip("0") != b_digits.lstrip("0"):
+                continue
+            if not b_letters or a_letters == b_letters:
+                return True
+    return False
 
 
 def _split_name(name: str) -> tuple[str, str]:
     norm = _NON_ALNUM_RE.sub("", (name or "").upper())
     return re.sub(r"\d", "", norm), re.sub(r"\D", "", norm)
+
 
 
 def _check_serves_endpoints(
@@ -465,6 +546,63 @@ def _trim_polyline(poly: list[list[float]], stops: list[dict]) -> list[list[floa
     j = _nearest_point(poly, stops[-1])
     part = poly[i : j + 1] if i <= j else list(reversed(poly[j : i + 1]))
     return part if len(part) >= 2 else []
+
+
+def _simplify(poly: list[list[float]],
+              tolerance_m: float = _SIMPLIFY_TOLERANCE_M) -> list[list[float]]:
+    """Ramer-Douglas-Peucker: drop points that lie within *tolerance_m* of the
+    line their neighbours already describe.
+
+    MOTIS ships shape points ~74 m apart over the whole journey, which is far
+    finer than anything downstream needs and is not free: the polyline is
+    persisted, returned by /geo on every load, and turned into one draggable
+    marker per vertex by the track editor, which has no cap of its own.
+    Hamburg->Offenburg goes from 9,717 points / 242 KiB of JSON to 2,023 /
+    49 KiB, with every dropped point provably within the tolerance of the line
+    that replaces it.
+
+    Iterative, not recursive: an 11k-point trip would otherwise risk blowing the
+    stack. Distances are measured on a locally-equirectangular projection
+    (longitude scaled by cos(latitude)) rather than on raw [lon, lat] degrees:
+    a degree of longitude is only ~63% of a degree of latitude at these
+    latitudes, so an unprojected epsilon silently allows up to 1/cos times the
+    tolerance in the north-south direction — measured at 3.10 m for a nominal
+    2 m on this very route. One scale factor is used for the whole line, so
+    the effective tolerance still drifts a few percent across a long
+    north-south route (measured 2.07 m for a nominal 2 m on ICE 75).
+    """
+    if len(poly) < 3 or tolerance_m <= 0:
+        return poly
+    mid_lat = (poly[0][1] + poly[-1][1]) / 2
+    scale = max(math.cos(math.radians(mid_lat)), 0.01)   # lon degrees -> lat degrees
+    eps = tolerance_m / 111_000.0
+    proj = [(x * scale, y) for x, y in poly]
+
+    keep = [False] * len(poly)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(poly) - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j - i < 2:
+            continue
+        ax, ay = proj[i]
+        bx, by = proj[j]
+        dx, dy = bx - ax, by - ay
+        den = math.hypot(dx, dy)
+        worst, at = -1.0, -1
+        for k in range(i + 1, j):
+            px, py = proj[k]
+            if den == 0:
+                dist = math.hypot(px - ax, py - ay)
+            else:
+                dist = abs(dy * px - dx * py + bx * ay - by * ax) / den
+            if dist > worst:
+                worst, at = dist, k
+        if worst > eps:
+            keep[at] = True
+            stack.append((i, at))
+            stack.append((at, j))
+    return [p for p, k in zip(poly, keep) if k]
 
 
 def _nearest_point(poly: list[list[float]], stop: dict) -> int:

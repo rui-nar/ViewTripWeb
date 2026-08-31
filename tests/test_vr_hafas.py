@@ -34,6 +34,12 @@ _D88_LAT2, _D88_LON2 = 60.069381, 23.664059
 # Two-endpoint train route-relation intersection tests
 # ---------------------------------------------------------------------------
 
+def _is_strategy_c(query: str) -> bool:
+    """True for the coordinate-fallback bounding-box query (not UIC enrichment,
+    not the Strategy-B relation-id lookup)."""
+    return "uic_ref" not in query and "out ids" not in query
+
+
 def _make_relation(lon_start, lat_start, lon_end, lat_end, mid_count=1):
     """Build a fake Overpass relation element."""
     geom = [{"lon": lon_start, "lat": lat_start}]
@@ -173,16 +179,10 @@ class TestCoordinateFallbackBoundedCalls:
 
     def test_strategy_c_makes_single_overpass_query_for_long_route(self):
         n = 12
-        # Helsinki → Tampere. This used to run all the way to Oulu (a 4.8° span),
-        # which _RAIL_BBOX_MAX_SPAN now (deliberately) rejects without querying —
-        # see the constant's comment for the measurements. The point of this test
-        # is the call *count* for a many-stop route, so it uses a leg inside the
-        # limit; the rejection above that limit is its own test below.
-        lat2, lon2 = 61.498224, 23.773087
         stops = [
             {
-                "lat": _LAT1 + (i / (n - 1)) * (lat2 - _LAT1),
-                "lon": _LON1 + (i / (n - 1)) * (lon2 - _LON1),
+                "lat": _LAT1 + (i / (n - 1)) * (_LAT2 - _LAT1),
+                "lon": _LON1 + (i / (n - 1)) * (_LON2 - _LON1),
             }
             for i in range(n)
         ]
@@ -220,15 +220,16 @@ class TestCoordinateFallbackBoundedCalls:
     @pytest.mark.parametrize("a,b", [
         # Pathological cross-continent input, the case 12.0 was chosen for.
         ((0.0, 0.0), (40.0, 5.0)),
-        # Offenburg → Hamburg: the real 5.1° x 2.3° box from issue #277.
+        # Offenburg → Hamburg: the real box from issue #277. Measured at
+        # 14.28 deg^2 / 43.4 s / 61 MB and it *still* hit Overpass's own query
+        # timeout, so there is nothing to gain by asking.
         ((48.4764, 7.9461), (53.5528, 10.0067)),
     ])
     def test_oversized_bbox_straight_lines_without_query(self, a, b):
-        """A span Overpass cannot serve skips the query and returns a chord.
+        """A box Overpass cannot serve skips the query and returns a chord.
 
-        The issue-#277 case is the second one: that box never completed inside
-        the 30 s query timeout, so three mirrors x 45 s were spent (~135 s) to
-        arrive at exactly the straight line this returns instantly.
+        Three mirrors x 45 s were previously spent (~135 s) to arrive at exactly
+        the straight line this returns instantly.
         """
         stops = [{"lat": a[0], "lon": a[1]}, {"lat": b[0], "lon": b[1]}]
         calls = {"rail": 0}
@@ -251,10 +252,19 @@ class TestCoordinateFallbackBoundedCalls:
         assert result.degraded is True
         assert result.strategy == "straight"
 
-    def test_a_leg_inside_the_limit_still_queries(self):
-        """The tightened limit must not swallow ordinary single-country legs."""
-        stops = [{"lat": 53.5528, "lon": 10.0067},   # Hamburg
-                 {"lat": 52.3770, "lon": 9.7410}]    # Hannover — 1.2° span
+    @pytest.mark.parametrize("a,b,why", [
+        ((53.5528, 10.0067), (52.3770, 9.7410), "Hamburg-Hannover, 1.28 deg^2"),
+        # The cap is on *area*, not span, precisely so a long leg through a
+        # sparse network is not discarded along with a dense one: this is 6.3
+        # degrees of latitude but only 8.80 deg^2, measured at 6.1 s / 4.2 MB.
+        # It is also the route _via_coordinate_fallback's docstring exists for,
+        # so a cap rejecting it would make that docstring describe a fiction.
+        ((60.172097, 24.941249), (66.503948, 25.729391),
+         "Helsinki-Rovaniemi, 8.80 deg^2"),
+    ])
+    def test_a_leg_inside_the_limit_still_queries(self, a, b, why):
+        """The limit must not swallow legs Overpass has been measured to serve."""
+        stops = [{"lat": a[0], "lon": a[1]}, {"lat": b[0], "lon": b[1]}]
         calls = {"rail": 0}
 
         def _overpass_side_effect(query):
@@ -266,7 +276,7 @@ class TestCoordinateFallbackBoundedCalls:
         with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
             get_rail_geometry(stops)
 
-        assert calls["rail"] == 1
+        assert calls["rail"] == 1, why
 
 
 class TestTrainRelationGraphExtraction:
@@ -403,12 +413,21 @@ class TestRailDegradedReporting:
     def test_overpass_failure_reports_degraded_straight_line(self):
         """Every Overpass call raises (network down/blocked) → strategies A/B/C
         all fail → straight chord, flagged degraded (not a silent 'resolved')."""
-        def _boom(_query):
+        calls = {"rail": 0}
+
+        def _boom(query):
+            if _is_strategy_c(query):
+                calls["rail"] += 1
             raise OverpassError("Overpass timeout")
 
         with patch("src.services.overpass_service._overpass", side_effect=_boom):
             result = get_rail_geometry(self._STOPS)
 
+        # These stops must actually reach Strategy C's bounding-box query. When
+        # the guard was a max-*span* cap this pair was over it, so the fallback
+        # short-circuited before issuing that query at all and the test passed
+        # for a completely different reason than the one it claims to test.
+        assert calls["rail"] == 1, "Strategy C's rail query was never issued"
         assert isinstance(result, RailGeometry)
         assert result.degraded is True
         assert result.strategy == "straight"
@@ -417,10 +436,17 @@ class TestRailDegradedReporting:
     def test_empty_overpass_reports_degraded_straight_line(self):
         """Overpass reachable but returns no rail elements → no graph → straight
         chord, flagged degraded."""
-        with patch("src.services.overpass_service._overpass",
-                   side_effect=lambda _q: {"elements": []}):
+        calls = {"rail": 0}
+
+        def _empty(query):
+            if _is_strategy_c(query):
+                calls["rail"] += 1
+            return {"elements": []}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_empty):
             result = get_rail_geometry(self._STOPS)
 
+        assert calls["rail"] == 1, "Strategy C's rail query was never issued"
         assert result.degraded is True
         assert result.strategy == "straight"
 

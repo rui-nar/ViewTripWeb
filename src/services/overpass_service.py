@@ -402,32 +402,39 @@ rel(id:{ids_str});
 # Strategy 3c — coordinate fallback (bounding-box Dijkstra)
 # ---------------------------------------------------------------------------
 
-# Maximum bounding-box span (degrees) of the *stops* for the single
-# coordinate-fallback query. The query box adds the 0.25° buffer below on each
-# side, so this caps the queried box at span + 0.5°.
+# Maximum *area* (square degrees) of the buffered bounding box for the single
+# coordinate-fallback query. Beyond this Overpass cannot answer inside the
+# 30 s QL / 45 s HTTP budget, so we straight-line instead of paying for a
+# request that can only fail.
 #
-# 12.0 was picked as a "pathological input" guard, not from what Overpass can
-# serve, and it let queries through that could only ever time out: the
-# Hamburg→Offenburg report (issue #277) sent a 5.1° × 2.3° box that never
-# completed, costing ~135 s across three mirrors to learn nothing and land on
-# the same straight line it would have produced instantly.
+# This was 12.0 degrees of max *span*, chosen as a "pathological input" guard
+# rather than from anything Overpass can serve, and it let through queries that
+# could only time out: the Hamburg→Offenburg report (issue #277) sent a box that
+# ran 43.4 s, returned 61 MB and still hit Overpass's own query timeout — ~135 s
+# across three mirrors to land on the straight line it would have produced
+# instantly.
 #
-# Measured against overpass-api.de with this exact query (railway=rail|
-# narrow_gauge|light_rail, service unset, out geom) over central Germany:
+# Span is the wrong axis. Cost tracks the area actually queried and the density
+# of rail inside it, and a max-span cap tight enough for Germany throws away
+# routes that sparse networks serve easily. Measured on overpass-api.de with
+# this exact query (railway=rail|narrow_gauge|light_rail, service unset,
+# out geom), each on its real buffered box:
 #
-#     box 2.0°  →  15.6 s,  15 MB
-#     box 2.5°  →  28.1 s,  25 MB
-#     box 3.0°  →  32.3 s,  37 MB      ← largest that fits _TIMEOUT_HTTP (45 s)
-#     box 4.0°  →  51.6 s,  71 MB      ← blows the HTTP timeout
-#     box 5.0°  →  Overpass's own query timeout; empty result with a "remark"
+#     Hamburg→Hannover      1.28 deg^2    8.4 s    6.2 MB   ok
+#     Helsinki→Oulu         5.57 deg^2   10.4 s    3.8 MB   ok
+#     Helsinki→Rovaniemi    8.80 deg^2    6.1 s    4.2 MB   ok
+#     central Germany 3.0°   9.00 deg^2   32.3 s   37.0 MB   ok  <- dense ceiling
+#     Hamburg→Offenburg    14.28 deg^2   43.4 s   61.0 MB   QUERY TIMED OUT
+#     central Germany 4.0°  20.25 deg^2   51.6 s   71.0 MB   past the HTTP timeout
 #
-# So 2.5 (a queried box of up to 3.0°) is the honest ceiling for the current
-# 30 s QL / 45 s HTTP budget. Longer legs now straight-line immediately instead
-# of spending minutes reaching the same answer. Since issue #277 a matched train
-# gets real geometry from MOTIS and never reaches this fallback at all; what
-# arrives here is a segment with no train number or an unmatched one, where a
-# continent-sized railway query was never going to help.
-_RAIL_BBOX_MAX_SPAN = 2.5
+# 9.0 is therefore the densest network's measured ceiling. Sparse networks clear
+# it with 5x margin, which is why Helsinki→Rovaniemi — the very route
+# _via_coordinate_fallback exists for — still reaches the query, while
+# Hamburg→Offenburg is rejected in ~0 s instead of after minutes. A degenerate
+# long-thin box stays bounded because the 0.25° buffer on each side puts a floor
+# of 0.5° under both dimensions.
+_RAIL_BBOX_BUFFER = 0.25
+_RAIL_BBOX_MAX_AREA = 9.0
 
 
 def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
@@ -448,12 +455,10 @@ def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
 
     lats = [s["lat"] for s in stops]
     lons = [s["lon"] for s in stops]
-    if (max(lats) - min(lats) > _RAIL_BBOX_MAX_SPAN or
-            max(lons) - min(lons) > _RAIL_BBOX_MAX_SPAN):
-        return _straight(lat1, lon1, lat2, lon2)
-
-    buf = 0.25
+    buf = _RAIL_BBOX_BUFFER
     bbox = (min(lats) - buf, min(lons) - buf, max(lats) + buf, max(lons) + buf)
+    if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) > _RAIL_BBOX_MAX_AREA:
+        return _straight(lat1, lon1, lat2, lon2)
     # No usage filter — OSM tagging conventions vary by country (Germany uses
     # usage=main/branch; France often uses usage=main_line or omits it entirely).
     # The railway type filter is restrictive enough to avoid excessive data.
