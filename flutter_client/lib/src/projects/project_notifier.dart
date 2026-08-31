@@ -835,8 +835,15 @@ class ProjectNotifier extends ChangeNotifier
         if (e is ApiException) loadErrorStatus = e.statusCode;
       }
     } finally {
-      isLoading = false;
-      notifyListeners();   // map appears here with low-res straight lines
+      // Guard like the catch block above: a stale finally (from a load()
+      // superseded while awaiting _buildFullTrack()'s compute() hop) must not
+      // flip isLoading back to false or notify for a project that's no longer
+      // current — a new load() for the current project may already be in
+      // flight with isLoading = true.
+      if (_loadKey == ref) {
+        isLoading = false;
+        notifyListeners();   // map appears here with low-res straight lines
+      }
     }
 
     // Phase 2: full-res GeoJSON, then elevation data — chained rather than
@@ -1038,6 +1045,10 @@ class ProjectNotifier extends ChangeNotifier
       if (_loadKey != ref) return;
       geo = {'type': 'FeatureCollection', 'features': features};
       await _buildFullTrack();
+      // _buildFullTrack() may hop through compute() — re-check like every
+      // other await in this function so a superseded load doesn't flip
+      // isGeoLoaded or notify for a project the user has since left.
+      if (_loadKey != ref) return;
       isGeoLoaded = true;
       notifyListeners();
     } on Object catch (e) {
@@ -1262,8 +1273,11 @@ class ProjectNotifier extends ChangeNotifier
     // the staleness check below and clobber newer data).
     final gen = ++_buildFullTrackGen;
     if (totalElevationProfilePoints(activities) <= kInlineFullTrackThreshold) {
+      // No staleness check needed here: buildFullTrackResult() is synchronous,
+      // so nothing can bump _buildFullTrackGen between the increment above and
+      // this line — unlike the compute() branch below, which awaits across an
+      // isolate hop and needs the check after it returns.
       final r = buildFullTrackResult((geo: geo, activities: activities));
-      if (gen != _buildFullTrackGen) return; // superseded by a newer call
       _fullTrack = r.fullTrack;
       _perActivityTracks = r.perActivityTracks;
       return;
