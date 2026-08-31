@@ -47,18 +47,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
   // Rail-track fields (train segments only)
   String _routeMode = 'great_circle';
-  String _hafasProvider = 'db';
   late TextEditingController _trainNumberCtrl;
-
-  static const _operators = [
-    ('db',   'DB (Deutsche Bahn)'),
-    ('obb',  'ÖBB (Austria)'),
-    ('sncf', 'SNCF (France)'),
-    ('sj',   'SJ (Sweden)'),
-    ('dsb',  'DSB (Denmark)'),
-    ('vr',   'VR (Finland)'),
-    ('nsb',  'NSB / Vy (Norway)'),
-  ];
 
   static const _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
@@ -88,7 +77,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
 
     // Rail-track fields
     _routeMode     = (seg?['route_mode'] as String?) ?? 'great_circle';
-    _hafasProvider = (seg?['hafas_provider'] as String?) ?? 'db';
     _trainNumberCtrl = TextEditingController(
         text: seg?['train_number'] as String? ?? '');
     _activityList = List<Map<String, dynamic>>.from(widget.notifier.activities)
@@ -428,7 +416,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
         endLon: endLon,
         date: dateStr,
         trainNumber: trainNum,
-        hafasProvider: needsResolve ? _hafasProvider : null,
         routeMode: {'train', 'boat', 'bus'}.contains(_segmentType) ? _routeMode : null,
       );
       resolveSegId = widget.editSegment!['id'] as String;
@@ -443,7 +430,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
         insertAfterIndex: insertAfterIndex,
         date: dateStr,
         trainNumber: trainNum,
-        hafasProvider: needsResolve ? _hafasProvider : null,
       );
     }
 
@@ -452,7 +438,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
     if (needsResolve && resolveSegId.isNotEmpty) {
       final messenger = ScaffoldMessenger.of(context);
       final notifier  = widget.notifier;
-      final provider  = _hafasProvider;
       final segId     = resolveSegId;
       final routeMode = const {'train': 'rail', 'boat': 'ferry', 'bus': 'bus'}[_segmentType]!;
       final resolveMsg = routeMode == 'ferry'
@@ -467,7 +452,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
       Navigator.of(context).pop();
       if (widget.editSegment == null) notifier.selectSegment(segId);
       unawaited(_resolveAsync(
-        notifier, segId, routeMode, provider, trainNum, dateStr, messenger,
+        notifier, segId, routeMode, trainNum, dateStr, messenger,
         force: force,
       ));
     } else {
@@ -482,7 +467,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
     ProjectNotifier notifier,
     String segId,
     String routeMode,
-    String hafasProvider,
     String? trainNumber,
     String? date,
     ScaffoldMessengerState messenger, {
@@ -492,8 +476,7 @@ class _SegmentDialogState extends State<SegmentDialog> {
       final result = await notifier.resolveTrainRoute(
         segId,
         routeMode: routeMode,
-        hafasProvider: routeMode == 'rail' ? hafasProvider : null,
-        trainNumber:   routeMode == 'rail' ? trainNumber   : null,
+        trainNumber: routeMode == 'rail' ? trainNumber : null,
         date: date,
         force: force,
       );
@@ -771,20 +754,6 @@ class _SegmentDialogState extends State<SegmentDialog> {
                 ),
                 if (_routeMode == 'rail') ...[
                   const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    initialValue: _hafasProvider,
-                    decoration: const InputDecoration(
-                      labelText: 'Operator',
-                      isDense: true,
-                    ),
-                    items: _operators
-                        .map((o) => DropdownMenuItem(value: o.$1, child: Text(o.$2)))
-                        .toList(),
-                    onChanged: (v) {
-                      if (v != null) setState(() => _hafasProvider = v);
-                    },
-                  ),
-                  const SizedBox(height: 8),
                   TextFormField(
                     controller: _trainNumberCtrl,
                     decoration: const InputDecoration(
