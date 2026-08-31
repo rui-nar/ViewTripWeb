@@ -402,11 +402,32 @@ rel(id:{ids_str});
 # Strategy 3c — coordinate fallback (bounding-box Dijkstra)
 # ---------------------------------------------------------------------------
 
-# Maximum bounding-box span (degrees) for the single coordinate-fallback query.
-# Beyond this the Overpass response risks being huge/slow, so we straight-line
-# instead. Comfortably covers any real single train leg (Helsinki–Rovaniemi is
-# ~6.3°); guards only against pathological cross-continent inputs.
-_RAIL_BBOX_MAX_SPAN = 12.0
+# Maximum bounding-box span (degrees) of the *stops* for the single
+# coordinate-fallback query. The query box adds the 0.25° buffer below on each
+# side, so this caps the queried box at span + 0.5°.
+#
+# 12.0 was picked as a "pathological input" guard, not from what Overpass can
+# serve, and it let queries through that could only ever time out: the
+# Hamburg→Offenburg report (issue #277) sent a 5.1° × 2.3° box that never
+# completed, costing ~135 s across three mirrors to learn nothing and land on
+# the same straight line it would have produced instantly.
+#
+# Measured against overpass-api.de with this exact query (railway=rail|
+# narrow_gauge|light_rail, service unset, out geom) over central Germany:
+#
+#     box 2.0°  →  15.6 s,  15 MB
+#     box 2.5°  →  28.1 s,  25 MB
+#     box 3.0°  →  32.3 s,  37 MB      ← largest that fits _TIMEOUT_HTTP (45 s)
+#     box 4.0°  →  51.6 s,  71 MB      ← blows the HTTP timeout
+#     box 5.0°  →  Overpass's own query timeout; empty result with a "remark"
+#
+# So 2.5 (a queried box of up to 3.0°) is the honest ceiling for the current
+# 30 s QL / 45 s HTTP budget. Longer legs now straight-line immediately instead
+# of spending minutes reaching the same answer. Since issue #277 a matched train
+# gets real geometry from MOTIS and never reaches this fallback at all; what
+# arrives here is a segment with no train number or an unmatched one, where a
+# continent-sized railway query was never going to help.
+_RAIL_BBOX_MAX_SPAN = 2.5
 
 
 def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:

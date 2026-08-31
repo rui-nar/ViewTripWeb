@@ -1,11 +1,17 @@
-"""Tests for VR (Finnish Railways) HAFAS support and the two-endpoint
-train route-relation strategy in overpass_service."""
+"""Tests for the two-endpoint train route-relation strategy in overpass_service.
+
+Originally also covered the VR (Finnish Railways) HAFAS backend; that backend
+was removed in issue #277 when train lookups moved to MOTIS/Transitous, which
+indexes the same ``fi-digitraffic`` data. Finnish coverage now lives in
+``test_motis_train_route.py::TestFinlandViaTheSameIndex``. Everything here is
+about the Overpass geometry fallback, which trains only reach when no train
+number is given or none could be matched.
+"""
 
 from unittest.mock import patch
 
 import pytest
 
-from src.services.hafas_service import HafasError, get_stop_sequence
 from src.services.overpass_service import (
     OverpassError,
     RailGeometry,
@@ -22,149 +28,6 @@ _LAT2, _LON2 = 65.010017, 25.484046   # Oulu Station
 # Day-88 style: Hanko → Salo
 _D88_LAT1, _D88_LON1 = 59.827043, 22.968801
 _D88_LAT2, _D88_LON2 = 60.069381, 23.664059
-
-
-# ---------------------------------------------------------------------------
-# VR HAFAS tests
-# ---------------------------------------------------------------------------
-
-_VR_STATIONS = [
-    {
-        "stationShortCode": "HKI",
-        "stationName": "Helsinki asema",
-        "latitude": 60.172097,
-        "longitude": 24.941249,
-        "stationUICCode": 1,
-        "passengerTraffic": True,
-    },
-    {
-        "stationShortCode": "TPE",
-        "stationName": "Tampere asema",
-        "latitude": 61.498224,
-        "longitude": 23.773087,
-        "stationUICCode": 160,
-        "passengerTraffic": True,
-    },
-    {
-        "stationShortCode": "OUL",
-        "stationName": "Oulu asema",
-        "latitude": 65.010017,
-        "longitude": 25.484046,
-        "stationUICCode": 483,
-        "passengerTraffic": True,
-    },
-]
-
-_VR_TRAIN_SCHEDULE = [
-    {
-        "trainNumber": 3,
-        "departureDate": "2026-06-01",
-        "timeTableRows": [
-            {"stationShortCode": "HKI", "type": "DEPARTURE"},
-            {"stationShortCode": "TPE", "type": "ARRIVAL"},
-            {"stationShortCode": "TPE", "type": "DEPARTURE"},
-            {"stationShortCode": "OUL", "type": "ARRIVAL"},
-        ],
-    }
-]
-
-
-class TestVrHafas:
-    def _mock_vr(self, mocker=None):
-        """Patch _vr_stations_cache and the requests for the schedule."""
-        import src.services.hafas_service as svc
-        svc._vr_stations_cache = _VR_STATIONS
-
-    def test_vr_returns_stop_sequence(self):
-        """get_stop_sequence with provider='vr' returns trimmed stops."""
-        import src.services.hafas_service as svc
-        svc._vr_stations_cache = _VR_STATIONS
-
-        with patch("src.services.hafas_service.requests.get") as mock_get:
-            mock_get.return_value.json.return_value = _VR_TRAIN_SCHEDULE
-            mock_get.return_value.raise_for_status = lambda: None
-
-            stops = get_stop_sequence(
-                provider="vr",
-                train_number="3",
-                date="2026-06-01",
-                start_lat=_LAT1, start_lon=_LON1,
-                end_lat=_LAT2,   end_lon=_LON2,
-            )
-
-        assert len(stops) >= 2
-        # First stop should be Helsinki, last should be Oulu
-        assert stops[0]["name"] == "Helsinki asema"
-        assert stops[-1]["name"] == "Oulu asema"
-
-        # Reset cache
-        svc._vr_stations_cache = None
-
-    def test_vr_strips_prefix_from_train_number(self):
-        """'IC 3' is normalised to '3' before the API call."""
-        import src.services.hafas_service as svc
-        svc._vr_stations_cache = _VR_STATIONS
-
-        with patch("src.services.hafas_service.requests.get") as mock_get:
-            mock_get.return_value.json.return_value = _VR_TRAIN_SCHEDULE
-            mock_get.return_value.raise_for_status = lambda: None
-
-            stops = get_stop_sequence(
-                provider="vr",
-                train_number="IC 3",
-                date="2026-06-01",
-                start_lat=_LAT1, start_lon=_LON1,
-                end_lat=_LAT2,   end_lon=_LON2,
-            )
-
-        # Check the URL called had the numeric-only train number
-        called_url = mock_get.call_args[0][0]
-        assert called_url.endswith("/trains/2026-06-01/3"), called_url
-
-        svc._vr_stations_cache = None
-
-    def test_vr_train_not_found_raises(self):
-        """Empty schedule list raises HafasError."""
-        import src.services.hafas_service as svc
-        svc._vr_stations_cache = _VR_STATIONS
-
-        with patch("src.services.hafas_service.requests.get") as mock_get:
-            mock_get.return_value.json.return_value = []
-            mock_get.return_value.raise_for_status = lambda: None
-
-            with pytest.raises(HafasError, match="not found"):
-                get_stop_sequence(
-                    provider="vr",
-                    train_number="999",
-                    date="2026-06-01",
-                    start_lat=_LAT1, start_lon=_LON1,
-                    end_lat=_LAT2,   end_lon=_LON2,
-                )
-
-        svc._vr_stations_cache = None
-
-    def test_vr_deduplicates_arrival_departure_rows(self):
-        """Each station appears only once even though schedule has ARRIVAL+DEPARTURE."""
-        import src.services.hafas_service as svc
-        svc._vr_stations_cache = _VR_STATIONS
-
-        with patch("src.services.hafas_service.requests.get") as mock_get:
-            mock_get.return_value.json.return_value = _VR_TRAIN_SCHEDULE
-            mock_get.return_value.raise_for_status = lambda: None
-
-            stops = get_stop_sequence(
-                provider="vr",
-                train_number="3",
-                date="2026-06-01",
-                start_lat=_LAT1, start_lon=_LON1,
-                end_lat=_LAT2,   end_lon=_LON2,
-            )
-
-        names = [s["name"] for s in stops]
-        # Tampere should appear exactly once despite two timeTableRows
-        assert names.count("Tampere asema") == 1
-
-        svc._vr_stations_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -310,10 +173,16 @@ class TestCoordinateFallbackBoundedCalls:
 
     def test_strategy_c_makes_single_overpass_query_for_long_route(self):
         n = 12
+        # Helsinki → Tampere. This used to run all the way to Oulu (a 4.8° span),
+        # which _RAIL_BBOX_MAX_SPAN now (deliberately) rejects without querying —
+        # see the constant's comment for the measurements. The point of this test
+        # is the call *count* for a many-stop route, so it uses a leg inside the
+        # limit; the rejection above that limit is its own test below.
+        lat2, lon2 = 61.498224, 23.773087
         stops = [
             {
-                "lat": _LAT1 + (i / (n - 1)) * (_LAT2 - _LAT1),
-                "lon": _LON1 + (i / (n - 1)) * (_LON2 - _LON1),
+                "lat": _LAT1 + (i / (n - 1)) * (lat2 - _LAT1),
+                "lon": _LON1 + (i / (n - 1)) * (lon2 - _LON1),
             }
             for i in range(n)
         ]
@@ -348,12 +217,20 @@ class TestCoordinateFallbackBoundedCalls:
         assert result.strategy == "coordinate_dijkstra"
         assert result.degraded is False
 
-    def test_oversized_bbox_straight_lines_without_query(self):
-        """A pathologically long span skips the query and returns a chord."""
-        stops = [
-            {"lat": 0.0, "lon": 0.0},
-            {"lat": 40.0, "lon": 5.0},   # >12° span
-        ]
+    @pytest.mark.parametrize("a,b", [
+        # Pathological cross-continent input, the case 12.0 was chosen for.
+        ((0.0, 0.0), (40.0, 5.0)),
+        # Offenburg → Hamburg: the real 5.1° x 2.3° box from issue #277.
+        ((48.4764, 7.9461), (53.5528, 10.0067)),
+    ])
+    def test_oversized_bbox_straight_lines_without_query(self, a, b):
+        """A span Overpass cannot serve skips the query and returns a chord.
+
+        The issue-#277 case is the second one: that box never completed inside
+        the 30 s query timeout, so three mirrors x 45 s were spent (~135 s) to
+        arrive at exactly the straight line this returns instantly.
+        """
+        stops = [{"lat": a[0], "lon": a[1]}, {"lat": b[0], "lon": b[1]}]
         calls = {"rail": 0}
 
         def _overpass_side_effect(query):
@@ -368,11 +245,28 @@ class TestCoordinateFallbackBoundedCalls:
             result = get_rail_geometry(stops)
 
         assert calls["rail"] == 0, "Oversized bbox must not issue a rail query"
-        assert result.polyline == [[0.0, 0.0], [5.0, 40.0]]
+        assert result.polyline == [[a[1], a[0]], [b[1], b[0]]]
         # This is the silent-straight-line case the observability work surfaces:
         # the result must self-report as a degraded straight chord.
         assert result.degraded is True
         assert result.strategy == "straight"
+
+    def test_a_leg_inside_the_limit_still_queries(self):
+        """The tightened limit must not swallow ordinary single-country legs."""
+        stops = [{"lat": 53.5528, "lon": 10.0067},   # Hamburg
+                 {"lat": 52.3770, "lon": 9.7410}]    # Hannover — 1.2° span
+        calls = {"rail": 0}
+
+        def _overpass_side_effect(query):
+            if "uic_ref" in query or "out ids" in query:
+                return {"elements": []}
+            calls["rail"] += 1
+            return {"elements": []}
+
+        with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
+            get_rail_geometry(stops)
+
+        assert calls["rail"] == 1
 
 
 class TestTrainRelationGraphExtraction:

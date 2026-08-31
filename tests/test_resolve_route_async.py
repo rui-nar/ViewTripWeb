@@ -601,13 +601,14 @@ def test_the_trigger_enqueues_onto_the_resolve_queue(env, monkeypatch):
 # unchanged.
 
 def test_hafas_failure_logs_warning_and_falls_back_unchanged(caplog):
-    from src.services.hafas_service import HafasError
+    from src.services.hafas_service import HafasError, TrainRoute
 
     seg = _train_segment()
     straight = [[24.9414, 60.1719], [25.7294, 66.5039]]
 
-    with patch("src.services.hafas_service.get_stop_sequence",
-               side_effect=HafasError("VR train lookup failed: boom")), \
+    with patch("src.services.hafas_service.get_train_route",
+               side_effect=HafasError("Train '273' not found departing "
+                                      "Helsinki on 2026-06-01")), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
             "R", (), {"polyline": straight, "degraded": True, "strategy": "straight"})()
@@ -640,13 +641,16 @@ def test_hafas_failure_logs_warning_and_falls_back_unchanged(caplog):
 
 def test_hafas_success_does_not_log_warning(caplog):
     """No degradation, no log — the WARNING is specific to the fallback path."""
+    from src.services.hafas_service import TrainRoute
+
     seg = _train_segment()
     hafas_stops = [
         {"lat": seg.start.lat, "lon": seg.start.lon, "uic": "1"},
         {"lat": seg.end.lat, "lon": seg.end.lon, "uic": "2"},
     ]
 
-    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+    with patch("src.services.hafas_service.get_train_route",
+               return_value=TrainRoute(hafas_stops, [])), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
             "R", (), {"polyline": [[1.0, 1.0]], "degraded": False, "strategy": "relation_uic"})()
@@ -659,6 +663,55 @@ def test_hafas_success_does_not_log_warning(caplog):
     assert seg.route_hafas_failed is False
 
 
+# ── MOTIS geometry short-circuits Overpass (issue #277) ──
+#
+# The whole point of moving trains to MOTIS is that /trip already carries the
+# real track, so a matched train must not pay for an Overpass query at all —
+# that cascade (3 mirrors x 45 s per query) is what made a long resolve take
+# minutes.
+
+def test_matched_train_uses_motis_geometry_and_skips_overpass():
+    from src.services.hafas_service import TrainRoute
+
+    seg = _train_segment()
+    stops = [
+        {"lat": seg.start.lat, "lon": seg.start.lon, "name": "A", "uic": ""},
+        {"lat": 62.0, "lon": 25.0, "name": "B", "uic": ""},
+        {"lat": seg.end.lat, "lon": seg.end.lon, "name": "C", "uic": ""},
+    ]
+    track = [[24.9414, 60.1719], [25.0, 62.0], [25.7294, 66.5039]]
+
+    with patch("src.services.hafas_service.get_train_route",
+               return_value=TrainRoute(stops, track)), \
+         patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
+        polyline, stop_count, degraded, strategy = _compute_segment_geometry(
+            seg, {"train_number": "273"})
+
+    mock_rail.assert_not_called()
+    assert polyline == track
+    assert stop_count == 3
+    assert degraded is False
+    assert strategy == "motis_trip"
+    assert seg.route_hafas_failed is False
+
+
+def test_train_number_alone_triggers_the_lookup():
+    """hafas_provider is vestigial — a segment with only a train number, which
+    the old code skipped outright, must now resolve."""
+    from src.services.hafas_service import TrainRoute
+
+    seg = _train_segment()
+    with patch("src.services.hafas_service.get_train_route") as mock_lookup:
+        mock_lookup.return_value = TrainRoute(
+            [{"lat": seg.start.lat, "lon": seg.start.lon, "name": "A", "uic": ""},
+             {"lat": seg.end.lat, "lon": seg.end.lon, "name": "B", "uic": ""}],
+            [[24.9414, 60.1719], [25.7294, 66.5039]])
+        _compute_segment_geometry(seg, {"train_number": "273"})
+
+    assert mock_lookup.call_count == 1
+    assert "provider" not in mock_lookup.call_args.kwargs
+
+
 # ── Distinguishing a HAFAS-fallback resolve from a fully clean one ──
 #
 # Both land as route_status="resolved" and both can be non-degraded (OSM finds
@@ -667,7 +720,7 @@ def test_hafas_success_does_not_log_warning(caplog):
 # resolve as chosen even when the generic fallback happens to succeed well.
 
 def test_job_hafas_fallback_flagged_distinctly_from_clean_resolve(env, monkeypatch):
-    from src.services.hafas_service import HafasError
+    from src.services.hafas_service import HafasError, TrainRoute
 
     client, user_id, project_id, engine = env
     _add_segments(engine, project_id, [
@@ -677,8 +730,9 @@ def test_job_hafas_fallback_flagged_distinctly_from_clean_resolve(env, monkeypat
 
     real_line = [[24.9414, 60.1719], [25.7294, 66.5039]]
 
-    with patch("src.services.hafas_service.get_stop_sequence",
-               side_effect=HafasError("VR train lookup failed: boom")), \
+    with patch("src.services.hafas_service.get_train_route",
+               side_effect=HafasError("Train '273' not found departing "
+                                      "Helsinki on 2026-06-01")), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
             "R", (), {"polyline": real_line, "degraded": False, "strategy": "straight"})()
@@ -689,7 +743,8 @@ def test_job_hafas_fallback_flagged_distinctly_from_clean_resolve(env, monkeypat
         {"lat": 60.1719, "lon": 24.9414, "uic": "1"},
         {"lat": 66.5039, "lon": 25.7294, "uic": "2"},
     ]
-    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+    with patch("src.services.hafas_service.get_train_route",
+               return_value=TrainRoute(hafas_stops, [])), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
             "R", (), {"polyline": real_line, "degraded": False, "strategy": "relation_uic"})()

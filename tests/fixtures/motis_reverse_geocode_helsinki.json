@@ -1,0 +1,268 @@
+[
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Päärautatieasema",
+  "id": "fi-hsl_1000201",
+  "lat": 60.17183,
+  "lon": 24.9412,
+  "country": "FI",
+  "tz": "Europe/Helsinki",
+  "areas": [
+   {
+    "name": "Suomi / Finland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Manner-Suomi",
+    "adminLevel": 3.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Uusimaa",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsingin seutukunta",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsinki",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Eteläinen suurpiiri",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Kluuvi",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 19.812480926513672,
+  "modes": [
+   "SUBURBAN",
+   "TRAM"
+  ],
+  "importance": 0.00342648196965456
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Helsinki",
+  "id": "fi-digitraffic_HKI",
+  "lat": 60.171356,
+  "lon": 24.941443999999997,
+  "country": "FI",
+  "tz": "Europe/Helsinki",
+  "areas": [
+   {
+    "name": "Suomi / Finland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Manner-Suomi",
+    "adminLevel": 3.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Uusimaa",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsingin seutukunta",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsinki",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Eteläinen suurpiiri",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Kluuvi",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 73.09830474853516,
+  "modes": [
+   "LONG_DISTANCE",
+   "SUBURBAN"
+  ],
+  "importance": 0.0318470261991024
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Elielinaukio",
+  "id": "fi-fintraffic_300001",
+  "lat": 60.171806,
+  "lon": 24.939487,
+  "country": "FI",
+  "tz": "Europe/Helsinki",
+  "areas": [
+   {
+    "name": "Suomi / Finland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Manner-Suomi",
+    "adminLevel": 3.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Uusimaa",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsingin seutukunta",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsinki",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Eteläinen suurpiiri",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Kluuvi",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 92.68457794189453,
+  "modes": [
+   "BUS"
+  ],
+  "importance": 9.365579899167642e-05
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Rautatientori",
+  "id": "fi-fintraffic_300002",
+  "lat": 60.17128399999999,
+  "lon": 24.942571999999995,
+  "country": "FI",
+  "tz": "Europe/Helsinki",
+  "areas": [
+   {
+    "name": "Suomi / Finland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Manner-Suomi",
+    "adminLevel": 3.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Uusimaa",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsingin seutukunta",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Helsinki",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Eteläinen suurpiiri",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Kluuvi",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 106.30462646484375,
+  "modes": [
+   "BUS"
+  ],
+  "importance": 0.0002328895207028836
+ }
+]

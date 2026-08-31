@@ -1,0 +1,244 @@
+[
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Offenburg, Stadtkirche",
+  "id": "de-amarillo-bw_de:08317:2702",
+  "lat": 48.472791,
+  "lon": 7.943622000000001,
+  "country": "DE",
+  "zip": "77652",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Baden-Württemberg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Regierungsbezirk Freiburg",
+    "adminLevel": 5.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Ortenaukreis",
+    "adminLevel": 6.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "VVG der Stadt Offenburg",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Offenburg",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   }
+  ],
+  "score": 194.1351318359375,
+  "modes": [
+   "RIDE_SHARING",
+   "BUS"
+  ],
+  "importance": 7.44311764719896e-05
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Offenburg, Rathaus/Zentrum",
+  "id": "de-amarillo-bw_de:08317:2701",
+  "lat": 48.469027,
+  "lon": 7.942877,
+  "country": "DE",
+  "zip": "77652",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Baden-Württemberg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Regierungsbezirk Freiburg",
+    "adminLevel": 5.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Ortenaukreis",
+    "adminLevel": 6.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "VVG der Stadt Offenburg",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Offenburg",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   }
+  ],
+  "score": 256.8263854980469,
+  "modes": [
+   "RIDE_SHARING",
+   "BUS"
+  ],
+  "importance": 7.853638817323372e-05
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Offenburg Lindenplatz/Zentrum",
+  "id": "de-DELFI_de:08317:14435:1:1",
+  "lat": 48.469944,
+  "lon": 7.947997,
+  "country": "DE",
+  "zip": "77654",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Baden-Württemberg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Regierungsbezirk Freiburg",
+    "adminLevel": 5.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Ortenaukreis",
+    "adminLevel": 6.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "VVG der Stadt Offenburg",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Offenburg",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   }
+  ],
+  "score": 264.9601135253906,
+  "modes": [
+   "BUS"
+  ],
+  "importance": 1.1860322956636082e-05
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Offenburg Luisen/FriedrichStr",
+  "id": "de-DELFI_de:08317:14414:1:1",
+  "lat": 48.472927,
+  "lon": 7.948536,
+  "country": "DE",
+  "zip": "77654",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Baden-Württemberg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Regierungsbezirk Freiburg",
+    "adminLevel": 5.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Ortenaukreis",
+    "adminLevel": 6.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "VVG der Stadt Offenburg",
+    "adminLevel": 7.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Offenburg",
+    "adminLevel": 8.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   }
+  ],
+  "score": 338.1993103027344,
+  "modes": [
+   "BUS"
+  ],
+  "importance": 4.939021891914308e-06
+ }
+]

@@ -1,0 +1,196 @@
+[
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Hamburg Hauptbahnhof",
+  "id": "at-Railway-Current-Reference-Data-2026_de:02000:10950:11:1",
+  "lat": 53.552475,
+  "lon": 10.008094999999999,
+  "level": -1.0,
+  "country": "DE",
+  "zip": "20099",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Hamburg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Hamburg-Mitte",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "St. Georg",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 88.98516082763672,
+  "modes": [
+   "HIGHSPEED_RAIL",
+   "LONG_DISTANCE",
+   "COACH",
+   "NIGHT_RAIL",
+   "REGIONAL_RAIL",
+   "SUBURBAN",
+   "SUBWAY",
+   "BUS"
+  ],
+  "importance": 0.02789154276251793
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Hauptbahnhof Nord",
+  "id": "de-DELFI_de:02000:10905:1:109013",
+  "lat": 53.55402399999999,
+  "lon": 10.005202,
+  "level": -3.0,
+  "country": "DE",
+  "zip": "20099",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Hamburg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Hamburg-Mitte",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "St. Georg",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 158.27346801757812,
+  "modes": [
+   "SUBWAY"
+  ],
+  "importance": 0.004574700258672237
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "HBF/Mönckebergstraße",
+  "id": "de-DELFI_de:02000:11001::100001",
+  "lat": 53.55155,
+  "lon": 10.004330999999999,
+  "country": "DE",
+  "zip": "20095",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Hamburg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Hamburg-Mitte",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Altstadt",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 199.3087921142578,
+  "modes": [
+   "BUS"
+  ],
+  "importance": 0.0001718695421004668
+ },
+ {
+  "type": "STOP",
+  "tokens": [],
+  "name": "Mönckebergstraße",
+  "id": "de-DELFI_de:02000:11904:1:119008",
+  "lat": 53.551295999999994,
+  "lon": 10.002238,
+  "level": -1.0,
+  "country": "DE",
+  "zip": "20095",
+  "tz": "Europe/Berlin",
+  "areas": [
+   {
+    "name": "Deutschland",
+    "adminLevel": 2.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Hamburg",
+    "adminLevel": 4.0,
+    "matched": true,
+    "unique": true,
+    "default": true
+   },
+   {
+    "name": "Hamburg-Mitte",
+    "adminLevel": 9.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   },
+   {
+    "name": "Altstadt",
+    "adminLevel": 10.0,
+    "matched": true,
+    "unique": false,
+    "default": false
+   }
+  ],
+  "score": 328.89776611328125,
+  "modes": [
+   "SUBWAY"
+  ],
+  "importance": 0.003330867039039731
+ }
+]

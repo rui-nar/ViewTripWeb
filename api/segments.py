@@ -85,27 +85,35 @@ def _compute_segment_geometry(
     seg.route_hafas_failed = False
 
     if seg.segment_type == "train":
-        from src.services.hafas_service import HafasError, get_stop_sequence
+        from src.services.hafas_service import HafasError, get_train_route
 
         use_date = params.get("date") or seg.date
         stops: list[dict] = [
             {"lat": seg.start.lat, "lon": seg.start.lon},
             {"lat": seg.end.lat,   "lon": seg.end.lon},
         ]
-        if params.get("hafas_provider") and params.get("train_number"):
+        # ``hafas_provider`` is vestigial (issue #277): MOTIS/Transitous indexes
+        # every country the old per-operator backends covered, so the lookup no
+        # longer needs — or reads — the operator the user picked. It is still
+        # persisted on the segment, so nothing stored breaks.
+        if params.get("train_number"):
             try:
-                stops = get_stop_sequence(
-                    provider=params["hafas_provider"],
+                route = get_train_route(
                     train_number=params["train_number"],
                     date=use_date or "",
                     start_lat=seg.start.lat, start_lon=seg.start.lon,
                     end_lat=seg.end.lat,     end_lon=seg.end.lon,
                 )
+                stops = route.stops
+                # The trip carries its own real track, so Overpass is skipped
+                # entirely for a matched train — the whole point of the move.
+                if len(route.polyline) >= 2:
+                    return route.polyline, len(stops), False, "motis_trip"
             except HafasError as exc:
                 _log.warning(
-                    "seg=%s HAFAS lookup failed (provider=%s train=%r): %s — "
+                    "seg=%s train lookup failed (train=%r): %s — "
                     "degrading to straight-line geometry",
-                    seg.id, params.get("hafas_provider"), params.get("train_number"), exc)
+                    seg.id, params.get("train_number"), exc)
                 # fall back to two-point geometry
                 seg.route_hafas_failed = True
         rail = get_rail_geometry(stops)
@@ -544,7 +552,10 @@ def delete_segment(
 
 
 class ResolveRouteRequest(BaseModel):
-    hafas_provider: Optional[str] = None   # omit to skip HAFAS
+    # Kept for backwards compatibility and still persisted on the segment, but
+    # no longer read when resolving (issue #277) — MOTIS covers every operator
+    # in one index. ``train_number`` alone is what enables the train lookup.
+    hafas_provider: Optional[str] = None
     train_number: Optional[str] = None
     date: Optional[str] = None             # ISO "YYYY-MM-DD"; defaults to segment.date
     force: bool = Field(
