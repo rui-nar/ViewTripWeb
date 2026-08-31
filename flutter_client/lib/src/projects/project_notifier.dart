@@ -127,6 +127,101 @@ Future<T> retryFetch<T>(
   );
 }
 
+/// Cheap O(activities) precheck for [kInlineFullTrackThreshold] — just reads
+/// `elevation_profile.length`, no per-point work. Mirrors elevation_chart.dart's
+/// private `_totalProfilePoints`.
+@visibleForTesting
+int totalElevationProfilePoints(List<Map<String, dynamic>> activities) {
+  var total = 0;
+  for (final a in activities) {
+    final profile = a['elevation_profile'];
+    if (profile is List) total += profile.length;
+  }
+  return total;
+}
+
+/// Above this many raw elevation_profile points across all activities,
+/// [ProjectNotifier._buildFullTrack] moves the work to a background isolate
+/// instead of running it inline — mirrors elevation_chart.dart's
+/// `_kInlineComputeThreshold` / map_panel.dart's `_kInlineHitTestThreshold`
+/// precedent.
+const kInlineFullTrackThreshold = 5000;
+
+/// Builds the distance-indexed full-trip track (and per-activity tracks) from
+/// [args.geo] + [args.activities] — the pure computation behind
+/// [ProjectNotifier._buildFullTrack]. Pure and top-level (only plain
+/// JSON-shaped input/output) so it can run via [compute] on a background
+/// isolate for a large trip: iterating every point of every activity's
+/// elevation_profile with no size threshold (issue #276) was the same "big
+/// computation on the UI isolate" mistake this codebase's other per-trip-size
+/// computations (computeElevationSpots, hitTestMapTap, decimatePolylinePoints)
+/// already guard against. Exposed (not `_`-prefixed) only for testing this
+/// computation directly; every real caller is ProjectNotifier._buildFullTrack.
+@visibleForTesting
+({List<(double, GeoPoint)> fullTrack, Map<String, List<(double, GeoPoint)>> perActivityTracks})
+    buildFullTrackResult(
+        ({Map<String, dynamic>? geo, List<Map<String, dynamic>> activities}) args) {
+  // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
+  // GeoJSON coordinates are [lon, lat] per spec.
+  final geoCoords = <String, List>{};
+  final features = args.geo?['features'];
+  if (features is List) {
+    for (final f in features) {
+      if (f is! Map) continue;
+      final props = f['properties'] as Map? ?? {};
+      if (props['type'] == 'segment') continue;
+      final actId = props['activity_id']?.toString();
+      if (actId == null) continue;
+      final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+      if (coords is List && coords.isNotEmpty) geoCoords[actId] = coords;
+    }
+  }
+
+  final combined = <(double, GeoPoint)>[];
+  final perAct = <String, List<(double, GeoPoint)>>{};
+  double offsetKm = 0;
+  for (final a in args.activities) {
+    final profile = a['elevation_profile'];
+    if (profile is! List || profile.isEmpty) continue;
+    final actId = a['id']?.toString();
+    final coords = actId != null ? geoCoords[actId] : null;
+    final last = profile.last;
+    final elevTotalKm = (last is List && last.isNotEmpty)
+        ? (last[0] as num).toDouble()
+        : 0.0;
+    final actTrack = <(double, GeoPoint)>[];
+    if (coords != null && coords.isNotEmpty) {
+      if (coords.length >= profile.length) {
+        // Fast path: build GeoPoint only for the points we actually use.
+        for (int i = 0; i < profile.length; i++) {
+          final pt = profile[i];
+          final c = coords[i];
+          if (pt is! List || pt.length < 2 || c is! List || c.length < 2) continue;
+          actTrack.add((
+            (pt[0] as num).toDouble(),
+            (lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()),
+          ));
+        }
+      } else {
+        // Haversine fallback: coords fewer than profile samples.
+        final pts = <GeoPoint>[];
+        for (final c in coords) {
+          if (c is List && c.length >= 2) {
+            pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
+          }
+        }
+        actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
+      }
+    }
+    if (actId != null) perAct[actId] = actTrack;
+    for (final pt in actTrack) {
+      combined.add((pt.$1 + offsetKm, pt.$2));
+    }
+    if (elevTotalKm > 0) offsetKm += elevTotalKm;
+  }
+  return (fullTrack: combined, perActivityTracks: perAct);
+}
+
 class ProjectNotifier extends ChangeNotifier
     with ProjectFilterMixin, ProjectQuotaMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
@@ -728,7 +823,7 @@ class ProjectNotifier extends ChangeNotifier
         // client-side (mirrors src/project/repo_core.py's _compute_low_res_geo).
         geo = client_geo.buildLowResGeo(items, client_geo.activitiesById(activities));
       }
-      _buildFullTrack();
+      await _buildFullTrack();
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
       await _restoreUiState();  // issue #76 follow-up: reapply persisted selection/filters
       // Catch Object, not just Exception: retryFetch rethrows whatever the last
@@ -740,8 +835,15 @@ class ProjectNotifier extends ChangeNotifier
         if (e is ApiException) loadErrorStatus = e.statusCode;
       }
     } finally {
-      isLoading = false;
-      notifyListeners();   // map appears here with low-res straight lines
+      // Guard like the catch block above: a stale finally (from a load()
+      // superseded while awaiting _buildFullTrack()'s compute() hop) must not
+      // flip isLoading back to false or notify for a project that's no longer
+      // current — a new load() for the current project may already be in
+      // flight with isLoading = true.
+      if (_loadKey == ref) {
+        isLoading = false;
+        notifyListeners();   // map appears here with low-res straight lines
+      }
     }
 
     // Phase 2: full-res GeoJSON, then elevation data — chained rather than
@@ -809,7 +911,7 @@ class ProjectNotifier extends ChangeNotifier
       // race here; build it once, directly, from client_geo_builder.dart.
       try {
         geo = client_geo.buildFullGeo(items, client_geo.activitiesById(activities));
-        _buildFullTrack();
+        await _buildFullTrack();
         isGeoLoaded = true;
       } catch (e) {
         error = _loadErrorMessage(e);
@@ -839,7 +941,7 @@ class ProjectNotifier extends ChangeNotifier
         final features = mergePendingSegmentPatches(
             List<dynamic>.from(cachedFullGeo['features'] as List? ?? []));
         geo = {'type': 'FeatureCollection', 'features': features};
-        _buildFullTrack();
+        await _buildFullTrack();
         isGeoLoaded = true;
       } catch (e) {
         error = _loadErrorMessage(e);
@@ -942,7 +1044,11 @@ class ProjectNotifier extends ChangeNotifier
       await _waitForCameraIdle();
       if (_loadKey != ref) return;
       geo = {'type': 'FeatureCollection', 'features': features};
-      _buildFullTrack();
+      await _buildFullTrack();
+      // _buildFullTrack() may hop through compute() — re-check like every
+      // other await in this function so a superseded load doesn't flip
+      // isGeoLoaded or notify for a project the user has since left.
+      if (_loadKey != ref) return;
       isGeoLoaded = true;
       notifyListeners();
     } on Object catch (e) {
@@ -972,7 +1078,9 @@ class ProjectNotifier extends ChangeNotifier
         activities = [
           for (final a in activities) byId[a['id']?.toString()] ?? a,
         ];
-        _buildFullTrack();
+        await _buildFullTrack();
+        await _waitForCameraIdle();
+        if (_loadKey != ref) return;
         notifyListeners();
       }
     } on Object catch (_) {
@@ -1101,13 +1209,20 @@ class ProjectNotifier extends ChangeNotifier
   /// then rebuilds tracks and notifies listeners.
   /// Called by SharedProjectNotifier / ViewProjectNotifier after phase 2.
   @protected
-  void applyFullActivities(List<Map<String, dynamic>> fullActivities) {
+  Future<void> applyFullActivities(List<Map<String, dynamic>> fullActivities) async {
+    // Snapshot so the camera-idle wait below (up to 2s) can detect the caller
+    // having moved on to a different project in the meantime and skip the
+    // notify — mirrors the _loadKey != ref guard used everywhere else in this
+    // file for the same reason.
+    final key = _loadKey;
     final byId = {for (final a in fullActivities) a['id']?.toString(): a};
     activities = [
       for (final a in activities) byId[a['id']?.toString()] ?? a,
     ];
     _updateStats();
-    _buildFullTrack();
+    await _buildFullTrack();
+    await _waitForCameraIdle();
+    if (_loadKey != key) return;
     notifyListeners();
   }
 
@@ -1138,68 +1253,50 @@ class ProjectNotifier extends ChangeNotifier
   Map<String, List<(double, GeoPoint)>> get perActivityTracks => _perActivityTracks;
   Map<String, List<(double, GeoPoint)>> _perActivityTracks = const {};
 
-  void _buildFullTrack() {
-    // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
-    // GeoJSON coordinates are [lon, lat] per spec.
-    final geoCoords = <String, List>{};
-    final features = geo?['features'];
-    if (features is List) {
-      for (final f in features) {
-        if (f is! Map) continue;
-        final props = f['properties'] as Map? ?? {};
-        if (props['type'] == 'segment') continue;
-        final actId = props['activity_id']?.toString();
-        if (actId == null) continue;
-        final coords = (f['geometry'] as Map? ?? {})['coordinates'];
-        if (coords is List && coords.isNotEmpty) geoCoords[actId] = coords;
-      }
-    }
+  // Bumped on every _buildFullTrack call; guards a stale async result (from a
+  // superseded call — e.g. the geo-load's call and the elevation-load's call
+  // landing out of order) from overwriting a newer one.
+  int _buildFullTrackGen = 0;
 
-    final combined = <(double, GeoPoint)>[];
-    final perAct = <String, List<(double, GeoPoint)>>{};
-    double offsetKm = 0;
-    for (final a in activities) {
-      final profile = a['elevation_profile'];
-      if (profile is! List || profile.isEmpty) continue;
-      final actId = a['id']?.toString();
-      final coords = actId != null ? geoCoords[actId] : null;
-      final last = profile.last;
-      final elevTotalKm = (last is List && last.isNotEmpty)
-          ? (last[0] as num).toDouble()
-          : 0.0;
-      final actTrack = <(double, GeoPoint)>[];
-      if (coords != null && coords.isNotEmpty) {
-        if (coords.length >= profile.length) {
-          // Fast path: build GeoPoint only for the points we actually use.
-          for (int i = 0; i < profile.length; i++) {
-            final pt = profile[i];
-            final c = coords[i];
-            if (pt is! List || pt.length < 2 || c is! List || c.length < 2) continue;
-            actTrack.add((
-              (pt[0] as num).toDouble(),
-              (lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()),
-            ));
-          }
-        } else {
-          // Haversine fallback: coords fewer than profile samples.
-          final pts = <GeoPoint>[];
-          for (final c in coords) {
-            if (c is List && c.length >= 2) {
-              pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
-            }
-          }
-          actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
-        }
-      }
-      if (actId != null) perAct[actId] = actTrack;
-      for (final pt in actTrack) {
-        combined.add((pt.$1 + offsetKm, pt.$2));
-      }
-      if (elevTotalKm > 0) offsetKm += elevTotalKm;
+  /// Rebuilds [_fullTrack]/[_perActivityTracks] from the current [geo] +
+  /// [activities]. Delegates to [buildFullTrackResult] — see its doc comment
+  /// for why that's a separate top-level function: above
+  /// [kInlineFullTrackThreshold] raw elevation_profile points, the work moves
+  /// to a background isolate via [compute] instead of running inline on the
+  /// UI isolate (issue #276).
+  Future<void> _buildFullTrack() async {
+    // Bumped unconditionally (before the threshold check) so every call — not
+    // just the background-isolate branch — invalidates any still-in-flight
+    // compute() from a prior call, even one that itself took the inline
+    // branch (issue #276 follow-up: a superseded inline call used to leave
+    // the counter untouched, so a stale compute() result could still pass
+    // the staleness check below and clobber newer data).
+    final gen = ++_buildFullTrackGen;
+    if (totalElevationProfilePoints(activities) <= kInlineFullTrackThreshold) {
+      // No staleness check needed here: buildFullTrackResult() is synchronous,
+      // so nothing can bump _buildFullTrackGen between the increment above and
+      // this line — unlike the compute() branch below, which awaits across an
+      // isolate hop and needs the check after it returns.
+      final r = buildFullTrackResult((geo: geo, activities: activities));
+      _fullTrack = r.fullTrack;
+      _perActivityTracks = r.perActivityTracks;
+      return;
     }
-    _fullTrack = combined;
-    _perActivityTracks = perAct;
+    final r = await compute(buildFullTrackResult, (geo: geo, activities: activities));
+    if (gen != _buildFullTrackGen) return; // superseded by a newer call
+    _fullTrack = r.fullTrack;
+    _perActivityTracks = r.perActivityTracks;
   }
+
+  /// Test-only seam for driving [_buildFullTrack] directly, without needing a
+  /// full [load] — see build_full_track_background_isolate_test.dart.
+  @visibleForTesting
+  Future<void> buildFullTrack() => _buildFullTrack();
+
+  /// Test-only peek at the staleness counter — see
+  /// build_full_track_background_isolate_test.dart.
+  @visibleForTesting
+  int get buildFullTrackGen => _buildFullTrackGen;
 
   void clear() {
     ref = null;
@@ -1224,6 +1321,10 @@ class ProjectNotifier extends ChangeNotifier
     mapCursorDistNotifier.value = null;
     _fullTrack = const [];
     _perActivityTracks = const {};
+    // Invalidate any _buildFullTrack() still in flight from before this
+    // clear() — without this, a stale compute() resolving afterward would
+    // pass the gen check and repopulate the track data this just wiped.
+    _buildFullTrackGen++;
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;
@@ -1910,7 +2011,8 @@ class ProjectNotifier extends ChangeNotifier
     await _revealItems(items);
     if (this.ref != ref) return;
     _updateStats();
-    _buildFullTrack();
+    await _buildFullTrack();
+    if (this.ref != ref) return;
     // Refresh GeoJSON so the map polylines reflect the updated track.
     geo = encryption.isUnlocked
         ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
@@ -2151,6 +2253,11 @@ class ProjectNotifier extends ChangeNotifier
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(ProjectRef ref) async {
+    // Set false only by the ref-check right after _buildFullTrack below, so a
+    // navigation that lands during that now-async call (issue #276 follow-up)
+    // suppresses the notify — every other path (success or the catch below)
+    // keeps notifying exactly as before.
+    var notify = true;
     try {
       if (encryption.isUnlocked) {
         // The server can't build geo for encrypted activities (issue #29) —
@@ -2170,11 +2277,15 @@ class ProjectNotifier extends ChangeNotifier
         geo = results[1];
       }
       _updateStats();
-      _buildFullTrack();
+      await _buildFullTrack();
+      if (this.ref != ref) {
+        notify = false;
+        return;
+      }
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
-      notifyListeners();
+      if (notify) notifyListeners();
     }
   }
 
