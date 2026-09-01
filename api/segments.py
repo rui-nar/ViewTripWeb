@@ -427,6 +427,26 @@ def update_segment(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
 
 
+# Ceiling on the point count of a manually edited segment track.
+#
+# Derived from what the server itself can produce, not picked for roundness:
+# a route the app resolved must always survive a round-trip through the
+# editor, so the bound sits above the largest geometry our own resolver can
+# emit. Overpass rail geometry is stored at full OSM-node resolution, which
+# measures ~14 points/km (9,700 points for the ~700 km Hamburg-Offenburg
+# route). The longest path the rail resolver will accept is pinned by two
+# guards in src/services/overpass_service.py: _RAIL_BBOX_MAX_SPAN = 12
+# degrees bounds the query box at roughly 1,600 km corner-to-corner at
+# European latitudes, and _MAX_RAIL_DETOUR_RATIO = 4.0 rejects any polyline
+# longer than 4x the crow-flight baseline through its stops -- so ~6,400 km,
+# i.e. ~90,000 points at that density. 100,000 clears that worst case with
+# margin while capping the persisted JSON at roughly 3 MB.
+#
+# Above the limit we reject rather than truncate: silently dropping points
+# would destroy a user's manual edit without telling them.
+MAX_TRACK_POINTS = 100_000
+
+
 class SegmentTrackPointIn(BaseModel):
     lat: float = Field(description="Latitude, decimal degrees")
     lng: float = Field(description="Longitude, decimal degrees")
@@ -479,6 +499,14 @@ def edit_segment_track(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A route needs at least 2 points",
+        )
+    if len(body.points) > MAX_TRACK_POINTS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"A route may not exceed {MAX_TRACK_POINTS} points "
+                f"(got {len(body.points)}). Simplify the track before saving."
+            ),
         )
     mode_for_type = {"train": "rail", "boat": "ferry", "bus": "bus"}
     with get_session() as sess:

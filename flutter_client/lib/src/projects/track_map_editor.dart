@@ -1,6 +1,7 @@
 /// Shared map + gesture chrome for a [TrackEditorController]: the tile map
 /// with the current polyline, draggable vertex handles (materialised only for
-/// the portion currently in view, per the perf requirement), the add-mode
+/// the portion currently in view, and capped in number — see
+/// [visibleVertexIndices]), the add-mode
 /// toolbar, and each vertex's long-press/right-click context menu.
 ///
 /// Extracted out of the original activity track editor (issue #31) so a
@@ -46,6 +47,60 @@ class PointMenuAction {
     this.color,
     this.dividerBefore = false,
   });
+}
+
+/// Upper bound on the number of draggable vertex handles materialised at
+/// once, however many of the track's vertices are in view.
+///
+/// Viewport filtering alone does not bound anything: zoom out to fit a whole
+/// resolved rail route and every one of its vertices is "in view". Overpass
+/// stores rail geometry at full OSM-node resolution, so that is routinely
+/// thousands of points — 9,700 measured for a single Hamburg→Offenburg
+/// route — and each one becomes a Marker wrapping a Listener, a
+/// GestureDetector and a [_VertexHandle], built in one frame.
+///
+/// 500 is not a round guess: a handle is 22x22 logical px, so 500 of them
+/// cover ~242,000 px² — about 80% of a 390x780 phone viewport. Past that
+/// they physically tile the screen and no individual vertex can be aimed at
+/// any more, so the cap never withholds a handle that was usable in the
+/// first place. It is also ~19x below the measured worst case.
+const kMaxVertexHandles = 500;
+
+/// Indices of the vertices in [points] that get a draggable handle: those
+/// inside [bounds] (all of them when [bounds] is null, i.e. before the map
+/// has reported a camera), thinned to at most [maxHandles] evenly-spaced
+/// entries, always keeping the first and last of the visible run.
+///
+/// Thinning is *even*, not shape-aware — deliberately unlike map_panel's
+/// [decimatePolylinePoints], which is LTTB because it optimises how a line
+/// *looks*. Handles are an interaction surface, and even spacing is what
+/// makes the thinning recoverable: every vertex dropped here is reachable by
+/// zooming in, because zooming shrinks the visible run until it fits under
+/// [maxHandles] and every remaining vertex gets its handle back. This
+/// editor sets no `MapOptions.maxZoom` and its raster tiles simply upscale
+/// past `maxNativeZoom`, so there is always a zoom level tight enough.
+///
+/// Pure and side-effect free: this only decides what to *show*. The
+/// controller's point list — and so the persisted polyline — is never
+/// touched by viewing, panning or zooming.
+@visibleForTesting
+List<int> visibleVertexIndices(
+  List<EditPoint> points,
+  LatLngBounds? bounds, {
+  int maxHandles = kMaxVertexHandles,
+}) {
+  final visible = <int>[];
+  for (var i = 0; i < points.length; i++) {
+    if (bounds == null ||
+        bounds.contains(LatLng(points[i].lat, points[i].lng))) {
+      visible.add(i);
+    }
+  }
+  if (visible.length <= maxHandles) return visible;
+  // step > 1 here (visible.length > maxHandles), so the floor()ed picks are
+  // strictly increasing and the result holds exactly maxHandles indices.
+  final step = (visible.length - 1) / (maxHandles - 1);
+  return [for (var k = 0; k < maxHandles; k++) visible[(k * step).round()]];
 }
 
 class TrackMapEditor extends StatefulWidget {
@@ -257,24 +312,10 @@ class _TrackMapEditorState extends State<TrackMapEditor> {
 
   // ── Handle materialisation (perf) ────────────────────────────────────────
 
-  /// Vertex indices whose points fall within the current map bounds. Only
-  /// these are turned into draggable handles so a thousands-point track stays
-  /// responsive; the full polyline is always drawn regardless.
-  List<int> _visibleVertexIndices() {
-    final b = _bounds;
-    final pts = widget.controller.points;
-    if (b == null) return [for (var i = 0; i < pts.length; i++) i];
-    final out = <int>[];
-    for (var i = 0; i < pts.length; i++) {
-      if (b.contains(LatLng(pts[i].lat, pts[i].lng))) out.add(i);
-    }
-    return out;
-  }
-
   List<Marker> _buildHandleMarkers() {
     final pts = widget.controller.points;
     final markers = <Marker>[];
-    for (final i in _visibleVertexIndices()) {
+    for (final i in visibleVertexIndices(pts, _bounds)) {
       final point = (i == _dragIndex && _dragLatLng != null)
           ? _dragLatLng!
           : LatLng(pts[i].lat, pts[i].lng);
