@@ -67,10 +67,11 @@ def _geocodes() -> dict:
 class _Motis:
     """Stand-in for the live MOTIS API, recording every request it serves."""
 
-    def __init__(self, geocode=None, boards=None, trip=None, statuses=None):
+    def __init__(self, geocode=None, boards=None, trip=None, trips=None, statuses=None):
         self.geocode = geocode if geocode is not None else _geocodes()
         self.boards = boards if boards is not None else [_fx("motis_stoptimes_hamburg.json")]
         self.trip = trip if trip is not None else _fx("motis_trip_ice75.json")
+        self.trips = trips           # tripId -> payload, when the board is ambiguous
         self.statuses = list(statuses or [])   # queued HTTP statuses to serve first
         self.calls: list[tuple[str, dict]] = []
         self._board_i = 0
@@ -88,6 +89,8 @@ class _Motis:
             self._board_i += 1
             return _Resp(board)
         if url.endswith("/trip"):
+            if self.trips is not None:
+                return _Resp(self.trips[params["tripId"]])
             return _Resp(self.trip)
         raise AssertionError(f"unexpected MOTIS request: {url}")
 
@@ -284,11 +287,11 @@ class TestServiceDayWindow:
 
         api = _Motis(boards=[board])
         with patch("src.services.hafas_service.requests.get", api):
-            trip_id = svc._find_trip_id(
-                "x", "2026-09-01", "11438", "Europe/Berlin")
+            trip_ids = list(svc._iter_trip_ids(
+                "x", "2026-09-01", "11438", "Europe/Berlin"))
 
-        assert trip_id != yesterday[0]["tripId"]
-        assert trip_id is None or trip_id.startswith("20260901_")
+        assert yesterday[0]["tripId"] not in trip_ids
+        assert all(t.startswith("20260901_") for t in trip_ids)
 
     def test_pages_forward_with_the_cursor_when_the_day_is_not_covered(self):
         board = _fx("motis_stoptimes_hamburg.json")
@@ -468,6 +471,160 @@ class TestNameMatching:
 
 
 # ---------------------------------------------------------------------------
+# A line number is not a train number (issue #286)
+# ---------------------------------------------------------------------------
+
+# RE1 is the Hamburg–Rostock "Hanse-Express". On the recorded board its
+# workings split between short runs terminating at Büchen and the long ones
+# that carry on to Schwerin or Rostock — and the first one of the service day
+# is a Büchen working, so taking the first name match strands a Hamburg →
+# Rostock segment. The stop lists below are constructed (/trip was only
+# recorded for ICE 75); the trip ids, their order and the headsigns they are
+# keyed on all come from the real fixture board.
+_RE1_STOPS = [
+    ("Hamburg Hbf", 53.5528, 10.0067),
+    ("Hamburg-Bergedorf", 53.4894, 10.2033),
+    ("Büchen", 53.4757, 10.6206),
+    ("Hagenow Land", 53.4256, 11.1836),
+    ("Schwerin Hbf", 53.6353, 11.4076),
+    ("Bad Kleinen", 53.8129, 11.4818),
+    ("Bützow", 53.8478, 11.9930),
+    ("Rostock Hbf", 54.0783, 12.1311),
+]
+_RE1_TERMINUS = {"Büchen": 2, "Schwerin Hauptbahnhof": 4, "Rostock Hauptbahnhof": 7}
+
+# The user's pins: Rostock town centre (~1 km off the station) and Büchen.
+_ROSTOCK_LAT, _ROSTOCK_LON = 54.0887, 12.1405
+_BUECHEN_LAT, _BUECHEN_LON = 53.4757, 10.6206
+_ROME_LAT, _ROME_LON = 41.9028, 12.4964
+
+
+def _re1_entries(board=None) -> list[dict]:
+    """The RE1 board entries inside the 2026-09-01 service day, in board order."""
+    board = board or _fx("motis_stoptimes_hamburg.json")
+    return [e for e in board["stopTimes"]
+            if (e.get("routeShortName") or "").startswith("RE1 (")
+            and e["place"]["departure"] >= "2026-08-31T22:00:00Z"]
+
+
+def _trip_payload(stops) -> dict:
+    """A /trip response carrying only a stop sequence — no geometry."""
+    places = [{"name": n, "lat": lat, "lon": lon} for n, lat, lon in stops]
+    return {"legs": [{"from": places[0], "to": places[-1],
+                      "intermediateStops": places[1:-1]}]}
+
+
+def _re1_trips() -> dict:
+    return {e["tripId"]: _trip_payload(_RE1_STOPS[:_RE1_TERMINUS[e["headsign"]] + 1])
+            for e in _re1_entries()}
+
+
+class TestAmbiguousLineNumber:
+    def test_scan_continues_past_a_working_that_misses_the_destination(self):
+        entries = _re1_entries()
+        assert entries[0]["headsign"] == "Büchen", "fixture must open with a short working"
+        assert entries[1]["headsign"] == "Rostock Hauptbahnhof"
+
+        api = _Motis(trips=_re1_trips())
+        with patch("src.services.hafas_service.requests.get", api):
+            route = _resolve(train_number="RE1",
+                             end_lat=_ROSTOCK_LAT, end_lon=_ROSTOCK_LON)
+
+        assert route.stops[0]["name"] == "Hamburg Hbf"
+        assert route.stops[-1]["name"] == "Rostock Hbf"
+        # The Büchen working was tried and rejected, the next one taken.
+        assert api.paths().count("trip") == 2
+        tried = [p["tripId"] for u, p in api.calls if u.endswith("/trip")]
+        assert tried == [entries[0]["tripId"], entries[1]["tripId"]]
+
+    def test_the_first_working_still_wins_when_it_fits(self):
+        """The fallback must not walk past a candidate that does serve the
+        segment: a Hamburg → Büchen leg is exactly what the first one is."""
+        api = _Motis(trips=_re1_trips())
+        with patch("src.services.hafas_service.requests.get", api):
+            route = _resolve(train_number="RE1",
+                             end_lat=_BUECHEN_LAT, end_lon=_BUECHEN_LON)
+
+        assert route.stops[-1]["name"] == "Büchen"
+        assert api.paths().count("trip") == 1
+
+    def test_an_unambiguous_number_still_costs_one_trip_request(self):
+        """The guard against the fallback multiplying requests: ICE 75 is on
+        the board once, so nothing about its resolve may change."""
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            route = _resolve()
+
+        assert route.stops[-1]["name"] == "Offenburg Bahnhof"
+        # One board page, one trip: the scan stops pulling the moment a
+        # candidate resolves, so it never reads past the match it used.
+        assert api.paths() == ["reverse-geocode", "stoptimes", "trip"]
+
+        board = _Motis()
+        with patch("src.services.hafas_service.requests.get", board):
+            assert len(list(svc._iter_trip_ids(
+                "x", _DATE, "ICE 75", "Europe/Berlin"))) == 1
+
+    def test_all_candidates_rejected_is_not_reported_as_not_found(self):
+        api = _Motis(trips=_re1_trips())
+        with patch("src.services.hafas_service.requests.get", api):
+            with pytest.raises(HafasError) as raised:
+                _resolve(train_number="RE1", end_lat=_ROME_LAT, end_lon=_ROME_LON)
+
+        message = str(raised.value)
+        assert "not found departing" not in message
+        assert "none of the" in message and "RE1" in message
+        # …and the bound held: one /trip per candidate, no more.
+        assert api.paths().count("trip") == svc._MAX_TRIP_CANDIDATES
+
+    def test_a_single_candidate_keeps_its_own_failure_message(self):
+        """ICE 75 is unambiguous, so the user must still be told the train does
+        not serve the endpoint rather than given the many-workings message."""
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            with pytest.raises(HafasError, match="does not stop near the end"):
+                _resolve(end_lat=_ROME_LAT, end_lon=_ROME_LON)
+        assert api.paths().count("trip") == 1
+
+    def test_candidate_scan_is_bounded(self):
+        """Each candidate is a /trip request against a shared free service, so
+        a line running all day must not turn one resolve into 20 calls."""
+        api = _Motis()
+        with patch("src.services.hafas_service.requests.get", api):
+            ids = list(svc._iter_trip_ids("x", _DATE, "RE1", "Europe/Berlin"))
+
+        assert len(_re1_entries()) > svc._MAX_TRIP_CANDIDATES
+        assert ids == [e["tripId"] for e in _re1_entries()][:svc._MAX_TRIP_CANDIDATES]
+
+    def test_one_working_seen_at_two_stops_counts_once(self):
+        """The radius sweep lists a trip once per stop it calls at, so without
+        deduplication the whole budget can go on a single train."""
+        board = _fx("motis_stoptimes_hamburg.json")
+        first = _re1_entries(board)[0]
+        twin = json.loads(json.dumps(first))
+        twin["place"]["name"] = "Hamburg Dammtor"
+        board["stopTimes"].insert(board["stopTimes"].index(first) + 1, twin)
+
+        api = _Motis(boards=[board])
+        with patch("src.services.hafas_service.requests.get", api):
+            ids = list(svc._iter_trip_ids("x", _DATE, "RE1", "Europe/Berlin"))
+
+        assert len(ids) == len(set(ids)) == svc._MAX_TRIP_CANDIDATES
+
+    def test_a_failing_trip_request_ends_the_lookup(self):
+        """A rejected candidate means "try the next one"; an unreachable /trip
+        does not — retrying it down the whole board would hammer a service that
+        is already failing and report the wrong reason."""
+        api = _Motis(trips=_re1_trips())
+        with patch("src.services.hafas_service.requests.get", api), \
+             patch("src.services.hafas_service._trip_stops_and_geometry",
+                   side_effect=HafasError("MOTIS /trip unavailable after 3 attempts")):
+            with pytest.raises(HafasError, match="unavailable after 3 attempts"):
+                _resolve(train_number="RE1",
+                         end_lat=_ROSTOCK_LAT, end_lon=_ROSTOCK_LON)
+
+
+# ---------------------------------------------------------------------------
 # Country coverage — one index instead of four provider backends
 # ---------------------------------------------------------------------------
 
@@ -482,10 +639,10 @@ class TestFinlandViaTheSameIndex:
             boards=[_fx("motis_stoptimes_helsinki.json")],
         )
         with patch("src.services.hafas_service.requests.get", api):
-            trip_id = svc._find_trip_id(
-                svc._nearest_stop(60.172097, 24.941249)["id"], _DATE, "IC 63")
+            trip_ids = list(svc._iter_trip_ids(
+                svc._nearest_stop(60.172097, 24.941249)["id"], _DATE, "IC 63"))
 
-        assert trip_id
+        assert trip_ids
         anchor = api.params_for("/reverse-geocode")
         assert anchor["type"] == "STOP"
         assert api.params_for("/stoptimes")["radius"] == 2000
