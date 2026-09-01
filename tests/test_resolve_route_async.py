@@ -778,7 +778,7 @@ def test_hafas_failure_reason_is_persisted_on_the_resolved_segment(env, monkeypa
     _add_segment(engine, project_id, _train_segment("seg-why"))
     monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
 
-    with patch("src.services.hafas_service.get_stop_sequence",
+    with patch("src.services.hafas_service.get_train_route",
                side_effect=HafasError("HAFAS request failed: 503 Service Unavailable")), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
@@ -798,6 +798,8 @@ def test_hafas_failure_reason_is_persisted_on_the_resolved_segment(env, monkeypa
 
 def test_a_clean_resolve_leaves_route_error_empty(env, monkeypatch):
     """The reason is specific to the fallback — a good resolve stays clean."""
+    from src.services.hafas_service import TrainRoute
+
     client, user_id, project_id, engine = env
     _add_segment(engine, project_id, _train_segment("seg-ok"))
     monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
@@ -806,7 +808,8 @@ def test_a_clean_resolve_leaves_route_error_empty(env, monkeypatch):
         {"lat": 60.1719, "lon": 24.9414, "uic": "1"},
         {"lat": 66.5039, "lon": 25.7294, "uic": "2"},
     ]
-    with patch("src.services.hafas_service.get_stop_sequence", return_value=hafas_stops), \
+    with patch("src.services.hafas_service.get_train_route",
+               return_value=TrainRoute(hafas_stops, [])), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
             "R", (), {"polyline": [[1.0, 1.0], [2.0, 2.0]],
@@ -824,7 +827,7 @@ def test_a_long_hafas_reason_is_truncated_to_200_chars():
     from src.services.hafas_service import HafasError
 
     seg = _train_segment()
-    with patch("src.services.hafas_service.get_stop_sequence",
+    with patch("src.services.hafas_service.get_train_route",
                side_effect=HafasError("x" * 500)), \
          patch("src.services.overpass_service.get_rail_geometry") as mock_rail:
         mock_rail.return_value = type(
