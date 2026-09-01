@@ -52,7 +52,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import polyline as polyline_lib
@@ -101,6 +101,14 @@ _STOP_RADIUS_M = 2000
 _BOARD_PAGE_SIZE = 500
 _BOARD_MAX_PAGES = 4  # hard stop; one page already spans ~23 h at Hamburg Hbf
 
+# How many board entries matching the query are worth resolving. A genuine
+# train number is unique on a service day, so this only ever bites for a *line*
+# number - "RE1" runs a dozen times a day and the short workings stop well
+# short of where the long ones go. Each extra candidate costs one /trip
+# request, and Transitous asks for modest volume, so the scan stops here rather
+# than walking a whole day's departures.
+_MAX_TRIP_CANDIDATES = 5
+
 # How far a trip's nearest stop may be from the segment endpoint the user
 # placed. Generous — pins get dropped on city centres, not platforms — but
 # tight enough that a train not actually serving the endpoint is rejected
@@ -130,6 +138,15 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 class HafasError(Exception):
     pass
+
+
+class _TripRejected(HafasError):
+    """One candidate working does not fit the segment — try the next one.
+
+    A HafasError like any other for callers, so the message a single candidate
+    fails with is unchanged; the subclass only keeps the fallback loop from
+    swallowing a transport failure, which must end the lookup outright.
+    """
 
 
 @dataclass
@@ -173,28 +190,39 @@ def get_train_route(
                 "(train=%r start=%s,%s)", name, start_lat, start_lon)
             raise HafasError("Could not locate a station near the start point")
 
-        trip_id = _find_trip_id(anchor["id"], date, name, anchor["tz"])
-        if not trip_id:
+        # A line number matches many workings and they do not all run the same
+        # way, so a rejected candidate is not the end of the lookup: keep going
+        # down the board until one serves both endpoints. The scan is lazy, so
+        # a number that matches once still costs exactly what it always did.
+        tried = 0
+        rejection: Optional[_TripRejected] = None
+        for trip_id in _iter_trip_ids(anchor["id"], date, name, anchor["tz"]):
+            tried += 1
+            try:
+                return _route_from_trip(
+                    trip_id, name, start_lat, start_lon, end_lat, end_lon)
+            except _TripRejected as exc:
+                rejection = exc
+                _log.info("train lookup: %r candidate %s rejected (%s)",
+                          name, trip_id, exc)
+
+        if tried == 0:
             _log.warning(
                 "train lookup failed: %r not on the %s departure board at %s",
                 name, date, anchor["name"])
             raise HafasError(
                 f"Train {name!r} not found departing {anchor['name']} on {date}")
-
-        stops, poly = _trip_stops_and_geometry(trip_id)
-        if len(stops) < 2:
-            _log.warning("train lookup failed: trip %r returned fewer than 2 stops", name)
-            raise HafasError("Trip returned fewer than 2 stops")
-
-        trimmed = _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
-        if len(trimmed) < 2:
-            _log.warning(
-                "train lookup failed: %r start and end snap to the same stop", name)
-            raise HafasError(
-                f"Train {name!r} serves only one of this segment's endpoints")
-        _check_serves_endpoints(trimmed, name, start_lat, start_lon, end_lat, end_lon)
-
-        return TrainRoute(trimmed, _simplify(_trim_polyline(poly, trimmed)))
+        if tried == 1:
+            # Unambiguous number: the one candidate's own reason, as before.
+            _log.warning("train lookup failed: %s", rejection)
+            raise rejection
+        _log.warning(
+            "train lookup failed: none of the %d %r departures from %s on %s "
+            "serve both endpoints (last: %s)",
+            tried, name, anchor["name"], date, rejection)
+        raise HafasError(
+            f"Train {name!r} departs {anchor['name']} on {date}, but none of the "
+            f"{tried} services checked runs between this segment's endpoints")
 
     except HafasError:
         raise
@@ -203,6 +231,33 @@ def get_train_route(
             "train route lookup failed unexpectedly (train=%r date=%s start=%s,%s end=%s,%s)",
             name, date, start_lat, start_lon, end_lat, end_lon)
         raise HafasError(f"Train route lookup failed: {exc}") from exc
+
+
+def _route_from_trip(
+    trip_id: str,
+    name: str,
+    start_lat: float,
+    start_lon: float,
+    end_lat: float,
+    end_lon: float,
+) -> TrainRoute:
+    """One candidate trip, trimmed to the caller's endpoints.
+
+    Raises _TripRejected if this particular working does not serve them, which
+    is the caller's cue to try the next candidate rather than to give up. A
+    transport failure propagates as a plain HafasError and ends the lookup.
+    """
+    stops, poly = _trip_stops_and_geometry(trip_id)
+    if len(stops) < 2:
+        raise _TripRejected("Trip returned fewer than 2 stops")
+
+    trimmed = _trim_stops(stops, start_lat, start_lon, end_lat, end_lon)
+    if len(trimmed) < 2:
+        raise _TripRejected(
+            f"Train {name!r} serves only one of this segment's endpoints")
+    _check_serves_endpoints(trimmed, name, start_lat, start_lon, end_lat, end_lon)
+
+    return TrainRoute(trimmed, _simplify(_trim_polyline(poly, trimmed)))
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +325,17 @@ def _lookup_stop(lat: float, lon: float) -> Optional[tuple[str, str, str]]:
 
 
 
-def _find_trip_id(stop_id: str, date: str, train_name: str,
-                  tz: str = "") -> Optional[str]:
-    """First trip on *stop_id*'s board within *date*'s service day matching *train_name*.
+def _iter_trip_ids(stop_id: str, date: str, train_name: str,
+                   tz: str = "", limit: int = _MAX_TRIP_CANDIDATES) -> Iterator[str]:
+    """Trips on *stop_id*'s board within *date*'s service day matching *train_name*.
+
+    Yielded in board order, at most *limit* of them, so the caller can fall back
+    to the next working when the first does not serve its endpoints. A train
+    number matches once; a line number matches every working that runs.
+
+    Lazy on purpose: the caller stops pulling as soon as a candidate resolves,
+    so the common single-match lookup reads no more of the board than it did
+    when this returned only the first hit.
 
     Pages forward with MOTIS's own ``pageCursor`` instead of brute-forcing a
     huge ``n``: one 500-entry page already spans ~23 h at Germany's busiest
@@ -283,6 +346,7 @@ def _find_trip_id(stop_id: str, date: str, train_name: str,
     """
     start, end = _service_window(date, tz)
     cursor: Optional[str] = None
+    seen: set[str] = set()
 
     for _page in range(_BOARD_MAX_PAGES):
         params: dict[str, Any] = {
@@ -299,26 +363,30 @@ def _find_trip_id(stop_id: str, date: str, train_name: str,
         data = _get("/stoptimes", params)
         entries = data.get("stopTimes") or []
         if not entries:
-            return None
+            return
 
         for entry in entries:
             when = _entry_time(entry)
             if when is not None and when >= end:
-                return None  # past the service day — the train isn't running today
+                return  # past the service day — no more of today's workings
             if when is not None and when < start:
                 continue
             if _entry_matches(entry, train_name):
                 trip_id = entry.get("tripId")
-                if trip_id:
-                    return trip_id
+                # The radius sweep puts one trip on the board once per stop it
+                # calls at, so the same working can appear more than once.
+                if trip_id and trip_id not in seen:
+                    seen.add(trip_id)
+                    yield trip_id
+                    if len(seen) >= limit:
+                        return
 
         last = _entry_time(entries[-1])
         if last is not None and last >= end:
-            return None
+            return
         cursor = data.get("nextPageCursor")
         if not cursor:
-            return None
-    return None
+            return
 
 
 def _trip_stops_and_geometry(trip_id: str) -> tuple[list[dict], list[list[float]]]:
@@ -530,10 +598,12 @@ def _check_serves_endpoints(
     ):
         gap = _crow_km(lat, lon, stop["lat"], stop["lon"])
         if gap > _MAX_ENDPOINT_SNAP_KM:
-            _log.warning(
-                "train lookup failed: %r does not serve the %s point "
+            # Only INFO: with several candidates on the board this rejection is
+            # routine, and the caller logs the failure once nothing is left.
+            _log.info(
+                "train candidate rejected: %r does not serve the %s point "
                 "(nearest stop %r is %.0f km away)", train_name, which, stop["name"], gap)
-            raise HafasError(
+            raise _TripRejected(
                 f"Train {train_name!r} does not stop near the {which} of this segment")
 
 

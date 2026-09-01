@@ -70,7 +70,7 @@ class TestTrainNotOnTheBoard:
     def test_logs_warning_and_raises(self, caplog):
         with patch("src.services.hafas_service._nearest_stop",
                    return_value={"id": "x", "name": "Berlin Hbf", "tz": "Europe/Berlin"}), \
-             patch("src.services.hafas_service._find_trip_id", return_value=None):
+             patch("src.services.hafas_service._iter_trip_ids", return_value=iter([])):
             with caplog.at_level(logging.WARNING, logger="src.services.hafas_service"):
                 with pytest.raises(HafasError, match="not found departing"):
                     _lookup()
