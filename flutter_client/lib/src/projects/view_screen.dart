@@ -76,8 +76,20 @@ class ViewProjectNotifier extends ProjectNotifier {
     // — a view-mode ref addresses a real project, so the base implementation
     // already hits the right /meta endpoint) which returns the lightweight
     // response in ~1 s.  isLoading goes false after that.
-    await load(ref);
-    if (_disposed) return;
+    //
+    // Captured synchronously, *before* awaiting: load()'s body runs its
+    // synchronous prefix — including bumping the load-supersession token —
+    // the instant it's called, before it suspends on its own first await. So
+    // this is guaranteed to be *this* loadView() call's own token. Reading
+    // currentLoadToken only after `await load(ref)` returned instead (this
+    // fix's first cut) could pick up a second concurrent loadView() call's
+    // token if that call's own load() had already bumped it by the time this
+    // one's await resolved — silently un-superseding a call that should have
+    // been rejected (issue #283 review finding).
+    final loadFuture = load(ref);
+    final token = currentLoadToken;
+    await loadFuture;
+    if (_disposed || currentLoadKey != ref || currentLoadToken != token) return;
     isMetaLoaded = true;
     // The /meta response now carries a downsampled (low-res) elevation profile,
     // so the chart can render immediately instead of waiting for the full
@@ -89,16 +101,23 @@ class ViewProjectNotifier extends ProjectNotifier {
     // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
       final fullDetails = await _viewSvc.fetchFullDetails(ref);
-      if (_disposed || currentLoadKey != ref) return;
+      if (_disposed || currentLoadKey != ref || currentLoadToken != token) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
         // applyFullActivities notifies internally (gated on camera-idle) —
         // isElevationLoaded was already set true above, so no second notify
         // is needed here just to surface it.
-        await applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+        await applyFullActivities(rawActs.cast<Map<String, dynamic>>(), token: token);
       }
     } catch (_) {
-      // Non-fatal — elevation placeholder stays visible
+      // Non-fatal — elevation placeholder stays visible. Still notify (like
+      // ProjectNotifier._loadFullGeoProgressively's own catch block) so a
+      // mutation applyFullActivities may have already made (the activities
+      // merge, before its own _buildFullTrack() threw) doesn't stay
+      // unbroadcast — issue #283 bug #4.
+      if (!_disposed && currentLoadKey == ref && currentLoadToken == token) {
+        notifyListeners();
+      }
     }
   }
 }
