@@ -222,6 +222,63 @@ const kInlineFullTrackThreshold = 5000;
   return (fullTrack: combined, perActivityTracks: perAct);
 }
 
+/// A monotonic call-identity counter paired with the ref its current holder
+/// was started for. Closes two related gaps a bare `_loadKey != ref` /
+/// `this.ref != ref` guard has (issue #283):
+///
+/// - `ProjectRef.==` is structural (name/ownerId/role — see project_ref.dart),
+///   so comparing against *any* ref only ever catches navigation to a
+///   *different* project, never a second concurrent call for the *same* one
+///   superseding an earlier one still mid-flight (e.g. the user mashing a
+///   Retry button). The token adds call identity on top of that.
+/// - Comparing against a *mutable* ref field that the call's own body
+///   legitimately reassigns mid-flight (`ProjectNotifier._applyDetails`
+///   corrects `this.ref`'s name/role from the server's response) can
+///   misreport a still-current, unraced call as stale the moment that
+///   correction lands. Comparing against the ref this track was *started*
+///   with — frozen at [begin], the same convention `_loadKey` already used —
+///   isn't affected by that, since nothing but [begin] ever touches it.
+///
+/// Give each independent family of top-level entry points that should be
+/// able to supersede *each other* (but must not cancel some *other* family's
+/// unrelated background work) its own instance — seeing three of these on
+/// [ProjectNotifier] is intentional, not an oversight: sharing one across
+/// families that don't have a legitimate reason to cancel each other is
+/// exactly the bug this PR's own first cut introduced and then had to walk
+/// back for `_silentReloadDetailsOnly`.
+class _SupersessionTrack {
+  int _token = 0;
+  ProjectRef? _ref;
+
+  /// The token/ref most recently passed to [begin] — exposed so a
+  /// staged-loading subclass can read a track it doesn't own the entry point
+  /// for (e.g. loadView()/loadShared() reading the base ProjectNotifier's
+  /// load track via [ProjectNotifier.currentLoadToken]/[ProjectNotifier.currentLoadKey]).
+  int get token => _token;
+  ProjectRef? get ref => _ref;
+
+  /// Starts a new call for [ref]. Call synchronously, before any await, at
+  /// the very top of a top-level entry point. Returns the token to thread
+  /// through that call's background continuations.
+  int begin(ProjectRef ref) {
+    _ref = ref;
+    return ++_token;
+  }
+
+  /// Bumps the token without starting a new call for any particular ref —
+  /// invalidates every previously-[begin]-ed call without this track itself
+  /// now claiming anything is current. For teardown (e.g.
+  /// [ProjectNotifier.clear]), where there's no new ref to hand a fresh call.
+  void invalidate() => _token++;
+
+  /// True while [token]/[ref] are still what this track was most recently
+  /// [begin]-ed with. Check immediately before every mutation of shared
+  /// notifier state and before every notify in a method that has awaited —
+  /// not just once at the top — since anything can supersede this call
+  /// during any of those awaits.
+  bool isCurrent(int token, ProjectRef ref) => token == _token && _ref == ref;
+}
+
 class ProjectNotifier extends ChangeNotifier
     with ProjectFilterMixin, ProjectQuotaMixin, ProjectJournalCrudMixin, ProjectMemoryCrudMixin, ProjectPeopleCrudMixin, ProjectSegmentCrudMixin {
   final ProjectService _service;
@@ -573,8 +630,8 @@ class ProjectNotifier extends ChangeNotifier
     try {
       final prefs = await SharedPreferences.getInstance();
       // issue #283: also reject a same-ref load that superseded this one
-      // while awaiting prefs, which a bare _loadKey comparison can't detect.
-      if (token != _loadToken || _loadKey != ref) return;
+      // while awaiting prefs, which a bare ref comparison can't detect.
+      if (!_isCurrent(token, ref)) return;
       final raw = prefs.getString(_uiStateKey(name));
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -653,53 +710,52 @@ class ProjectNotifier extends ChangeNotifier
   /// decrypted content via the CMK).
   SecretKey? get shareContentKey => null;
 
-  // Tracks the ref passed to the current load() call so Phase 2 can detect
-  // navigation-away without comparing against the mutable `ref` field (whose
-  // name is overwritten with the server's returned name during Phase 1).
-  ProjectRef? _loadKey;
-
   // ── Load supersession (issue #283) ────────────────────────────────────────
   //
-  // ProjectRef.== is structural (name/ownerId/role — see project_ref.dart), so
-  // a `_loadKey != ref` / `this.ref != ref` guard only detects navigation to a
-  // *different* project. It does not detect a second concurrent load of the
-  // *same* ref superseding an earlier one still mid-flight (e.g. the user
-  // mashing the offline-banner's Retry button, or any other double-trigger of
-  // load()/loadView()/loadShared() for the same ref), since their refs compare
-  // equal. _loadToken adds call identity on top: bumped at the top of every
-  // top-level entry point that independently refreshes geo/fullTrack itself
-  // (load(), _applyRefreshedProject(), _silentReload(), clear()) — deliberately
-  // NOT _silentReloadDetailsOnly(), which has its own dedicated
-  // _detailsOnlyReloadToken instead; see that field's doc for why sharing this
-  // one with it would let an unrelated details-only mutation permanently
-  // cancel a real load()'s still in-flight progressive geo fetch. A token
-  // captured at the start of one of the entry points above stops matching the
-  // moment ANY of them starts again — same ref or not — so every background
-  // continuation that checks it catches both kinds of supersession with one
-  // comparison.
-  int _loadToken = 0;
+  // Three independent _SupersessionTrack instances — see that class's doc for
+  // why one shared counter across all of them would be wrong. Each protects a
+  // family of top-level entry points that legitimately supersede *each
+  // other*, without being able to cancel a *different* family's unrelated
+  // background work:
+  //
+  // - _loadTrack: load() and its own progressive Phase 2
+  //   (_loadFullGeoProgressively/_loadElevationData/applyFullActivities) —
+  //   the original full project load.
+  // - _reloadTrack: _silentReload()/_applyRefreshedProject() — CRUD-triggered
+  //   full reloads (remove/split/reset/refresh an activity, etc.). These
+  //   fetch their own fresh geo/details, so superseding each other is fine,
+  //   but sharing _loadTrack with them would let one of these unrelated
+  //   mutations cancel load()'s still-useful, still in-flight background
+  //   fetch, discarding real network I/O for no reason.
+  // - _detailsOnlyReloadTrack: _silentReloadDetailsOnly() (reorder, sort,
+  //   trip-date edit, memory/people/journal/segment CRUD) — kept separate
+  //   from _reloadTrack too, for the same reason again one level down: unlike
+  //   _silentReload/_applyRefreshedProject, this one never refreshes
+  //   geo/fullTrack itself, so it has even less business superseding
+  //   anything that does.
+  final _loadTrack = _SupersessionTrack();
+  final _reloadTrack = _SupersessionTrack();
+  final _detailsOnlyReloadTrack = _SupersessionTrack();
 
-  /// Bumps and returns [_loadToken]. Call synchronously, before any await, at
-  /// the very top of a top-level load/reload entry point; thread the returned
-  /// token through that call's background continuations and check it (via
-  /// [_isCurrent] or a direct `token != _loadToken` comparison) immediately
-  /// before every mutation of shared notifier state and before every notify —
-  /// not just once at the top — since anything can supersede this call during
-  /// any of those awaits.
-  int _beginLoad() => ++_loadToken;
-
-  /// True while [token] and [ref] are both still current for [load]'s own
-  /// flow (which additionally tracks [_loadKey]). See the [_loadToken] doc
-  /// above for why this is stricter than a bare `_loadKey == ref` check.
-  bool _isCurrent(int token, ProjectRef ref) =>
-      token == _loadToken && _loadKey == ref;
+  /// The ref [load] was most recently started with. Lets a staged-loading
+  /// subclass's own background phase (e.g. loadView's/loadShared's Phase 2)
+  /// detect navigation away without comparing against the mutable `ref`
+  /// field (whose name/role get corrected from the server's response during
+  /// Phase 1).
+  @protected
+  ProjectRef? get currentLoadKey => _loadTrack.ref;
 
   /// The token [load] most recently started with — lets a staged-loading
-  /// subclass's own background phase (e.g. loadView's/loadShared's Phase 2)
-  /// detect supersession the same way [applyFullActivities] does, including a
-  /// same-ref race that [currentLoadKey] alone can't catch.
+  /// subclass's own background phase detect supersession the same way
+  /// [applyFullActivities] does, including a same-ref race that
+  /// [currentLoadKey] alone can't catch (see [_SupersessionTrack]).
   @protected
-  int get currentLoadToken => _loadToken;
+  int get currentLoadToken => _loadTrack.token;
+
+  /// True while [token]/[ref] are still current for [_loadTrack] — i.e.
+  /// [load]'s own flow. Shorthand for `_loadTrack.isCurrent(token, ref)`,
+  /// used throughout `load()`/`_loadFullGeoProgressively`/`_loadElevationData`.
+  bool _isCurrent(int token, ProjectRef ref) => _loadTrack.isCurrent(token, ref);
 
   /// Retry delays for the initial fetch pair — overridable so tests don't wait
   /// real seconds, like refreshActivity's pollInterval/pollTimeout.
@@ -714,8 +770,7 @@ class ProjectNotifier extends ChangeNotifier
     if (ref.name.isEmpty) return;
     final name = ref.name;
     _stopPhotoPolling();
-    _loadKey = ref;
-    final token = _beginLoad();
+    final token = _loadTrack.begin(ref);
     this.ref = ref;
     isLoading = true;
     error = null;
@@ -1276,39 +1331,37 @@ class ProjectNotifier extends ChangeNotifier
   /// background full-details request into the already-rendered activity list,
   /// then rebuilds tracks and notifies listeners.
   /// Called by SharedProjectNotifier / ViewProjectNotifier after phase 2.
-  @protected
   ///
-  /// [token] should be [currentLoadToken] captured *before* the caller's own
-  /// long-running fetch that produced [fullActivities] — passing it lets this
-  /// reject a call superseded during that fetch by a second concurrent load
-  /// of the *same* project, which a plain [currentLoadKey] comparison can't
-  /// detect (issue #283 bug #3: ProjectRef.== is structural, so it only
-  /// catches navigation to a *different* project). Omitting it falls back to
-  /// checking against the token current right now, at entry.
+  /// [ref]/[token] should be [currentLoadKey]/[currentLoadToken] captured
+  /// *before* the caller's own long-running fetch that produced
+  /// [fullActivities] — passing them lets this reject a call superseded
+  /// during that fetch by a second concurrent load of the *same* project,
+  /// which a plain [currentLoadKey] comparison alone can't detect (issue
+  /// #283 bug #3: ProjectRef.== is structural, so it only catches navigation
+  /// to a *different* project). Required, not optional/defaulted: a caller
+  /// that forgot to pass them would otherwise silently compare the current
+  /// state against itself and always pass — defeating the guard entirely.
+  @protected
   Future<void> applyFullActivities(
     List<Map<String, dynamic>> fullActivities, {
-    int? token,
+    required ProjectRef ref,
+    required int token,
   }) async {
-    final tok = token ?? _loadToken;
     // Checked before mutating, not just before the trailing notify — a stale
     // call used to merge into `activities` unconditionally and only skip the
     // notify, leaving the mutation live but unbroadcast (issue #283 bug #3).
-    if (tok != _loadToken) return;
+    if (!_isCurrent(token, ref)) return;
     final byId = {for (final a in fullActivities) a['id']?.toString(): a};
     activities = [
       for (final a in activities) byId[a['id']?.toString()] ?? a,
     ];
     _updateStats();
     await _buildFullTrack();
-    if (tok != _loadToken) return;
+    if (!_isCurrent(token, ref)) return;
     await _waitForCameraIdle();
-    if (tok != _loadToken) return;
+    if (!_isCurrent(token, ref)) return;
     notifyListeners();
   }
-
-  /// Guard used by staged-loading subclasses to detect navigation away.
-  @protected
-  ProjectRef? get currentLoadKey => _loadKey;
 
   /// Live arc preview while a SegmentDialog or LocationPickerDialog is open.
   /// Callers write directly to `.value` — updates don't trigger notifyListeners().
@@ -1405,12 +1458,12 @@ class ProjectNotifier extends ChangeNotifier
     // clear() — without this, a stale compute() resolving afterward would
     // pass the gen check and repopulate the track data this just wiped.
     _buildFullTrackGen++;
-    // Same idea for any other in-flight top-level load/reload (issue #283):
-    // _loadKey is left untouched (ref itself is nulled below, which the
-    // `this.ref != ref`-style guards already react to), but bumping the
-    // token also invalidates a same-ref call an equality check alone
-    // couldn't tell apart.
-    _loadToken++;
+    // Same idea for any other in-flight top-level load/reload (issue #283) —
+    // all three tracks, so nothing left over from before clear() can still
+    // report itself as current afterward.
+    _loadTrack.invalidate();
+    _reloadTrack.invalidate();
+    _detailsOnlyReloadTrack.invalidate();
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;
@@ -1492,7 +1545,7 @@ class ProjectNotifier extends ChangeNotifier
       // Now fired in the background rather than awaited inside load(), so a
       // late response must not clobber a newer project's state if the user
       // has since navigated on to a different one.
-      if (_loadKey != ref) return;
+      if (currentLoadKey != ref) return;
       autoSyncEnabled = data['auto_sync_enabled'] as bool? ?? true;
       linkedPsTripId = data['linked_ps_trip_id'] as int?;
       lastStravaSyncAt = (data['last_strava_sync_at'] as num?)?.toDouble();
@@ -1505,7 +1558,7 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _loadShareInfo(ProjectRef ref) async {
     try {
       final data = await api.get(ref.path('/share-info')) as Map<String, dynamic>;
-      if (_loadKey != ref) return; // see _loadSyncMeta above
+      if (currentLoadKey != ref) return; // see _loadSyncMeta above
       shareToken = data['share_token'] as String?;
       shareTokenNoMemories = data['share_token_no_memories'] as String?;
     } catch (_) {
@@ -2077,20 +2130,25 @@ class ProjectNotifier extends ChangeNotifier
   /// the very track the re-fetch just updated. So the verdict comes from the
   /// cheap poll and the data from one full fetch here.
   Future<void> _applyRefreshedProject(ProjectRef ref) async {
-    // issue #283: bumped so a second concurrent top-level load/reload for the
-    // same ref (which `this.ref != ref` below can't tell apart from this one,
-    // since ProjectRef.== is structural) still supersedes this call.
-    final token = _beginLoad();
+    // issue #283: on _reloadTrack (shared with _silentReload, not _loadTrack)
+    // so a second concurrent top-level reload for the same ref — which a
+    // bare `this.ref != ref` check can't tell apart from this call, since
+    // ProjectRef.== is structural — still supersedes this call, without also
+    // being able to cancel load()'s own unrelated in-flight Phase 2. Compares
+    // against the ref this call started with (frozen at begin()), not the
+    // live `this.ref` field _applyDetails-style code can legitimately
+    // reassign mid-call — see _SupersessionTrack's doc for why that matters.
+    final token = _reloadTrack.begin(ref);
     final Map<String, dynamic> details;
     try {
       details = await _service.getDetails(ref, bypassCache: true);
     } on Exception catch (e) {
-      if (token != _loadToken || this.ref != ref) return;
+      if (!_reloadTrack.isCurrent(token, ref)) return;
       error = _loadErrorMessage(e);
       notifyListeners();
       return;
     }
-    if (token != _loadToken || this.ref != ref) return;
+    if (!_reloadTrack.isCurrent(token, ref)) return;
 
     final rawActivities = details['activities'];
     activities = rawActivities is List
@@ -2100,15 +2158,15 @@ class ProjectNotifier extends ChangeNotifier
     final rawItems = details['items'];
     items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
     await _revealItems(items);
-    if (token != _loadToken || this.ref != ref) return;
+    if (!_reloadTrack.isCurrent(token, ref)) return;
     _updateStats();
     await _buildFullTrack();
-    if (token != _loadToken || this.ref != ref) return;
+    if (!_reloadTrack.isCurrent(token, ref)) return;
     // Refresh GeoJSON so the map polylines reflect the updated track.
     geo = encryption.isUnlocked
         ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
         : await _service.getGeo(ref, bypassCache: true);
-    if (token != _loadToken || this.ref != ref) return;
+    if (!_reloadTrack.isCurrent(token, ref)) return;
     notifyListeners();
   }
 
@@ -2345,13 +2403,20 @@ class ProjectNotifier extends ChangeNotifier
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(ProjectRef ref) async {
-    // issue #283: also catches a second concurrent reload for the same ref,
-    // which `this.ref != ref` below can't (ProjectRef.== is structural).
-    final token = _beginLoad();
-    // Set false only by the ref-check right after _buildFullTrack below, so a
-    // navigation that lands during that now-async call (issue #276 follow-up)
-    // suppresses the notify — every other path (success or the catch below)
-    // keeps notifying exactly as before.
+    // issue #283: on _reloadTrack (shared with _applyRefreshedProject, not
+    // _loadTrack) so a second concurrent reload for the same ref — which a
+    // bare `this.ref != ref` check can't tell apart from this call, since
+    // ProjectRef.== is structural — still supersedes this call, without also
+    // being able to cancel load()'s own unrelated in-flight Phase 2. Compares
+    // against the ref this call started with (frozen at begin()), not the
+    // live `this.ref` field _applyDetails reassigns mid-call — see
+    // _SupersessionTrack's doc for why that matters.
+    final token = _reloadTrack.begin(ref);
+    bool stale() => !_reloadTrack.isCurrent(token, ref);
+    // Set false only by the staleness check right after _buildFullTrack
+    // below, so a navigation that lands during that now-async call (issue
+    // #276 follow-up) suppresses the notify — every other path (success or
+    // the catch below) keeps notifying exactly as before.
     var notify = true;
     try {
       if (encryption.isUnlocked) {
@@ -2373,7 +2438,7 @@ class ProjectNotifier extends ChangeNotifier
       }
       _updateStats();
       await _buildFullTrack();
-      if (token != _loadToken || this.ref != ref) {
+      if (stale()) {
         notify = false;
         return;
       }
@@ -2384,7 +2449,7 @@ class ProjectNotifier extends ChangeNotifier
       // failure (e.g. a network error arriving after a second concurrent
       // _silentReload/load for the same ref already succeeded) could
       // overwrite fresh state with a stale error and fire a spurious notify.
-      if (token != _loadToken || this.ref != ref) {
+      if (stale()) {
         notify = false;
       } else {
         error = _msg(e);
@@ -2394,39 +2459,34 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  // Dedicated to _silentReloadDetailsOnly below — deliberately NOT the shared
-  // _loadToken. This reload never touches geo/_fullTrack (that's the whole
-  // point of it being details-only), so unlike _applyRefreshedProject/
-  // _silentReload it has no fresher geo of its own to offer in exchange for
-  // superseding whoever it cancels. Sharing _loadToken with load() would let
-  // an unrelated details-only mutation (reorder, sort, trip-date edit) that
-  // fires mid-load permanently cancel that load()'s still in-flight
-  // progressive full-geo fetch (_loadFullGeoProgressively/_loadElevationData)
-  // with nothing left to ever complete it — isGeoLoaded would never become
-  // true and the map would stay stuck at low-res for the rest of the session
-  // (issue #283 review finding). This counter only ever needs to protect
-  // _silentReloadDetailsOnly against a second concurrent call to itself.
-  int _detailsOnlyReloadToken = 0;
-
   /// Details-only reload: skips the heavy GeoJSON fetch. Use when a mutation
   /// cannot change map geometry (reorder, trip-start, memory CRUD).
   Future<void> _silentReloadDetailsOnly(ProjectRef ref) async {
-    // issue #283: this reload had no staleness guard at all — a second
-    // concurrent call (or a navigation away) could clobber the outcome of a
-    // later, current one landing first. See _detailsOnlyReloadToken's doc
-    // above for why this uses its own counter rather than the shared
-    // _loadToken.
-    final token = ++_detailsOnlyReloadToken;
+    // issue #283: this reload had no staleness guard at all originally — a
+    // second concurrent call (or a navigation away) could clobber the
+    // outcome of a later, current one landing first. On _detailsOnlyReloadTrack
+    // (see its doc above) rather than _loadTrack/_reloadTrack, since this
+    // reload has no geo/details of its own to offer in exchange for
+    // superseding whoever it cancels.
+    final token = _detailsOnlyReloadTrack.begin(ref);
+    bool stale() => !_detailsOnlyReloadTrack.isCurrent(token, ref);
     try {
       final details = await _service.getDetailsMeta(ref);
+      // Checked before _applyDetails mutates activities/items/dayMeta/ref,
+      // not just before the trailing notify/error below — a stale call used
+      // to run this unconditionally and only skip the notify, leaving a
+      // second concurrent call's fresher result silently overwritten by a
+      // slower, superseded one (the same bug class applyFullActivities was
+      // fixed for — issue #283 review finding).
+      if (stale()) return;
       await _applyDetails(details, ref);
       _autoFillDaysToToday();
       _updateStats();
     } on Exception catch (e) {
-      if (token != _detailsOnlyReloadToken || this.ref != ref) return;
+      if (stale()) return;
       error = _msg(e);
     } finally {
-      if (token == _detailsOnlyReloadToken && this.ref == ref) notifyListeners();
+      if (!stale()) notifyListeners();
     }
   }
 
