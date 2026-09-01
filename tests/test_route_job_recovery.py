@@ -312,6 +312,44 @@ class TestDegradedSegmentSweep:
         assert sweep_degraded_segments() == 0
         assert enqueued == []
 
+    # A train whose schedule lookup failed resolves via the generic two-point
+    # OSM fallback: route_status="resolved", route_degraded=False (OSM found
+    # *a* track), route_hafas_failed=True. That used to be invisible to the
+    # sweep, so a route that isn't the user's train stuck forever (issue #277).
+
+    def test_a_hafas_fallback_segment_is_retried(self, degraded_env, monkeypatch):
+        engine, user_id, _project_id = degraded_env(_degraded_segment(
+            route_degraded=False, route_hafas_failed=True))
+
+        import src.jobs.queue as queue_mod
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 1
+        assert len(enqueued) == 1
+        user_arg, name_arg, seg_id_arg, _params, _started_at, _job_id = enqueued[0]
+        assert (user_arg, name_arg, seg_id_arg) == (user_id, "Trip", "seg-1")
+
+        seg = json.loads(_segment_row(engine).segment_json)
+        assert seg["route_status"] == "pending"
+        # Shares the degraded retry budget — no parallel counter.
+        assert seg["route_degrade_retries"] == 1
+
+    def test_an_exhausted_hafas_fallback_stops_being_retried(
+            self, degraded_env, monkeypatch):
+        degraded_env(_degraded_segment(
+            route_degraded=False, route_hafas_failed=True,
+            route_degrade_retries=MAX_DEGRADE_RETRIES))
+
+        import src.jobs.queue as queue_mod
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append(a) or True)
+
+        assert sweep_degraded_segments() == 0
+        assert enqueued == []
+
     def test_a_broken_sweep_does_not_raise(self, degraded_env, monkeypatch):
         degraded_env(_degraded_segment())
 

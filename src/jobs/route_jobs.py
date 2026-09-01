@@ -40,9 +40,12 @@ MAX_ATTEMPTS = 3
 # A degraded resolve (route_degraded=True) is a straight endpoint chord used
 # because Overpass failed every mirror/strategy at request time — not a
 # permanent verdict; the same mirror flakiness is often transient (issue
-# #207). sweep_degraded_segments retries a degraded segment up to this many
-# times before leaving it alone — still manually retryable from the tile,
-# same as any other resolve.
+# #207). A HAFAS-fallback resolve (route_hafas_failed=True) is the same kind
+# of provisional verdict: the train's own schedule lookup failed and the
+# geometry shown is a generic two-point route, not the train the user picked
+# (issue #277). sweep_degraded_segments retries either up to this many times
+# before leaving it alone — still manually retryable from the tile, same as
+# any other resolve.
 MAX_DEGRADE_RETRIES = 5
 
 TERMINAL = ("done", "failed")
@@ -194,11 +197,18 @@ def _fail_segment_for(
 
 
 def sweep_degraded_segments() -> int:
-    """Re-attempt every degraded, not-yet-exhausted segment. Returns how many.
+    """Re-attempt every provisionally-resolved segment. Returns how many.
+
+    "Provisional" means either ``route_degraded`` (Overpass found no usable
+    track, so the line is a straight endpoint chord — issue #207) or
+    ``route_hafas_failed`` (the selected train's schedule lookup failed and the
+    geometry is a generic two-point route — issue #277). Both are resolved
+    *around* a failure rather than because of a real answer, and both are
+    routinely transient, so neither should be frozen in for good.
 
     Called on a schedule (hourly, api/router.py) — unlike :func:`sweep_orphaned_jobs`
     there is no startup/crash urgency here, just giving a flaky Overpass mirror
-    room to recover between attempts (issue #207).
+    or train-schedule provider room to recover between attempts.
 
     Reads candidates directly off ``DBProjectItem`` rows rather than loading
     whole projects via :class:`ProjectRepo` — the same reason
@@ -219,7 +229,9 @@ def sweep_degraded_segments() -> int:
             ).all()
             for row, user_info_id, name in rows:
                 seg = ConnectingSegment.from_dict(json.loads(row.segment_json or "{}"))
-                if seg.route_status != "resolved" or not seg.route_degraded:
+                if seg.route_status != "resolved":
+                    continue
+                if not (seg.route_degraded or seg.route_hafas_failed):
                     continue
                 if seg.route_degrade_retries >= MAX_DEGRADE_RETRIES:
                     continue
@@ -241,8 +253,8 @@ def sweep_degraded_segments() -> int:
         started_at = datetime.now(timezone.utc).isoformat()
         try:
             with get_session() as sess:
-                # Only if still resolved+degraded: a manual trigger or edit
-                # racing this sweep owns the outcome instead.
+                # Only if still resolved: a manual trigger or edit racing this
+                # sweep owns the outcome instead.
                 written = _repo.update_segment_fields(
                     sess, project_id, seg_id,
                     {
@@ -272,5 +284,5 @@ def sweep_degraded_segments() -> int:
             _log.exception("could not enqueue degraded retry for seg=%s", seg_id)
 
     if retried:
-        _log.info("retried %d degraded segment(s)", retried)
+        _log.info("retried %d provisionally-resolved segment(s)", retried)
     return retried

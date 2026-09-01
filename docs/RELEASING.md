@@ -6,7 +6,7 @@
 .\bump_version_and_release.ps1 -DryRun    # preview the notes, change nothing
 .\bump_version_and_release.ps1            # feature bump: 0.46.9 -> 0.47.0
 .\bump_version_and_release.ps1 -Patch     # patch bump:   0.46.9 -> 0.46.10
-.\bump_version_and_release.ps1 -Polish    # + an LLM-written highlights paragraph
+.\bump_version_and_release.ps1 -Polish    # + translation and a highlights paragraph
 ```
 
 The script reads the version from `flutter_client/pubspec.yaml`, bumps it,
@@ -55,6 +55,30 @@ Two supported trailers:
 
 Both may wrap across lines; a blank line ends them.
 
+### Write them in English
+
+**Release notes are published in English**, so `Release-Note:` and
+`Upgrade-Note:` trailers are written in English — whatever language the commit
+subject, the body, or the conversation that produced it was in.
+
+"Write it for someone who uses the app" is about *vocabulary*, not language: say
+"Strava import no longer stalls", not "enforce the API quota process-wide". It
+has never meant "write it in the reader's mother tongue" — the app has one
+release page and it is in English.
+
+This is worth stating because it has already gone wrong: v0.48.0 shipped with
+sixty Portuguese bullets between the English ones, and had to be rewritten by
+hand after the fact. Two things now catch it:
+
+- `release_notes.py` flags entries that don't look like English and lists them
+  on stderr — always, `-DryRun` included. Preview before you tag and you'll see
+  them while the commits are still amendable.
+- `-Polish` translates the flagged entries into English before rendering (see
+  below). It never touches an entry that already reads as English.
+
+The detection is deliberately blunt — it only has to spot a whole sentence in
+another language. A bullet that names a Portuguese place or product is fine.
+
 ## What lands where
 
 | Commit | Section |
@@ -86,10 +110,18 @@ python scripts/release_notes.py --from v0.46.0 --to v0.46.9 --version v0.46.9
 Useful for checking how a commit will read *before* it's tagged — and for
 seeing whether a change needs a `Release-Note:` trailer.
 
-## Highlights (`-Polish`)
+## Polish (`-Polish`)
 
-`-Polish` asks Claude for a two-or-three sentence intro paragraph summarising
-the release. It is entirely optional:
+`-Polish` is the one layer that calls out to Claude. It does two things:
+
+1. **Translates** any entry the language check flagged into English, leaving
+   entries that already read as English exactly as they were. Only the flagged
+   lines are sent, and if the answer doesn't come back one-for-one the
+   originals are kept and still warned about.
+2. **Highlights** — a two-or-three sentence intro paragraph summarising the
+   release, written from the (now English) notes.
+
+It is entirely optional:
 
 ```powershell
 pip install anthropic          # not in requirements.txt — release tooling only
