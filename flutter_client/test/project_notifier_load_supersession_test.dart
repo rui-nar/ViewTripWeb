@@ -1,10 +1,14 @@
 // Regression tests for issue #283: ProjectNotifier's background loads had no
 // real cancellation, just ad hoc `_loadKey != ref` guards. Since ProjectRef.==
 // is structural (project_ref.dart), those guards only ever caught navigation
-// to a *different* project — a second concurrent load of the *same* ref (e.g.
-// the user mashing a Retry button) compared equal and could still let a
-// stale background continuation mutate/notify after a newer one had already
-// taken over. _loadToken (project_notifier.dart) closes that gap.
+// to a *different* project — a second concurrent call for the *same* ref
+// (e.g. the user mashing a Retry button, or an unrelated CRUD mutation
+// landing mid-load) compared equal and could still let a stale background
+// continuation mutate/notify after a newer one had already taken over.
+// project_notifier.dart's _SupersessionTrack closes that gap — three separate
+// instances (_loadTrack/_reloadTrack/_detailsOnlyReloadTrack) so that fixing
+// the same-ref race doesn't introduce a new one: an unrelated CRUD reload
+// must not be able to cancel load()'s own independent progressive fetch.
 //
 // These tests deliberately race two same-ref calls against each other via
 // Completer-controlled fakes, matching the "manual gen/token" testing
@@ -23,10 +27,10 @@ import 'package:viewtrip_client/src/projects/project_service.dart';
 
 const _ref = ProjectRef(name: 'Trip');
 
-Map<String, dynamic> _meta() => {
+Map<String, dynamic> _metaNamed(String name) => {
       'name': 'Trip',
       'activities': [
-        {'id': '1', 'name': 'meta'}
+        {'id': '1', 'name': name}
       ],
       'items': [
         {'item_type': 'activity', 'activity_id': '1'}
@@ -34,6 +38,8 @@ Map<String, dynamic> _meta() => {
       'people': [],
       'groups': [],
     };
+
+Map<String, dynamic> _meta() => _metaNamed('meta');
 
 Map<String, dynamic> _emptyGeo() => {'type': 'FeatureCollection', 'features': <dynamic>[]};
 
@@ -44,22 +50,41 @@ Map<String, dynamic> _detailsNamed(String name) => {
     };
 
 /// A [ProjectService] whose `getGeo`/`getDetails` calls are held open on
-/// Completers the test resolves by hand, so two concurrent same-ref
-/// `load()` calls can be interleaved deterministically. `getDetailsMeta`/
-/// `getLowResGeo` resolve immediately — only the Phase 2 fetches (the ones
-/// _loadFullGeoProgressively/_loadElevationData act on) need controlling.
+/// Completers the test resolves by hand, so two concurrent same-ref calls
+/// can be interleaved deterministically.
+///
+/// `getDetailsMeta` resolves immediately by default (so `load()`'s Phase 1
+/// isn't blocked by tests that don't care about it) unless [metaCalls] is
+/// set to a list, at which point subsequent calls are held on it the same
+/// way — a test flips this on only after its own `load()` setup call has
+/// already completed, to race two *later* same-ref calls against each other
+/// without also blocking `load()` itself.
+///
+/// `getGeo` is held by default ([holdGeoCalls]) since most tests need
+/// `load()`'s own Phase 2 fetch held open; a test driving an unrelated
+/// same-ref reload afterward flips this off first so that reload's own geo
+/// fetch (fetched fresh, not under test) doesn't also hang forever.
 class _RacingService extends ProjectService {
   final List<Completer<Map<String, dynamic>>> geoCalls = [];
   final List<Completer<Map<String, dynamic>>> detailsCalls = [];
+  bool holdGeoCalls = true;
+  List<Completer<Map<String, dynamic>>>? metaCalls;
 
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async => _meta();
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) {
+    final calls = metaCalls;
+    if (calls == null) return Future.value(_meta());
+    final c = Completer<Map<String, dynamic>>();
+    calls.add(c);
+    return c.future;
+  }
 
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async => _emptyGeo();
 
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) {
+    if (!holdGeoCalls) return Future.value(_emptyGeo());
     final c = Completer<Map<String, dynamic>>();
     geoCalls.add(c);
     return c.future;
@@ -71,6 +96,9 @@ class _RacingService extends ProjectService {
     detailsCalls.add(c);
     return c.future;
   }
+
+  @override
+  Future<Map<String, dynamic>> resetActivityTrack(ProjectRef ref, int activityId) async => {};
 }
 
 /// Test-only subclass exposing the @protected applyFullActivities/
@@ -80,8 +108,9 @@ class _RacingService extends ProjectService {
 class _ExposedNotifier extends ProjectNotifier {
   _ExposedNotifier(super.service);
 
-  Future<void> apply(List<Map<String, dynamic>> acts, {int? token}) =>
-      applyFullActivities(acts, token: token);
+  Future<void> apply(List<Map<String, dynamic>> acts,
+          {required ProjectRef ref, required int token}) =>
+      applyFullActivities(acts, ref: ref, token: token);
 
   int get token => currentLoadToken;
 }
@@ -166,7 +195,7 @@ void main() {
     // A completely unrelated mutation (e.g. the user drag-reordering an
     // activity, which is available as soon as Phase 1's low-res data has
     // rendered) triggers a details-only reload. Before the fix, this shared
-    // load()'s own _loadToken, so bumping it here would silently and
+    // load()'s own supersession track, so bumping it here would silently and
     // permanently cancel the still-in-flight progressive geo fetch below —
     // isGeoLoaded would never become true again for the rest of the session.
     await notifier.reloadDetailsOnly(_ref);
@@ -183,6 +212,100 @@ void main() {
 
     // Drain the whenComplete-chained _loadElevationData details fetch.
     await _pumpUntil(() => svc.detailsCalls.isNotEmpty);
+    for (final c in svc.detailsCalls) {
+      if (!c.isCompleted) c.complete(_detailsNamed('drained'));
+    }
+    await _pumpUntil(() => false, maxTicks: 5);
+  });
+
+  test(
+      'an unrelated _silentReload (e.g. resetActivityTrack) does not cancel '
+      'a load()\'s still in-flight progressive full-geo fetch (issue #283 '
+      'review finding)', () async {
+    final svc = _RacingService();
+    final notifier = ProjectNotifier(svc);
+
+    // load()'s Phase 2 geo fetch is held open — it is genuinely still in
+    // flight for a large trip when the unrelated CRUD reload below fires.
+    await notifier.load(_ref);
+    notifier.isGeoLoaded = false;
+    await _pumpUntil(() => svc.geoCalls.length == 1);
+
+    // A completely unrelated mutation (resetting an activity's track)
+    // triggers _silentReload. Its own geo fetch resolves immediately
+    // (holdGeoCalls flipped off here) so this await completes; before this
+    // fix, _silentReload shared load()'s own supersession track, so bumping
+    // it here would silently and permanently cancel the still-in-flight
+    // progressive geo fetch below — isGeoLoaded (and the low-res-to-full-res
+    // map/elevation-chart upgrade it gates) would never land for the rest of
+    // the session.
+    svc.holdGeoCalls = false;
+    await notifier.resetActivityTrack(1);
+
+    // The original load()'s geo fetch now resolves. It must still be able to
+    // land normally — the unrelated _silentReload must not have superseded
+    // it.
+    svc.geoCalls[0].complete(_emptyGeo());
+    await _pumpUntil(() => notifier.isGeoLoaded);
+    expect(notifier.isGeoLoaded, isTrue,
+        reason: 'an unrelated _silentReload (CRUD mutation) must not be '
+            'able to starve an in-flight load()\'s own progressive geo '
+            'fetch, which has no other way to ever complete');
+
+    // Drain the whenComplete-chained _loadElevationData details fetch.
+    await _pumpUntil(() => svc.detailsCalls.isNotEmpty);
+    for (final c in svc.detailsCalls) {
+      if (!c.isCompleted) c.complete(_detailsNamed('drained'));
+    }
+    await _pumpUntil(() => false, maxTicks: 5);
+  });
+
+  test(
+      'reloadDetailsOnly: a stale call\'s late-arriving response does not '
+      'overwrite a newer concurrent reloadDetailsOnly() for the same ref '
+      '(issue #283 review finding — mutation must be guarded, not just the '
+      'trailing notify)', () async {
+    final svc = _RacingService();
+    final notifier = ProjectNotifier(svc);
+
+    await notifier.load(_ref);
+    expect(notifier.activities.first['name'], 'meta');
+
+    // Switch to holding getDetailsMeta() so the two reloadDetailsOnly()
+    // calls below can be raced deterministically against each other —
+    // load()'s own Phase 1 fetch above already completed before this flips.
+    svc.metaCalls = [];
+
+    // Call A: starts, its getDetailsMeta() is held on metaCalls[0].
+    final callA = notifier.reloadDetailsOnly(_ref);
+    await _pumpUntil(() => svc.metaCalls!.length == 1);
+
+    // Call B: a second concurrent reloadDetailsOnly() for the same ref.
+    final callB = notifier.reloadDetailsOnly(_ref);
+    await _pumpUntil(() => svc.metaCalls!.length == 2);
+
+    // B's (current) response lands first with the real data.
+    svc.metaCalls![1].complete(_metaNamed('CURRENT'));
+    await callB;
+    expect(notifier.activities.first['name'], 'CURRENT');
+
+    // A's (stale) response lands late. Before this fix,
+    // _silentReloadDetailsOnly guarded only its own trailing notify/error,
+    // not the _applyDetails mutation itself — so this would have silently
+    // overwritten 'CURRENT' with 'STALE' even though only the notify was
+    // (correctly) suppressed, exactly the bug class applyFullActivities was
+    // fixed for.
+    svc.metaCalls![0].complete(_metaNamed('STALE'));
+    await callA;
+    expect(notifier.activities.first['name'], 'CURRENT',
+        reason: 'a stale reloadDetailsOnly() call must not be able to '
+            'overwrite a newer one\'s already-applied data');
+
+    // Drain load()'s still-pending Phase 2 fetches (not under test here).
+    for (final c in svc.geoCalls) {
+      if (!c.isCompleted) c.complete(_emptyGeo());
+    }
+    await _pumpUntil(() => false, maxTicks: 5);
     for (final c in svc.detailsCalls) {
       if (!c.isCompleted) c.complete(_detailsNamed('drained'));
     }
@@ -254,13 +377,13 @@ void main() {
     // and only skip the trailing notify).
     await notifier.apply([
       {'id': '1', 'name': 'STALE'}
-    ], token: staleToken);
+    ], ref: _ref, token: staleToken);
     expect(notifier.activities.first['name'], 'CURRENT');
 
     // Applying with the current token still works normally.
     await notifier.apply([
       {'id': '1', 'name': 'FRESH'}
-    ], token: notifier.token);
+    ], ref: _ref, token: notifier.token);
     expect(notifier.activities.first['name'], 'FRESH');
 
     // Drain both load() calls' still-pending Phase 2 fetches so nothing is

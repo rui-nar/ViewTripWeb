@@ -179,7 +179,8 @@ class SharedProjectNotifier extends ProjectNotifier {
         // applyFullActivities notifies internally (gated on camera-idle) —
         // isElevationLoaded was already set true above, so no second notify
         // is needed here just to surface it.
-        await applyFullActivities(rawActs.cast<Map<String, dynamic>>(), token: loadToken);
+        await applyFullActivities(rawActs.cast<Map<String, dynamic>>(),
+            ref: tokenRef, token: loadToken);
       }
     } catch (_) {
       // Non-fatal — elevation placeholder stays visible. Still notify (like
