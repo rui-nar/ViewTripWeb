@@ -667,11 +667,16 @@ class ProjectNotifier extends ChangeNotifier
   // mashing the offline-banner's Retry button, or any other double-trigger of
   // load()/loadView()/loadShared() for the same ref), since their refs compare
   // equal. _loadToken adds call identity on top: bumped at the top of every
-  // top-level load/reload entry point (load(), _applyRefreshedProject(),
-  // _silentReload(), _silentReloadDetailsOnly(), clear()), a token captured at
-  // the start of one of those calls stops matching the moment ANY of them
-  // starts again — same ref or not — so every background continuation that
-  // checks it catches both kinds of supersession with one comparison.
+  // top-level entry point that independently refreshes geo/fullTrack itself
+  // (load(), _applyRefreshedProject(), _silentReload(), clear()) — deliberately
+  // NOT _silentReloadDetailsOnly(), which has its own dedicated
+  // _detailsOnlyReloadToken instead; see that field's doc for why sharing this
+  // one with it would let an unrelated details-only mutation permanently
+  // cancel a real load()'s still in-flight progressive geo fetch. A token
+  // captured at the start of one of the entry points above stops matching the
+  // moment ANY of them starts again — same ref or not — so every background
+  // continuation that checks it catches both kinds of supersession with one
+  // comparison.
   int _loadToken = 0;
 
   /// Bumps and returns [_loadToken]. Call synchronously, before any await, at
@@ -2373,28 +2378,55 @@ class ProjectNotifier extends ChangeNotifier
         return;
       }
     } on Exception catch (e) {
-      error = _msg(e);
+      // issue #283 review finding: this used to set `error`/notify
+      // unconditionally on the exception path — the staleness guard above
+      // only covered the success path — so a stale, superseded call's
+      // failure (e.g. a network error arriving after a second concurrent
+      // _silentReload/load for the same ref already succeeded) could
+      // overwrite fresh state with a stale error and fire a spurious notify.
+      if (token != _loadToken || this.ref != ref) {
+        notify = false;
+      } else {
+        error = _msg(e);
+      }
     } finally {
       if (notify) notifyListeners();
     }
   }
+
+  // Dedicated to _silentReloadDetailsOnly below — deliberately NOT the shared
+  // _loadToken. This reload never touches geo/_fullTrack (that's the whole
+  // point of it being details-only), so unlike _applyRefreshedProject/
+  // _silentReload it has no fresher geo of its own to offer in exchange for
+  // superseding whoever it cancels. Sharing _loadToken with load() would let
+  // an unrelated details-only mutation (reorder, sort, trip-date edit) that
+  // fires mid-load permanently cancel that load()'s still in-flight
+  // progressive full-geo fetch (_loadFullGeoProgressively/_loadElevationData)
+  // with nothing left to ever complete it — isGeoLoaded would never become
+  // true and the map would stay stuck at low-res for the rest of the session
+  // (issue #283 review finding). This counter only ever needs to protect
+  // _silentReloadDetailsOnly against a second concurrent call to itself.
+  int _detailsOnlyReloadToken = 0;
 
   /// Details-only reload: skips the heavy GeoJSON fetch. Use when a mutation
   /// cannot change map geometry (reorder, trip-start, memory CRUD).
   Future<void> _silentReloadDetailsOnly(ProjectRef ref) async {
     // issue #283: this reload had no staleness guard at all — a second
     // concurrent call (or a navigation away) could clobber the outcome of a
-    // later, current one landing first.
-    final token = _beginLoad();
+    // later, current one landing first. See _detailsOnlyReloadToken's doc
+    // above for why this uses its own counter rather than the shared
+    // _loadToken.
+    final token = ++_detailsOnlyReloadToken;
     try {
       final details = await _service.getDetailsMeta(ref);
       await _applyDetails(details, ref);
       _autoFillDaysToToday();
       _updateStats();
     } on Exception catch (e) {
+      if (token != _detailsOnlyReloadToken || this.ref != ref) return;
       error = _msg(e);
     } finally {
-      if (token == _loadToken && this.ref == ref) notifyListeners();
+      if (token == _detailsOnlyReloadToken && this.ref == ref) notifyListeners();
     }
   }
 

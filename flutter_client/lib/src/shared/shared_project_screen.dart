@@ -147,14 +147,22 @@ class SharedProjectNotifier extends ProjectNotifier {
 
     // Phase 1: load() calls _sharedSvc.getDetailsMeta() which returns the
     // lightweight /meta response in ~1 s.  isLoading goes false after that.
+    //
+    // loadToken captured synchronously, *before* awaiting: load()'s body runs
+    // its synchronous prefix — including bumping the load-supersession token
+    // — the instant it's called, before it suspends on its own first await.
+    // So this is guaranteed to be *this* loadShared() call's own token.
+    // Reading currentLoadToken only after `await load(tokenRef)` returned
+    // instead (this fix's first cut) could pick up a second concurrent
+    // loadShared() call's token if that call's own load() had already
+    // bumped it by the time this one's await resolved — silently
+    // un-superseding a call that should have been rejected (issue #283
+    // review finding).
     final tokenRef = ProjectRef(name: token);
-    await load(tokenRef);
-    if (_disposed || currentLoadKey != tokenRef) return;
-    // Captured now, right before Phase 2's own fetch, so a second concurrent
-    // loadShared() for the same ref (currentLoadKey alone can't tell those
-    // apart — ProjectRef.== is structural) still supersedes this one's Phase
-    // 2 below — issue #283.
+    final loadFuture = load(tokenRef);
     final loadToken = currentLoadToken;
+    await loadFuture;
+    if (_disposed || currentLoadKey != tokenRef || currentLoadToken != loadToken) return;
     isMetaLoaded = true;
     // The /meta response now carries a downsampled (low-res) elevation profile,
     // so the chart can render immediately; Phase 2 below upgrades it in place.
@@ -165,7 +173,7 @@ class SharedProjectNotifier extends ProjectNotifier {
     // Fired here — after load() has returned — so meta had exclusive bandwidth.
     try {
       final fullDetails = await _sharedSvc.fetchFullDetails();
-      if (_disposed || currentLoadKey != tokenRef) return;
+      if (_disposed || currentLoadKey != tokenRef || currentLoadToken != loadToken) return;
       final rawActs = fullDetails['activities'];
       if (rawActs is List) {
         // applyFullActivities notifies internally (gated on camera-idle) —

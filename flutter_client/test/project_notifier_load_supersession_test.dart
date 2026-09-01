@@ -151,6 +151,45 @@ void main() {
   });
 
   test(
+      'an unrelated reloadDetailsOnly() (reorder/sort/trip-date edit) does '
+      'not cancel a load()\'s still in-flight progressive full-geo fetch '
+      '(issue #283 review finding)', () async {
+    final svc = _RacingService();
+    final notifier = ProjectNotifier(svc);
+
+    // load()'s Phase 2 geo fetch is held open — it is genuinely still in
+    // flight for a large trip when the details-only reload below fires.
+    await notifier.load(_ref);
+    notifier.isGeoLoaded = false;
+    await _pumpUntil(() => svc.geoCalls.length == 1);
+
+    // A completely unrelated mutation (e.g. the user drag-reordering an
+    // activity, which is available as soon as Phase 1's low-res data has
+    // rendered) triggers a details-only reload. Before the fix, this shared
+    // load()'s own _loadToken, so bumping it here would silently and
+    // permanently cancel the still-in-flight progressive geo fetch below —
+    // isGeoLoaded would never become true again for the rest of the session.
+    await notifier.reloadDetailsOnly(_ref);
+
+    // The original load()'s geo fetch now resolves. It must still be able to
+    // land normally — the unrelated details-only reload must not have
+    // superseded it.
+    svc.geoCalls[0].complete(_emptyGeo());
+    await _pumpUntil(() => notifier.isGeoLoaded);
+    expect(notifier.isGeoLoaded, isTrue,
+        reason: 'an unrelated details-only reload must not be able to '
+            'starve an in-flight load()\'s own progressive geo fetch, which '
+            'has no other way to ever complete');
+
+    // Drain the whenComplete-chained _loadElevationData details fetch.
+    await _pumpUntil(() => svc.detailsCalls.isNotEmpty);
+    for (final c in svc.detailsCalls) {
+      if (!c.isCompleted) c.complete(_detailsNamed('drained'));
+    }
+    await _pumpUntil(() => false, maxTicks: 5);
+  });
+
+  test(
       '_loadElevationData: a stale load()\'s details fetch resolving late '
       'does not overwrite activities merged by a second concurrent load() of '
       'the same ref (issue #283, same-ref case)', () async {
