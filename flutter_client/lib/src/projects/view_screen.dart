@@ -77,7 +77,12 @@ class ViewProjectNotifier extends ProjectNotifier {
     // already hits the right /meta endpoint) which returns the lightweight
     // response in ~1 s.  isLoading goes false after that.
     await load(ref);
-    if (_disposed) return;
+    if (_disposed || currentLoadKey != ref) return;
+    // Captured now, right before Phase 2's own fetch, so a second concurrent
+    // loadView() for the same ref (currentLoadKey alone can't tell those
+    // apart — ProjectRef.== is structural) still supersedes this one's Phase
+    // 2 below — issue #283.
+    final token = currentLoadToken;
     isMetaLoaded = true;
     // The /meta response now carries a downsampled (low-res) elevation profile,
     // so the chart can render immediately instead of waiting for the full
@@ -95,10 +100,17 @@ class ViewProjectNotifier extends ProjectNotifier {
         // applyFullActivities notifies internally (gated on camera-idle) —
         // isElevationLoaded was already set true above, so no second notify
         // is needed here just to surface it.
-        await applyFullActivities(rawActs.cast<Map<String, dynamic>>());
+        await applyFullActivities(rawActs.cast<Map<String, dynamic>>(), token: token);
       }
     } catch (_) {
-      // Non-fatal — elevation placeholder stays visible
+      // Non-fatal — elevation placeholder stays visible. Still notify (like
+      // ProjectNotifier._loadFullGeoProgressively's own catch block) so a
+      // mutation applyFullActivities may have already made (the activities
+      // merge, before its own _buildFullTrack() threw) doesn't stay
+      // unbroadcast — issue #283 bug #4.
+      if (!_disposed && currentLoadKey == ref && currentLoadToken == token) {
+        notifyListeners();
+      }
     }
   }
 }

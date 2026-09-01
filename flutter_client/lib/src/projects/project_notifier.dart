@@ -566,13 +566,15 @@ class ProjectNotifier extends ChangeNotifier
   /// real data (e.g. a deleted activity/segment/memory or a day that's no
   /// longer in [dayMeta]) so a stale selection can't resurrect as a dangling
   /// reference. Silently no-ops on missing/malformed prefs.
-  Future<void> _restoreUiState() async {
+  Future<void> _restoreUiState(int token) async {
     final ref = this.ref;
     if (ref == null) return;
     final name = ref.name;
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (_loadKey != ref) return; // navigated away while awaiting prefs
+      // issue #283: also reject a same-ref load that superseded this one
+      // while awaiting prefs, which a bare _loadKey comparison can't detect.
+      if (token != _loadToken || _loadKey != ref) return;
       final raw = prefs.getString(_uiStateKey(name));
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -656,6 +658,44 @@ class ProjectNotifier extends ChangeNotifier
   // name is overwritten with the server's returned name during Phase 1).
   ProjectRef? _loadKey;
 
+  // ── Load supersession (issue #283) ────────────────────────────────────────
+  //
+  // ProjectRef.== is structural (name/ownerId/role — see project_ref.dart), so
+  // a `_loadKey != ref` / `this.ref != ref` guard only detects navigation to a
+  // *different* project. It does not detect a second concurrent load of the
+  // *same* ref superseding an earlier one still mid-flight (e.g. the user
+  // mashing the offline-banner's Retry button, or any other double-trigger of
+  // load()/loadView()/loadShared() for the same ref), since their refs compare
+  // equal. _loadToken adds call identity on top: bumped at the top of every
+  // top-level load/reload entry point (load(), _applyRefreshedProject(),
+  // _silentReload(), _silentReloadDetailsOnly(), clear()), a token captured at
+  // the start of one of those calls stops matching the moment ANY of them
+  // starts again — same ref or not — so every background continuation that
+  // checks it catches both kinds of supersession with one comparison.
+  int _loadToken = 0;
+
+  /// Bumps and returns [_loadToken]. Call synchronously, before any await, at
+  /// the very top of a top-level load/reload entry point; thread the returned
+  /// token through that call's background continuations and check it (via
+  /// [_isCurrent] or a direct `token != _loadToken` comparison) immediately
+  /// before every mutation of shared notifier state and before every notify —
+  /// not just once at the top — since anything can supersede this call during
+  /// any of those awaits.
+  int _beginLoad() => ++_loadToken;
+
+  /// True while [token] and [ref] are both still current for [load]'s own
+  /// flow (which additionally tracks [_loadKey]). See the [_loadToken] doc
+  /// above for why this is stricter than a bare `_loadKey == ref` check.
+  bool _isCurrent(int token, ProjectRef ref) =>
+      token == _loadToken && _loadKey == ref;
+
+  /// The token [load] most recently started with — lets a staged-loading
+  /// subclass's own background phase (e.g. loadView's/loadShared's Phase 2)
+  /// detect supersession the same way [applyFullActivities] does, including a
+  /// same-ref race that [currentLoadKey] alone can't catch.
+  @protected
+  int get currentLoadToken => _loadToken;
+
   /// Retry delays for the initial fetch pair — overridable so tests don't wait
   /// real seconds, like refreshActivity's pollInterval/pollTimeout.
   @visibleForTesting
@@ -670,6 +710,7 @@ class ProjectNotifier extends ChangeNotifier
     final name = ref.name;
     _stopPhotoPolling();
     _loadKey = ref;
+    final token = _beginLoad();
     this.ref = ref;
     isLoading = true;
     error = null;
@@ -709,11 +750,11 @@ class ProjectNotifier extends ChangeNotifier
       // low-res geo that already arrived. isLoading stays true throughout, so
       // the panel shows its spinner while the retries run rather than an error.
       final detailsFuture = retryFetch(() => _service.getDetailsMeta(ref),
-          backoff: loadRetryBackoff, abort: () => _loadKey != ref);
+          backoff: loadRetryBackoff, abort: () => !_isCurrent(token, ref));
       final lowResFuture = encryption.isUnlocked
           ? null
           : retryFetch(() => _service.getLowResGeo(ref),
-              backoff: loadRetryBackoff, abort: () => _loadKey != ref);
+              backoff: loadRetryBackoff, abort: () => !_isCurrent(token, ref));
       // Both futures need a listener from the moment they're created: if
       // lowResFuture rejects first, the catch below returns before
       // detailsFuture is ever awaited, leaving it truly unobserved — a later
@@ -734,7 +775,7 @@ class ProjectNotifier extends ChangeNotifier
           // screen when offline and a fuller cache entry exists.
           geo = await projectDataCache.readLowResGeo(ref);
         }
-        if (_loadKey == ref) notifyListeners(); // map visible at ~2.2s
+        if (_isCurrent(token, ref)) notifyListeners(); // map visible at ~2.2s
       }
 
       Map<String, dynamic> details;
@@ -746,7 +787,7 @@ class ProjectNotifier extends ChangeNotifier
         details = cachedMeta;
         offlineFromCache = true;
       }
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
 
       // caller_role (issue #109) is the server's authoritative answer to
       // "what's my tier here" — corrects the resolveRoleFor() placeholder
@@ -824,13 +865,17 @@ class ProjectNotifier extends ChangeNotifier
         geo = client_geo.buildLowResGeo(items, client_geo.activitiesById(activities));
       }
       await _buildFullTrack();
+      // Bug #1 of issue #283: without this check, a load() superseded while
+      // _buildFullTrack() was hopping through compute() could still mutate
+      // dayMeta/activities below for a project the user has since left.
+      if (!_isCurrent(token, ref)) return;
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
-      await _restoreUiState();  // issue #76 follow-up: reapply persisted selection/filters
+      await _restoreUiState(token);  // issue #76 follow-up: reapply persisted selection/filters
       // Catch Object, not just Exception: retryFetch rethrows whatever the last
       // attempt threw, and a truncated response decodes into an Error
       // (RangeError/TypeError) that would otherwise escape this handler.
     } on Object catch (e) {
-      if (_loadKey == ref) {
+      if (_isCurrent(token, ref)) {
         error = _loadErrorMessage(e);
         if (e is ApiException) loadErrorStatus = e.statusCode;
       }
@@ -840,7 +885,7 @@ class ProjectNotifier extends ChangeNotifier
       // flip isLoading back to false or notify for a project that's no longer
       // current — a new load() for the current project may already be in
       // flight with isLoading = true.
-      if (_loadKey == ref) {
+      if (_isCurrent(token, ref)) {
         isLoading = false;
         notifyListeners();   // map appears here with low-res straight lines
       }
@@ -851,8 +896,8 @@ class ProjectNotifier extends ChangeNotifier
     // one fetches the ~12 MB full dict), so racing them made a cold open ask
     // for the same project three times at once, each slowing the others down
     // into the timeout that produced issue #178.
-    unawaited(_loadFullGeoProgressively(ref)
-        .whenComplete(() => _loadElevationData(ref)));
+    unawaited(_loadFullGeoProgressively(ref, token)
+        .whenComplete(() => _loadElevationData(ref, token)));
 
     // Sync status / share-link info — neither the map nor the activity panel
     // already rendered above needs them, so fetching them must not hold the
@@ -863,7 +908,7 @@ class ProjectNotifier extends ChangeNotifier
     // assuming isLoading turning false means they're already populated.
     if (loadOwnerExtras) {
       unawaited(Future.wait([_loadSyncMeta(ref), _loadShareInfo(ref)]).then((_) {
-        if (_loadKey != ref) return;
+        if (!_isCurrent(token, ref)) return;
         isSyncMetaLoaded = true;
         notifyListeners();
         // Background sync check — fires only for active trips with auto-sync
@@ -872,7 +917,7 @@ class ProjectNotifier extends ChangeNotifier
         // full-res geo fetch on load.
         if (_tripIsActive && autoSyncEnabled) {
           Future.delayed(const Duration(seconds: 5), () {
-            if (_loadKey == ref) _backgroundSyncCheck(ref);
+            if (_isCurrent(token, ref)) _backgroundSyncCheck(ref);
           });
         }
       }));
@@ -900,9 +945,9 @@ class ProjectNotifier extends ChangeNotifier
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
   /// straight-line approximation with its real GPS trace (last activity first).
-  Future<void> _loadFullGeoProgressively(ProjectRef ref) async {
+  Future<void> _loadFullGeoProgressively(ProjectRef ref, int token) async {
     // Guard: abort if the user navigated away before we finish
-    if (_loadKey != ref) return;
+    if (!_isCurrent(token, ref)) return;
 
     if (encryption.isUnlocked) {
       // Full-res geo is already fully knowable from the decrypted activities
@@ -912,12 +957,19 @@ class ProjectNotifier extends ChangeNotifier
       try {
         geo = client_geo.buildFullGeo(items, client_geo.activitiesById(activities));
         await _buildFullTrack();
+        // Bug #1 of issue #283: this used to be set unconditionally right
+        // after the await above, before the ref check below — a load()
+        // superseded during _buildFullTrack()'s compute() hop could still
+        // flip isGeoLoaded for the wrong project even with its notify
+        // suppressed.
+        if (!_isCurrent(token, ref)) return;
         isGeoLoaded = true;
       } catch (e) {
+        if (!_isCurrent(token, ref)) return;
         error = _loadErrorMessage(e);
       }
       await _waitForCameraIdle();
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       notifyListeners();
       return;
     }
@@ -935,19 +987,22 @@ class ProjectNotifier extends ChangeNotifier
     // final pass below does for a real fetch.
     final cachedFullGeo = await projectDataCache.readFullGeo(ref);
     if (cachedFullGeo != null) {
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       try {
         reconcileSegmentOverlay(cachedFullGeo);
         final features = mergePendingSegmentPatches(
             List<dynamic>.from(cachedFullGeo['features'] as List? ?? []));
         geo = {'type': 'FeatureCollection', 'features': features};
         await _buildFullTrack();
+        // Same bug #1 fix as the encrypted branch above.
+        if (!_isCurrent(token, ref)) return;
         isGeoLoaded = true;
       } catch (e) {
+        if (!_isCurrent(token, ref)) return;
         error = _loadErrorMessage(e);
       }
       await _waitForCameraIdle();
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       notifyListeners();
       return;
     }
@@ -966,7 +1021,7 @@ class ProjectNotifier extends ChangeNotifier
         // Catch Object (not just Exception): a decode failure can throw an
         // Error (RangeError/TypeError), which would otherwise escape as an
         // unhandled async exception and never surface here.
-        if (_loadKey != ref) return;
+        if (!_isCurrent(token, ref)) return;
         if (attempt == 1) {
           error = _loadErrorMessage(e);
           isGeoLoaded = false;
@@ -974,10 +1029,10 @@ class ProjectNotifier extends ChangeNotifier
           return;
         }
         await Future.delayed(const Duration(seconds: 2));
-        if (_loadKey != ref) return;
+        if (!_isCurrent(token, ref)) return;
       }
     }
-    if (fullGeo == null || _loadKey != ref) return;
+    if (fullGeo == null || !_isCurrent(token, ref)) return;
 
     try {
       // Drop overlay entries the server geo already reflects, so the durable
@@ -1011,7 +1066,7 @@ class ProjectNotifier extends ChangeNotifier
       int batchCount = 0;
       List<dynamic>? batchFeatures;
       for (final actId in actIds) {
-        if (_loadKey != ref) return;
+        if (!_isCurrent(token, ref)) return;
         final full = fullFeatures[actId];
         if (full == null) continue;
         if (batchFeatures == null) {
@@ -1025,7 +1080,7 @@ class ProjectNotifier extends ChangeNotifier
         batchCount++;
         if (batchCount % batchSize == 0) {
           await _waitForCameraIdle();
-          if (_loadKey != ref) return;
+          if (!_isCurrent(token, ref)) return;
           geo = {'type': 'FeatureCollection', 'features': batchFeatures};
           batchFeatures = null; // re-read next batch so concurrent CRUD is picked up
           notifyListeners();
@@ -1033,7 +1088,7 @@ class ProjectNotifier extends ChangeNotifier
         }
       }
 
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       // Final pass: rebuild authoritatively from the server geo (activities at
       // full resolution + the server's segment features), then re-apply the
       // durable segment overlay so any local add/update/delete that happened
@@ -1042,18 +1097,21 @@ class ProjectNotifier extends ChangeNotifier
       final features = mergePendingSegmentPatches(
           List<dynamic>.from(fullGeo['features'] as List? ?? []));
       await _waitForCameraIdle();
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       geo = {'type': 'FeatureCollection', 'features': features};
       await _buildFullTrack();
       // _buildFullTrack() may hop through compute() — re-check like every
       // other await in this function so a superseded load doesn't flip
       // isGeoLoaded or notify for a project the user has since left.
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       isGeoLoaded = true;
       notifyListeners();
     } on Object catch (e) {
       // Non-fatal — low-res map is still shown. Catch Object so an Error in the
-      // apply path can't escape as a recurring unhandled exception.
+      // apply path can't escape as a recurring unhandled exception. Checked
+      // like every mutation above: a stale error must not surface for a
+      // project the user has since left (issue #283).
+      if (!_isCurrent(token, ref)) return;
       error = _loadErrorMessage(e);
       notifyListeners();
     }
@@ -1063,14 +1121,18 @@ class ProjectNotifier extends ChangeNotifier
   /// background and merges them into the already-rendered activity list so the
   /// elevation chart and cursor-to-map sync become available without blocking
   /// the initial panel render.
-  Future<void> _loadElevationData(ProjectRef ref) async {
+  Future<void> _loadElevationData(ProjectRef ref, int token) async {
     try {
       final details = await _service.getDetails(ref);
-      if (_loadKey != ref) return;
+      if (!_isCurrent(token, ref)) return;
       final rawActivities = details['activities'];
       if (rawActivities is List) {
         final freshActivities = rawActivities.cast<Map<String, dynamic>>();
         await _revealActivities(freshActivities);
+        // issue #283: _revealActivities awaits (per-field decrypt calls), so
+        // re-check before merging into the shared `activities` field below —
+        // the original code only checked once, before this await.
+        if (!_isCurrent(token, ref)) return;
         final byId = <String, Map<String, dynamic>>{};
         for (final a in freshActivities) {
           byId[a['id']?.toString() ?? ''] = a;
@@ -1079,8 +1141,9 @@ class ProjectNotifier extends ChangeNotifier
           for (final a in activities) byId[a['id']?.toString()] ?? a,
         ];
         await _buildFullTrack();
+        if (!_isCurrent(token, ref)) return;
         await _waitForCameraIdle();
-        if (_loadKey != ref) return;
+        if (!_isCurrent(token, ref)) return;
         notifyListeners();
       }
     } on Object catch (_) {
@@ -1209,20 +1272,32 @@ class ProjectNotifier extends ChangeNotifier
   /// then rebuilds tracks and notifies listeners.
   /// Called by SharedProjectNotifier / ViewProjectNotifier after phase 2.
   @protected
-  Future<void> applyFullActivities(List<Map<String, dynamic>> fullActivities) async {
-    // Snapshot so the camera-idle wait below (up to 2s) can detect the caller
-    // having moved on to a different project in the meantime and skip the
-    // notify — mirrors the _loadKey != ref guard used everywhere else in this
-    // file for the same reason.
-    final key = _loadKey;
+  ///
+  /// [token] should be [currentLoadToken] captured *before* the caller's own
+  /// long-running fetch that produced [fullActivities] — passing it lets this
+  /// reject a call superseded during that fetch by a second concurrent load
+  /// of the *same* project, which a plain [currentLoadKey] comparison can't
+  /// detect (issue #283 bug #3: ProjectRef.== is structural, so it only
+  /// catches navigation to a *different* project). Omitting it falls back to
+  /// checking against the token current right now, at entry.
+  Future<void> applyFullActivities(
+    List<Map<String, dynamic>> fullActivities, {
+    int? token,
+  }) async {
+    final tok = token ?? _loadToken;
+    // Checked before mutating, not just before the trailing notify — a stale
+    // call used to merge into `activities` unconditionally and only skip the
+    // notify, leaving the mutation live but unbroadcast (issue #283 bug #3).
+    if (tok != _loadToken) return;
     final byId = {for (final a in fullActivities) a['id']?.toString(): a};
     activities = [
       for (final a in activities) byId[a['id']?.toString()] ?? a,
     ];
     _updateStats();
     await _buildFullTrack();
+    if (tok != _loadToken) return;
     await _waitForCameraIdle();
-    if (_loadKey != key) return;
+    if (tok != _loadToken) return;
     notifyListeners();
   }
 
@@ -1325,6 +1400,12 @@ class ProjectNotifier extends ChangeNotifier
     // clear() — without this, a stale compute() resolving afterward would
     // pass the gen check and repopulate the track data this just wiped.
     _buildFullTrackGen++;
+    // Same idea for any other in-flight top-level load/reload (issue #283):
+    // _loadKey is left untouched (ref itself is nulled below, which the
+    // `this.ref != ref`-style guards already react to), but bumping the
+    // token also invalidates a same-ref call an equality check alone
+    // couldn't tell apart.
+    _loadToken++;
     totalDistanceM = 0;
     totalMovingSeconds = 0;
     totalElevationGainM = 0;
@@ -1991,15 +2072,20 @@ class ProjectNotifier extends ChangeNotifier
   /// the very track the re-fetch just updated. So the verdict comes from the
   /// cheap poll and the data from one full fetch here.
   Future<void> _applyRefreshedProject(ProjectRef ref) async {
+    // issue #283: bumped so a second concurrent top-level load/reload for the
+    // same ref (which `this.ref != ref` below can't tell apart from this one,
+    // since ProjectRef.== is structural) still supersedes this call.
+    final token = _beginLoad();
     final Map<String, dynamic> details;
     try {
       details = await _service.getDetails(ref, bypassCache: true);
     } on Exception catch (e) {
+      if (token != _loadToken || this.ref != ref) return;
       error = _loadErrorMessage(e);
       notifyListeners();
       return;
     }
-    if (this.ref != ref) return;
+    if (token != _loadToken || this.ref != ref) return;
 
     final rawActivities = details['activities'];
     activities = rawActivities is List
@@ -2009,14 +2095,15 @@ class ProjectNotifier extends ChangeNotifier
     final rawItems = details['items'];
     items = rawItems is List ? rawItems.cast<Map<String, dynamic>>() : [];
     await _revealItems(items);
-    if (this.ref != ref) return;
+    if (token != _loadToken || this.ref != ref) return;
     _updateStats();
     await _buildFullTrack();
-    if (this.ref != ref) return;
+    if (token != _loadToken || this.ref != ref) return;
     // Refresh GeoJSON so the map polylines reflect the updated track.
     geo = encryption.isUnlocked
         ? client_geo.buildFullGeo(items, client_geo.activitiesById(activities))
         : await _service.getGeo(ref, bypassCache: true);
+    if (token != _loadToken || this.ref != ref) return;
     notifyListeners();
   }
 
@@ -2253,6 +2340,9 @@ class ProjectNotifier extends ChangeNotifier
   /// Full reload: details + geo. Use when a mutation can change map geometry
   /// (remove item, add/update/delete segment, refresh activity).
   Future<void> _silentReload(ProjectRef ref) async {
+    // issue #283: also catches a second concurrent reload for the same ref,
+    // which `this.ref != ref` below can't (ProjectRef.== is structural).
+    final token = _beginLoad();
     // Set false only by the ref-check right after _buildFullTrack below, so a
     // navigation that lands during that now-async call (issue #276 follow-up)
     // suppresses the notify — every other path (success or the catch below)
@@ -2278,7 +2368,7 @@ class ProjectNotifier extends ChangeNotifier
       }
       _updateStats();
       await _buildFullTrack();
-      if (this.ref != ref) {
+      if (token != _loadToken || this.ref != ref) {
         notify = false;
         return;
       }
@@ -2292,6 +2382,10 @@ class ProjectNotifier extends ChangeNotifier
   /// Details-only reload: skips the heavy GeoJSON fetch. Use when a mutation
   /// cannot change map geometry (reorder, trip-start, memory CRUD).
   Future<void> _silentReloadDetailsOnly(ProjectRef ref) async {
+    // issue #283: this reload had no staleness guard at all — a second
+    // concurrent call (or a navigation away) could clobber the outcome of a
+    // later, current one landing first.
+    final token = _beginLoad();
     try {
       final details = await _service.getDetailsMeta(ref);
       await _applyDetails(details, ref);
@@ -2300,7 +2394,7 @@ class ProjectNotifier extends ChangeNotifier
     } on Exception catch (e) {
       error = _msg(e);
     } finally {
-      notifyListeners();
+      if (token == _loadToken && this.ref == ref) notifyListeners();
     }
   }
 
