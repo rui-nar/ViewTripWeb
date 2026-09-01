@@ -459,6 +459,26 @@ def _name_variants(name: str) -> list[tuple[str, str]]:
     return [_split_name(p) for p in parts]
 
 
+def _query_forms(query: str) -> list[str]:
+    """The query as typed, plus it with a leading operator token dropped.
+
+    The Operator dropdown is gone, so the train-number field is the only
+    place left to name the operator - and #277's own title reads "DB ICE
+    75" while the board carries only "ICE 75". A token is dropped only
+    while what remains still has letters of its own: without that guard
+    "RS 1" would degrade to the bare "1" and match every service numbered
+    1, and a letterless query matches on digits alone.
+    """
+    forms = [query]
+    parts = (query or "").split()
+    for i in range(1, len(parts)):
+        tail = " ".join(parts[i:])
+        if not re.search(r"[A-Za-z]", tail):
+            break
+        forms.append(tail)
+    return forms
+
+
 def _name_matches(line_name: str, query: str) -> bool:
     """True if *line_name* names the service the user asked for.
 
@@ -475,7 +495,8 @@ def _name_matches(line_name: str, query: str) -> bool:
     candidate in _entry_matches, which does carry the letters.
     """
     for a_letters, a_digits in _name_variants(line_name):
-        for b_letters, b_digits in _name_variants(query):
+        for form in _query_forms(query):
+          for b_letters, b_digits in _name_variants(form):
             if not (a_letters or a_digits) or not (b_letters or b_digits):
                 continue
             if a_digits.lstrip("0") != b_digits.lstrip("0"):

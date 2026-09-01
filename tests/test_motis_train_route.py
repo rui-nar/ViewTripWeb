@@ -398,6 +398,12 @@ class TestNameMatching:
         ("RE8 (11438)", "RE8"),
         ("RE8 (11438)", "RE 8"),
         ("RE8 (11438)", "11438"),
+        # The Operator dropdown is gone, so the train-number field is the
+        # only place left to put the operator - and #277's own title reads
+        # "DB ICE 75". The board names only the service.
+        ("ICE 75", "DB ICE 75"),
+        ("ICE 75", "db ice 75"),
+        ("RE8 (11438)", "DB RE8"),
     ])
     def test_matches(self, candidate, query):
         assert svc._name_matches(candidate, query)
@@ -414,6 +420,15 @@ class TestNameMatching:
         ("011438", "TGV 11438"),
         ("011438", "ICE 11438"),
         ("RE8 (11438)", "TGV 11438"),
+        # The operator-prefix allowance runs one way only: the candidate's
+        # letters may be a suffix of the query's, never the reverse.
+        ("DB ICE 75", "ICE 75"),
+        ("ICE 75", "XICE 75"),
+        # A leading token is dropped only while what remains still has
+        # letters. Without that guard "RS 1" would degrade to a bare "1"
+        # and match every service numbered 1.
+        ("S 1", "RS 1"),
+        ("S1", "RS1"),
     ])
     def test_does_not_match(self, candidate, query):
         assert not svc._name_matches(candidate, query)
@@ -424,6 +439,8 @@ class TestNameMatching:
         ("TGV 11438", False),   # regression: this matched the RE8
         ("ICE 11438", False),
         ("IC 11438", False),
+        ("DB ICE 75", True),    # regression: this found nothing at all
+        ("DB RE8", True),
     ])
     def test_regional_line_on_the_real_board(self, query, expected):
         """Exercised against the recorded Hamburg board, where the entry really
