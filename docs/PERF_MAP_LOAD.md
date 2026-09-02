@@ -67,7 +67,11 @@ is one.
 
 It polls every 100 ms and gives up after 2 s. Pan continuously and the whole
 rebuild lands mid-gesture at t+2 s anyway. Deferral without a cheaper rebuild
-only moves the stall.
+only moves the stall — and the polling is itself work competing with the
+gesture it is trying to stay out of the way of.
+
+*(Fixed in Phase 2a: the wait is now event-driven off the camera-idle
+callback, with the same cap.)*
 
 ### 4. One god-notifier makes every update a whole-screen update
 
@@ -81,12 +85,22 @@ compensation, not architecture, and it fails exactly when it matters: a geo
 swap changes `geo`'s identity, so `geoOrStyleChanged` is true and everything
 rebuilds from raw GeoJSON.
 
-### 5. Geometry lives as untyped GeoJSON and is re-walked on every rebuild
+### 5. Geometry lives as untyped GeoJSON and is re-walked on every geo swap
 
 `_buildPolylineSpecs`, `_buildActivityMarkerSpecs` and `buildFullTrackResult`
 each walk `f['geometry']['coordinates']` with `as num` casts per coordinate
-and allocate a `LatLng` per point. Rebuild cost is O(total points), not
-O(activities). That is the multiplier sitting under every other problem here.
+and allocate a `LatLng` per point.
+
+**Correction to this document's first draft.** It originally claimed every
+*rebuild* is O(total points). That is wrong: `memoCoordsToLatLng` already
+memoizes the conversion on the identity of each feature's coords list, so
+only a *changed* feature is re-converted. Measured on a 100-activity /
+500k-point trip: a cold conversion costs ~83 ms, a warm rebuild ~0.1 ms.
+
+The real cost is therefore one cold conversion per geo swap, not per rebuild
+— which is exactly why it mattered that Phase 2a cut the number of swaps from
+nine to one, and why Phase 2b is about moving that single conversion off the
+UI isolate rather than restructuring the storage.
 
 ### 6. No zoom-adaptive level of detail
 
@@ -141,6 +155,20 @@ Extend `perf_timing.dart` from percentile dumps to **named phase spans**:
 main-isolate span exceeds the frame budget. Without this, every phase below
 is unfalsifiable and the whole area regresses again silently.
 
+**Reading the numbers on a real device.** Recording is on in every build, not
+just `--dart-define=PERF_TIMING` ones — each span wraps a multi-millisecond
+fetch, decode or build, so a Stopwatch and a map insert are far below the
+noise floor of what they measure. After opening a trip, the last load's
+report is in **Settings → Performance**, with a Copy button. A
+dart-define-gated `debugPrint` cannot diagnose the builds that actually need
+it: the ones installed on a phone with no debugger attached.
+
+Read it as two separate things. **Blocking** spans are UI-isolate stalls —
+those are jank, and anything over 16.7 ms dropped a frame. **Stage** spans
+are wall clock and include isolate hops, so a multi-second `decode_geo` that
+ran on a worker costs zero frames. The report says explicitly which blocking
+spans, if any, went over budget.
+
 ### Phase 1 — move decode off the UI isolate
 
 Fetch heavy payloads as bytes and do `utf8.decode → jsonDecode → domain
@@ -153,30 +181,100 @@ is deep-copied; `Uint8List`/`Float64List` transfer near-free). Route
 *Verify:* `decode_geo` and `decode_details` spans disappear from the UI
 thread; #276's repro — pan immediately after the spinner clears — is smooth.
 
-### Phase 2 — typed geometry model, and drop the progressive reveal
+### Phase 2a — drop the progressive reveal *(done)*
 
-Introduce `TrackGeometry`: per activity, `Float64List` lat/lon plus
-precomputed bounds, built **once** inside the Phase 1 isolate hop. The spec
-builders consume it, so rebuild becomes O(activities).
+Delete the 8-batch reveal in favour of the single atomic swap the code
+already performed as its "final pass", and replace `_waitForCameraIdle`'s
+poll loop with an event-driven wait on the camera-idle callback (same cap, no
+timer storm).
 
-Then delete the 8-batch reveal in favour of a single atomic swap scheduled at
-`Priority.idle` via `SchedulerBinding.scheduleTask`, and replace
-`_waitForCameraIdle`'s poll loop with that scheduler priority — the framework
-already knows when frames are free; polling only guesses.
+*Verified:* a test asserting listeners are handed at most two distinct `geo`
+objects across a whole load — the low-res one, then the full-res one. On the
+batched implementation the same test reports **9**.
 
-*Verify:* exactly one geometry-driven rebuild per load, pinned by a test that
-counts `notifyListeners()` during a full load.
+**Rejected: `SchedulerBinding.scheduleTask(..., Priority.idle)`.** That was
+the original plan — let the framework place the swap in a frame that has
+spare time. Measured behaviour says no: an idle task resolves in ~3 ms in a
+plain `test()` but **does not run at all under a pumped `testWidgets`
+pipeline**, so gating the upgrade on one hangs the background load in widget
+tests. The deeper objection is the same one in production: a busy map is
+exactly the situation with no spare frame time, so the upgrade would be
+starved precisely when it is most wanted. Don't retry this without new
+evidence.
 
-### Phase 3 — split the notifier into observable slices
+### Phase 2b — convert coordinates on the worker, not the UI isolate *(done)*
 
-Decompose `ProjectNotifier` into independently-listenable facets: `geometry`,
-`selection`, `style`, `items`, `elevation`. The polyline layer listens to
-geometry and style; markers to items; highlighting to selection. Then delete
-the `_lastX` guard fields in `map_panel.dart` — they become dead weight once
-notification is correctly scoped.
+**Rejected: the `TrackGeometry` / `Float64List` model this phase originally
+specified.** Two measurements killed it. First, the conversion is already
+memoized per feature (see the correction under root cause 5), so the
+"O(points) on every rebuild" problem it was designed to solve does not exist.
+Second, flutter_map's `Polyline` takes a `List<LatLng>`, so typed buffers
+would have to be materialised back into exactly that list on the render path
+— moving the cost, not removing it. That is a large refactor across the spec
+builders, `buildFullTrackResult`, `hitTestMapTap`, `extractSelectedPoints`,
+the segment-overlay merge and the on-device cache, for no measured gain.
 
-*Verify:* selecting a day rebuilds no polyline geometry. The existing
-map-panel cache tests are rewritten as scope tests.
+**What shipped instead**, which is the part of the original idea that
+survives contact with the measurements: the decode hop from Phase 1 now
+produces the coordinate→LatLng conversion alongside the parse and seeds
+`map_geometry_memo.dart`'s cache with the result. Both halves ride back on
+one zero-copy hop, and because the coords lists and their converted points
+transfer as a single object graph, identity-keyed caching still works across
+the isolate boundary. On native platforms the UI isolate therefore never pays
+the cold conversion at all.
+
+**Not on web**, where `compute` runs its callback inline on the main thread:
+there the conversion is front-loaded into the decode rather than removed from
+it. Web's answer is Phase 4's payload reduction, not more `compute` calls —
+the same caveat as root cause 7.
+
+*Verified:* after `decodeGeoOffIsolate`, walking every feature through
+`memoCoordsToLatLng` performs **zero** conversions (counted, not timed),
+against a baseline test showing an unseeded geo pays one per feature.
+
+### Phase 3 — stop the selection path doing geometry work *(partly done)*
+
+The phase as written was: decompose `ProjectNotifier` into independently
+listenable facets, then delete `map_panel.dart`'s `_lastX` guard fields as
+compensation that is no longer needed.
+
+**Measuring first changed this too.** Instrumenting `build_specs` /
+`style_markers` / `all_points` and driving a 100-activity / 500k-point trip
+through a real widget pump showed the selection path costing **~24 ms per
+selection change** — over the frame budget on its own. But none of it was
+notification scope, and none of it was the spec builders: it was
+`_cachedAllPoints`, a list of every point in the trip, derived from `geo`
+alone and consumed only by the one-shot fit-to-bounds, sitting in the
+*selection*-dependent half of `build()`. Every day or activity tap rebuilt it
+for nothing.
+
+Moving that one assignment into the geo-dependent half:
+
+| | before | after |
+|---|---|---|
+| `style_markers` per selection change | 27.2 ms | **0.7 ms** |
+
+Also folded in: `arcMidpoint` now rides the Phase 2b seeding path alongside
+the coordinate conversion, and its per-segment `pow(x, 0.5)` became `sqrt(x)`.
+
+**The `_lastX` guards should stay.** They are the reason a selection change
+never re-enters the spec builders at all. This document previously called
+them "compensation, not architecture" — they are in fact load-bearing, and
+deleting them in favour of finer-grained notification would have made the
+selection path slower, not faster. Splitting the notifier remains defensible
+as a *maintainability* change; it is not a performance one and should not be
+sold as one.
+
+*Verified:* across six selection changes the `all_points` span records one
+sample; on the previous placement it records seven.
+
+**Still open, measured but not fixed** (issue #299).
+`_maybeDecimatePolylines` marshals every point into `(double, double)`
+records on the UI isolate before its `compute()` hop — 134 ms — and the hop's
+argument is *copied* to the worker (only the return value is zero-copy),
+which accounts for most of the ~477 ms `build_specs` still costs on a
+500k-point trip. The fix is to decimate inside the decode isolate, where the
+coordinates already live, so nothing is marshalled or sent at all.
 
 ### Phase 4 — server-side level of detail (the long game)
 

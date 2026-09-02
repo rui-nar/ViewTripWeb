@@ -21,6 +21,7 @@ import 'package:viewtrip_client/src/core/perf_timing.dart' show kFrameBudgetMs;
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/map/polyline_decoder.dart';
 import 'package:viewtrip_client/src/projects/heavy_decode.dart';
+import 'package:viewtrip_client/src/projects/map_geometry_memo.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 /// Google-encoded-polyline encoder — the inverse of [decodePolyline], needed
@@ -214,6 +215,63 @@ void main() {
       // Fixture adequacy is pinned separately by the inlineDecodeMs test above.
       expect(r.ticks, greaterThan(r.elapsedMs ~/ 4),
           reason: 'event loop was starved — the decode ran on the UI isolate');
+    });
+  });
+
+  // Issue #293 (Phase 2b). The coordinate->LatLng conversion is O(total
+  // points) and happens once per geo swap — ~83 ms of UI-isolate stall on a
+  // 100-activity / 500k-point trip, ~0.1 ms once the memo is warm. Since the
+  // staged reveal collapsed into a single swap, that one cold conversion was
+  // the last O(points) cost left on the UI isolate in the geo path, so the
+  // decode hop now produces it too and seeds the cache with the result.
+  group('coordinate cache seeding', () {
+    List coordsOf(Map<String, dynamic> geo, int i) =>
+        (geo['features'] as List)[i]['geometry']['coordinates'] as List;
+
+    test('an unseeded geo pays a conversion per feature on first use', () {
+      // Baseline: without seeding, the UI isolate does the work. If this ever
+      // reports 0 the assertion below has stopped proving anything.
+      final geo = decodeGeoBytes(jsonBytes(buildEncodedGeo(activities: 5, pointsPer: 10)));
+      coordsConversionCount = 0;
+      for (var i = 0; i < 5; i++) {
+        memoCoordsToLatLng(coordsOf(geo, i));
+      }
+      expect(coordsConversionCount, 5);
+    });
+
+    test('decodeGeoOffIsolate leaves the cache warm — zero UI-isolate work',
+        () async {
+      final geo = await decodeGeoOffIsolate(bigGeoBytes);
+      coordsConversionCount = 0;
+      var totalPoints = 0;
+      for (var i = 0; i < (geo['features'] as List).length; i++) {
+        totalPoints += memoCoordsToLatLng(coordsOf(geo, i)).length;
+      }
+      expect(coordsConversionCount, 0,
+          reason: 'the map must not re-convert coordinates the decode hop '
+              'already converted');
+      expect(totalPoints, 100 * 5000,
+          reason: 'the seeded points must be the real conversion, not empties');
+    });
+
+    test('seeded points are correct, not just present', () async {
+      final geo = await decodeGeoOffIsolate(
+          jsonBytes(buildEncodedGeo(activities: 1, pointsPer: 3)));
+      final pts = memoCoordsToLatLng(coordsOf(geo, 0));
+      final expected = coordsToLatLng(coordsOf(geo, 0));
+      expect(pts, expected);
+      expect(pts.first.latitude, closeTo(45.0, 1e-4));
+      expect(pts.first.longitude, closeTo(7.0, 1e-4));
+    });
+
+    test('the inline path below the threshold seeds too', () async {
+      final small = jsonBytes(buildEncodedGeo(activities: 1, pointsPer: 4));
+      expect(small.length, lessThan(kInlineDecodeThresholdBytes));
+      final geo = await decodeGeoOffIsolate(small);
+      coordsConversionCount = 0;
+      memoCoordsToLatLng(coordsOf(geo, 0));
+      expect(coordsConversionCount, 0,
+          reason: 'both sides of the threshold must behave identically');
     });
   });
 

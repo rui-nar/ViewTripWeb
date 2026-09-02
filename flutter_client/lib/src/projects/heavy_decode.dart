@@ -19,8 +19,10 @@ library;
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../map/polyline_decoder.dart';
+import 'map_geometry_memo.dart';
 
 /// Below this many bytes, decoding inline beats hopping isolates.
 ///
@@ -54,11 +56,72 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
         ? Future.value(decodeJsonMapBytes(bytes))
         : compute(decodeJsonMapBytes, bytes);
 
-/// [decodeGeoBytes] on a background isolate when the payload is big enough.
-Future<Map<String, dynamic>> decodeGeoOffIsolate(Uint8List bytes) =>
-    bytes.length <= kInlineDecodeThresholdBytes
-        ? Future.value(decodeGeoBytes(bytes))
-        : compute(decodeGeoBytes, bytes);
+/// [decodeGeoBytes], plus the per-feature coordinate->LatLng conversion the
+/// map would otherwise do on its first build after the swap.
+///
+/// Both halves are produced together so they ride back on one hop, and the
+/// coords lists and their converted points arrive as a single object graph —
+/// which is what lets [seedCoordsLatLng] key the cache on coords identity
+/// across the isolate boundary. Top-level and pure so it can run under
+/// [compute]. Parallel to `geo['features']`, one entry per feature, empty
+/// where a feature has no usable geometry.
+({
+  Map<String, dynamic> geo,
+  List<List<LatLng>> points,
+  List<LatLng?> midpoints,
+}) decodeGeoWithPoints(Uint8List bytes) {
+  final geo = decodeGeoBytes(bytes);
+  final features = geo['features'];
+  final points = <List<LatLng>>[];
+  final midpoints = <LatLng?>[];
+  if (features is List) {
+    for (final f in features) {
+      final coords = f is Map ? (f['geometry'] as Map? ?? {})['coordinates'] : null;
+      points.add(coords is List ? coordsToLatLng(coords) : const []);
+      midpoints.add(coords is List ? arcMidpoint(coords) : null);
+    }
+  }
+  return (geo: geo, points: points, midpoints: midpoints);
+}
+
+/// [decodeGeoBytes] on a background isolate when the payload is big enough,
+/// with the map's coordinate cache pre-warmed from the same hop.
+///
+/// Seeding matters because both derivations are O(total points) and happen
+/// exactly once per geo swap: measured on a 100-activity / 500k-point trip at
+/// ~83 ms of UI-isolate stall for the conversion and ~45 ms for the arc
+/// midpoints (and more again on a mid-range phone), against ~0.1 ms once
+/// warm. Since #293 collapsed the staged reveal into a single swap, these
+/// were the O(points) costs left on the UI isolate in the geo path.
+///
+/// **Native only.** On Flutter web [compute] runs its callback inline on the
+/// main thread, so there the conversion and the midpoint pass still happen on
+/// the UI thread — front-loaded into the decode rather than removed from it.
+/// Web's answer is to stop shipping payloads this size at all (Phase 4 of
+/// docs/PERF_MAP_LOAD.md), not more [compute] calls.
+///
+/// Note this deliberately does NOT restructure geometry into `Float64List`
+/// buffers, which the original plan proposed: flutter_map's `Polyline` takes
+/// `List<LatLng>`, so typed buffers would have to be materialised back into
+/// exactly this list on the render path — moving the cost rather than
+/// removing it. See docs/PERF_MAP_LOAD.md.
+Future<Map<String, dynamic>> decodeGeoOffIsolate(Uint8List bytes) async {
+  final decoded = bytes.length <= kInlineDecodeThresholdBytes
+      ? decodeGeoWithPoints(bytes)
+      : await compute(decodeGeoWithPoints, bytes);
+  final features = decoded.geo['features'];
+  if (features is List) {
+    for (var i = 0; i < features.length && i < decoded.points.length; i++) {
+      final f = features[i];
+      final coords = f is Map ? (f['geometry'] as Map? ?? {})['coordinates'] : null;
+      if (coords is! List) continue;
+      seedCoordsLatLng(coords, decoded.points[i]);
+      final mid = i < decoded.midpoints.length ? decoded.midpoints[i] : null;
+      if (mid != null) seedArcMidpoint(coords, mid);
+    }
+  }
+  return decoded.geo;
+}
 
 /// Expand any activity feature carrying a Google-encoded `polyline` property
 /// into a standard GeoJSON `coordinates` array (`[[lon, lat], …]`). No-op for

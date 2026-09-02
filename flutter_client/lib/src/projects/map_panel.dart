@@ -16,57 +16,21 @@ import '../core/concurrency_gate.dart';
 import '../core/design_tokens.dart'
     show kAccent, kShadow2, monoStyle, activityTypeBucket, segmentTypeBucket,
         resolveTypeStyle, LineStyleKind;
-import '../core/perf_timing.dart' show kPerfTiming;
+import '../core/perf_timing.dart' show kPerfTiming, perfSpans;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'map_geometry_memo.dart';
 import 'memory_detail_modal.dart';
 import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
 import 'people_search.dart' show classifyEncounterPin;
 import 'photo_thumb_cache.dart';
 import 'project_notifier.dart';
-LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
-/// Returns the coordinate at 50% of the total chord length — accurate even
-/// when points are unevenly spaced (e.g. resolved rail/ferry/bus routes).
-LatLng? _arcMidpoint(List coords) {
-  if (coords.isEmpty) return null;
-  if (coords.length == 1) {
-    final c = coords[0];
-    if (c is! List || c.length < 2) return null;
-    return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
-  }
-  double total = 0;
-  final lens = <double>[0.0];
-  for (int i = 1; i < coords.length; i++) {
-    final a = coords[i - 1], b = coords[i];
-    if (a is! List || b is! List || a.length < 2 || b.length < 2) {
-      lens.add(total);
-      continue;
-    }
-    final dlat = (b[1] as num).toDouble() - (a[1] as num).toDouble();
-    final dlon = (b[0] as num).toDouble() - (a[0] as num).toDouble();
-    total += pow(dlat * dlat + dlon * dlon, 0.5);
-    lens.add(total);
-  }
-  final half = total / 2;
-  for (int i = 1; i < lens.length; i++) {
-    if (lens[i] >= half) {
-      final t = (lens[i] - lens[i - 1]) == 0
-          ? 0.0
-          : (half - lens[i - 1]) / (lens[i] - lens[i - 1]);
-      final a = coords[i - 1], b = coords[i];
-      if (a is! List || b is! List || a.length < 2 || b.length < 2) break;
-      return LatLng(
-        (a[1] as num).toDouble() + t * ((b[1] as num).toDouble() - (a[1] as num).toDouble()),
-        (a[0] as num).toDouble() + t * ((b[0] as num).toDouble() - (a[0] as num).toDouble()),
-      );
-    }
-  }
-  final last = coords.last;
-  if (last is! List || last.length < 2) return null;
-  return LatLng((last[1] as num).toDouble(), (last[0] as num).toDouble());
-}
+// Existing callers (and map_geometry_memo_test.dart) import this helper from
+// map_panel.dart, where it used to live; keep that entry point.
+export 'map_geometry_memo.dart' show memoArcMidpoint, memoCoordsToLatLng;
+LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
 IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
   'run' || 'virtualrun'                  => Icons.directions_run,
@@ -185,47 +149,10 @@ LatLng? _coordToLatLng(dynamic c) {
   return LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble());
 }
 
-// ── Per-feature geometry memoization ─────────────────────────────────────────
-//
-// The map rebuilds whenever `geo` is reassigned (notably the progressive
-// low-res→full-res upgrade on load). Reconstructing markers/polylines re-ran the
-// O(track-points) work — converting every coordinate to LatLng and recomputing
-// each activity's arc-midpoint — for *every* feature on *every* rebuild, which
-// dominated the build-thread cost and produced the load-time map jank.
-//
-// These memoize that work keyed by the *identity* of the raw coordinates list.
-// Only changed features get a new coords list (the upgrade replaces just the
-// upgraded activities), so unchanged features hit the cache — "rebuild only
-// changed features" without any signature/invalidation bookkeeping: the selection
-// /style-dependent bits (colour, dimming) are cheap and stay recomputed, and
-// entries auto-evict when their coords list is GC'd (Expando). Returned point
-// lists are shared — callers must treat them as read-only.
-final Expando<List<LatLng>> _coordsLatLngCache = Expando('coordsLatLng');
-final Expando<LatLng> _arcMidpointCache = Expando('arcMidpoint');
-
-@visibleForTesting
-List<LatLng> memoCoordsToLatLng(List coords) {
-  final cached = _coordsLatLngCache[coords];
-  if (cached != null) return cached;
-  final pts = <LatLng>[];
-  for (final c in coords) {
-    if (c is List && c.length >= 2) {
-      pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-    }
-  }
-  _coordsLatLngCache[coords] = pts;
-  return pts;
-}
-
-@visibleForTesting
-LatLng? memoArcMidpoint(List coords) {
-  final cached = _arcMidpointCache[coords];
-  if (cached != null) return cached;
-  final m = _arcMidpoint(coords);
-  if (m != null) _arcMidpointCache[coords] = m;
-  return m;
-}
-
+// Per-feature geometry memoization (coordinate→LatLng and arc midpoint) lives
+// in map_geometry_memo.dart so the decode path can seed both without importing
+// UI code (issue #293). Both are re-exported above, so this library stays the
+// single import point for callers.
 /// Activity ids that begin a new day, in trip order: the first dated activity
 /// of each distinct consecutive `start_date_local` date. Used to drop a day
 /// breakpoint node at the start of each day on the map so days are visually
@@ -1385,7 +1312,6 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
   List<Marker> _cachedDayBreakpointMarkers = const [];
   Map<String, ({Set<String> actIds, Set<String> segIds})> _dayIndex = const {};
   List<Polyline> _cachedPolylines = [];
-  List<LatLng> _cachedAllPoints = [];
   List<Marker> _cachedActivityMarkers = [];
   List<Marker> _cachedSegmentMarkers = [];
   List<Marker> _cachedMemoryMarkers = [];
@@ -1506,10 +1432,10 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     if (identical(specs, _decimateSourceSpecs)) return;
     _decimateSourceSpecs = specs;
     final gen = ++_polylineDecimateGen;
-    final lines = [
+    final lines = perfSpans.blocking('decimate_marshal', () => [
       for (final s in specs)
         [for (final p in s.points) (p.latitude, p.longitude)],
-    ];
+    ]);
     compute(decimatePolylinePoints,
             (lines: lines, budget: kMaxTotalPolylinePoints))
         .then((decimated) {
@@ -1623,6 +1549,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           ? selDays
           : (selDay != null ? {selDay} : <String>{});
       if (geoOrStyleChanged) {
+        perfSpans.blocking('build_specs', () {
         final actById = <dynamic, Map<String, dynamic>>{
           for (final a in notifier.activities) a['id']: a
         };
@@ -1647,6 +1574,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
             : const [];
         _memoryMarkerSpecs = _buildMemoryMarkerSpecs(items, notifier);
         _journalMarkerSpecs = _buildJournalMarkerSpecs(items);
+        });
       }
       Set<String>? dayActIds;
       Set<String>? daySegIds;
@@ -1660,11 +1588,9 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           daySegIds.addAll(r.segIds);
         }
       }
+      perfSpans.blocking('style_markers', () {
       _cachedPolylines = _stylePolylines(_polylineSpecs, selActId, selSegId, trackWidth,
           selectedOnly: tilesActive, dayActIds: dayActIds, daySegIds: daySegIds);
-      _cachedAllPoints = geo != null
-          ? _allPointsFromGeo(geo)
-          : _allPoints(_cachedPolylines);
       final hasSelection = selActId != null || selSegId != null ||
           effectiveDays.isNotEmpty || selMemId != null || selJournalId != null;
       _cachedActivityMarkers = _styleActivityMarkers(
@@ -1679,6 +1605,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               readOnly: true, shareContentKey: notifier.shareContentKey));
       _cachedJournalMarkers =
           _styleJournalMarkers(_journalMarkerSpecs, selJournalId, hasSelection, notifier);
+      });
       // Auto-zoom to selection (issue #34). Previously this always did
       // `_fittedBounds = false` on any selection change, which re-fit the map to
       // the WHOLE trip every time — so view mode "reset to full trip zoom"
@@ -1711,10 +1638,20 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           : const [];
     }
     final polylines = _cachedPolylines;
-    final allPoints = _cachedAllPoints;
 
-    if (allPoints.isNotEmpty && !notifier.isLoading) {
-      _fitBoundsOnce(allPoints);
+    // Guard before flattening every polyline's points: this list is consumed
+    // only by the one-shot _fitBoundsOnce, so once the map has been fitted
+    // building it is pure waste. It used to be rebuilt on every day/activity
+    // tap — measured at ~24 ms per selection on a 500k-point trip, over the
+    // frame budget on its own (issue #294). Mirrors the identical guard
+    // ManageMapPanel already had. Uses the full geo, not _cachedPolylines,
+    // which may be decimated for rendering (see _maybeDecimatePolylines).
+    if (!notifier.isLoading && !_fittedBounds) {
+      perfSpans.blocking('all_points', () {
+        _fitBoundsOnce(geo != null
+            ? _allPointsFromGeo(geo)
+            : _allPoints(polylines));
+      });
     }
 
     // Auto-zoom to the selected item (issue #34), scheduled after the
@@ -2443,10 +2380,10 @@ class ManageMapPanelState extends State<ManageMapPanel>
     if (identical(specs, _decimateSourceSpecs)) return;
     _decimateSourceSpecs = specs;
     final gen = ++_polylineDecimateGen;
-    final lines = [
+    final lines = perfSpans.blocking('decimate_marshal', () => [
       for (final s in specs)
         [for (final p in s.points) (p.latitude, p.longitude)],
-    ];
+    ]);
     compute(decimatePolylinePoints,
             (lines: lines, budget: kMaxTotalPolylinePoints))
         .then((decimated) {

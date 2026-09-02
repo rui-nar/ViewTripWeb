@@ -15,7 +15,7 @@ void main() {
   tearDown(() {
     perfSpans
       ..reset()
-      ..enabled = kPerfTiming;
+      ..enabled = true;  // the library default — see PerfSpans.enabled
   });
 
   group('PerfSpans recording', () {
@@ -104,6 +104,28 @@ void main() {
 
     test('exactly at budget is not over budget', () {
       expect(perfOverBudgetSpans({'a': [kFrameBudgetMs]}), isEmpty);
+    });
+  });
+
+  group('perfLoadReport', () {
+    // This is what a user reads off Settings -> Performance and pastes into an
+    // issue, so its shape is pinned rather than incidental.
+    test('carries both buckets and an explicit all-clear', () {
+      final r = perfLoadReport(const {'style_markers': [0.7]},
+          const {'decode_geo': [1200.0]});
+      expect(r, contains('blocking (UI isolate)'));
+      expect(r, contains('style_markers'));
+      expect(r, contains('stages (wall clock)'));
+      expect(r, contains('decode_geo'));
+      // A slow *stage* is not jank: it ran on a worker. Saying so explicitly
+      // is the point, otherwise a 1.2 s decode_geo reads as a problem.
+      expect(r, contains('no UI-isolate span over'));
+    });
+
+    test('names the over-budget spans when there are any', () {
+      final r = perfLoadReport(const {'build_specs': [480.0]}, const {});
+      expect(r, contains('OVER BUDGET'));
+      expect(r, contains('build_specs'));
     });
   });
 
