@@ -88,13 +88,19 @@ class _SharedProjectService extends ProjectService {
   Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) =>
       fetchFullDetails();
 
-  /// The share endpoint returns expanded `coordinates` (not encoded
-  /// polylines), so this decodes without the expansion pass the owner-side
-  /// [ProjectService.getGeo] needs.
+  /// Routed through [heavy.decodeGeoOffIsolate], not the plain JSON decode,
+  /// so a shared viewer gets the same seeded coordinate/arc-midpoint caches an
+  /// owner does (issue #294) instead of paying the cold derivation on the UI
+  /// isolate. The share endpoint returns expanded `coordinates` rather than
+  /// encoded polylines, and the expansion pass is a documented no-op on those,
+  /// so sharing the owner-side path costs nothing here.
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) =>
-      _getJson('decode_geo', '/api/share/$token/geo$_aidParam',
-          timeout: const Duration(seconds: 90));
+      perfSpans.stage('decode_geo', () async {
+        final bytes = await api.getBytes('/api/share/$token/geo$_aidParam',
+            timeout: const Duration(seconds: 90));
+        return heavy.decodeGeoOffIsolate(bytes);
+      });
 
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>

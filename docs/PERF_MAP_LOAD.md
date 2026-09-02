@@ -206,23 +206,61 @@ produces the coordinate→LatLng conversion alongside the parse and seeds
 `map_geometry_memo.dart`'s cache with the result. Both halves ride back on
 one zero-copy hop, and because the coords lists and their converted points
 transfer as a single object graph, identity-keyed caching still works across
-the isolate boundary. The UI isolate therefore never pays the cold conversion
-at all.
+the isolate boundary. On native platforms the UI isolate therefore never pays
+the cold conversion at all.
+
+**Not on web**, where `compute` runs its callback inline on the main thread:
+there the conversion is front-loaded into the decode rather than removed from
+it. Web's answer is Phase 4's payload reduction, not more `compute` calls —
+the same caveat as root cause 7.
 
 *Verified:* after `decodeGeoOffIsolate`, walking every feature through
 `memoCoordsToLatLng` performs **zero** conversions (counted, not timed),
 against a baseline test showing an unseeded geo pays one per feature.
 
-### Phase 3 — split the notifier into observable slices
+### Phase 3 — stop the selection path doing geometry work *(partly done)*
 
-Decompose `ProjectNotifier` into independently-listenable facets: `geometry`,
-`selection`, `style`, `items`, `elevation`. The polyline layer listens to
-geometry and style; markers to items; highlighting to selection. Then delete
-the `_lastX` guard fields in `map_panel.dart` — they become dead weight once
-notification is correctly scoped.
+The phase as written was: decompose `ProjectNotifier` into independently
+listenable facets, then delete `map_panel.dart`'s `_lastX` guard fields as
+compensation that is no longer needed.
 
-*Verify:* selecting a day rebuilds no polyline geometry. The existing
-map-panel cache tests are rewritten as scope tests.
+**Measuring first changed this too.** Instrumenting `build_specs` /
+`style_markers` / `all_points` and driving a 100-activity / 500k-point trip
+through a real widget pump showed the selection path costing **~24 ms per
+selection change** — over the frame budget on its own. But none of it was
+notification scope, and none of it was the spec builders: it was
+`_cachedAllPoints`, a list of every point in the trip, derived from `geo`
+alone and consumed only by the one-shot fit-to-bounds, sitting in the
+*selection*-dependent half of `build()`. Every day or activity tap rebuilt it
+for nothing.
+
+Moving that one assignment into the geo-dependent half:
+
+| | before | after |
+|---|---|---|
+| `style_markers` per selection change | 27.2 ms | **0.7 ms** |
+
+Also folded in: `arcMidpoint` now rides the Phase 2b seeding path alongside
+the coordinate conversion, and its per-segment `pow(x, 0.5)` became `sqrt(x)`.
+
+**The `_lastX` guards should stay.** They are the reason a selection change
+never re-enters the spec builders at all. This document previously called
+them "compensation, not architecture" — they are in fact load-bearing, and
+deleting them in favour of finer-grained notification would have made the
+selection path slower, not faster. Splitting the notifier remains defensible
+as a *maintainability* change; it is not a performance one and should not be
+sold as one.
+
+*Verified:* across six selection changes the `all_points` span records one
+sample; on the previous placement it records seven.
+
+**Still open, measured but not fixed** (issue #299).
+`_maybeDecimatePolylines` marshals every point into `(double, double)`
+records on the UI isolate before its `compute()` hop — 134 ms — and the hop's
+argument is *copied* to the worker (only the return value is zero-copy),
+which accounts for most of the ~477 ms `build_specs` still costs on a
+500k-point trip. The fix is to decimate inside the decode isolate, where the
+coordinates already live, so nothing is marshalled or sent at all.
 
 ### Phase 4 — server-side level of detail (the long game)
 
