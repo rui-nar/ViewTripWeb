@@ -122,6 +122,26 @@ void main() {
       expect(r, contains('no UI-isolate span over'));
     });
 
+    test('payload notes are rendered, sorted, when present', () {
+      // A duration alone cannot tell a big payload on a slow link from a slow
+      // server; the size is what disambiguates them.
+      final r = perfLoadReport(const {}, const {'fetch_geo': [5263.0]},
+          const {'geo': '11.4 MB', 'details': '3.2 MB'});
+      expect(r, contains('payloads'));
+      expect(r.indexOf('details'), lessThan(r.indexOf('geo  11.4 MB')));
+      expect(r, contains('11.4 MB'));
+    });
+
+    test('no payloads section when nothing was noted', () {
+      expect(perfLoadReport(const {}, const {'a': [1.0]}), isNot(contains('payloads')));
+    });
+
+    test('note() is a no-op while recording is disabled', () {
+      perfSpans.enabled = false;
+      perfSpans.note('geo', '1 MB');
+      expect(perfSpans.notes, isEmpty);
+    });
+
     test('names the over-budget spans when there are any', () {
       final r = perfLoadReport(const {'build_specs': [480.0]}, const {});
       expect(r, contains('OVER BUDGET'));

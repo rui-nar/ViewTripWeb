@@ -186,6 +186,7 @@ class PerfSpans {
 
   final Map<String, List<double>> _blocking = {};
   final Map<String, List<double>> _stage = {};
+  final Map<String, String> _notes = {};
 
   /// UI-isolate stall of a synchronous [body], recorded under [name].
   T blocking<T>(String name, T Function() body) {
@@ -218,9 +219,20 @@ class PerfSpans {
   Map<String, List<double>> get stageSpans =>
       {for (final e in _stage.entries) e.key: List.unmodifiable(e.value)};
 
+  /// Records a non-timing fact about this load — a payload size, a cache
+  /// verdict. A duration alone cannot distinguish a big payload on a slow
+  /// link from a slow server, and those have entirely different fixes.
+  void note(String name, String value) {
+    if (!enabled) return;
+    _notes[name] = value;
+  }
+
+  Map<String, String> get notes => Map.unmodifiable(_notes);
+
   void reset() {
     _blocking.clear();
     _stage.clear();
+    _notes.clear();
   }
 
   /// The most recently completed load's report, or null if none has finished
@@ -233,7 +245,7 @@ class PerfSpans {
   /// finish; a no-op when nothing was recorded.
   void report() {
     if (_blocking.isEmpty && _stage.isEmpty) return;
-    final text = perfLoadReport(_blocking, _stage);
+    final text = perfLoadReport(_blocking, _stage, _notes);
     lastReport.value = text;
     if (kPerfTiming) debugPrint(text);
   }
@@ -243,11 +255,18 @@ class PerfSpans {
 /// explicit over-budget verdict. Pure + testable — this is what a user reads
 /// off Settings -> Performance and pastes into an issue, so its shape is
 /// pinned rather than incidental.
-String perfLoadReport(
-    Map<String, List<double>> blocking, Map<String, List<double>> stage) {
+String perfLoadReport(Map<String, List<double>> blocking,
+    Map<String, List<double>> stage, [Map<String, String> notes = const {}]) {
   final buf = StringBuffer()
     ..writeln(perfSpanReport('blocking (UI isolate)', blocking))
     ..writeln(perfSpanReport('stages (wall clock)', stage));
+  if (notes.isNotEmpty) {
+    buf.writeln('[perf] payloads');
+    final names = notes.keys.toList()..sort();
+    for (final n in names) {
+      buf.writeln('  $n  ${notes[n]}');
+    }
+  }
   final over = perfOverBudgetSpans(blocking);
   buf.write(over.isEmpty
       ? '[perf] no UI-isolate span over '

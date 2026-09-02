@@ -43,6 +43,12 @@ Future<Map<String, dynamic>> _dedupFetch(
   return future;
 }
 
+/// Human-readable payload size for a [PerfSpans.note]. Shared with the
+/// shared-project service, which records the same notes for its own endpoints.
+String perfSizeLabel(int bytes) => bytes >= 1024 * 1024
+    ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+    : '${(bytes / 1024).toStringAsFixed(0)} KB';
+
 class ProjectService {
   /// Fetches the full project dict for [ref] including elevation_profile data.
   /// GET /api/projects/{name}
@@ -68,13 +74,13 @@ class ProjectService {
       // open (issue #292). _dedupFetch's own doc comment above already named
       // "jsonDecode'd back to back on the UI isolate" as an ANR cause; that
       // round removed the duplicate fetch but left the decode where it was.
-      return perfSpans.stage('decode_details', () async {
-        final bytes = await api
-            .getBytes(ref.path(), timeout: const Duration(minutes: 2));
-        final data = await heavy.decodeJsonMapOffIsolate(bytes);
-        projectDataCache.writeFullDetails(ref, data);
-        return data;
-      });
+      final bytes = await perfSpans.stage('fetch_details',
+          () => api.getBytes(ref.path(), timeout: const Duration(minutes: 2)));
+      perfSpans.note('details', perfSizeLabel(bytes.length));
+      final data = await perfSpans.stage(
+          'decode_details', () => heavy.decodeJsonMapOffIsolate(bytes));
+      projectDataCache.writeFullDetails(ref, data);
+      return data;
     });
   }
 
@@ -96,10 +102,11 @@ class ProjectService {
     // unlike them it lands *before* the spinner clears, where the user is
     // already waiting. heavy.decodeJsonMapOffIsolate stays inline below
     // kInlineDecodeThresholdBytes, so a small trip pays no isolate hop.
-    final data = await perfSpans.stage('decode_meta', () async {
-      final bytes = await api.getBytes(ref.path('/meta'), timeout: _kLoadTimeout);
-      return heavy.decodeJsonMapOffIsolate(bytes);
-    });
+    final metaBytes = await perfSpans.stage('fetch_meta',
+        () => api.getBytes(ref.path('/meta'), timeout: _kLoadTimeout));
+    perfSpans.note('meta', perfSizeLabel(metaBytes.length));
+    final data = await perfSpans.stage(
+        'decode_meta', () => heavy.decodeJsonMapOffIsolate(metaBytes));
     projectDataCache.onMetaFetched(ref, data);
     return data;
   }
@@ -132,15 +139,17 @@ class ProjectService {
       // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
       // (see polyline_decoder.dart). The generous timeout covers a cold-cache
       // build of a large trip.
-      final expanded = await perfSpans.stage('decode_geo', () async {
-        final bytes = await api.getBytes(
-            ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
-            timeout: const Duration(seconds: 90));
-        // Parse and polyline-expansion fused into one worker-isolate hop —
-        // they used to run as two consecutive inline passes over the same
-        // 300k+ points. See heavy_decode.dart.
-        return heavy.decodeGeoOffIsolate(bytes);
-      });
+      final bytes = await perfSpans.stage(
+          'fetch_geo',
+          () => api.getBytes(
+              ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
+              timeout: const Duration(seconds: 90)));
+      perfSpans.note('geo', perfSizeLabel(bytes.length));
+      // Parse and polyline-expansion fused into one worker-isolate hop — they
+      // used to run as two consecutive inline passes over the same 300k+
+      // points. See heavy_decode.dart.
+      final expanded =
+          await perfSpans.stage('decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
       projectDataCache.writeFullGeo(ref, expanded);
       return expanded;
     });
@@ -161,12 +170,14 @@ class ProjectService {
     if (cached != null) return cached;
     return _dedupFetch('lowResGeo:${ref.ownerId ?? 0}:${ref.name}', () async {
       final encoded = Uri.encodeComponent(ref.name);
-      final data = await perfSpans.stage('decode_low_res_geo', () async {
-        final bytes = await api.getBytes(
-            ref.withOwner('/api/geo/project/low-res?name=$encoded'),
-            timeout: _kLoadTimeout);
-        return heavy.decodeJsonMapOffIsolate(bytes);
-      });
+      final bytes = await perfSpans.stage(
+          'fetch_low_res_geo',
+          () => api.getBytes(
+              ref.withOwner('/api/geo/project/low-res?name=$encoded'),
+              timeout: _kLoadTimeout));
+      perfSpans.note('low_res_geo', perfSizeLabel(bytes.length));
+      final data = await perfSpans.stage(
+          'decode_low_res_geo', () => heavy.decodeJsonMapOffIsolate(bytes));
       projectDataCache.writeLowResGeo(ref, data);
       return data;
     });
