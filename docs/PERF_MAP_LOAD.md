@@ -155,6 +155,20 @@ Extend `perf_timing.dart` from percentile dumps to **named phase spans**:
 main-isolate span exceeds the frame budget. Without this, every phase below
 is unfalsifiable and the whole area regresses again silently.
 
+**Reading the numbers on a real device.** Recording is on in every build, not
+just `--dart-define=PERF_TIMING` ones — each span wraps a multi-millisecond
+fetch, decode or build, so a Stopwatch and a map insert are far below the
+noise floor of what they measure. After opening a trip, the last load's
+report is in **Settings → Performance**, with a Copy button. A
+dart-define-gated `debugPrint` cannot diagnose the builds that actually need
+it: the ones installed on a phone with no debugger attached.
+
+Read it as two separate things. **Blocking** spans are UI-isolate stalls —
+those are jank, and anything over 16.7 ms dropped a frame. **Stage** spans
+are wall clock and include isolate hops, so a multi-second `decode_geo` that
+ran on a worker costs zero frames. The report says explicitly which blocking
+spans, if any, went over budget.
+
 ### Phase 1 — move decode off the UI isolate
 
 Fetch heavy payloads as bytes and do `utf8.decode → jsonDecode → domain

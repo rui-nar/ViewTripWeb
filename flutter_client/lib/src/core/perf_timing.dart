@@ -176,7 +176,13 @@ class PerfSpans {
   PerfSpans._();
   static final PerfSpans instance = PerfSpans._();
 
-  bool enabled = kPerfTiming;
+  /// Recording is on in every build, not just `--dart-define=PERF_TIMING`
+  /// ones. Each span wraps a multi-millisecond fetch, decode or build, so a
+  /// Stopwatch and a map insert sit far below the noise floor of what they
+  /// measure — and [lastReport] is surfaced in-app (Settings -> Performance)
+  /// precisely so a real device can be diagnosed without a debugger attached,
+  /// which a dart-define-gated debugPrint cannot do.
+  bool enabled = true;
 
   final Map<String, List<double>> _blocking = {};
   final Map<String, List<double>> _stage = {};
@@ -217,18 +223,38 @@ class PerfSpans {
     _stage.clear();
   }
 
-  /// Prints both buckets. Called from a dev build after a load completes;
-  /// a no-op when nothing was recorded.
+  /// The most recently completed load's report, or null if none has finished
+  /// in this session. A [ValueNotifier] so a Settings screen left open across
+  /// a load updates itself.
+  final ValueNotifier<String?> lastReport = ValueNotifier<String?>(null);
+
+  /// Snapshots both buckets into [lastReport] (and prints them on a
+  /// PERF_TIMING build). Called once per load, after the background phases
+  /// finish; a no-op when nothing was recorded.
   void report() {
     if (_blocking.isEmpty && _stage.isEmpty) return;
-    debugPrint(perfSpanReport('blocking (UI isolate)', _blocking));
-    debugPrint(perfSpanReport('stages (wall clock)', _stage));
-    final over = perfOverBudgetSpans(_blocking);
-    if (over.isNotEmpty) {
-      debugPrint('[perf] OVER BUDGET (>${kFrameBudgetMs.toStringAsFixed(1)}ms '
-          'on the UI isolate): ${over.join(', ')}');
-    }
+    final text = perfLoadReport(_blocking, _stage);
+    lastReport.value = text;
+    if (kPerfTiming) debugPrint(text);
   }
+}
+
+/// The full report for one load: UI-isolate stalls, wall-clock stages, and an
+/// explicit over-budget verdict. Pure + testable — this is what a user reads
+/// off Settings -> Performance and pastes into an issue, so its shape is
+/// pinned rather than incidental.
+String perfLoadReport(
+    Map<String, List<double>> blocking, Map<String, List<double>> stage) {
+  final buf = StringBuffer()
+    ..writeln(perfSpanReport('blocking (UI isolate)', blocking))
+    ..writeln(perfSpanReport('stages (wall clock)', stage));
+  final over = perfOverBudgetSpans(blocking);
+  buf.write(over.isEmpty
+      ? '[perf] no UI-isolate span over '
+          '${kFrameBudgetMs.toStringAsFixed(1)}ms'
+      : '[perf] OVER BUDGET (>${kFrameBudgetMs.toStringAsFixed(1)}ms on the '
+          'UI isolate): ${over.join(', ')}');
+  return buf.toString();
 }
 
 /// Shorthand for the instrumentation call sites.

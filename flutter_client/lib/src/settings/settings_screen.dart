@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -7,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
 import '../billing/billing_section.dart';
+import '../core/perf_timing.dart' show perfSpans;
 import '../core/version_reload_stub.dart'
     if (dart.library.html) '../core/version_reload_web.dart';
 import '../crypto/enable_encryption_screen.dart';
@@ -1077,6 +1079,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         child: const Text('Delete my account'),
                       ),
                     ],
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // ── Performance ────────────────────────────────────────
+                // Surfaced in the app, not behind a --dart-define debugPrint,
+                // because the builds that actually need diagnosing are the
+                // ones installed on a phone with no debugger attached
+                // (issue #291).
+                _SectionCard(
+                  title: 'Performance',
+                  icon: Icons.speed_outlined,
+                  child: ValueListenableBuilder<String?>(
+                    valueListenable: perfSpans.lastReport,
+                    builder: (context, report, __) {
+                      if (report == null) {
+                        return Text(
+                          'Open a trip, then come back here to see where its '
+                          'loading time went.',
+                          style: theme.textTheme.bodySmall,
+                        );
+                      }
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Timings from the last trip you opened.',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                          const SizedBox(height: 8),
+                          // Wide fixed-width content: scroll it rather than
+                          // wrapping, which would scramble the columns.
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: SelectableText(
+                              report,
+                              style: const TextStyle(
+                                  fontFamily: 'monospace', fontSize: 11),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              icon: const Icon(Icons.copy, size: 16),
+                              label: const Text('Copy'),
+                              onPressed: () async {
+                                await Clipboard.setData(
+                                    ClipboardData(text: report));
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text('Timings copied')),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                 ),
 

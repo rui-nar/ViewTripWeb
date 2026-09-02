@@ -70,7 +70,7 @@ void main() {
   tearDown(() {
     perfSpans
       ..reset()
-      ..enabled = kPerfTiming;
+      ..enabled = true;  // the library default — see PerfSpans.enabled
   });
 
   testWidgets('changing the selection does no geo-derived work', (tester) async {
