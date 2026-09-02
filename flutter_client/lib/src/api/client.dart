@@ -5,6 +5,8 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:http/http.dart' as http;
 
 // Empty string → relative URLs (same origin, production).
@@ -41,6 +43,25 @@ class ApiClient {
         .get(Uri.parse('$baseUrl$path'), headers: _headers)
         .timeout(timeout);
     return _handle(res);
+  }
+
+  /// GET a JSON endpoint and return its **undecoded** UTF-8 bytes.
+  ///
+  /// The counterpart to [get] for payloads big enough that decoding them on
+  /// the calling isolate drops frames — the full-res geo and the ~12 MB
+  /// project details (issue #292). Callers hand the bytes to
+  /// `heavy_decode.dart`, which parses them on a worker isolate.
+  ///
+  /// Error bodies deliberately stay on the string path: they are small, and
+  /// [ApiException] carries the text.
+  Future<Uint8List> getBytes(String path,
+      {Duration timeout = _kDefaultTimeout}) async {
+    final res = await _client
+        .get(Uri.parse('$baseUrl$path'), headers: _headers)
+        .timeout(timeout);
+    if (res.statusCode >= 200 && res.statusCode < 300) return res.bodyBytes;
+    throw ApiException(res.statusCode, res.body,
+        location: res.headers['location']);
   }
 
   Future<dynamic> post(

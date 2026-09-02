@@ -10,6 +10,7 @@ import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../api/client.dart';
+import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
 import '../crypto/encryption.dart';
 import '../map/geo_point.dart';
@@ -772,6 +773,7 @@ class ProjectNotifier extends ChangeNotifier
     _stopPhotoPolling();
     final token = _loadTrack.begin(ref);
     this.ref = ref;
+    if (perfSpans.enabled) perfSpans.reset();  // scope spans to this load
     isLoading = true;
     error = null;
     loadErrorStatus = null;
@@ -957,7 +959,11 @@ class ProjectNotifier extends ChangeNotifier
     // for the same project three times at once, each slowing the others down
     // into the timeout that produced issue #178.
     unawaited(_loadFullGeoProgressively(ref, token)
-        .whenComplete(() => _loadElevationData(ref, token)));
+        .whenComplete(() => _loadElevationData(ref, token))
+        // Dev diagnostic (issue #291): the whole load is finished here, so this
+        // is where a run's span report is worth printing. No-op unless built
+        // with --dart-define=PERF_TIMING=true.
+        .whenComplete(perfSpans.report));
 
     // Sync status / share-link info — neither the map nor the activity panel
     // already rendered above needs them, so fetching them must not hold the
