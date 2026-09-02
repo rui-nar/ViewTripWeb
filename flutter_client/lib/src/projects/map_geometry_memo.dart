@@ -87,6 +87,18 @@ LatLng? memoArcMidpoint(List coords) {
   return m;
 }
 
+final Expando<List<LatLng>> _decimatedCache = Expando('decimatedLatLng');
+
+/// The decimated render geometry for [coords], or null if the decode hop did
+/// not produce one (client-built geo, locally patched segments).
+List<LatLng>? decimatedLatLng(List coords) => _decimatedCache[coords];
+
+/// Records [points] as the decimated render geometry of [coords] — see
+/// polyline_decimation.dart for why this is produced on the worker.
+void seedDecimatedLatLng(List coords, List<LatLng> points) {
+  _decimatedCache[coords] = points;
+}
+
 /// Records [midpoint] as the arc midpoint of [coords]. See [seedCoordsLatLng].
 void seedArcMidpoint(List coords, LatLng midpoint) {
   _arcMidpointCache[coords] = midpoint;

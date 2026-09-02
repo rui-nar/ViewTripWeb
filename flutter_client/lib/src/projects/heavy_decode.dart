@@ -23,6 +23,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../map/polyline_decoder.dart';
 import 'map_geometry_memo.dart';
+import 'polyline_decimation.dart';
 
 /// Below this many bytes, decoding inline beats hopping isolates.
 ///
@@ -69,6 +70,7 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
   Map<String, dynamic> geo,
   List<List<LatLng>> points,
   List<LatLng?> midpoints,
+  List<List<LatLng>?> decimated,
 }) decodeGeoWithPoints(Uint8List bytes) {
   final geo = decodeGeoBytes(bytes);
   final features = geo['features'];
@@ -81,7 +83,27 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
       midpoints.add(coords is List ? arcMidpoint(coords) : null);
     }
   }
-  return (geo: geo, points: points, midpoints: midpoints);
+
+  // Decimation, over exactly the features the map will draw — the >= 2 point
+  // filter mirrors _buildPolylineSpecs, so the aggregate budget is shared out
+  // the same way it would have been on the UI isolate.
+  final drawIndexes = <int>[];
+  final lines = <List<(double, double)>>[];
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].length < 2) continue;
+    drawIndexes.add(i);
+    lines.add([for (final p in points[i]) (p.latitude, p.longitude)]);
+  }
+  final reduced =
+      decimatePolylinePoints((lines: lines, budget: kMaxTotalPolylinePoints));
+  final decimated = List<List<LatLng>?>.filled(points.length, null);
+  for (var k = 0; k < drawIndexes.length; k++) {
+    decimated[drawIndexes[k]] = identical(reduced[k], lines[k])
+        ? points[drawIndexes[k]] // under budget: unchanged, reuse the list
+        : [for (final (lat, lon) in reduced[k]) LatLng(lat, lon)];
+  }
+
+  return (geo: geo, points: points, midpoints: midpoints, decimated: decimated);
 }
 
 /// [decodeGeoBytes] on a background isolate when the payload is big enough,
@@ -118,6 +140,8 @@ Future<Map<String, dynamic>> decodeGeoOffIsolate(Uint8List bytes) async {
       seedCoordsLatLng(coords, decoded.points[i]);
       final mid = i < decoded.midpoints.length ? decoded.midpoints[i] : null;
       if (mid != null) seedArcMidpoint(coords, mid);
+      final dec = i < decoded.decimated.length ? decoded.decimated[i] : null;
+      if (dec != null) seedDecimatedLatLng(coords, dec);
     }
   }
   return decoded.geo;

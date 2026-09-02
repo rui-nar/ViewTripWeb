@@ -22,6 +22,7 @@ import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/map/polyline_decoder.dart';
 import 'package:viewtrip_client/src/projects/heavy_decode.dart';
 import 'package:viewtrip_client/src/projects/map_geometry_memo.dart';
+import 'package:viewtrip_client/src/projects/polyline_decimation.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 /// Google-encoded-polyline encoder — the inverse of [decodePolyline], needed
@@ -272,6 +273,70 @@ void main() {
       memoCoordsToLatLng(coordsOf(geo, 0));
       expect(coordsConversionCount, 0,
           reason: 'both sides of the threshold must behave identically');
+    });
+  });
+
+  // Issue #299. The decimation input used to be marshalled into records on
+  // the UI isolate and then *copied* into the compute() hop — only a
+  // compute()'s return value is zero-copy, never its argument. On a real
+  // device that was 788 ms of marshalling plus ~1.6 s of copy: a 2.4 s stall
+  // that landed mid-pan and tripped Android's ANR watchdog. The worker now
+  // produces the decimated geometry, and at most kMaxTotalPolylinePoints
+  // points come back.
+  group('decimation seeding', () {
+    List coordsOf(Map<String, dynamic> geo, int i) =>
+        (geo['features'] as List)[i]['geometry']['coordinates'] as List;
+
+    test('decodeGeoOffIsolate seeds a decimated list for every drawn feature',
+        () async {
+      final geo = await decodeGeoOffIsolate(bigGeoBytes);
+      var totalDecimated = 0;
+      for (var i = 0; i < (geo['features'] as List).length; i++) {
+        final d = decimatedLatLng(coordsOf(geo, i));
+        expect(d, isNotNull, reason: 'feature $i was not seeded');
+        totalDecimated += d!.length;
+      }
+      // The whole point: what comes back is bounded by the render budget, not
+      // by the trip's size. 100 x 5000 raw points in, ~6000 out.
+      expect(totalDecimated, lessThanOrEqualTo(kMaxTotalPolylinePoints + 100));
+      expect(totalDecimated, greaterThan(0));
+    });
+
+    test('a track under the budget is passed through untouched', () async {
+      final geo = await decodeGeoOffIsolate(
+          jsonBytes(buildEncodedGeo(activities: 1, pointsPer: 5)));
+      final coords = coordsOf(geo, 0);
+      expect(decimatedLatLng(coords), memoCoordsToLatLng(coords),
+          reason: 'no budget pressure means no loss of detail');
+    });
+
+    test('endpoints are preserved so the track still starts and ends right',
+        () async {
+      final geo = await decodeGeoOffIsolate(bigGeoBytes);
+      final full = memoCoordsToLatLng(coordsOf(geo, 0));
+      final dec = decimatedLatLng(coordsOf(geo, 0))!;
+      expect(dec.first, full.first);
+      expect(dec.last, full.last);
+      expect(dec.length, lessThan(full.length));
+    });
+
+    test('a feature with too few points to draw is not seeded', () async {
+      final geo = await decodeGeoOffIsolate(jsonBytes({
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'properties': {'activity_id': 'a'},
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [7.0, 45.0]
+              ],
+            },
+          },
+        ],
+      }));
+      expect(decimatedLatLng(coordsOf(geo, 0)), isNull);
     });
   });
 
