@@ -58,13 +58,15 @@ class _SharedProjectService extends ProjectService {
   /// payloads — a ~363 KB /meta and a ~3 MB full details — so decoding them
   /// inline stalled the UI isolate here exactly as it did there.
   Future<Map<String, dynamic>> _getJson(String span, String path,
-          {Duration? timeout}) =>
-      perfSpans.stage(span, () async {
-        final bytes = timeout == null
-            ? await api.getBytes(path)
-            : await api.getBytes(path, timeout: timeout);
-        return heavy.decodeJsonMapOffIsolate(bytes);
-      });
+      {Duration? timeout}) async {
+    final bytes = await perfSpans.stage(
+        'fetch_${span.replaceFirst('decode_', '')}',
+        () => timeout == null
+            ? api.getBytes(path)
+            : api.getBytes(path, timeout: timeout));
+    perfSpans.note(span.replaceFirst('decode_', ''), perfSizeLabel(bytes.length));
+    return perfSpans.stage(span, () => heavy.decodeJsonMapOffIsolate(bytes));
+  }
 
   /// Fetches the full ~3 MB response (elevation_profile included) — the
   /// getDetails() contract's actual meaning (see ProjectService.getDetails).
@@ -96,11 +98,15 @@ class _SharedProjectService extends ProjectService {
   /// so sharing the owner-side path costs nothing here.
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) =>
-      perfSpans.stage('decode_geo', () async {
-        final bytes = await api.getBytes('/api/share/$token/geo$_aidParam',
-            timeout: const Duration(seconds: 90));
-        return heavy.decodeGeoOffIsolate(bytes);
-      });
+      () async {
+        final bytes = await perfSpans.stage(
+            'fetch_geo',
+            () => api.getBytes('/api/share/$token/geo$_aidParam',
+                timeout: const Duration(seconds: 90)));
+        perfSpans.note('geo', perfSizeLabel(bytes.length));
+        return perfSpans.stage(
+            'decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
+      }();
 
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>
