@@ -28,17 +28,6 @@ import 'project_quota_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
 
-/// Activities to upgrade between progressive-geo repaints during the low-res →
-/// full-res background upgrade. Each repaint (`notifyListeners`) triggers a full
-/// map rebuild — every marker + polyline — so notifying per few activities made
-/// long trips repaint dozens of times (~50 on a 150-activity trip), each costing
-/// tens-to-hundreds of ms: seconds of jank on load (#4). Bounding to ~8 repaints
-/// regardless of trip size keeps the upgrade visibly progressive but O(1) in
-/// repaints.
-@visibleForTesting
-int progressiveGeoBatchSize(int activityCount) =>
-    activityCount <= 8 ? 1 : (activityCount / 8).ceil();
-
 /// Waits between the automatic retries of a failed project fetch.
 ///
 /// A slow server or a stalled connection is transient far more often than not —
@@ -998,15 +987,48 @@ class ProjectNotifier extends ChangeNotifier
   /// panning shortly after a trip opens, since each geo upgrade forces
   /// MapPanel to rebuild every polyline and marker.
   bool _mapCameraActive = false;
-  void setMapCameraActive(bool active) => _mapCameraActive = active;
+
+  /// Completes the moment the camera settles. Non-null only while a wait is
+  /// actually outstanding, so a camera event costs nothing when nobody is
+  /// waiting on it.
+  Completer<void>? _cameraIdleWaiter;
+
+  void setMapCameraActive(bool active) {
+    _mapCameraActive = active;
+    if (!active) {
+      final waiter = _cameraIdleWaiter;
+      _cameraIdleWaiter = null;
+      if (waiter != null && !waiter.isCompleted) waiter.complete();
+    }
+  }
+
+  /// How long [_waitForCameraIdle] will hold a background upgrade before
+  /// applying it anyway. Overridable for the same reason as
+  /// [loadRetryBackoff]: so a test never waits real seconds.
+  @visibleForTesting
+  Duration cameraIdleTimeout = const Duration(seconds: 2);
 
   /// Waits until the camera is idle before returning, capped so a user who
   /// never stops panning still eventually gets the full-res geo.
+  ///
+  /// Event-driven rather than polled: the old version woke the isolate every
+  /// 100 ms for up to 2 s on every background apply, which is itself work
+  /// competing with the gesture it was trying to stay out of the way of.
+  ///
+  /// Deliberately NOT `SchedulerBinding.scheduleTask(..., Priority.idle)`,
+  /// which would be the natural "land between frames" primitive: idle tasks
+  /// resolve promptly in a plain `test()` but do not run at all under a
+  /// pumped `testWidgets` pipeline, so gating the geo upgrade on one would
+  /// hang the background load in widget tests — and, more to the point, would
+  /// make the upgrade's arrival depend on the frame pipeline having spare
+  /// time, which is exactly what a busy map does not have.
   Future<void> _waitForCameraIdle() async {
-    final deadline = DateTime.now().add(const Duration(seconds: 2));
-    while (_mapCameraActive && DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
+    if (!_mapCameraActive) return;
+    final waiter = _cameraIdleWaiter ??= Completer<void>();
+    await Future.any([
+      waiter.future,
+      Future<void>.delayed(cameraIdleTimeout),
+    ]);
   }
 
   /// Fetches full-res GeoJSON and progressively replaces each activity's
@@ -1046,7 +1068,7 @@ class ProjectNotifier extends ChangeNotifier
     // the batched reveal below would just repaint the whole map (every marker
     // + polyline) up to ~8 extra times, 80ms apart, for a payload that was
     // already complete. On a large trip each of those repaints is itself
-    // "tens-to-hundreds of ms" (see progressiveGeoBatchSize), and toggling
+    // "tens-to-hundreds of ms", and toggling
     // between view/manage mode re-ran this on every switch — several seconds
     // of back-to-back main-thread rebuilds was enough to trip Android's ANR
     // watchdog. Apply the cached geo in one shot instead, exactly like the
@@ -1105,61 +1127,23 @@ class ProjectNotifier extends ChangeNotifier
       // overlay self-cleans once the backend has caught up.
       reconcileSegmentOverlay(fullGeo);
 
-      // Index full-res features by activity_id
-      final fullFeatures = <String, Map<String, dynamic>>{};
-      for (final f in (fullGeo['features'] as List? ?? [])) {
-        final actId = (f as Map)['properties']?['activity_id']?.toString();
-        if (actId != null) fullFeatures[actId] = Map<String, dynamic>.from(f);
-      }
-
-      // Ordered activity IDs from items, reversed so last activity updates first
-      final actIds = items
-          .where((i) => i['item_type'] == 'activity')
-          .map((i) => i['activity_id']?.toString())
-          .whereType<String>()
-          .toList()
-          .reversed
-          .toList();
-
-      // Mutate one working copy per batch rather than copying the whole feature
-      // list + reassigning geo on every activity. Intermediate reassignments are
-      // never read (no notify fires between them) and only churned GC, which
-      // inflated each progressive repaint (#4). geo is re-read at each batch
-      // boundary so concurrent CRUD (e.g. a segment deletion mid-load) between
-      // batches isn't clobbered; the authoritative final pass below re-applies
-      // the durable segment overlay regardless, so within-batch races self-heal.
-      final batchSize = progressiveGeoBatchSize(actIds.length);
-      int batchCount = 0;
-      List<dynamic>? batchFeatures;
-      for (final actId in actIds) {
-        if (!_isCurrent(token, ref)) return;
-        final full = fullFeatures[actId];
-        if (full == null) continue;
-        if (batchFeatures == null) {
-          final snapshot = geo;
-          if (snapshot == null) continue;
-          batchFeatures = List<dynamic>.from(snapshot['features'] as List? ?? []);
-        }
-        final idx = batchFeatures.indexWhere(
-            (f) => (f as Map)['properties']?['activity_id']?.toString() == actId);
-        if (idx >= 0) batchFeatures[idx] = full;
-        batchCount++;
-        if (batchCount % batchSize == 0) {
-          await _waitForCameraIdle();
-          if (!_isCurrent(token, ref)) return;
-          geo = {'type': 'FeatureCollection', 'features': batchFeatures};
-          batchFeatures = null; // re-read next batch so concurrent CRUD is picked up
-          notifyListeners();
-          await Future.delayed(const Duration(milliseconds: 80));
-        }
-      }
-
       if (!_isCurrent(token, ref)) return;
-      // Final pass: rebuild authoritatively from the server geo (activities at
-      // full resolution + the server's segment features), then re-apply the
-      // durable segment overlay so any local add/update/delete that happened
-      // during this background load wins over the stale server snapshot. This
-      // single deterministic merge replaces the old ad-hoc "safety net".
+      // One atomic swap: rebuild authoritatively from the server geo
+      // (activities at full resolution + the server's segment features), then
+      // re-apply the durable segment overlay so any local add/update/delete
+      // that happened during this background load wins over the stale server
+      // snapshot.
+      //
+      // This used to be the *final* pass after a staged reveal that replaced
+      // the low-res track a few activities at a time, ~8 repaints 80 ms apart
+      // (issue #293). That staging made sense when the upgrade genuinely
+      // trickled in. It does not now: getGeo returns — and, since #292, fully
+      // parses — the whole payload before the first batch could fire, so the
+      // reveal bought no perceived progress and cost 8 whole-tree rebuilds
+      // (every polyline spec, every marker spec, a compute() decimation hop,
+      // ActivityPanel, ElevationChart). That was the reported "small local
+      // blocks and unblocks" on #276: a metronome of hitches, because the
+      // cause was literally a metronome.
       final features = mergePendingSegmentPatches(
           List<dynamic>.from(fullGeo['features'] as List? ?? []));
       await _waitForCameraIdle();

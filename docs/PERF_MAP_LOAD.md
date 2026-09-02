@@ -67,7 +67,11 @@ is one.
 
 It polls every 100 ms and gives up after 2 s. Pan continuously and the whole
 rebuild lands mid-gesture at t+2 s anyway. Deferral without a cheaper rebuild
-only moves the stall.
+only moves the stall — and the polling is itself work competing with the
+gesture it is trying to stay out of the way of.
+
+*(Fixed in Phase 2a: the wait is now event-driven off the camera-idle
+callback, with the same cap.)*
 
 ### 4. One god-notifier makes every update a whole-screen update
 
@@ -153,19 +157,35 @@ is deep-copied; `Uint8List`/`Float64List` transfer near-free). Route
 *Verify:* `decode_geo` and `decode_details` spans disappear from the UI
 thread; #276's repro — pan immediately after the spinner clears — is smooth.
 
-### Phase 2 — typed geometry model, and drop the progressive reveal
+### Phase 2a — drop the progressive reveal *(done)*
+
+Delete the 8-batch reveal in favour of the single atomic swap the code
+already performed as its "final pass", and replace `_waitForCameraIdle`'s
+poll loop with an event-driven wait on the camera-idle callback (same cap, no
+timer storm).
+
+*Verified:* a test asserting listeners are handed at most two distinct `geo`
+objects across a whole load — the low-res one, then the full-res one. On the
+batched implementation the same test reports **9**.
+
+**Rejected: `SchedulerBinding.scheduleTask(..., Priority.idle)`.** That was
+the original plan — let the framework place the swap in a frame that has
+spare time. Measured behaviour says no: an idle task resolves in ~3 ms in a
+plain `test()` but **does not run at all under a pumped `testWidgets`
+pipeline**, so gating the upgrade on one hangs the background load in widget
+tests. The deeper objection is the same one in production: a busy map is
+exactly the situation with no spare frame time, so the upgrade would be
+starved precisely when it is most wanted. Don't retry this without new
+evidence.
+
+### Phase 2b — typed geometry model
 
 Introduce `TrackGeometry`: per activity, `Float64List` lat/lon plus
 precomputed bounds, built **once** inside the Phase 1 isolate hop. The spec
-builders consume it, so rebuild becomes O(activities).
+builders consume it, so rebuild becomes O(activities) rather than O(total
+points).
 
-Then delete the 8-batch reveal in favour of a single atomic swap scheduled at
-`Priority.idle` via `SchedulerBinding.scheduleTask`, and replace
-`_waitForCameraIdle`'s poll loop with that scheduler priority — the framework
-already knows when frames are free; polling only guesses.
-
-*Verify:* exactly one geometry-driven rebuild per load, pinned by a test that
-counts `notifyListeners()` during a full load.
+*Verify:* spec-build spans (Phase 0) stop scaling with point count.
 
 ### Phase 3 — split the notifier into observable slices
 

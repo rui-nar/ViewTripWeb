@@ -1,20 +1,20 @@
 // Regression test for the Android view/manage mode-toggle ANR.
 //
-// _loadFullGeoProgressively() used to unconditionally replay its batched
-// low-res→full-res reveal (up to ~8 full map rebuilds, 80ms apart — see
-// progressiveGeoBatchSize) on every load(), even when the full-res geo was
-// already sitting in projectDataCache from the mode just left. Toggling
-// between view and manage mode re-ran that batched replay every single time,
-// even though nothing was actually "progressively arriving" — the data was
-// already complete in memory. On a large trip, several seconds of
-// back-to-back full-map rebuilds was enough to trip Android's ANR watchdog,
-// and it reappeared after dismissal because the batch sequence just kept
-// going.
+// _loadFullGeoProgressively() used to unconditionally re-fetch and re-apply
+// the full-res geo on every load(), even when it was already sitting in
+// projectDataCache from the mode just left. Toggling between view and manage
+// mode re-ran that whole path every single time, even though the data was
+// already complete in memory. On a large trip that was enough back-to-back
+// full-map rebuild work to trip Android's ANR watchdog.
 //
 // The fix: when projectDataCache already has full geo for the ref, apply it
-// in one shot instead of replaying the batch simulation. This test asserts
-// getGeo() (the only path that drives the batched reveal) is never called
-// when the cache is already warm.
+// directly instead of going back to the network. This test asserts getGeo()
+// is never called when the cache is already warm.
+//
+// (The batched low-res -> full-res reveal this originally guarded against
+// replaying was deleted outright in issue #293 — see
+// _loadFullGeoProgressively. The warm-cache shortcut it pins is independent
+// of that and still load-bearing.)
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
@@ -90,13 +90,12 @@ void main() {
 
     await notifier.load(_ref);
     // _loadFullGeoProgressively runs unawaited in the background; give it a
-    // moment to finish. The batched path needs 80ms per repaint, so a short
-    // wait here would still catch it if the shortcut regressed.
+    // moment to finish.
     await Future<void>.delayed(const Duration(milliseconds: 30));
 
     expect(service.getGeoCalls, 0,
-        reason: 'a warm cache must never fall through to the batched '
-            'network-reveal path (that path is the only caller of getGeo())');
+        reason: 'a warm cache must never fall through to the network path '
+            '(_loadFullGeoProgressively is the only caller of getGeo())');
     expect(notifier.isGeoLoaded, isTrue);
     expect(notifier.geo?['features'], hasLength(1));
     expect((notifier.geo?['features'] as List).first['properties']['activity_id'], '111');
