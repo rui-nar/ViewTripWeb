@@ -4,8 +4,9 @@ library;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../api/client.dart';
+import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
-import '../map/polyline_decoder.dart';
+import 'heavy_decode.dart' as heavy;
 import 'project_data_cache.dart';
 
 /// Deduplicates concurrent identical heavy fetches across *all* [ProjectService]
@@ -62,10 +63,18 @@ class ProjectService {
       if (cached != null) return cached;
     }
     return _dedupFetch('details:${ref.ownerId ?? 0}:${ref.name}', () async {
-      final data = await api.get(ref.path(), timeout: const Duration(minutes: 2))
-          as Map<String, dynamic>;
-      projectDataCache.writeFullDetails(ref, data);
-      return data;
+      // Bytes, then a worker-isolate parse: this is the ~12 MB payload whose
+      // inline jsonDecode is the single largest UI-isolate stall of a cold
+      // open (issue #292). _dedupFetch's own doc comment above already named
+      // "jsonDecode'd back to back on the UI isolate" as an ANR cause; that
+      // round removed the duplicate fetch but left the decode where it was.
+      return perfSpans.stage('decode_details', () async {
+        final bytes = await api
+            .getBytes(ref.path(), timeout: const Duration(minutes: 2));
+        final data = await heavy.decodeJsonMapOffIsolate(bytes);
+        projectDataCache.writeFullDetails(ref, data);
+        return data;
+      });
     });
   }
 
@@ -82,7 +91,15 @@ class ProjectService {
   /// whether the heavier payloads it may be holding are still valid, so it
   /// would be circular for this call itself to skip the network.
   Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
-    final data = await api.get(ref.path('/meta'), timeout: _kLoadTimeout) as Map<String, dynamic>;
+    // Routed through the same seam as the heavier payloads: /meta is 10-15x
+    // smaller than getDetails but still hundreds of KB on a large trip, and
+    // unlike them it lands *before* the spinner clears, where the user is
+    // already waiting. heavy.decodeJsonMapOffIsolate stays inline below
+    // kInlineDecodeThresholdBytes, so a small trip pays no isolate hop.
+    final data = await perfSpans.stage('decode_meta', () async {
+      final bytes = await api.getBytes(ref.path('/meta'), timeout: _kLoadTimeout);
+      return heavy.decodeJsonMapOffIsolate(bytes);
+    });
     projectDataCache.onMetaFetched(ref, data);
     return data;
   }
@@ -115,10 +132,15 @@ class ProjectService {
       // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
       // (see polyline_decoder.dart). The generous timeout covers a cold-cache
       // build of a large trip.
-      final data = await api.get(
-          ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
-          timeout: const Duration(seconds: 90));
-      final expanded = expandEncodedActivities(data as Map<String, dynamic>);
+      final expanded = await perfSpans.stage('decode_geo', () async {
+        final bytes = await api.getBytes(
+            ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
+            timeout: const Duration(seconds: 90));
+        // Parse and polyline-expansion fused into one worker-isolate hop —
+        // they used to run as two consecutive inline passes over the same
+        // 300k+ points. See heavy_decode.dart.
+        return heavy.decodeGeoOffIsolate(bytes);
+      });
       projectDataCache.writeFullGeo(ref, expanded);
       return expanded;
     });
@@ -129,35 +151,8 @@ class ProjectService {
   /// features that already have coordinates (segments, straight-line fallbacks,
   /// and the share endpoint's expanded responses).
   @visibleForTesting
-  static Map<String, dynamic> expandEncodedActivities(Map<String, dynamic> geo) {
-    final features = geo['features'];
-    if (features is! List) return geo;
-    for (final f in features) {
-      if (f is! Map) continue;
-      final props = f['properties'];
-      if (props is! Map) continue;
-      final enc = props['polyline'];
-      if (enc is! String || enc.isEmpty) continue;
-      final geom = f['geometry'];
-      if (geom is! Map) continue;
-      final existing = geom['coordinates'];
-      if (existing is List && existing.isNotEmpty) continue; // already expanded
-      // Validate every decoded point: on the web the polyline decode can yield
-      // out-of-range values, and a single bad latitude crashes flutter_map's
-      // bounds assertion. Drop non-finite / out-of-range points rather than
-      // ever handing them to the map. (Client-side decode is disabled for web in
-      // getGeo; this is a defensive backstop for any other caller/platform.)
-      final coords = <List<double>>[];
-      for (final p in decodePolyline(enc)) {
-        if (p.lat.isFinite && p.lon.isFinite &&
-            p.lat >= -90 && p.lat <= 90 && p.lon >= -180 && p.lon <= 180) {
-          coords.add([p.lon, p.lat]);
-        }
-      }
-      if (coords.length >= 2) geom['coordinates'] = coords;
-    }
-    return geo;
-  }
+  static Map<String, dynamic> expandEncodedActivities(Map<String, dynamic> geo) =>
+      heavy.expandEncodedActivities(geo);
 
   /// Fetches pre-computed low-res GeoJSON (straight lines per activity) for [ref].
   /// GET /api/geo/project/low-res?name={name}
@@ -166,9 +161,12 @@ class ProjectService {
     if (cached != null) return cached;
     return _dedupFetch('lowResGeo:${ref.ownerId ?? 0}:${ref.name}', () async {
       final encoded = Uri.encodeComponent(ref.name);
-      final data = await api.get(
-          ref.withOwner('/api/geo/project/low-res?name=$encoded'),
-          timeout: _kLoadTimeout) as Map<String, dynamic>;
+      final data = await perfSpans.stage('decode_low_res_geo', () async {
+        final bytes = await api.getBytes(
+            ref.withOwner('/api/geo/project/low-res?name=$encoded'),
+            timeout: _kLoadTimeout);
+        return heavy.decodeJsonMapOffIsolate(bytes);
+      });
       projectDataCache.writeLowResGeo(ref, data);
       return data;
     });

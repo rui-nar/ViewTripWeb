@@ -13,8 +13,10 @@ import 'package:provider/provider.dart';
 
 import '../api/client.dart' show api;
 import '../auth/auth_notifier.dart';
+import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
 import '../projects/basemaps.dart';
+import '../projects/heavy_decode.dart' as heavy;
 import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingPlaceholder;
 import '../projects/map_panel.dart';
 import '../projects/memory_detail_modal.dart';
@@ -46,11 +48,23 @@ class _SharedProjectService extends ProjectService {
   /// the wrong endpoint and failed outright.
   @override
   Future<Map<String, dynamic>> getDetailsMeta(ProjectRef _) async {
-    final meta =
-        await api.get('/api/share/$token/meta$_aidParam') as Map<String, dynamic>;
+    final meta = await _getJson('decode_meta', '/api/share/$token/meta$_aidParam');
     ownerName = (meta['owner_name'] as String?) ?? '';
     return meta;
   }
+
+  /// Fetch + off-UI-isolate decode, matching what [ProjectService] does for
+  /// the owner-side endpoints (issue #292). The shared screen loads the same
+  /// payloads — a ~363 KB /meta and a ~3 MB full details — so decoding them
+  /// inline stalled the UI isolate here exactly as it did there.
+  Future<Map<String, dynamic>> _getJson(String span, String path,
+          {Duration? timeout}) =>
+      perfSpans.stage(span, () async {
+        final bytes = timeout == null
+            ? await api.getBytes(path)
+            : await api.getBytes(path, timeout: timeout);
+        return heavy.decodeJsonMapOffIsolate(bytes);
+      });
 
   /// Fetches the full ~3 MB response (elevation_profile included) — the
   /// getDetails() contract's actual meaning (see ProjectService.getDetails).
@@ -58,8 +72,8 @@ class _SharedProjectService extends ProjectService {
   /// load() has returned, so meta gets exclusive bandwidth before this
   /// request fires.
   Future<Map<String, dynamic>> fetchFullDetails() async {
-    final data = await api.get('/api/share/$token$_aidParam');
-    final m = data as Map<String, dynamic>;
+    final m = await _getJson('decode_details', '/api/share/$token$_aidParam',
+        timeout: const Duration(minutes: 2));
     ownerName = (m['owner_name'] as String?) ?? '';
     return m;
   }
@@ -74,17 +88,17 @@ class _SharedProjectService extends ProjectService {
   Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) =>
       fetchFullDetails();
 
+  /// The share endpoint returns expanded `coordinates` (not encoded
+  /// polylines), so this decodes without the expansion pass the owner-side
+  /// [ProjectService.getGeo] needs.
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) async {
-    final data = await api.get('/api/share/$token/geo$_aidParam');
-    return data as Map<String, dynamic>;
-  }
+  Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) =>
+      _getJson('decode_geo', '/api/share/$token/geo$_aidParam',
+          timeout: const Duration(seconds: 90));
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) async {
-    final data = await api.get('/api/share/$token/geo/low-res');
-    return data as Map<String, dynamic>;
-  }
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>
+      _getJson('decode_low_res_geo', '/api/share/$token/geo/low-res');
 
   @override
   Future<Map<String, dynamic>> getStats(ProjectRef _, {List<String> tags = const []}) async {
