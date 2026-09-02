@@ -20,11 +20,16 @@ import '../core/perf_timing.dart' show kPerfTiming;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'map_geometry_memo.dart';
 import 'memory_detail_modal.dart';
 import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
 import 'people_search.dart' show classifyEncounterPin;
 import 'photo_thumb_cache.dart';
 import 'project_notifier.dart';
+
+// Existing callers (and map_geometry_memo_test.dart) import this helper from
+// map_panel.dart, where it used to live; keep that entry point.
+export 'map_geometry_memo.dart' show memoCoordsToLatLng;
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
 /// Returns the coordinate at 50% of the total chord length — accurate even
@@ -187,35 +192,11 @@ LatLng? _coordToLatLng(dynamic c) {
 
 // ── Per-feature geometry memoization ─────────────────────────────────────────
 //
-// The map rebuilds whenever `geo` is reassigned (notably the progressive
-// low-res→full-res upgrade on load). Reconstructing markers/polylines re-ran the
-// O(track-points) work — converting every coordinate to LatLng and recomputing
-// each activity's arc-midpoint — for *every* feature on *every* rebuild, which
-// dominated the build-thread cost and produced the load-time map jank.
-//
-// These memoize that work keyed by the *identity* of the raw coordinates list.
-// Only changed features get a new coords list (the upgrade replaces just the
-// upgraded activities), so unchanged features hit the cache — "rebuild only
-// changed features" without any signature/invalidation bookkeeping: the selection
-// /style-dependent bits (colour, dimming) are cheap and stay recomputed, and
-// entries auto-evict when their coords list is GC'd (Expando). Returned point
-// lists are shared — callers must treat them as read-only.
-final Expando<List<LatLng>> _coordsLatLngCache = Expando('coordsLatLng');
+// The coordinate→LatLng half lives in map_geometry_memo.dart so the decode
+// path can seed it (issue #293); it is re-exported below so this library
+// stays the single import for map geometry helpers. The arc-midpoint half
+// stays here because it depends on _arcMidpoint's great-circle maths.
 final Expando<LatLng> _arcMidpointCache = Expando('arcMidpoint');
-
-@visibleForTesting
-List<LatLng> memoCoordsToLatLng(List coords) {
-  final cached = _coordsLatLngCache[coords];
-  if (cached != null) return cached;
-  final pts = <LatLng>[];
-  for (final c in coords) {
-    if (c is List && c.length >= 2) {
-      pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
-    }
-  }
-  _coordsLatLngCache[coords] = pts;
-  return pts;
-}
 
 @visibleForTesting
 LatLng? memoArcMidpoint(List coords) {

@@ -85,12 +85,22 @@ compensation, not architecture, and it fails exactly when it matters: a geo
 swap changes `geo`'s identity, so `geoOrStyleChanged` is true and everything
 rebuilds from raw GeoJSON.
 
-### 5. Geometry lives as untyped GeoJSON and is re-walked on every rebuild
+### 5. Geometry lives as untyped GeoJSON and is re-walked on every geo swap
 
 `_buildPolylineSpecs`, `_buildActivityMarkerSpecs` and `buildFullTrackResult`
 each walk `f['geometry']['coordinates']` with `as num` casts per coordinate
-and allocate a `LatLng` per point. Rebuild cost is O(total points), not
-O(activities). That is the multiplier sitting under every other problem here.
+and allocate a `LatLng` per point.
+
+**Correction to this document's first draft.** It originally claimed every
+*rebuild* is O(total points). That is wrong: `memoCoordsToLatLng` already
+memoizes the conversion on the identity of each feature's coords list, so
+only a *changed* feature is re-converted. Measured on a 100-activity /
+500k-point trip: a cold conversion costs ~83 ms, a warm rebuild ~0.1 ms.
+
+The real cost is therefore one cold conversion per geo swap, not per rebuild
+— which is exactly why it mattered that Phase 2a cut the number of swaps from
+nine to one, and why Phase 2b is about moving that single conversion off the
+UI isolate rather than restructuring the storage.
 
 ### 6. No zoom-adaptive level of detail
 
@@ -178,14 +188,30 @@ exactly the situation with no spare frame time, so the upgrade would be
 starved precisely when it is most wanted. Don't retry this without new
 evidence.
 
-### Phase 2b — typed geometry model
+### Phase 2b — convert coordinates on the worker, not the UI isolate *(done)*
 
-Introduce `TrackGeometry`: per activity, `Float64List` lat/lon plus
-precomputed bounds, built **once** inside the Phase 1 isolate hop. The spec
-builders consume it, so rebuild becomes O(activities) rather than O(total
-points).
+**Rejected: the `TrackGeometry` / `Float64List` model this phase originally
+specified.** Two measurements killed it. First, the conversion is already
+memoized per feature (see the correction under root cause 5), so the
+"O(points) on every rebuild" problem it was designed to solve does not exist.
+Second, flutter_map's `Polyline` takes a `List<LatLng>`, so typed buffers
+would have to be materialised back into exactly that list on the render path
+— moving the cost, not removing it. That is a large refactor across the spec
+builders, `buildFullTrackResult`, `hitTestMapTap`, `extractSelectedPoints`,
+the segment-overlay merge and the on-device cache, for no measured gain.
 
-*Verify:* spec-build spans (Phase 0) stop scaling with point count.
+**What shipped instead**, which is the part of the original idea that
+survives contact with the measurements: the decode hop from Phase 1 now
+produces the coordinate→LatLng conversion alongside the parse and seeds
+`map_geometry_memo.dart`'s cache with the result. Both halves ride back on
+one zero-copy hop, and because the coords lists and their converted points
+transfer as a single object graph, identity-keyed caching still works across
+the isolate boundary. The UI isolate therefore never pays the cold conversion
+at all.
+
+*Verified:* after `decodeGeoOffIsolate`, walking every feature through
+`memoCoordsToLatLng` performs **zero** conversions (counted, not timed),
+against a baseline test showing an unseeded geo pays one per feature.
 
 ### Phase 3 — split the notifier into observable slices
 
