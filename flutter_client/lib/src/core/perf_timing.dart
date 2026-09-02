@@ -101,3 +101,135 @@ class PerfTiming {
     }
   }
 }
+
+// ── Named phase spans (issue #291) ───────────────────────────────────────────
+//
+// Frame percentiles above answer "was that window janky"; they cannot answer
+// "which pipeline stage caused it". Every phase of the map-load plan
+// (docs/PERF_MAP_LOAD.md) needs a before/after number attached to a specific
+// stage, so the load path is instrumented with named spans instead.
+//
+// Two kinds, deliberately distinct — conflating them is what makes most
+// "perf timing" harnesses lie:
+//
+//   * BLOCKING spans ([PerfSpans.blocking]) wrap *synchronous* work and
+//     measure UI-isolate stall. These are the jank numbers, and the only ones
+//     a frame-budget assertion may be made against.
+//   * STAGE spans ([PerfSpans.stage]) wrap async work and measure wall clock,
+//     which includes awaits and isolate hops. A 3 s `decode_geo` stage that
+//     ran entirely on a worker isolate costs zero frames — useful for
+//     time-to-interactive, meaningless for jank.
+
+/// One line per recorded span: count, total, worst. Pure + testable, mirroring
+/// [perfSummaryLine]'s split so the numbers read off a dev run are trustworthy.
+/// [label] distinguishes the two buckets in the printed report.
+String perfSpanReport(String label, Map<String, List<double>> spans) {
+  if (spans.isEmpty) return '[perf] $label (none)';
+  // Worst-first: the line that matters is always at the top.
+  final names = spans.keys.toList()
+    ..sort((a, b) => _spanMax(spans[b]!).compareTo(_spanMax(spans[a]!)));
+  final buf = StringBuffer('[perf] $label');
+  for (final name in names) {
+    final samples = spans[name]!;
+    if (samples.isEmpty) continue;
+    var total = 0.0;
+    for (final s in samples) {
+      total += s;
+    }
+    buf.write('\n  $name  n=${samples.length}  '
+        'total=${total.toStringAsFixed(1)}ms  '
+        'worst=${_spanMax(samples).toStringAsFixed(1)}ms');
+  }
+  return buf.toString();
+}
+
+double _spanMax(List<double> samples) {
+  var max = 0.0;
+  for (final s in samples) {
+    if (s > max) max = s;
+  }
+  return max;
+}
+
+/// Names of every blocking span that blew [kFrameBudgetMs]. Pure + testable —
+/// this is the assertion the load-pipeline regression tests are written
+/// against, so it must not depend on a frame pipeline or a wall clock.
+List<String> perfOverBudgetSpans(Map<String, List<double>> blockingSpans,
+    {double budgetMs = kFrameBudgetMs}) {
+  final over = <String>[];
+  for (final entry in blockingSpans.entries) {
+    if (_spanMax(entry.value) > budgetMs) over.add(entry.key);
+  }
+  over.sort();
+  return over;
+}
+
+/// Records named load-pipeline spans. See the block comment above for why
+/// blocking and stage timings are kept in separate buckets.
+///
+/// Unlike [PerfTiming], this is not `kPerfTiming`-gated at the const level:
+/// [enabled] is a mutable field so tests can turn it on. The production cost
+/// is one field read and a branch per *stage* — these wrap multi-millisecond
+/// fetches and decodes, never per-point loops — which is well below the noise
+/// floor of the work they measure.
+class PerfSpans {
+  PerfSpans._();
+  static final PerfSpans instance = PerfSpans._();
+
+  bool enabled = kPerfTiming;
+
+  final Map<String, List<double>> _blocking = {};
+  final Map<String, List<double>> _stage = {};
+
+  /// UI-isolate stall of a synchronous [body], recorded under [name].
+  T blocking<T>(String name, T Function() body) {
+    if (!enabled) return body();
+    final sw = Stopwatch()..start();
+    try {
+      return body();
+    } finally {
+      (_blocking[name] ??= []).add(sw.elapsedMicroseconds / 1000.0);
+    }
+  }
+
+  /// Wall-clock duration of an async [body], recorded under [name]. Includes
+  /// awaits and isolate hops, so this is NOT a jank measurement.
+  Future<T> stage<T>(String name, Future<T> Function() body) async {
+    if (!enabled) return body();
+    final sw = Stopwatch()..start();
+    try {
+      return await body();
+    } finally {
+      (_stage[name] ??= []).add(sw.elapsedMicroseconds / 1000.0);
+    }
+  }
+
+  /// Snapshot of recorded UI-isolate stalls, keyed by span name.
+  Map<String, List<double>> get blockingSpans =>
+      {for (final e in _blocking.entries) e.key: List.unmodifiable(e.value)};
+
+  /// Snapshot of recorded wall-clock stage durations, keyed by span name.
+  Map<String, List<double>> get stageSpans =>
+      {for (final e in _stage.entries) e.key: List.unmodifiable(e.value)};
+
+  void reset() {
+    _blocking.clear();
+    _stage.clear();
+  }
+
+  /// Prints both buckets. Called from a dev build after a load completes;
+  /// a no-op when nothing was recorded.
+  void report() {
+    if (_blocking.isEmpty && _stage.isEmpty) return;
+    debugPrint(perfSpanReport('blocking (UI isolate)', _blocking));
+    debugPrint(perfSpanReport('stages (wall clock)', _stage));
+    final over = perfOverBudgetSpans(_blocking);
+    if (over.isNotEmpty) {
+      debugPrint('[perf] OVER BUDGET (>${kFrameBudgetMs.toStringAsFixed(1)}ms '
+          'on the UI isolate): ${over.join(', ')}');
+    }
+  }
+}
+
+/// Shorthand for the instrumentation call sites.
+PerfSpans get perfSpans => PerfSpans.instance;
