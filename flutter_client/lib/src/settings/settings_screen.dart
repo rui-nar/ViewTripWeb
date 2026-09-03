@@ -1198,6 +1198,7 @@ class _PerfPanelState extends State<_PerfPanel> {
       failures: perfSpans.failures,
       loads: perfSpans.session.loads,
       lastBackgroundRefresh: perfSpans.session.lastBackgroundRefresh,
+      diagnostics: perfSpans.diagnostics,
       gestures: frames.gestures,
       gestureBuild: frames.build,
       gestureRaster: frames.raster,
@@ -1210,7 +1211,8 @@ class _PerfPanelState extends State<_PerfPanel> {
     final report = _report();
     final empty = perfSpans.blockingSpans.isEmpty &&
         perfSpans.stageSpans.isEmpty &&
-        perfSpans.gestureFrames.gestures == 0;
+        perfSpans.gestureFrames.gestures == 0 &&
+        perfSpans.diagnostics.stallTicks == 0;
 
     return _SectionCard(
       title: 'Performance',
