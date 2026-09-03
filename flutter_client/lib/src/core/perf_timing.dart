@@ -221,6 +221,33 @@ class PerfSpans {
   double _maxStallMs = 0;
   double _maxGestureStallMs = 0;
   static const _kStallInterval = Duration(milliseconds: 250);
+
+  /// When the last gesture ended, so frames that complete during a gesture but
+  /// whose FrameTiming is *delivered* just after it still count. The callback
+  /// is batched and arrives late, so filtering purely on [_inGesture] dropped
+  /// exactly the samples a short pan produces — which is why reports kept
+  /// saying "1 gesture, (no frames)" while the user was demonstrably panning.
+  DateTime? _gestureEndedAt;
+  static const _kFrameGrace = Duration(seconds: 1);
+
+  int _loads = 0;
+  String? _lastBackgroundRefresh;
+
+  /// Counts a project load. Session-scoped: a report saying "3 loads" is how
+  /// an unexpected reload — the thing most likely to land heavy work in the
+  /// middle of a gesture — becomes visible at all.
+  void recordLoad() {
+    if (enabled) _loads++;
+  }
+
+  /// Names the most recent background refresh, so a report can distinguish a
+  /// degraded-route check from photo polling from a viewport URL sync without
+  /// anyone having to guess which timer fired.
+  void recordBackgroundRefresh(String what) {
+    if (!enabled) return;
+    final t = DateTime.now().toIso8601String();
+    _lastBackgroundRefresh = '$what at ${t.substring(11, 19)}';
+  }
   int _gestures = 0;
   final List<double> _gestureBuild = [];
   final List<double> _gestureRaster = [];
@@ -239,7 +266,11 @@ class PerfSpans {
     _gestures++;
   }
 
-  void endGesture() => _inGesture = false;
+  void endGesture() {
+    if (!_inGesture) return;
+    _inGesture = false;
+    _gestureEndedAt = DateTime.now();
+  }
 
   void _hookFrames() {
     if (_framesHooked) return;
@@ -251,8 +282,14 @@ class PerfSpans {
     }
   }
 
+  bool get _withinGestureWindow {
+    if (_inGesture) return true;
+    final ended = _gestureEndedAt;
+    return ended != null && DateTime.now().difference(ended) < _kFrameGrace;
+  }
+
   void _onGestureFrames(List<FrameTiming> timings) {
-    if (!_inGesture) return;
+    if (!_withinGestureWindow) return;
     for (final t in timings) {
       _gestureBuild.add(t.buildDuration.inMicroseconds / 1000.0);
       _gestureRaster.add(t.rasterDuration.inMicroseconds / 1000.0);
@@ -270,6 +307,11 @@ class PerfSpans {
         build: List.unmodifiable(_gestureBuild),
         raster: List.unmodifiable(_gestureRaster),
       );
+
+  /// Session-level context for the report: how many loads have run and which
+  /// background refresh fired most recently.
+  ({int loads, String? lastBackgroundRefresh}) get session =>
+      (loads: _loads, lastBackgroundRefresh: _lastBackgroundRefresh);
 
   /// UI-isolate stall of a synchronous [body], recorded under [name].
   T blocking<T>(String name, T Function() body) {
@@ -359,23 +401,36 @@ class PerfSpans {
   Map<String, List<String>> get failures =>
       {for (final e in _failures.entries) e.key: List.unmodifiable(e.value)};
 
+  /// Clears the per-LOAD record: spans, stages, notes, failures.
+  ///
+  /// Deliberately leaves gesture frames, gesture-scoped spans, stall maxima
+  /// and the load counter alone — those are session-level facts. reset() runs
+  /// at the start of every load, so clearing them meant a reload erased the
+  /// evidence of the very freeze it had just caused, in exactly the scenario
+  /// worth diagnosing (issue #276). Use [resetSession] to clear everything.
   void reset() {
     _blocking.clear();
     _stage.clear();
     _notes.clear();
     _failures.clear();
+  }
+
+  /// Clears everything, including session-level state. For tests.
+  @visibleForTesting
+  void resetSession() {
+    reset();
     _gestureBlocking.clear();
-    _maxStallMs = 0;
-    _maxGestureStallMs = 0;
     _gestureBuild.clear();
     _gestureRaster.clear();
     _gestures = 0;
-    // Must clear too: reset() runs at the start of every load, and a load can
-    // begin while the user is mid-pan (a mode toggle, say). Leaving this true
-    // would wedge the flag on forever — every later gesture skipped as
-    // "already in one", and all subsequent work misattributed to panning.
-    // The next camera event re-arms it, so nothing is lost.
+    _maxStallMs = 0;
+    _maxGestureStallMs = 0;
+    _loads = 0;
+    _lastBackgroundRefresh = null;
+    // Self-heals on the next camera event either way, but leaving it set
+    // would make the next beginGesture() a no-op.
     _inGesture = false;
+    _gestureEndedAt = null;
   }
 
   /// The most recently completed load's report, or null if none has finished
@@ -390,6 +445,8 @@ class PerfSpans {
     if (_blocking.isEmpty && _stage.isEmpty) return;
     final text = perfFullReport(_blocking, _stage, _notes,
         failures: _failures,
+        loads: _loads,
+        lastBackgroundRefresh: _lastBackgroundRefresh,
         gestureBlocking: _gestureBlocking,
         worstStallMs: _maxStallMs,
         worstGestureStallMs: _maxGestureStallMs,
@@ -420,6 +477,8 @@ String perfFullReport(
   Map<String, List<double>> gestureBlocking = const {},
   double worstStallMs = 0,
   double worstGestureStallMs = 0,
+  int loads = 0,
+  String? lastBackgroundRefresh,
   int gestures = 0,
   List<double> gestureBuild = const [],
   List<double> gestureRaster = const [],
@@ -434,6 +493,10 @@ String perfFullReport(
     if (gestureBlocking.isNotEmpty) {
       buf.writeln(perfSpanReport('blocking DURING gestures', gestureBlocking));
     }
+  }
+  if (loads > 0 || lastBackgroundRefresh != null) {
+    buf.writeln('[perf] session: $loads load(s)'
+        '${lastBackgroundRefresh == null ? '' : ', last background refresh: $lastBackgroundRefresh'}');
   }
   if (worstStallMs > 0) {
     // The number that actually corresponds to a freeze: frames that never

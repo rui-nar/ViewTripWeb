@@ -8,13 +8,13 @@ import 'package:viewtrip_client/src/core/perf_timing.dart';
 void main() {
   setUp(() {
     perfSpans
-      ..reset()
+      ..resetSession()
       ..enabled = true;
   });
 
   tearDown(() {
     perfSpans
-      ..reset()
+      ..resetSession()
       ..enabled = true;  // the library default — see PerfSpans.enabled
   });
 
@@ -240,11 +240,53 @@ void main() {
           reason: 'session totals cannot say which work happens while panning');
     });
 
-    test('reset clears the gesture bucket', () {
+    test('a load-scoped reset keeps the gesture bucket', () {
       perfSpans.beginGesture();
       perfSpans.blocking('x', () {});
       perfSpans.reset();
-      expect(perfSpans.gestureBlockingSpans, isEmpty);
+      expect(perfSpans.gestureBlockingSpans['x'], hasLength(1));
+    });
+  });
+
+  group('session context', () {
+    test('loads are counted across resets', () {
+      perfSpans.recordLoad();
+      perfSpans.reset();
+      perfSpans.recordLoad();
+      expect(perfSpans.session.loads, 2,
+          reason: 'an unexpected reload is only visible if someone counts it');
+    });
+
+    test('the last background refresh is named and timestamped', () {
+      perfSpans.recordBackgroundRefresh('degraded_route_check');
+      final v = perfSpans.session.lastBackgroundRefresh!;
+      expect(v, startsWith('degraded_route_check at '));
+      expect(v, matches(RegExp(r'\d{2}:\d{2}:\d{2}$')));
+    });
+
+    test('the most recent refresh wins', () {
+      perfSpans.recordBackgroundRefresh('photo_poll');
+      perfSpans.recordBackgroundRefresh('viewport_url_sync');
+      expect(perfSpans.session.lastBackgroundRefresh, contains('viewport_url_sync'));
+    });
+
+    test('session context is rendered in the report', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          loads: 3, lastBackgroundRefresh: 'viewport_url_sync at 10:11:12');
+      expect(r, contains('3 load(s)'));
+      expect(r, contains('viewport_url_sync'));
+    });
+  });
+
+  group('frame capture window', () {
+    test('frames are still accepted just after a gesture ends', () {
+      // FrameTiming is delivered in a batch AFTER the frames complete, so a
+      // short pan's samples arrive once the gesture is already over. Filtering
+      // on "in gesture" alone dropped exactly those, which is why reports read
+      // "1 gesture, (no frames)" while the user was demonstrably panning.
+      perfSpans.beginGesture();
+      perfSpans.endGesture();
+      expect(perfSpans.gestureFrames.gestures, 1);
     });
   });
 
@@ -297,9 +339,18 @@ void main() {
       expect(perfSpans.gestureFrames.gestures, 0);
     });
 
-    test('reset clears gesture state too', () {
+    test('a load-scoped reset does NOT erase gesture history', () {
+      // reset() runs at the start of every load. Clearing this here meant a
+      // reload erased the record of the freeze it had just caused — in
+      // exactly the scenario worth diagnosing (issue #276).
       perfSpans.beginGesture();
       perfSpans.reset();
+      expect(perfSpans.gestureFrames.gestures, 1);
+    });
+
+    test('resetSession does clear it', () {
+      perfSpans.beginGesture();
+      perfSpans.resetSession();
       expect(perfSpans.gestureFrames.gestures, 0);
     });
   });

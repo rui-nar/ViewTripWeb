@@ -763,6 +763,9 @@ class ProjectNotifier extends ChangeNotifier
     final token = _loadTrack.begin(ref);
     this.ref = ref;
     if (perfSpans.enabled) perfSpans.reset();  // scope spans to this load
+    // Counted session-wide: an unexpected reload is the likeliest way heavy
+    // work lands mid-gesture, and it is invisible unless someone counts.
+    perfSpans.recordLoad();
     isLoading = true;
     error = null;
     loadErrorStatus = null;
@@ -1179,6 +1182,7 @@ class ProjectNotifier extends ChangeNotifier
   /// elevation chart and cursor-to-map sync become available without blocking
   /// the initial panel render.
   Future<void> _loadElevationData(ProjectRef ref, int token) async {
+    perfSpans.recordBackgroundRefresh('elevation_load');
     try {
       final details = await _service.getDetails(ref);
       if (!_isCurrent(token, ref)) return;
@@ -1618,6 +1622,7 @@ class ProjectNotifier extends ChangeNotifier
 
   Future<void> _checkDegradedRouteUpgrade(ProjectRef ref) async {
     if (this.ref != ref) return;
+    perfSpans.recordBackgroundRefresh('degraded_route_check');
     Map<String, dynamic> meta;
     try {
       meta = await _service.getDetailsMeta(ref);
@@ -1967,6 +1972,7 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   Future<void> _refreshMemoryPhotos(ProjectRef ref) async {
+    perfSpans.recordBackgroundRefresh('photo_poll');
     try {
       final details = await _service.getDetails(ref, bypassCache: true);
       if (this.ref != ref) return;
