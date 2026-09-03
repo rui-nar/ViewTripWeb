@@ -39,7 +39,7 @@ void main() {
 
   test(
       'ViewProjectNotifier: the background elevation-data fetch hits the '
-      'full-details endpoint, not a second /meta call', () async {
+      'elevation endpoint, not a second /meta call', () async {
     final paths = <String>[];
     api = ApiClient(
         baseUrl: '',
@@ -57,9 +57,16 @@ void main() {
               req.url.path == '/api/geo/project') {
             return _json({'type': 'FeatureCollection', 'features': []});
           }
+          if (req.url.path == '/api/projects/Trip/elevation') {
+            // Since issue #295 this is where elevation comes from — 2.8 MB
+            // rather than the 33 MB details payload. encode_profile_pairs(
+            // [[0.0, 10.0], [1.0, 12.0]])
+            return _json({
+              'profiles': {'1': r'?gEo}@g@'},
+              'encrypted': <String, dynamic>{},
+            });
+          }
           if (req.url.path == '/api/projects/Trip') {
-            // The real full-details payload — what _loadElevationData()
-            // should end up fetching.
             return _json({
               'name': 'Trip',
               'activities': [
@@ -83,9 +90,13 @@ void main() {
             '_loadElevationData() must not silently get redirected there '
             'by a getDetails() override');
 
-    final fullCalls = paths.where((p) => p == '/api/projects/Trip').length;
-    expect(fullCalls, greaterThanOrEqualTo(1),
-        reason: 'the full-details endpoint must actually be reached');
+    expect(paths.where((p) => p == '/api/projects/Trip/elevation').length, 1,
+        reason: 'elevation must come from its own endpoint');
+    // And exactly once: view mode used to run its own Phase 2 details fetch
+    // *in addition* to the inherited upgrade, so a 180-day trip fetched
+    // elevation twice — once compactly and once as 33 MB (issue #295).
+    expect(paths.where((p) => p == '/api/projects/Trip').length, 0,
+        reason: 'the 33 MB details payload must not be fetched for elevation');
   });
 
   test(

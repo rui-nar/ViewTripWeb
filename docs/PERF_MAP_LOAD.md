@@ -596,3 +596,34 @@ threshold had to start measuring coordinates. Gating on profile size alone
 would have let a trip carrying the 300-point low-res profile walk hundreds of
 thousands of coordinates on the UI isolate — precisely the pattern that guard
 exists to prevent.
+
+
+## Measured: the compact endpoint, and the fetch it did not remove
+
+First device run with the compact path live:
+
+| | before | after |
+|---|---|---|
+| elevation payload | 33.0 MB | **2.8 MB** |
+| decode | 4884 ms | **57 ms** |
+
+But `fetch_details` was *still there*, at 14.1 s. **View mode ran its own
+Phase 2**, fetching the full details payload for elevation, entirely
+independently of the inherited background upgrade — so a view-mode load
+fetched elevation twice: once cheaply through the new endpoint, and once
+expensively through the old one.
+
+That Phase 2 predates the low-res profile now carried by `/meta` and the
+compact endpoint, and both of the things it existed to do are now done
+elsewhere. It is gone, along with the `_ViewProjectService.fetchFullDetails`
+that only it called.
+
+Worth recording as a pattern: the report named the problem in one line, but
+only because `fetch_elevation` and `fetch_details` appear as *separate* spans.
+Aggregate load time would have shown an improvement and hidden a duplicated
+14-second fetch completely.
+
+**Shared mode still has the equivalent Phase 2.** Its service talks to
+`/api/share/{token}` and there is no share-scoped elevation endpoint yet, so
+it keeps fetching the full payload; the compact endpoint 404s there and falls
+back. That is the next thing to close.
