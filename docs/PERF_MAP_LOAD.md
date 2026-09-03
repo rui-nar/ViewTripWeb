@@ -429,3 +429,50 @@ per-entry ceiling so one oversized payload cannot evict everything else.
 
 This is a mitigation, not the cure. The cure is Phase 4.2: stop building a
 35 MB payload at all.
+
+
+## The ANR was never on the Dart isolate
+
+Six rounds of fixes targeted the Dart UI isolate, and the ANR outlived all of
+them. The instrument that finally settled it was the event-loop stall
+watchdog, by reporting **nothing**: across two device runs, one of which
+ANR'd, the Dart event loop was never blocked for more than ~250 ms. Every
+blocking span agreed — worst was `all_points` at 7.9 ms, and
+`activity_panel_build` did not even appear.
+
+The thing to have questioned much earlier: **an Android ANR is the platform
+main thread failing to handle input for 5 s, and Flutter's Dart code does not
+run on that thread.** It runs on the engine's UI thread. Instruments that
+only watch the Dart isolate can report all-clear through an ANR, and did.
+
+The second run made it sharper still: an ANR with **one** map gesture, zero
+frames captured, and no user interaction at all. Not gesture work, not
+geometry, not marker count — `rendered_points` and `markers` stayed flat
+across every run where behaviour changed drastically.
+
+### What was actually consuming the device
+
+`_MarkerThumbImage` drew each marker with:
+
+```dart
+Image.memory(bytes, width: widget.size, height: widget.size, fit: BoxFit.cover)
+```
+
+`width`/`height` are **layout** constraints and do not affect decoding.
+Without `cacheWidth`/`cacheHeight` Flutter decodes at native resolution, and
+`api/memories.py`'s `_THUMB_SIZE` is `(400, 400)`. So every marker held
+roughly 400x400x4 = ~640 KB of decoded bitmap to draw a ~30-pixel circle. At
+~600 memory markers that is on the order of **375 MB of native memory** —
+outside the Dart heap, outside every span in this codebase, and invisible to
+the stall watchdog because decoding does not happen on the UI isolate.
+
+Passing `cacheWidth`/`cacheHeight` sized to the display box times the device
+pixel ratio takes each decode to roughly 40 KB: about a 16x reduction.
+
+Alongside it, the encoded-bytes cache behind those thumbnails was a
+`static final Map<String, Uint8List>` with **no eviction whatsoever** — the
+same mistake as the server payload cache, and the reason hiding the memories
+layer freed nothing. It is now a `BoundedByteCache` with a byte budget.
+
+`image_cache` and `thumb_bytes` are reported as payload notes so the next
+device run measures this rather than inferring it.
