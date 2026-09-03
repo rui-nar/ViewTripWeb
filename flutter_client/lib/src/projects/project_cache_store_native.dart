@@ -120,12 +120,17 @@ Future<Uint8List?> _ungzBytes(Object? blob) {
 /// The stored full-res geo as raw JSON bytes, with the row's versions so the
 /// caller can apply the same freshness checks [cacheStoreRead] does.
 Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
-    cacheStoreReadFullGeoBytes(String key) async {
+    cacheStoreReadFullGeoBytes(String key) =>
+        _readColumnBytes(key, 'full_geo_gz');
+
+
+Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
+    _readColumnBytes(String key, String column) async {
   try {
     final db = await _open();
     if (db == null) return null;
     final rows = await db.query(_kTable,
-        columns: ['lock_version', 'schema_version', 'full_geo_gz'],
+        columns: ['lock_version', 'schema_version', column],
         where: 'cache_key = ?',
         whereArgs: [key],
         limit: 1);
@@ -134,7 +139,7 @@ Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
     return (
       lockVersion: row['lock_version'] as int,
       schemaVersion: row['schema_version'] as int,
-      bytes: await _ungzBytes(row['full_geo_gz']),
+      bytes: await _ungzBytes(row[column]),
     );
   } catch (_) {
     return null;
@@ -153,8 +158,8 @@ Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
       'schemaVersion': row['schema_version'] as int,
       'meta': await _ungz(row['meta_gz']),
       'lowResGeo': await _ungz(row['low_res_geo_gz']),
-      'fullGeo': await _ungz(row['full_geo_gz']),
       'fullDetails': await _ungz(row['full_details_gz']),
+      'fullGeo': await _ungz(row['full_geo_gz']),
       'updatedAt': row['updated_at'] as int,
     };
   } catch (_) {
@@ -170,25 +175,36 @@ Future<void> cacheStoreWrite(String key, Map<String, dynamic> row) async {
   try {
     final db = await _open();
     if (db == null) return;
-    final existing = await cacheStoreRead(key);
-    final merged = <String, dynamic>{
-      'lockVersion': row['lockVersion'] ?? existing?['lockVersion'] ?? 0,
-      'schemaVersion': row['schemaVersion'] ?? existing?['schemaVersion'] ?? 0,
-      'meta': row.containsKey('meta') ? row['meta'] : existing?['meta'],
-      'lowResGeo': row.containsKey('lowResGeo') ? row['lowResGeo'] : existing?['lowResGeo'],
-      'fullGeo': row.containsKey('fullGeo') ? row['fullGeo'] : existing?['fullGeo'],
-      'fullDetails': row.containsKey('fullDetails') ? row['fullDetails'] : existing?['fullDetails'],
-    };
+    // Merge at the BLOB level, not through decoded maps. Two reasons:
+    //
+    // 1. Correctness. cacheStoreRead deliberately no longer returns the
+    //    details payload — it is the 33 MB one, see readFullDetails — so a
+    //    merge reading decoded values would read "absent" as "no value" and
+    //    wipe the stored details on every unrelated write.
+    // 2. Cost. Re-encoding an untouched column meant gunzip + jsonDecode +
+    //    jsonEncode + gzip over megabytes to rewrite bytes that never changed.
+    final existing = await db.query(_kTable,
+        where: 'cache_key = ?', whereArgs: [key], limit: 1);
+    final prev = existing.isEmpty ? null : existing.first;
+
+    Future<Object?> blob(String field, String column) async =>
+        row.containsKey(field)
+            ? await _gz(row[field] as Map<String, dynamic>?)
+            : prev?[column];
+
     await db.insert(
       _kTable,
       {
         'cache_key': key,
-        'lock_version': merged['lockVersion'],
-        'schema_version': merged['schemaVersion'],
-        'meta_gz': await _gz(merged['meta'] as Map<String, dynamic>?),
-        'low_res_geo_gz': await _gz(merged['lowResGeo'] as Map<String, dynamic>?),
-        'full_geo_gz': await _gz(merged['fullGeo'] as Map<String, dynamic>?),
-        'full_details_gz': await _gz(merged['fullDetails'] as Map<String, dynamic>?),
+        // An absent lockVersion means "unknown — do not touch". Writing a
+        // literal 0 clobbered the real version, which made the whole row
+        // unusable on the next cold start.
+        'lock_version': row['lockVersion'] ?? prev?['lock_version'] ?? 0,
+        'schema_version': row['schemaVersion'] ?? prev?['schema_version'] ?? 0,
+        'meta_gz': await blob('meta', 'meta_gz'),
+        'low_res_geo_gz': await blob('lowResGeo', 'low_res_geo_gz'),
+        'full_geo_gz': await blob('fullGeo', 'full_geo_gz'),
+        'full_details_gz': await blob('fullDetails', 'full_details_gz'),
         'updated_at': DateTime.now().millisecondsSinceEpoch,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
