@@ -1,6 +1,7 @@
 /// Basemap tile URL constants shared between manage, view, and share screens.
 library;
 
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:vector_map_tiles/vector_map_tiles.dart' show VectorTileLayerMode;
 
 // ── Vector tile render mode ──────────────────────────────────────────────────
@@ -18,6 +19,19 @@ const String _kTileMode =
 const VectorTileLayerMode kVectorTileMode = _kTileMode == 'raster'
     ? VectorTileLayerMode.raster
     : VectorTileLayerMode.vector;
+
+/// Live override for [kVectorTileMode], so the two modes can be compared on
+/// one build instead of needing a custom `--dart-define` APK (issue #276).
+///
+/// The parking decision above was made on a CanvasKit measurement and has
+/// never been tested against a long trip on a real device, where raster
+/// frame cost tripled while our own overlay counts stayed flat. A settings
+/// toggle turns that from an argument into an experiment.
+final ValueNotifier<VectorTileLayerMode> mapTileModeNotifier =
+    ValueNotifier<VectorTileLayerMode>(kVectorTileMode);
+
+/// SharedPreferences key for [mapTileModeNotifier].
+const kMapTileModePref = 'map_tile_mode';
 
 // ── Zoom bounds ──────────────────────────────────────────────────────────────
 /// Hard upper bound for the interactive map camera zoom.

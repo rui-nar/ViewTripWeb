@@ -1,5 +1,6 @@
 library;
 
+import '../core/perf_timing.dart' show perfSpans;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter/material.dart';
@@ -262,6 +263,9 @@ class _ElevationChartState extends State<ElevationChart> {
 
   @override
   Widget build(BuildContext context) {
+    // The other uninstrumented widget on the map screen: 180 days of
+    // elevation data, rebuilt alongside the map (#276).
+    return perfSpans.blocking('elevation_chart_build', () {
     if (_spots.isEmpty) {
       return const SizedBox(
         height: 160,
@@ -357,6 +361,7 @@ class _ElevationChartState extends State<ElevationChart> {
         ),
       ),
     );
+    });
   }
 }
 

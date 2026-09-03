@@ -222,6 +222,60 @@ void main() {
     });
   });
 
+  group('gesture-scoped blocking', () {
+    test('work outside a gesture is not attributed to one', () {
+      perfSpans.blocking('activity_panel_build', () {});
+      expect(perfSpans.blockingSpans['activity_panel_build'], hasLength(1));
+      expect(perfSpans.gestureBlockingSpans, isEmpty);
+    });
+
+    test('work during a gesture lands in both buckets', () {
+      perfSpans.beginGesture();
+      perfSpans.blocking('activity_panel_build', () {});
+      perfSpans.endGesture();
+      perfSpans.blocking('activity_panel_build', () {});
+      expect(perfSpans.blockingSpans['activity_panel_build'], hasLength(2));
+      expect(perfSpans.gestureBlockingSpans['activity_panel_build'],
+          hasLength(1),
+          reason: 'session totals cannot say which work happens while panning');
+    });
+
+    test('reset clears the gesture bucket', () {
+      perfSpans.beginGesture();
+      perfSpans.blocking('x', () {});
+      perfSpans.reset();
+      expect(perfSpans.gestureBlockingSpans, isEmpty);
+    });
+  });
+
+  group('stall reporting', () {
+    // The number that corresponds to a freeze. Frames that never happen leave
+    // no timing behind, so build/raster percentiles stay survivable through an
+    // ANR; a late timer tick measures the block directly.
+    test('a stall is reported, split by whether the user was panning', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          worstStallMs: 5200, worstGestureStallMs: 5200);
+      expect(r, contains('worst event-loop stall'));
+      expect(r, contains('5200ms overall'));
+      expect(r, contains('5200ms while panning'));
+    });
+
+    test('no stall line when nothing stalled', () {
+      expect(perfFullReport(const {}, const {'a': [1.0]}, const {}),
+          isNot(contains('event-loop stall')));
+    });
+
+    test('gesture-scoped blocking is reported under the gesture section', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          gestures: 3,
+          gestureBuild: const [5.0],
+          gestureRaster: const [5.0],
+          gestureBlocking: const {'elevation_chart_build': [40.0]});
+      expect(r, contains('blocking DURING gestures'));
+      expect(r, contains('elevation_chart_build'));
+    });
+  });
+
   group('gesture frames', () {
     test('nothing is recorded until a gesture begins', () {
       expect(perfSpans.gestureFrames.gestures, 0);

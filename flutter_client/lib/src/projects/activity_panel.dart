@@ -6,6 +6,7 @@ import 'package:flutter_map_animations/flutter_map_animations.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import '../core/perf_timing.dart' show perfSpans;
 import '../core/design_tokens.dart';
 import '../core/scrolling_selectable_text.dart';
 import '../crypto/e2ee_crypto.dart' show EncryptedField;
@@ -1232,6 +1233,9 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Uninstrumented until now, and a prime suspect during a pan: this panel
+    // renders 180 days of items and rebuilds on every notification (#276).
+    return perfSpans.blocking('activity_panel_build', () {
     final notifier = widget.notifier;
     final theme = Theme.of(context);
     final items = notifier.items;
@@ -2160,6 +2164,7 @@ class _ActivityPanelState extends State<ActivityPanel> {
 
       ],
     );
+    });
   }
 }
 

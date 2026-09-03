@@ -34,6 +34,9 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // No-op unless built with --dart-define=PERF_TIMING=true (dev measurement).
   PerfTiming.instance.start();
+  // Event-loop stall watchdog — the only instrument that sees a freeze, since
+  // a blocked main thread emits no frame timings at all (issue #276).
+  perfSpans.start();
   // Fire-and-forget: login_screen.initState calls attemptLightweightAuthentication()
   // which handles ordering internally. Deferring unblocks the first frame.
   GoogleSignIn.instance.initialize(

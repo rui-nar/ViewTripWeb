@@ -1749,13 +1749,20 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
           ),
           children: [
             if (_vectorStyle != null)
-              VectorTileLayer(
-                tileProviders: _vectorStyle!.providers,
-                theme: _vectorStyle!.theme,
-                sprites: _vectorStyle!.sprites,
-                tileOffset: TileOffset.mapbox,
-                layerMode: kVectorTileMode,
-                maximumZoom: kMaxMapZoom,
+              ValueListenableBuilder<VectorTileLayerMode>(
+                valueListenable: mapTileModeNotifier,
+                builder: (_, tileMode, __) => VectorTileLayer(
+                  // Keyed by mode: VectorTileLayer caches rasterised tiles
+                  // internally, so it has to be rebuilt from scratch rather
+                  // than updated in place when the mode changes.
+                  key: ValueKey(tileMode),
+                  tileProviders: _vectorStyle!.providers,
+                  theme: _vectorStyle!.theme,
+                  sprites: _vectorStyle!.sprites,
+                  tileOffset: TileOffset.mapbox,
+                  layerMode: tileMode,
+                  maximumZoom: kMaxMapZoom,
+                ),
               )
             else if (_tileProvider != null) ...[
               TileLayer(
@@ -2667,13 +2674,20 @@ class ManageMapPanelState extends State<ManageMapPanel>
           ),
           children: [
             if (_vectorStyle != null)
-              VectorTileLayer(
-                tileProviders: _vectorStyle!.providers,
-                theme: _vectorStyle!.theme,
-                sprites: _vectorStyle!.sprites,
-                tileOffset: TileOffset.mapbox,
-                layerMode: kVectorTileMode,
-                maximumZoom: kMaxMapZoom,
+              ValueListenableBuilder<VectorTileLayerMode>(
+                valueListenable: mapTileModeNotifier,
+                builder: (_, tileMode, __) => VectorTileLayer(
+                  // Keyed by mode: VectorTileLayer caches rasterised tiles
+                  // internally, so it has to be rebuilt from scratch rather
+                  // than updated in place when the mode changes.
+                  key: ValueKey(tileMode),
+                  tileProviders: _vectorStyle!.providers,
+                  theme: _vectorStyle!.theme,
+                  sprites: _vectorStyle!.sprites,
+                  tileOffset: TileOffset.mapbox,
+                  layerMode: tileMode,
+                  maximumZoom: kMaxMapZoom,
+                ),
               )
             else if (_tileProvider != null)
               TileLayer(
