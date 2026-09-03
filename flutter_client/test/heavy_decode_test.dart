@@ -377,6 +377,31 @@ void main() {
     });
   });
 
+  // The first attempt at seeding cached geo inferred "already seeded" from
+  // L1 cache residency. That inference is false: ProjectDataCache._readDisk
+  // promotes a whole disk row into L1, and a load reads low-res geo first, so
+  // an unseeded full geo is already sitting in L1 by the time the check runs
+  // — the fix never engaged on the path it was written for. Seeding is now
+  // asked of the geometry itself.
+  group('geoGeometrySeeded', () {
+    test('is false for a freshly decoded geo nothing has derived', () {
+      final geo = decodeGeoBytes(jsonBytes(buildEncodedGeo(activities: 2, pointsPer: 8)));
+      expect(geoGeometrySeeded(geo), isFalse);
+    });
+
+    test('is true once the decode hop has run over it', () async {
+      final geo = await decodeGeoOffIsolate(
+          jsonBytes(buildEncodedGeo(activities: 2, pointsPer: 8)));
+      expect(geoGeometrySeeded(geo), isTrue);
+    });
+
+    test('a geo with nothing drawable needs no derivation', () {
+      expect(geoGeometrySeeded(const {'type': 'FeatureCollection', 'features': []}),
+          isTrue);
+      expect(geoGeometrySeeded(const {}), isTrue);
+    });
+  });
+
   group('ApiClient.getBytes', () {
     test('returns the undecoded response body', () async {
       final client = ApiClient(

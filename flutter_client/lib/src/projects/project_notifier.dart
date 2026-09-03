@@ -995,6 +995,13 @@ class ProjectNotifier extends ChangeNotifier
 
   void setMapCameraActive(bool active) {
     _mapCameraActive = active;
+    // Frame capture for the pan itself (issue #276): every other span in this
+    // app measures loading, and the ANR happens mid-gesture.
+    if (active) {
+      perfSpans.beginGesture();
+    } else {
+      perfSpans.endGesture();
+    }
     if (!active) {
       final waiter = _cameraIdleWaiter;
       _cameraIdleWaiter = null;

@@ -149,6 +149,61 @@ void main() {
     });
   });
 
+  group('gesture frames', () {
+    test('nothing is recorded until a gesture begins', () {
+      expect(perfSpans.gestureFrames.gestures, 0);
+      expect(perfSpans.gestureFrames.build, isEmpty);
+    });
+
+    test('beginGesture counts a gesture; repeats do not double-count', () {
+      perfSpans.beginGesture();
+      perfSpans.beginGesture(); // a second camera event in the same drag
+      expect(perfSpans.gestureFrames.gestures, 1);
+      perfSpans.endGesture();
+      perfSpans.beginGesture();
+      expect(perfSpans.gestureFrames.gestures, 2);
+    });
+
+    test('a disabled recorder counts nothing', () {
+      perfSpans.enabled = false;
+      perfSpans.beginGesture();
+      expect(perfSpans.gestureFrames.gestures, 0);
+    });
+
+    test('reset clears gesture state too', () {
+      perfSpans.beginGesture();
+      perfSpans.reset();
+      expect(perfSpans.gestureFrames.gestures, 0);
+    });
+  });
+
+  group('perfFullReport', () {
+    test('omits the gesture section when nothing panned', () {
+      expect(perfFullReport(const {}, const {'a': [1.0]}, const {}),
+          isNot(contains('map gestures')));
+    });
+
+    test('reports gesture frames when there are any', () {
+      // A pan that drops frames must be visible even when every load span is
+      // comfortably under budget — that combination is exactly what issue
+      // #276 turned out to be.
+      final r = perfFullReport(
+        const {'build_specs': [12.0]},
+        const {},
+        const {},
+        gestures: 2,
+        gestureBuild: const [4.0, 90.0, 5.0],
+        gestureRaster: const [3.0, 6.0, 4.0],
+      );
+      expect(r, contains('map gestures: 2'));
+      expect(r, contains('frames=3'));
+      expect(r, contains('janky'));
+      expect(r, isNot(contains('OVER BUDGET')),
+          reason: 'the load was fine; the gesture was not — they must not be '
+              'conflated');
+    });
+  });
+
   group('perfSpanReport', () {
     test('empty spans report explicitly', () {
       expect(perfSpanReport('blocking', const {}), contains('none'));

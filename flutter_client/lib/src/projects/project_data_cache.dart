@@ -158,12 +158,12 @@ class ProjectDataCache {
   /// takes (issue #299) rather than receive a Map whose geometry nothing has
   /// derived.
   ///
-  /// Returns null when L1 already holds this ref: that Map is the very object
-  /// the decode hop seeded earlier in the session, so [readFullGeo] is both
-  /// cheaper and already warm. This is strictly the cold-start path.
+  /// Deliberately does NOT skip when L1 holds this ref. [_readDisk] promotes
+  /// an entire disk row into L1, so L1 residency says nothing about whether
+  /// the geometry was ever derived — the caller decides, by asking the
+  /// geometry (see `geoGeometrySeeded`).
   Future<Uint8List?> readFullGeoBytes(ProjectRef ref) async {
     final key = _key(ref);
-    if (_mem.containsKey(key)) return null;
     final row = await store.cacheStoreReadFullGeoBytes(key);
     if (row == null || row.schemaVersion != _kSchemaVersion) return null;
     return row.bytes;

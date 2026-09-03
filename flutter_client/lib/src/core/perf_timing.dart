@@ -188,6 +188,64 @@ class PerfSpans {
   final Map<String, List<double>> _stage = {};
   final Map<String, String> _notes = {};
 
+  // ── Frames during map gestures ─────────────────────────────────────────
+  // Every span above measures *loading*. The ANR on issue #276 happens while
+  // panning, and nothing measured that window — three rounds of fixes were
+  // aimed at load-time work on the strength of load-time numbers. These
+  // capture the gesture itself: a pan that drops frames shows up here even
+  // when every load span is comfortably under budget.
+  bool _framesHooked = false;
+  bool _inGesture = false;
+  int _gestures = 0;
+  final List<double> _gestureBuild = [];
+  final List<double> _gestureRaster = [];
+
+  /// Bounded so a long session cannot grow this without limit; the worst
+  /// frame is what matters, and trimming the oldest keeps it.
+  static const _kMaxGestureFrames = 4000;
+
+  /// Called when the map camera starts moving — see
+  /// `ProjectNotifier.setMapCameraActive`, which drives both.
+  void beginGesture() {
+    if (!enabled) return;
+    _hookFrames();
+    if (_inGesture) return;
+    _inGesture = true;
+    _gestures++;
+  }
+
+  void endGesture() => _inGesture = false;
+
+  void _hookFrames() {
+    if (_framesHooked) return;
+    try {
+      WidgetsBinding.instance.addTimingsCallback(_onGestureFrames);
+      _framesHooked = true;
+    } catch (_) {
+      // No binding (a plain unit test) — frame capture simply stays off.
+    }
+  }
+
+  void _onGestureFrames(List<FrameTiming> timings) {
+    if (!_inGesture) return;
+    for (final t in timings) {
+      _gestureBuild.add(t.buildDuration.inMicroseconds / 1000.0);
+      _gestureRaster.add(t.rasterDuration.inMicroseconds / 1000.0);
+    }
+    if (_gestureBuild.length > _kMaxGestureFrames) {
+      _gestureBuild.removeRange(0, _gestureBuild.length - _kMaxGestureFrames);
+      _gestureRaster.removeRange(0, _gestureRaster.length - _kMaxGestureFrames);
+    }
+  }
+
+  /// Frames captured while the map camera was moving.
+  ({int gestures, List<double> build, List<double> raster}) get gestureFrames =>
+      (
+        gestures: _gestures,
+        build: List.unmodifiable(_gestureBuild),
+        raster: List.unmodifiable(_gestureRaster),
+      );
+
   /// UI-isolate stall of a synchronous [body], recorded under [name].
   T blocking<T>(String name, T Function() body) {
     if (!enabled) return body();
@@ -233,6 +291,9 @@ class PerfSpans {
     _blocking.clear();
     _stage.clear();
     _notes.clear();
+    _gestureBuild.clear();
+    _gestureRaster.clear();
+    _gestures = 0;
   }
 
   /// The most recently completed load's report, or null if none has finished
@@ -245,7 +306,10 @@ class PerfSpans {
   /// finish; a no-op when nothing was recorded.
   void report() {
     if (_blocking.isEmpty && _stage.isEmpty) return;
-    final text = perfLoadReport(_blocking, _stage, _notes);
+    final text = perfFullReport(_blocking, _stage, _notes,
+        gestures: _gestures,
+        gestureBuild: _gestureBuild,
+        gestureRaster: _gestureRaster);
     lastReport.value = text;
     if (kPerfTiming) debugPrint(text);
   }
@@ -256,10 +320,28 @@ class PerfSpans {
 /// off Settings -> Performance and pastes into an issue, so its shape is
 /// pinned rather than incidental.
 String perfLoadReport(Map<String, List<double>> blocking,
-    Map<String, List<double>> stage, [Map<String, String> notes = const {}]) {
+        Map<String, List<double>> stage,
+        [Map<String, String> notes = const {}]) =>
+    perfFullReport(blocking, stage, notes);
+
+/// [perfLoadReport] plus the map-gesture frame summary. A separate entry
+/// point so the three-argument form, and its tests, keep working.
+String perfFullReport(
+  Map<String, List<double>> blocking,
+  Map<String, List<double>> stage,
+  Map<String, String> notes, {
+  int gestures = 0,
+  List<double> gestureBuild = const [],
+  List<double> gestureRaster = const [],
+}) {
   final buf = StringBuffer()
     ..writeln(perfSpanReport('blocking (UI isolate)', blocking))
     ..writeln(perfSpanReport('stages (wall clock)', stage));
+  if (gestures > 0) {
+    buf
+      ..writeln('[perf] map gestures: $gestures')
+      ..writeln('  ${perfSummaryLine(gestureBuild, gestureRaster)}');
+  }
   if (notes.isNotEmpty) {
     buf.writeln('[perf] payloads');
     final names = notes.keys.toList()..sort();
