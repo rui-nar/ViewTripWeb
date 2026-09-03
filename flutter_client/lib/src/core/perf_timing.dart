@@ -206,6 +206,21 @@ class PerfSpans {
   // when every load span is comfortably under budget.
   bool _framesHooked = false;
   bool _inGesture = false;
+  final Map<String, List<double>> _gestureBlocking = {};
+
+  // ── Event-loop stall watchdog ──────────────────────────────────────────
+  // Frame timings only exist for frames that COMPLETE. A main thread blocked
+  // for five seconds emits no FrameTiming callbacks at all, so an ANR shows
+  // up as missing samples rather than as a slow frame — which is why the
+  // build/raster percentiles above kept looking survivable while issue #276
+  // was still freezing the app. A periodic timer measuring its own lateness
+  // detects the stall directly: if the loop is blocked, the tick arrives
+  // late by however long it was blocked.
+  Timer? _stallTimer;
+  DateTime? _lastTick;
+  double _maxStallMs = 0;
+  double _maxGestureStallMs = 0;
+  static const _kStallInterval = Duration(milliseconds: 250);
   int _gestures = 0;
   final List<double> _gestureBuild = [];
   final List<double> _gestureRaster = [];
@@ -263,9 +278,40 @@ class PerfSpans {
     try {
       return body();
     } finally {
-      (_blocking[name] ??= []).add(sw.elapsedMicroseconds / 1000.0);
+      final ms = sw.elapsedMicroseconds / 1000.0;
+      (_blocking[name] ??= []).add(ms);
+      // Same measurement, scoped to gestures: session totals cannot say which
+      // work happens while the user is actually panning.
+      if (_inGesture) (_gestureBlocking[name] ??= []).add(ms);
     }
   }
+
+  /// Starts the event-loop stall watchdog. Idempotent; call once at startup.
+  void start() {
+    if (!enabled || _stallTimer != null) return;
+    _lastTick = DateTime.now();
+    _stallTimer = Timer.periodic(_kStallInterval, (_) {
+      final now = DateTime.now();
+      final late = now.difference(_lastTick!).inMilliseconds -
+          _kStallInterval.inMilliseconds;
+      _lastTick = now;
+      if (late <= 0) return;
+      final ms = late.toDouble();
+      if (ms > _maxStallMs) _maxStallMs = ms;
+      if (_inGesture && ms > _maxGestureStallMs) _maxGestureStallMs = ms;
+    });
+  }
+
+  /// Longest observed event-loop stall, overall and while the map camera was
+  /// moving, in milliseconds.
+  ({double worst, double worstDuringGesture}) get stalls =>
+      (worst: _maxStallMs, worstDuringGesture: _maxGestureStallMs);
+
+  /// UI-isolate stalls recorded while the map camera was moving.
+  Map<String, List<double>> get gestureBlockingSpans => {
+        for (final e in _gestureBlocking.entries)
+          e.key: List.unmodifiable(e.value)
+      };
 
   /// Wall-clock duration of an async [body], recorded under [name]. Includes
   /// awaits and isolate hops, so this is NOT a jank measurement.
@@ -318,9 +364,18 @@ class PerfSpans {
     _stage.clear();
     _notes.clear();
     _failures.clear();
+    _gestureBlocking.clear();
+    _maxStallMs = 0;
+    _maxGestureStallMs = 0;
     _gestureBuild.clear();
     _gestureRaster.clear();
     _gestures = 0;
+    // Must clear too: reset() runs at the start of every load, and a load can
+    // begin while the user is mid-pan (a mode toggle, say). Leaving this true
+    // would wedge the flag on forever — every later gesture skipped as
+    // "already in one", and all subsequent work misattributed to panning.
+    // The next camera event re-arms it, so nothing is lost.
+    _inGesture = false;
   }
 
   /// The most recently completed load's report, or null if none has finished
@@ -335,6 +390,9 @@ class PerfSpans {
     if (_blocking.isEmpty && _stage.isEmpty) return;
     final text = perfFullReport(_blocking, _stage, _notes,
         failures: _failures,
+        gestureBlocking: _gestureBlocking,
+        worstStallMs: _maxStallMs,
+        worstGestureStallMs: _maxGestureStallMs,
         gestures: _gestures,
         gestureBuild: _gestureBuild,
         gestureRaster: _gestureRaster);
@@ -359,6 +417,9 @@ String perfFullReport(
   Map<String, List<double>> stage,
   Map<String, String> notes, {
   Map<String, List<String>> failures = const {},
+  Map<String, List<double>> gestureBlocking = const {},
+  double worstStallMs = 0,
+  double worstGestureStallMs = 0,
   int gestures = 0,
   List<double> gestureBuild = const [],
   List<double> gestureRaster = const [],
@@ -370,6 +431,17 @@ String perfFullReport(
     buf
       ..writeln('[perf] map gestures: $gestures')
       ..writeln('  ${perfSummaryLine(gestureBuild, gestureRaster)}');
+    if (gestureBlocking.isNotEmpty) {
+      buf.writeln(perfSpanReport('blocking DURING gestures', gestureBlocking));
+    }
+  }
+  if (worstStallMs > 0) {
+    // The number that actually corresponds to a freeze: frames that never
+    // happened leave no timing behind, but a late timer tick measures the
+    // block directly.
+    buf.writeln('[perf] worst event-loop stall: '
+        '${worstStallMs.toStringAsFixed(0)}ms overall, '
+        '${worstGestureStallMs.toStringAsFixed(0)}ms while panning');
   }
   if (failures.isNotEmpty) {
     buf.writeln('[perf] FAILURES');

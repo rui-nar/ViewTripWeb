@@ -3,12 +3,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:vector_map_tiles/vector_map_tiles.dart' show VectorTileLayerMode;
 
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
 import '../billing/billing_section.dart';
 import '../core/perf_timing.dart' show perfFullReport, perfSpans;
+import '../projects/basemaps.dart' show kMapTileModePref, mapTileModeNotifier;
 import '../core/version_reload_stub.dart'
     if (dart.library.html) '../core/version_reload_web.dart';
 import '../crypto/enable_encryption_screen.dart';
@@ -1084,6 +1087,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 const SizedBox(height: 16),
 
+                // ── Map rendering ──────────────────────────────────────
+                const _TileModePanel(),
+
+                const SizedBox(height: 16),
+
                 // ── Performance ────────────────────────────────────────
                 // Surfaced in the app, not behind a --dart-define debugPrint,
                 // because the builds that need diagnosing are the ones on a
@@ -1254,6 +1262,73 @@ class _PerfPanelState extends State<_PerfPanel> {
                 ),
               ],
             ),
+    );
+  }
+}
+
+
+/// Runtime basemap render-mode switch (issue #276).
+///
+/// `vector` repaints the whole basemap on every pumped frame; `raster`
+/// renders each tile to a cached bitmap once. The project has been parked on
+/// `vector` behind a `--dart-define` since that trade-off was measured on
+/// CanvasKit, which meant comparing them on a phone required a custom build.
+/// Exposing it here makes it a one-tap experiment on the build you already
+/// have.
+class _TileModePanel extends StatefulWidget {
+  const _TileModePanel();
+
+  @override
+  State<_TileModePanel> createState() => _TileModePanelState();
+}
+
+class _TileModePanelState extends State<_TileModePanel> {
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((prefs) {
+      final saved = prefs.getString(kMapTileModePref);
+      if (saved == null || !mounted) return;
+      mapTileModeNotifier.value = saved == 'raster'
+          ? VectorTileLayerMode.raster
+          : VectorTileLayerMode.vector;
+    });
+  }
+
+  Future<void> _set(VectorTileLayerMode mode) async {
+    mapTileModeNotifier.value = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        kMapTileModePref,
+        mode == VectorTileLayerMode.raster ? 'raster' : 'vector');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return _SectionCard(
+      title: 'Map rendering',
+      icon: Icons.layers_outlined,
+      child: ValueListenableBuilder<VectorTileLayerMode>(
+        valueListenable: mapTileModeNotifier,
+        builder: (context, mode, __) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Cache map tiles as images'),
+              subtitle: Text(
+                'Smoother panning on long trips; tiles look briefly soft '
+                'while zooming. Reopen the map to apply.',
+                style: theme.textTheme.bodySmall,
+              ),
+              value: mode == VectorTileLayerMode.raster,
+              onChanged: (on) => _set(
+                  on ? VectorTileLayerMode.raster : VectorTileLayerMode.vector),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
