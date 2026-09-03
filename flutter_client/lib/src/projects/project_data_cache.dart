@@ -44,6 +44,8 @@
 /// streams in.
 library;
 
+import 'dart:typed_data' show Uint8List;
+
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../core/project_ref.dart';
@@ -150,6 +152,30 @@ class ProjectDataCache {
       _readHeavy(ref, (e) => e.lowResGeo);
   Future<Map<String, dynamic>?> readFullGeo(ProjectRef ref) =>
       _readHeavy(ref, (e) => e.fullGeo);
+
+  /// The on-disk full-res geo as raw JSON bytes, for a caller that wants to
+  /// run it through the same parse-derive-seed worker hop a network response
+  /// takes (issue #299) rather than receive a Map whose geometry nothing has
+  /// derived.
+  ///
+  /// Returns null when L1 already holds this ref: that Map is the very object
+  /// the decode hop seeded earlier in the session, so [readFullGeo] is both
+  /// cheaper and already warm. This is strictly the cold-start path.
+  Future<Uint8List?> readFullGeoBytes(ProjectRef ref) async {
+    final key = _key(ref);
+    if (_mem.containsKey(key)) return null;
+    final row = await store.cacheStoreReadFullGeoBytes(key);
+    if (row == null || row.schemaVersion != _kSchemaVersion) return null;
+    return row.bytes;
+  }
+
+  /// Records [data] in L1 only — for a caller that just decoded bytes this
+  /// cache handed it, so rewriting the identical blob to disk would be pure
+  /// churn.
+  void promoteFullGeo(ProjectRef ref, Map<String, dynamic> data) {
+    final key = _key(ref);
+    (_mem[key] ??= _Entry(0)).fullGeo = data;
+  }
   Future<Map<String, dynamic>?> readFullDetails(ProjectRef ref) =>
       _readHeavy(ref, (e) => e.fullDetails);
 

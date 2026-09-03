@@ -1073,7 +1073,7 @@ class ProjectNotifier extends ChangeNotifier
     // of back-to-back main-thread rebuilds was enough to trip Android's ANR
     // watchdog. Apply the cached geo in one shot instead, exactly like the
     // final pass below does for a real fetch.
-    final cachedFullGeo = await projectDataCache.readFullGeo(ref);
+    final cachedFullGeo = await _service.readCachedGeo(ref);
     if (cachedFullGeo != null) {
       if (!_isCurrent(token, ref)) return;
       try {
