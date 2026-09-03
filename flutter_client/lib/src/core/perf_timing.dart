@@ -28,6 +28,33 @@ const bool kPerfNoMap = bool.fromEnvironment('PERF_NO_MAP');
 /// 60 fps frame budget in milliseconds.
 const double kFrameBudgetMs = 1000.0 / 60.0; // 16.67
 
+/// Rough heap cost of the big per-trip structures, as a human-readable label.
+///
+/// Deliberately an *estimate*, and labelled as one in the report: Dart exposes
+/// no way to size an object graph, and the alternative — reading a 1.5 GB RSS
+/// and guessing which of several candidates it is — is what several rounds of
+/// issue #276 already wasted. Knowing whether our own structures account for
+/// 200 MB or 1 GB decides where to look next, and that does not need
+/// precision.
+///
+/// Per-entry costs on the 64-bit VM, deliberately conservative:
+/// * a `(double, GeoPoint)` track entry: the outer record, the inner record
+///   and three boxed doubles — call it 64 B.
+/// * a geo coordinate: `jsonDecode` yields a 2-element `List<dynamic>` of
+///   boxed doubles, so a list header plus two pointers plus two boxes — call
+///   it 88 B. The memoised `LatLng` per coordinate adds ~32 B on top.
+String perfEstimateStructBytes({
+  required int fullTrackPoints,
+  required int perActivityTrackPoints,
+  required int geoCoords,
+}) {
+  const trackEntry = 64;
+  const coordEntry = 88 + 32;
+  final bytes = (fullTrackPoints + perActivityTrackPoints) * trackEntry +
+      geoCoords * coordEntry;
+  return '~${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB (estimate)';
+}
+
 /// A one-line, bounded description of a thrown object, for the failure report.
 /// `toString()` is used deliberately rather than type-switching: ApiException
 /// already prints its status code, and this file must not import the API

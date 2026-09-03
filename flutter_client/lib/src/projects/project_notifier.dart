@@ -1482,12 +1482,40 @@ class ProjectNotifier extends ChangeNotifier
       final r = buildFullTrackResult((geo: geo, activities: activities));
       _fullTrack = r.fullTrack;
       _perActivityTracks = r.perActivityTracks;
+      _noteTrackSizes();
       return;
     }
     final r = await compute(buildFullTrackResult, (geo: geo, activities: activities));
     if (gen != _buildFullTrackGen) return; // superseded by a newer call
     _fullTrack = r.fullTrack;
     _perActivityTracks = r.perActivityTracks;
+    _noteTrackSizes();
+  }
+
+  /// Records how large the structures this app holds actually are.
+  ///
+  /// Removing the 33 MB details payload took peak RSS from ~1.9 GB to
+  /// ~1.5 GB, so it was a large contributor but not the bulk — and nothing
+  /// currently says what the remaining 1.5 GB is. These counts separate "our
+  /// data" from engine, GPU and native-image memory, which RSS lumps
+  /// together. Every one is an O(1) length read or an O(features) walk.
+  void _noteTrackSizes() {
+    if (!perfSpans.enabled) return;
+    var perAct = 0;
+    for (final t in _perActivityTracks.values) {
+      perAct += t.length;
+    }
+    final coords = totalTrackCoordinatePoints(geo);
+    perfSpans
+      ..note('full_track_points', '${_fullTrack.length}')
+      ..note('per_activity_track_points', '$perAct')
+      ..note('geo_coords', '$coords')
+      ..note('activities', '${activities.length}')
+      ..note('items', '${items.length}')
+      ..note('dart_structs_est', perfEstimateStructBytes(
+          fullTrackPoints: _fullTrack.length,
+          perActivityTrackPoints: perAct,
+          geoCoords: coords));
   }
 
   /// Test-only seam for driving [_buildFullTrack] directly, without needing a
