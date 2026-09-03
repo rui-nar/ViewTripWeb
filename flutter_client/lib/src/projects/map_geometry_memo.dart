@@ -99,6 +99,26 @@ void seedDecimatedLatLng(List coords, List<LatLng> points) {
   _decimatedCache[coords] = points;
 }
 
+/// Whether [geo]'s drawable geometry has already been derived and seeded.
+///
+/// Asked of the geometry itself rather than inferred from where the Map came
+/// from: `ProjectDataCache._readDisk` promotes a whole disk row into L1, so
+/// "L1 holds this ref" does NOT imply "the decode hop seeded it" — a load
+/// reads low-res geo first, which pulls the row in, and an unseeded full geo
+/// rides along with it. Inferring seeding from cache residency is what made
+/// the first attempt at this fix a no-op on the exact path it targeted.
+bool geoGeometrySeeded(Map<String, dynamic> geo) {
+  final features = geo['features'];
+  if (features is! List) return true; // nothing to draw, nothing to derive
+  for (final f in features) {
+    if (f is! Map) continue;
+    final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is! List || coords.length < 2) continue;
+    return _decimatedCache[coords] != null;
+  }
+  return true; // no drawable feature
+}
+
 /// Records [midpoint] as the arc midpoint of [coords]. See [seedCoordsLatLng].
 void seedArcMidpoint(List coords, LatLng midpoint) {
   _arcMidpointCache[coords] = midpoint;

@@ -1666,6 +1666,21 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     }
     final polylines = _cachedPolylines;
 
+    // What the renderer is being handed. flutter_map re-walks every point of
+    // every polyline overlapping the viewport, and repositions every marker,
+    // on every camera frame — so these two counts, not any load timing, are
+    // what a pan actually costs (issue #276).
+    if (perfSpans.enabled) {
+      var pts = 0;
+      for (final p in polylines) {
+        pts += p.points.length;
+      }
+      perfSpans.note('rendered_points', '$pts');
+      perfSpans.note(
+          'markers',
+          '${_cachedActivityMarkers.length + _cachedSegmentMarkers.length + _cachedMemoryMarkers.length + _cachedJournalMarkers.length + _cachedEncounterMarkers.length}');
+    }
+
     // Guard before flattening every polyline's points: this list is consumed
     // only by the one-shot _fitBoundsOnce, so once the map has been fitted
     // building it is pure waste. It used to be rebuilt on every day/activity

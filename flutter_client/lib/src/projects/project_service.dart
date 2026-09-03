@@ -7,6 +7,7 @@ import '../api/client.dart';
 import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
 import 'heavy_decode.dart' as heavy;
+import 'map_geometry_memo.dart' show geoGeometrySeeded;
 import 'project_data_cache.dart';
 
 /// Deduplicates concurrent identical heavy fetches across *all* [ProjectService]
@@ -127,6 +128,10 @@ class ProjectService {
   /// ANR watchdog mid-pan. L1 is preferred when present: that Map is the very
   /// object the decode hop already seeded this session.
   Future<Map<String, dynamic>?> readCachedGeo(ProjectRef ref) async {
+    final cached = await projectDataCache.readFullGeo(ref);
+    // Ask the geometry, not the cache: L1 residency does not imply the decode
+    // hop ever ran over this Map (see geoGeometrySeeded).
+    if (cached != null && geoGeometrySeeded(cached)) return cached;
     final bytes = await projectDataCache.readFullGeoBytes(ref);
     if (bytes != null) {
       final geo = await perfSpans.stage(
@@ -134,7 +139,7 @@ class ProjectService {
       projectDataCache.promoteFullGeo(ref, geo);
       return geo;
     }
-    return projectDataCache.readFullGeo(ref);
+    return cached;
   }
 
   /// Fetches the GeoJSON FeatureCollection for [ref].
@@ -197,8 +202,12 @@ class ProjectService {
               ref.withOwner('/api/geo/project/low-res?name=$encoded'),
               timeout: _kLoadTimeout));
       perfSpans.note('low_res_geo', perfSizeLabel(bytes.length));
+      // decodeGeoOffIsolate, not the plain JSON decode: the low-res payload
+      // already carries expanded coordinates (the expansion pass is a no-op on
+      // those), and on a long trip it is still well over the render budget, so
+      // it needs the same derive-and-seed treatment as the full-res geo.
       final data = await perfSpans.stage(
-          'decode_low_res_geo', () => heavy.decodeJsonMapOffIsolate(bytes));
+          'decode_low_res_geo', () => heavy.decodeGeoOffIsolate(bytes));
       projectDataCache.writeLowResGeo(ref, data);
       return data;
     });
