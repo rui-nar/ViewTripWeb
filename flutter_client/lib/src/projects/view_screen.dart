@@ -32,29 +32,22 @@ import 'sync_import_dialog.dart';
 import 'sync_import_notifier.dart';
 import 'viewport_sync.dart';
 
-// ── Service — calls /api/projects/{name}/meta first, full details in background
+// ── Service — calls /api/projects/{name}/meta first, elevation in background
 
-class _ViewProjectService extends ProjectService {
-  /// Fetches the full ~3 MB response (elevation_profile included).
-  /// Called by ViewProjectNotifier.loadView() after load() has returned.
-  ///
-  /// Delegates to the base ProjectService.getDetails() — not just for the
-  /// cache slot it already shared with manage mode's equivalent full fetch,
-  /// but for the in-flight-fetch dedup that lives there too: toggling into
-  /// manage mode while this is still running used to let both hit the same
-  /// ~12 MB endpoint at once, landing two synchronous jsonDecodes back to
-  /// back on the UI isolate and ANR-ing the app. See ProjectService.getDetails.
-  Future<Map<String, dynamic>> fetchFullDetails(ProjectRef ref) => super.getDetails(ref);
-}
+/// View mode uses the base service unchanged.
+///
+/// It used to add a `fetchFullDetails` for its own Phase 2 elevation fetch.
+/// That Phase 2 is gone (see [ViewProjectNotifier.loadView]) — the inherited
+/// background upgrade fetches the compact /elevation endpoint instead of the
+/// 33 MB details payload, so there is nothing left for a subclass to add.
+class _ViewProjectService extends ProjectService {}
 
 // ── Notifier — progressive two-phase load ────────────────────────────────────
 
 class ViewProjectNotifier extends ProjectNotifier {
-  final _ViewProjectService _viewSvc;
   bool _disposed = false;
 
-  ViewProjectNotifier._internal(_ViewProjectService super.svc)
-      : _viewSvc = svc;
+  ViewProjectNotifier._internal(_ViewProjectService super.svc);
 
   factory ViewProjectNotifier() {
     final svc = _ViewProjectService();
@@ -97,29 +90,19 @@ class ViewProjectNotifier extends ProjectNotifier {
     isElevationLoaded = true;
     notifyListeners(); // project name, map, activity panel + elevation chart visible
 
-    // Phase 2 (background): fetch full ~3 MB response for elevation data.
-    // Fired here — after load() has returned — so meta had exclusive bandwidth.
-    try {
-      final fullDetails = await _viewSvc.fetchFullDetails(ref);
-      if (_disposed || currentLoadKey != ref || currentLoadToken != token) return;
-      final rawActs = fullDetails['activities'];
-      if (rawActs is List) {
-        // applyFullActivities notifies internally (gated on camera-idle) —
-        // isElevationLoaded was already set true above, so no second notify
-        // is needed here just to surface it.
-        await applyFullActivities(rawActs.cast<Map<String, dynamic>>(),
-            ref: ref, token: token);
-      }
-    } catch (_) {
-      // Non-fatal — elevation placeholder stays visible. Still notify (like
-      // ProjectNotifier._loadFullGeoProgressively's own catch block) so a
-      // mutation applyFullActivities may have already made (the activities
-      // merge, before its own _buildFullTrack() threw) doesn't stay
-      // unbroadcast — issue #283 bug #4.
-      if (!_disposed && currentLoadKey == ref && currentLoadToken == token) {
-        notifyListeners();
-      }
-    }
+    // There is deliberately no Phase 2 here any more.
+    //
+    // It used to fetch the full details payload for elevation — on a 180-day
+    // trip that is 33 MB and ~14 s (issue #295). The inherited load() already
+    // upgrades elevation in its own background phase, and since #295 it does
+    // so from the compact /elevation endpoint: 2.8 MB and ~57 ms to decode on
+    // the same trip. Keeping this block meant view mode fetched elevation
+    // *twice*, once cheaply and once expensively, and the expensive one was
+    // still the largest single thing a view-mode load did.
+    //
+    // isElevationLoaded is already true above so the chart renders from the
+    // low-res profile /meta carries; the inherited upgrade replaces it in
+    // place, notifying through the same camera-idle gate.
   }
 }
 
