@@ -175,14 +175,20 @@ Future<void> cacheStoreWrite(String key, Map<String, dynamic> row) async {
   try {
     final db = await _open();
     if (db == null) return;
-    // Merge at the BLOB level, not through decoded maps. Two reasons:
+    // Merge at the BLOB level, not through decoded maps.
     //
-    // 1. Correctness. cacheStoreRead deliberately no longer returns the
-    //    details payload — it is the 33 MB one, see readFullDetails — so a
-    //    merge reading decoded values would read "absent" as "no value" and
-    //    wipe the stored details on every unrelated write.
-    // 2. Cost. Re-encoding an untouched column meant gunzip + jsonDecode +
-    //    jsonEncode + gzip over megabytes to rewrite bytes that never changed.
+    // The old version read the whole row back through cacheStoreRead —
+    // gunzipping and jsonDecoding every column — then re-encoded and
+    // re-gzipped all of them to change one. A load calls this three times
+    // (low-res geo, full geo, details), so opening a trip decoded and
+    // re-encoded the 33 MB details payload three times over to rewrite bytes
+    // that never changed. It runs off the UI isolate, so it never showed up
+    // in a blocking span, but transient allocation at that scale is what
+    // drives the GC behind issue #276's 2.17 GB RSS.
+    //
+    // Carrying untouched columns across as stored bytes also removes the
+    // decode step's failure mode: a column this write does not name cannot be
+    // lost to a decode that returned null.
     final existing = await db.query(_kTable,
         where: 'cache_key = ?', whereArgs: [key], limit: 1);
     final prev = existing.isEmpty ? null : existing.first;

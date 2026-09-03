@@ -117,9 +117,8 @@ Future<T> retryFetch<T>(
   );
 }
 
-/// Cheap O(activities) precheck for [kInlineFullTrackThreshold] — just reads
-/// `elevation_profile.length`, no per-point work. Mirrors elevation_chart.dart's
-/// private `_totalProfilePoints`.
+/// Cheap O(activities) count of raw elevation samples. Mirrors
+/// elevation_chart.dart's private `_totalProfilePoints`.
 @visibleForTesting
 int totalElevationProfilePoints(List<Map<String, dynamic>> activities) {
   var total = 0;
@@ -130,9 +129,31 @@ int totalElevationProfilePoints(List<Map<String, dynamic>> activities) {
   return total;
 }
 
-/// Above this many raw elevation_profile points across all activities,
-/// [ProjectNotifier._buildFullTrack] moves the work to a background isolate
-/// instead of running it inline — mirrors elevation_chart.dart's
+/// Cheap O(features) count of the coordinates [buildFullTrackResult] will walk.
+///
+/// This, not the elevation-sample count, is what that function costs: since
+/// issue #295 it derives distances from the geometry (haversine per segment)
+/// rather than pairing profile samples by index. Gating the isolate hop on
+/// profile size alone meant a trip carrying the 300-point low-res profile
+/// scored far below the threshold while still walking hundreds of thousands
+/// of coordinates on the UI isolate — exactly the pattern the guard exists
+/// to prevent.
+@visibleForTesting
+int totalTrackCoordinatePoints(Map<String, dynamic>? geo) {
+  var total = 0;
+  final features = geo?['features'];
+  if (features is! List) return 0;
+  for (final f in features) {
+    if (f is! Map) continue;
+    if ((f['properties'] as Map? ?? {})['type'] == 'segment') continue;
+    final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is List) total += coords.length;
+  }
+  return total;
+}
+
+/// Above this many points, [ProjectNotifier._buildFullTrack] moves the work to
+/// a background isolate instead of running it inline — mirrors elevation_chart.dart's
 /// `_kInlineComputeThreshold` / map_panel.dart's `_kInlineHitTestThreshold`
 /// precedent.
 const kInlineFullTrackThreshold = 5000;
@@ -181,27 +202,28 @@ const kInlineFullTrackThreshold = 5000;
         : 0.0;
     final actTrack = <(double, GeoPoint)>[];
     if (coords != null && coords.isNotEmpty) {
-      if (coords.length >= profile.length) {
-        // Fast path: build GeoPoint only for the points we actually use.
-        for (int i = 0; i < profile.length; i++) {
-          final pt = profile[i];
-          final c = coords[i];
-          if (pt is! List || pt.length < 2 || c is! List || c.length < 2) continue;
-          actTrack.add((
-            (pt[0] as num).toDouble(),
-            (lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()),
-          ));
+      // Always distance-based, never index-based.
+      //
+      // This used to pair profile[i] with coords[i] whenever there were at
+      // least as many coordinates as profile samples, which is only correct
+      // when the two are index-aligned — i.e. when the profile is at full GPS
+      // resolution. Given a *downsampled* profile it silently mapped the
+      // whole distance range onto the leading fraction of the geometry: a
+      // 10 km track with a 10-sample profile ended at 10% of its true length,
+      // so the map cursor pointed at the wrong place entirely.
+      //
+      // That is the reason the client fetched the ~33 MB full-resolution
+      // details payload at all (issue #295): the low-res profile /meta
+      // already carries could not be used. Distances come from the geometry
+      // and are scaled to the profile's total, so the only thing needed from
+      // the profile is that one number — at any resolution.
+      final pts = <GeoPoint>[];
+      for (final c in coords) {
+        if (c is List && c.length >= 2) {
+          pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
         }
-      } else {
-        // Haversine fallback: coords fewer than profile samples.
-        final pts = <GeoPoint>[];
-        for (final c in coords) {
-          if (c is List && c.length >= 2) {
-            pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
-          }
-        }
-        actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
       }
+      actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
     }
     if (actId != null) perAct[actId] = actTrack;
     for (final pt in actTrack) {
@@ -1183,6 +1205,18 @@ class ProjectNotifier extends ChangeNotifier
   /// the initial panel render.
   Future<void> _loadElevationData(ProjectRef ref, int token) async {
     perfSpans.recordBackgroundRefresh('elevation_load');
+    // The compact endpoint (issue #295) carries the only part of the details
+    // payload this load needs. That payload is 33 MB on a long trip — ~9 s to
+    // fetch, ~5 s to decode, and retained afterwards; this is a few hundred
+    // KB. E2EE trips still take the old path: their profiles are opaque
+    // envelopes the endpoint cannot open, and decrypting them is the details
+    // payload's job.
+    if (!encryption.isUnlocked) {
+      final merged = await _loadElevationCompact(ref, token);
+      if (merged) return;
+      // Fell through (older server without the endpoint, or encrypted
+      // profiles) — the details payload is still the source of truth.
+    }
     try {
       final details = await _service.getDetails(ref);
       if (!_isCurrent(token, ref)) return;
@@ -1212,6 +1246,37 @@ class ProjectNotifier extends ChangeNotifier
       // just Exception), matching _loadFullGeoProgressively above: a decode
       // failure can throw an Error (RangeError/TypeError) that would
       // otherwise escape as an unhandled async exception.
+    }
+  }
+
+  /// Fetches elevation from the compact endpoint and merges it into
+  /// [activities]. Returns false when the caller should fall back to the full
+  /// details payload — an older server, or profiles this endpoint could not
+  /// open.
+  Future<bool> _loadElevationCompact(ProjectRef ref, int token) async {
+    try {
+      final result = await _service.getElevation(ref);
+      if (!_isCurrent(token, ref)) return true; // superseded: nothing to do
+      if (result.encryptedIds.isNotEmpty) return false;
+      if (result.profiles.isEmpty) return true; // genuinely no elevation data
+      // Copy-on-write per activity, so MapPanel's identical() caches see a
+      // new list and nothing mutates an object another listener is reading.
+      activities = [
+        for (final a in activities)
+          result.profiles[a['id']?.toString()] == null
+              ? a
+              : {...a, 'elevation_profile': result.profiles[a['id'].toString()]},
+      ];
+      await _buildFullTrack();
+      if (!_isCurrent(token, ref)) return true;
+      await _waitForCameraIdle();
+      if (!_isCurrent(token, ref)) return true;
+      notifyListeners();
+      return true;
+    } on Object {
+      // Non-fatal, and deliberately not an error banner: the details payload
+      // below can still supply this.
+      return false;
     }
   }
 
@@ -1406,7 +1471,10 @@ class ProjectNotifier extends ChangeNotifier
     // the counter untouched, so a stale compute() result could still pass
     // the staleness check below and clobber newer data).
     final gen = ++_buildFullTrackGen;
-    if (totalElevationProfilePoints(activities) <= kInlineFullTrackThreshold) {
+    final coordPoints = totalTrackCoordinatePoints(geo);
+    final samplePoints = totalElevationProfilePoints(activities);
+    final work = coordPoints > samplePoints ? coordPoints : samplePoints;
+    if (work <= kInlineFullTrackThreshold) {
       // No staleness check needed here: buildFullTrackResult() is synchronous,
       // so nothing can bump _buildFullTrackGen between the increment above and
       // this line — unlike the compute() branch below, which awaits across an
