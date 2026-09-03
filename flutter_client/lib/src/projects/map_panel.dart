@@ -21,6 +21,7 @@ import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
 import 'map_geometry_memo.dart';
+import 'polyline_decimation.dart';
 import 'memory_detail_modal.dart';
 import 'people_screen.dart' show showGroupDetailSheet, showPersonDetailSheet;
 import 'people_search.dart' show classifyEncounterPin;
@@ -30,6 +31,8 @@ import 'project_notifier.dart';
 // Existing callers (and map_geometry_memo_test.dart) import this helper from
 // map_panel.dart, where it used to live; keep that entry point.
 export 'map_geometry_memo.dart' show memoArcMidpoint, memoCoordsToLatLng;
+export 'polyline_decimation.dart'
+    show decimatePolylinePoints, kMaxTotalPolylinePoints, totalPolylinePoints;
 LatLng _ll(GeoPoint p) => LatLng(p.lat, p.lon);
 
 IconData _iconForActivityType(String? type) => switch (type?.toLowerCase()) {
@@ -1431,6 +1434,30 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     if (total <= kMaxTotalPolylinePoints) return;
     if (identical(specs, _decimateSourceSpecs)) return;
     _decimateSourceSpecs = specs;
+
+    // Fast path: the decode hop already decimated this geometry on a worker
+    // (issue #299). Taking it costs one lookup per feature instead of
+    // marshalling every point into records and paying compute() to copy them
+    // across — measured on a real device at 788 ms of marshalling plus ~1.6 s
+    // of argument copy, a 2.4 s stall that landed mid-pan and tripped
+    // Android's ANR watchdog. Assigning synchronously is safe: build() reads
+    // _polylineSpecs only after this returns.
+    final seeded = <List<LatLng>>[];
+    for (final s in specs) {
+      final coords = s.rawCoords;
+      final d = coords == null ? null : decimatedLatLng(coords);
+      if (d == null) break;
+      seeded.add(d);
+    }
+    if (seeded.length == specs.length) {
+      _polylineSpecs = [
+        for (var i = 0; i < specs.length; i++) specs[i].withPoints(seeded[i]),
+      ];
+      return;
+    }
+
+    // Fallback for geometry the decode hop never saw: client-built E2EE geo,
+    // and locally patched segments merged in after a load.
     final gen = ++_polylineDecimateGen;
     final lines = perfSpans.blocking('decimate_marshal', () => [
       for (final s in specs)
@@ -1912,6 +1939,11 @@ class _MapToggleRow extends StatelessWidget {
 /// [buildDayIndex]'s doc comment).
 class _PolylineSpec {
   final List<LatLng> points;
+  /// The raw GeoJSON coordinates this spec was built from — carried purely as
+  /// the identity key for the geometry caches in map_geometry_memo.dart, so
+  /// _maybeDecimatePolylines can find the decimation the decode hop already
+  /// produced. Never read as data.
+  final List? rawCoords;
   final bool isSegment;
   final String? featureId;
   final Color baseColor;
@@ -1922,10 +1954,12 @@ class _PolylineSpec {
     required this.featureId,
     required this.baseColor,
     required this.lineStyle,
+    this.rawCoords,
   });
 
   _PolylineSpec withPoints(List<LatLng> newPoints) => _PolylineSpec(
         points: newPoints,
+        rawCoords: rawCoords,
         isSegment: isSegment,
         featureId: featureId,
         baseColor: baseColor,
@@ -1950,88 +1984,6 @@ List<LatLng> _allPointsFromGeo(Map<String, dynamic> geo) {
   return pts;
 }
 
-/// Total polyline points across every simultaneously-drawn line above which
-/// [decimatePolylinePoints] kicks in, capping the total at roughly this many
-/// (distributed proportionally per line). flutter_map's own PolylineLayer
-/// already reduces point density per line adaptively with zoom
-/// (simplificationTolerance, set below) — but that has no concept of the
-/// AGGREGATE across every line drawn at once, and the default (no
-/// selection) view always draws every activity's full track simultaneously.
-/// For a large trip whose activities' tracks overlap the same region, that
-/// aggregate is exactly what flutter_map's own per-camera-frame culling walk
-/// (it re-walks every point of every polyline overlapping the viewport, on
-/// every single frame — confirmed by reading flutter_map 8.3.1's source)
-/// pays for on every pan event, scaling linearly with trip size regardless
-/// of any of our own caching. Confirmed as the actual cause via an Android
-/// ANR trace: "Waited 5001ms for MotionEvent" with the app's main thread
-/// pegged near 100% CPU throughout a pan on a large (dozens-of-activities)
-/// trip — sustained main-isolate computation, not an I/O or lock wait.
-const kMaxTotalPolylinePoints = 6000;
-
-/// Total points across [lines] — split out from [decimatePolylinePoints] so
-/// a caller can cheaply decide whether decimation is needed at all.
-@visibleForTesting
-int totalPolylinePoints(List<List<(double, double)>> lines) =>
-    lines.fold(0, (sum, l) => sum + l.length);
-
-/// Caps the combined point count of [args.lines] at [args.budget], keeping
-/// every line if already under budget. Each line's share of the budget is
-/// proportional to its share of the raw total, then LTTB-downsampled (see
-/// [_lttbPoints]) — long/dense tracks get more of the budget than short
-/// ones, and every line keeps its first/last point exactly. Pure and
-/// isolate-safe (plain records only) so it can run via [compute] for a large
-/// trip without blocking the UI isolate that's about to render the result.
-@visibleForTesting
-List<List<(double, double)>> decimatePolylinePoints(
-  ({List<List<(double, double)>> lines, int budget}) args,
-) {
-  final total = totalPolylinePoints(args.lines);
-  if (total <= args.budget || args.lines.isEmpty) return args.lines;
-  return [
-    for (final line in args.lines)
-      if (line.length <= 2)
-        line
-      else
-        _lttbPoints(line,
-            (args.budget * line.length / total).round().clamp(2, line.length)),
-  ];
-}
-
-/// Largest-Triangle-Three-Buckets downsampling over generic (x, y) points —
-/// mirrors elevation_chart.dart's [_lttb] (kept separate: that one is
-/// specialised for FlSpot/distance-elevation series, this one for
-/// lat/lon geometry) — O(n), selects [threshold] points that best preserve
-/// the curve's visual shape.
-List<(double, double)> _lttbPoints(List<(double, double)> data, int threshold) {
-  final n = data.length;
-  if (threshold >= n) return data;
-  final out = <(double, double)>[data.first];
-  int a = 0;
-  final every = (n - 2) / (threshold - 2);
-  for (int i = 0; i < threshold - 2; i++) {
-    final nS = ((i + 1) * every + 1).floor();
-    final nE = ((i + 2) * every + 1).floor().clamp(0, n);
-    double avgX = 0, avgY = 0;
-    for (int j = nS; j < nE; j++) { avgX += data[j].$1; avgY += data[j].$2; }
-    final cnt = nE - nS;
-    avgX /= cnt; avgY /= cnt;
-    final cS = (i * every + 1).floor();
-    final cE = ((i + 1) * every + 1).floor().clamp(0, n);
-    final ax = data[a].$1, ay = data[a].$2;
-    double maxArea = -1; int best = cS;
-    for (int j = cS; j < cE; j++) {
-      final area = ((ax - avgX) * (data[j].$2 - ay)
-                  - (ax - data[j].$1) * (avgY - ay)).abs();
-      if (area > maxArea) { maxArea = area; best = j; }
-    }
-    out.add(data[best]);
-    a = best;
-  }
-  out.add(data.last);
-  return out;
-}
-
-// Shared by _MapPanelState and ManageMapPanelState. Builds the geometry/style
 // half of each polyline — everything except which one is highlighted, which
 // depends only on selection and is applied separately by [_stylePolylines].
 // Independent of selection; callers cache this and only rerun it when
@@ -2106,6 +2058,7 @@ List<_PolylineSpec> _buildPolylineSpecs(
 
     specs.add(_PolylineSpec(
       points: points,
+      rawCoords: coords,
       isSegment: isSegment,
       featureId: featureId,
       baseColor: effectiveBaseColor,
@@ -2379,6 +2332,30 @@ class ManageMapPanelState extends State<ManageMapPanel>
     if (total <= kMaxTotalPolylinePoints) return;
     if (identical(specs, _decimateSourceSpecs)) return;
     _decimateSourceSpecs = specs;
+
+    // Fast path: the decode hop already decimated this geometry on a worker
+    // (issue #299). Taking it costs one lookup per feature instead of
+    // marshalling every point into records and paying compute() to copy them
+    // across — measured on a real device at 788 ms of marshalling plus ~1.6 s
+    // of argument copy, a 2.4 s stall that landed mid-pan and tripped
+    // Android's ANR watchdog. Assigning synchronously is safe: build() reads
+    // _polylineSpecs only after this returns.
+    final seeded = <List<LatLng>>[];
+    for (final s in specs) {
+      final coords = s.rawCoords;
+      final d = coords == null ? null : decimatedLatLng(coords);
+      if (d == null) break;
+      seeded.add(d);
+    }
+    if (seeded.length == specs.length) {
+      _polylineSpecs = [
+        for (var i = 0; i < specs.length; i++) specs[i].withPoints(seeded[i]),
+      ];
+      return;
+    }
+
+    // Fallback for geometry the decode hop never saw: client-built E2EE geo,
+    // and locally patched segments merged in after a load.
     final gen = ++_polylineDecimateGen;
     final lines = perfSpans.blocking('decimate_marshal', () => [
       for (final s in specs)

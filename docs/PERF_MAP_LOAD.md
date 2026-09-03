@@ -268,13 +268,37 @@ sold as one.
 *Verified:* across six selection changes the `all_points` span records one
 sample; on the previous placement it records seven.
 
-**Still open, measured but not fixed** (issue #299).
-`_maybeDecimatePolylines` marshals every point into `(double, double)`
-records on the UI isolate before its `compute()` hop — 134 ms — and the hop's
-argument is *copied* to the worker (only the return value is zero-copy),
-which accounts for most of the ~477 ms `build_specs` still costs on a
-500k-point trip. The fix is to decimate inside the decode isolate, where the
-coordinates already live, so nothing is marshalled or sent at all.
+### Phase 3b — decimate on the worker *(done — issue #299)*
+
+`_maybeDecimatePolylines` marshalled every rendered point into
+`(double, double)` records on the UI isolate and handed the result to
+`compute()`. Only a `compute()`'s **return** value is zero-copy; its argument
+is copied. The first real-device report made the cost of that plain:
+
+```
+build_specs       n=3  worst=2402.3ms
+  decimate_marshal     worst= 788.4ms
+```
+
+788 ms of marshalling plus roughly 1.6 s of argument copy — a 2.4 s UI-isolate
+stall. And because the camera-idle gate releases the geo swap after at most a
+couple of seconds, that stall landed *in the middle of an active pan*, which
+is what tripped Android's ANR watchdog on aggressive panning. This is exactly
+the failure root cause 3 predicted and Phase 2a did not fix: deferral without
+a cheaper rebuild only moves the stall.
+
+The decode hop now produces the decimated geometry itself, using the same
+aggregate budget and the same `>= 2 point` filter the spec builder applies, so
+the shares come out identical. At most `kMaxTotalPolylinePoints` points come
+back, so the return costs nothing. The map looks the result up per feature
+instead of marshalling anything.
+
+The async fallback stays for geometry the worker never saw: client-built E2EE
+geo, and locally patched segments merged in after a load.
+
+*Verified:* a widget test asserting the `decimate_marshal` span is **never
+recorded** for geo that arrived through the decode hop, that the render budget
+is still applied, and that the fallback still runs for geo that did not.
 
 ### Phase 4 — server-side level of detail (the long game)
 
