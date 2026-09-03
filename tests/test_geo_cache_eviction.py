@@ -79,3 +79,54 @@ def test_overwriting_an_existing_key_does_not_evict(monkeypatch):
     assert len(_geo_cache) == 2
     assert (1, "Trip", False) in _geo_cache
     assert (2, "Trip", False) in _geo_cache
+
+
+# ── Byte budget (issue #276) ─────────────────────────────────────────────────
+#
+# An entry count was never a real bound here: entries are whole gzipped project
+# payloads and are wildly non-uniform. A 180-day trip's full details payload is
+# ~35 MB of JSON before compression, so 200 of those is gigabytes in a
+# container the deployment caps at 768 MB. Issue #276 saw both large requests
+# for one trip fail after ~5 s while smaller payloads on the same project
+# succeeded — what an OOM-killed container looks like from the client side.
+
+
+def _store_sized(key: tuple, size: int) -> None:
+    _geo_cache_store(key, b"x" * size, 0)
+
+
+def test_total_bytes_are_bounded(monkeypatch):
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_BYTES", 1000)
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_ENTRY_BYTES", 10_000)
+    for i in range(20):
+        _store_sized((1, f"p{i}", False), 200)
+    total = sum(len(v[0]) for v in _geo_cache.values())
+    assert total <= 1000, f"cache held {total} bytes, over its budget"
+    assert _geo_cache, "the budget must not empty the cache entirely"
+
+
+def test_a_payload_too_large_is_never_cached(monkeypatch):
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_ENTRY_BYTES", 100)
+    _store_sized((1, "huge", False), 500)
+    assert (1, "huge", False) not in _geo_cache
+
+
+def test_an_oversized_write_evicts_its_own_stale_entry(monkeypatch):
+    # A project that shrank below the limit and grew back over it must not
+    # leave the old, now-wrong payload behind to be served as a HIT.
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_ENTRY_BYTES", 100)
+    _store_sized((1, "p", False), 50)
+    assert (1, "p", False) in _geo_cache
+    _store_sized((1, "p", False), 500)
+    assert (1, "p", False) not in _geo_cache
+
+
+def test_eviction_prefers_the_entry_closest_to_expiry(monkeypatch):
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_BYTES", 400)
+    monkeypatch.setattr(geo_mod, "_GEO_CACHE_MAX_ENTRY_BYTES", 10_000)
+    _store_sized((1, "old", False), 200)
+    # A later write has a later deadline, so the earlier one goes first.
+    _store_sized((1, "new", False), 200)
+    _store_sized((1, "newest", False), 200)
+    assert (1, "old", False) not in _geo_cache
+    assert (1, "newest", False) in _geo_cache

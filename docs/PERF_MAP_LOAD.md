@@ -384,3 +384,48 @@ Phases 0 and 1 together carry the least architectural risk and address the
 largest unguarded main-thread work left in the app. Phase 2's reveal deletion
 is the targeted fix for the "small local blocks and unblocks" symptom. Phase
 4 is where the ceiling actually lifts.
+
+
+## The straight-lines report, and what a duration cannot tell you
+
+The first gesture-instrumented run cleared the ANR: 4000 frames across 80
+pans, `janky=82/4000`, worst frame 79 ms, and no UI-isolate span over budget.
+But the map showed only straight lines, and the report said why once read
+carefully:
+
+```
+fetch_geo      n=2  total=5119.8ms  worst=5081.5ms
+fetch_details  n=2  total=5411.1ms  worst=5367.1ms
+```
+
+with no `decode_geo`, no `decode_details`, and no `geo`/`details` payload
+notes. Those notes sit on the line immediately after the fetch, so they can
+only be skipped if the fetch threw. `n=2` is not two fetches; it is one
+failure at ~5 s plus `_loadFullGeoProgressively`'s retry failing fast.
+
+**A span timed in a `finally` is recorded whether the body returned or
+threw.** That made a failing fetch and a slow one indistinguishable, which is
+the most misleading thing an instrument can do. `PerfSpans.stage` now records
+failures separately and the report prints a `FAILURES` section.
+
+### Why the two largest payloads failed
+
+The API container is capped at 768 MB (`docker-compose.yml.example`), and
+`api/geo.py`'s payload cache, shared by `/meta`, full details and both geo
+variants, was bounded by an **entry count of 200** rather than by bytes.
+Entries are whole gzipped project payloads and are nowhere near uniform: a
+small trip's `/meta` is tens of KB, while a 180-day trip's details payload
+serialises to ~35 MB before compression. Two hundred of those is gigabytes.
+
+Issue #209's third incident was already this failure mode, the container
+OOM-killed at ~779 MB with no single request to blame. Here it presented from
+the client side instead: for one trip both large requests failed after ~5 s
+while smaller payloads on the same project succeeded, and the retry failed
+instantly, which is what an OOM-killed container looks like from outside.
+
+The cache is now bounded by the thing that actually runs out, bytes (64 MB),
+with the entry cap kept only as a guard against a flood of tiny entries and a
+per-entry ceiling so one oversized payload cannot evict everything else.
+
+This is a mitigation, not the cure. The cure is Phase 4.2: stop building a
+35 MB payload at all.

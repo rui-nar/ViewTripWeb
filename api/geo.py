@@ -67,6 +67,28 @@ _GEO_CACHE_TTL_S = 300.0
 # a fixed number of live entries instead.
 _GEO_CACHE_MAX_ENTRIES = 200
 
+# An entry count is the wrong unit for this cache and was never a real bound.
+# Entries here are whole gzipped project payloads, and they are not remotely
+# uniform: a small trip's /meta is tens of KB, while a 180-day trip's full
+# details payload serialises to ~35 MB of JSON before compression. 200 entries
+# of the latter is multiple gigabytes, in an API container the deployment caps
+# at 768 MB (docker-compose.yml.example) — and issue #209's third incident was
+# already this class of failure, the container OOM-killed at ~779 MB with no
+# single request to blame.
+#
+# Issue #276 hit the same wall from the other side: a 180-day trip's full geo
+# and full details requests both failed after ~5 s while smaller payloads on
+# the same project succeeded, which is what an OOM-killed container looks like
+# to a client. So the cache is bounded by the thing that actually runs out —
+# bytes — with the entry cap kept as a secondary guard against a flood of tiny
+# entries.
+_GEO_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+# An individual payload larger than this is never cached at all. Holding one
+# would evict most of the cache to make room for a single entry that, being
+# that large, is also the one most likely to be a rarely-reopened trip.
+_GEO_CACHE_MAX_ENTRY_BYTES = 16 * 1024 * 1024
+
 # Per-project invalidation counter, bumped by every bust (issue #132). A reader
 # captures it *before* its DB read and declines to persist its result if the
 # counter moved meanwhile — otherwise a read that started before a mutation can
@@ -160,6 +182,11 @@ def _geo_cache_get(cache_key: tuple) -> bytes | None:
     return gz_bytes
 
 
+def _geo_cache_bytes() -> int:
+    """Total bytes currently held. Callers must hold ``_geo_cache_lock``."""
+    return sum(len(v[0]) for v in _geo_cache.values())
+
+
 def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
     """Persist *gz_bytes* only if nothing busted the project since generation *gen*.
 
@@ -174,12 +201,22 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
         expired = [k for k, (_, deadline, _) in _geo_cache.items() if deadline <= now]
         for k in expired:
             _geo_cache.pop(k, None)
-        if cache_key not in _geo_cache and len(_geo_cache) >= _GEO_CACHE_MAX_ENTRIES:
-            # Still over the cap after sweeping expired entries — evict whichever
-            # live entry is closest to its own TTL rather than pick arbitrarily.
-            soonest = min(_geo_cache, key=lambda k: _geo_cache[k][1])
-            _geo_cache.pop(soonest, None)
+        if len(gz_bytes) > _GEO_CACHE_MAX_ENTRY_BYTES:
+            # Too big to be worth the room it would cost everything else.
+            _geo_cache.pop(cache_key, None)
+            return
         _geo_cache[cache_key] = (gz_bytes, now + _GEO_CACHE_TTL_S, gen)
+        # Evict closest-to-expiry first, on both bounds, until within budget.
+        # Bytes is the binding one; the entry cap only guards against a flood
+        # of tiny payloads.
+        while _geo_cache and (
+            _geo_cache_bytes() > _GEO_CACHE_MAX_BYTES
+            or len(_geo_cache) > _GEO_CACHE_MAX_ENTRIES
+        ):
+            soonest = min(_geo_cache, key=lambda k: _geo_cache[k][1])
+            if soonest == cache_key and len(_geo_cache) == 1:
+                break  # never evict the entry we were asked to store, alone
+            _geo_cache.pop(soonest, None)
 
 
 # Public names for the three primitives above, used by the other per-project
