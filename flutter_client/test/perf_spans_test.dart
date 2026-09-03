@@ -149,6 +149,79 @@ void main() {
     });
   });
 
+  group('stage failures', () {
+    // A span timed in a finally is written whether the body returned or threw,
+    // so duration alone cannot tell a failing fetch from a slow one. On issue
+    // #276 that ambiguity was the whole problem: fetch_geo showed 5.1 s twice
+    // with no decode after it, and the report could not say why.
+    test('a failed stage is recorded as a failure, and still rethrows',
+        () async {
+      await expectLater(
+        perfSpans.stage('fetch_geo', () async => throw StateError('boom')),
+        throwsStateError,
+      );
+      expect(perfSpans.failures['fetch_geo'], hasLength(1));
+      expect(perfSpans.failures['fetch_geo']!.single, contains('boom'));
+      // The duration is still recorded — a failure has a duration too.
+      expect(perfSpans.stageSpans['fetch_geo'], hasLength(1));
+    });
+
+    test('a successful stage records no failure', () async {
+      await perfSpans.stage('fetch_geo', () async => 1);
+      expect(perfSpans.failures, isEmpty);
+    });
+
+    test('repeated failures accumulate, newest last', () async {
+      for (final msg in ['first', 'second']) {
+        try {
+          await perfSpans.stage('fetch_details', () async => throw StateError(msg));
+        } on StateError {
+          // expected
+        }
+      }
+      expect(perfSpans.failures['fetch_details'], hasLength(2));
+      expect(perfSpans.failures['fetch_details']!.last, contains('second'));
+    });
+
+    test('reset clears failures', () async {
+      try {
+        await perfSpans.stage('x', () async => throw StateError('e'));
+      } on StateError {
+        // expected
+      }
+      perfSpans.reset();
+      expect(perfSpans.failures, isEmpty);
+    });
+  });
+
+  group('perfDescribeError', () {
+    test('collapses whitespace to one line', () {
+      expect(perfDescribeError('a\n  b'), 'a b');
+    });
+
+    test('truncates something very long', () {
+      final d = perfDescribeError('x' * 500);
+      expect(d.length, 120);
+      expect(d, endsWith('...'));
+    });
+  });
+
+  group('failure reporting', () {
+    test('failures are called out, with the last error', () {
+      final r = perfFullReport(const {}, const {'fetch_geo': [5081.0, 38.0]},
+          const {}, failures: const {'fetch_geo': ['ApiException(504)', 'ApiException(504)']});
+      expect(r, contains('FAILURES'));
+      expect(r, contains('fetch_geo'));
+      expect(r, contains('x2'));
+      expect(r, contains('504'));
+    });
+
+    test('no failures section when everything succeeded', () {
+      expect(perfFullReport(const {}, const {'fetch_geo': [10.0]}, const {}),
+          isNot(contains('FAILURES')));
+    });
+  });
+
   group('gesture frames', () {
     test('nothing is recorded until a gesture begins', () {
       expect(perfSpans.gestureFrames.gestures, 0);

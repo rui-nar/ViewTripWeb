@@ -25,6 +25,15 @@ const bool kPerfNoMap = bool.fromEnvironment('PERF_NO_MAP');
 /// 60 fps frame budget in milliseconds.
 const double kFrameBudgetMs = 1000.0 / 60.0; // 16.67
 
+/// A one-line, bounded description of a thrown object, for the failure report.
+/// `toString()` is used deliberately rather than type-switching: ApiException
+/// already prints its status code, and this file must not import the API
+/// layer to find that out.
+String perfDescribeError(Object e) {
+  final text = e.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+  return text.length <= 120 ? text : '${text.substring(0, 117)}...';
+}
+
 /// Nearest-rank percentile of an already-ascending-sorted list, in ms.
 /// Returns 0 for an empty list. Pure + testable.
 double perfPercentile(List<double> sortedAsc, int pct) {
@@ -187,6 +196,7 @@ class PerfSpans {
   final Map<String, List<double>> _blocking = {};
   final Map<String, List<double>> _stage = {};
   final Map<String, String> _notes = {};
+  final Map<String, List<String>> _failures = {};
 
   // ── Frames during map gestures ─────────────────────────────────────────
   // Every span above measures *loading*. The ANR on issue #276 happens while
@@ -259,11 +269,23 @@ class PerfSpans {
 
   /// Wall-clock duration of an async [body], recorded under [name]. Includes
   /// awaits and isolate hops, so this is NOT a jank measurement.
+  /// Wall-clock duration of an async [body], recorded under [name]. Includes
+  /// awaits and isolate hops, so this is NOT a jank measurement.
+  ///
+  /// A failure is recorded too, and separately. The duration alone is
+  /// actively misleading without it: a span timed in a `finally` is written
+  /// whether the body returned or threw, so a failing fetch and a slow
+  /// successful one are indistinguishable. On issue #276 that is exactly what
+  /// happened — `fetch_geo` showed 5.1 s twice with no decode after it, and
+  /// the report gave no way to tell a slow server from a failing one.
   Future<T> stage<T>(String name, Future<T> Function() body) async {
     if (!enabled) return body();
     final sw = Stopwatch()..start();
     try {
       return await body();
+    } on Object catch (e) {
+      (_failures[name] ??= []).add(perfDescribeError(e));
+      rethrow;
     } finally {
       (_stage[name] ??= []).add(sw.elapsedMicroseconds / 1000.0);
     }
@@ -287,10 +309,15 @@ class PerfSpans {
 
   Map<String, String> get notes => Map.unmodifiable(_notes);
 
+  /// Failures per stage, newest last.
+  Map<String, List<String>> get failures =>
+      {for (final e in _failures.entries) e.key: List.unmodifiable(e.value)};
+
   void reset() {
     _blocking.clear();
     _stage.clear();
     _notes.clear();
+    _failures.clear();
     _gestureBuild.clear();
     _gestureRaster.clear();
     _gestures = 0;
@@ -307,6 +334,7 @@ class PerfSpans {
   void report() {
     if (_blocking.isEmpty && _stage.isEmpty) return;
     final text = perfFullReport(_blocking, _stage, _notes,
+        failures: _failures,
         gestures: _gestures,
         gestureBuild: _gestureBuild,
         gestureRaster: _gestureRaster);
@@ -330,6 +358,7 @@ String perfFullReport(
   Map<String, List<double>> blocking,
   Map<String, List<double>> stage,
   Map<String, String> notes, {
+  Map<String, List<String>> failures = const {},
   int gestures = 0,
   List<double> gestureBuild = const [],
   List<double> gestureRaster = const [],
@@ -341,6 +370,14 @@ String perfFullReport(
     buf
       ..writeln('[perf] map gestures: $gestures')
       ..writeln('  ${perfSummaryLine(gestureBuild, gestureRaster)}');
+  }
+  if (failures.isNotEmpty) {
+    buf.writeln('[perf] FAILURES');
+    final names = failures.keys.toList()..sort();
+    for (final n in names) {
+      final errs = failures[n]!;
+      buf.writeln('  $n  x${errs.length}  ${errs.last}');
+    }
   }
   if (notes.isNotEmpty) {
     buf.writeln('[perf] payloads');
