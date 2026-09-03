@@ -6,6 +6,10 @@
 // ungated notifyListeners() regardless of what the map camera was doing.
 // Fixed the same way as the geo upgrade: _loadElevationData now awaits
 // ProjectNotifier._waitForCameraIdle() before committing/notifying.
+//
+// Since #295 that upgrade fetches the compact /elevation endpoint rather than
+// the 33 MB details payload, so the mock serves it here — the gate being
+// tested is the same one either way.
 
 import 'dart:convert';
 
@@ -81,6 +85,14 @@ ApiClient _mockedApi() => ApiClient(
       }
       if (path == '/api/geo/project') {
         return _json(_fullGeo());
+      }
+      if (path == '/api/projects/Trip/elevation') {
+        // The compact endpoint the elevation upgrade now uses (issue #295).
+        // encode_profile_pairs([[0.0, 100.0], [1.0, 110.0]])
+        return _json({
+          'profiles': {'1': r'?o}@o}@gE'},
+          'encrypted': <String, dynamic>{},
+        });
       }
       if (path == '/api/projects/Trip') {
         return _json(_fullDetails());

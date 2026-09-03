@@ -1,11 +1,12 @@
 /// Single-project service — wraps /api/projects/{name} and /api/geo/* endpoints.
 library;
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../api/client.dart';
 import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
+import 'elevation_codec.dart';
 import 'heavy_decode.dart' as heavy;
 import 'map_geometry_memo.dart' show geoGeometrySeeded;
 import 'project_data_cache.dart';
@@ -211,6 +212,38 @@ class ProjectService {
       projectDataCache.writeLowResGeo(ref, data);
       return data;
     });
+  }
+
+  /// Per-activity elevation profiles from the compact endpoint (issue #295).
+  ///
+  /// The reason this exists rather than reusing [getDetails]: that payload is
+  /// 33 MB on a long trip, ~9 s to fetch and ~5 s to decode, and elevation is
+  /// the only part of it the load actually needs. Decoded on a worker, since
+  /// keeping the work off the UI isolate is the whole point.
+  ///
+  /// Returns `(profiles, encryptedIds)`. An E2EE trip's profiles arrive as
+  /// opaque envelopes this endpoint cannot open, so their ids are reported
+  /// back and the caller falls through to the details payload for those.
+  /// GET /api/projects/{name}/elevation
+  Future<({Map<String, List<List<double>>> profiles, Set<String> encryptedIds})>
+      getElevation(ProjectRef ref) async {
+    final bytes = await perfSpans.stage(
+        'fetch_elevation',
+        () => api.getBytes(ref.path('/elevation'),
+            timeout: const Duration(seconds: 90)));
+    perfSpans.note('elevation', perfSizeLabel(bytes.length));
+    final body = await perfSpans.stage(
+        'decode_elevation', () => heavy.decodeJsonMapOffIsolate(bytes));
+    final raw = body['profiles'];
+    final encrypted = body['encrypted'];
+    final profiles = raw is Map<String, dynamic>
+        ? await compute(decodeElevationProfiles, raw)
+        : <String, List<List<double>>>{};
+    return (
+      profiles: profiles,
+      encryptedIds:
+          encrypted is Map ? encrypted.keys.map((k) => k.toString()).toSet() : <String>{},
+    );
   }
 
   /// Fetches pre-computed project statistics for [ref].

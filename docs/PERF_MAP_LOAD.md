@@ -566,8 +566,33 @@ Two things found while building this, both of which shrink the work:
   exactly the low-res case — that function already takes its haversine
   fallback and derives distances from the geometry instead.
 
-Which raises the question the next slice has to answer honestly: **does the
-client need the full-resolution profile at all?** If the cursor is accurate
-enough from low-res elevation plus full-res geometry, the fix is not a smaller
-payload but *not fetching it on load*, and the 33 MB, its ~9 s fetch and its
-~5 s decode all disappear together.
+Which raised the question the next slice had to answer honestly: **does the
+client need the full-resolution profile at all?**
+
+**It never did — and the reason it appeared to is a bug.**
+`buildFullTrackResult` paired `profile[i]` with `coords[i]` whenever there
+were at least as many coordinates as profile samples. That is only correct
+when the two are index-aligned, i.e. at full GPS resolution. Given a
+*downsampled* profile it mapped the entire distance range onto the leading
+fraction of the geometry: measured on a straight 10 km track with a 10-sample
+profile, the track ended at lat 0.009 instead of 0.099 — the map cursor
+pointing about a tenth of the way along.
+
+So the low-res profile `/meta` already ships could not be used, and the 33 MB
+payload existed to paper over that. The builder now always derives distances
+from the geometry and scales them to the profile's total (what
+`buildTrackFromPolyline` already did as a "fallback"), which needs exactly
+*one* number from the profile at any resolution. Cursor accuracy follows the
+geometry, which was never the limiting factor.
+
+With that fixed, the client fetches `/elevation` instead of the details
+payload, and the 33 MB, its ~9 s fetch, its ~5 s decode and its retention all
+go together. E2EE trips still take the old path: their profiles are opaque
+envelopes the endpoint cannot open.
+
+One consequence worth recording: the work is now O(geometry coordinates)
+rather than O(profile samples), so `_buildFullTrack`'s inline-vs-isolate
+threshold had to start measuring coordinates. Gating on profile size alone
+would have let a trip carrying the 300-point low-res profile walk hundreds of
+thousands of coordinates on the UI isolate — precisely the pattern that guard
+exists to prevent.
