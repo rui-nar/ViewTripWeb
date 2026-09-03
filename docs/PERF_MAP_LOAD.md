@@ -476,3 +476,98 @@ layer freed nothing. It is now a `BoundedByteCache` with a byte budget.
 
 `image_cache` and `thumb_bytes` are reported as payload notes so the next
 device run measures this rather than inferring it.
+
+
+## Phase 4 design rationale: reducing the payload without losing the track
+
+Two payloads get conflated, and the distinction is the whole answer.
+
+| | size (180-day trip) | what it is | used for |
+|---|---|---|---|
+| `geo` | 4.5 MB | GPS coordinates | drawing the track on the map |
+| `details` | 33 MB | activity metadata + `elevation_profile` | the elevation chart, and cursor sync |
+
+**Phase 4.2 targets `details`. Track geometry is untouched** — it stays
+full-resolution, encoded as Google polylines at ~1 m precision. Shrinking
+33 MB costs nothing on the map line, because the map line is not in there.
+
+### Why `details` is 33 MB
+
+`elevation_profile` is an array of `[distance, elevation]` pairs, one per GPS
+sample, serialised as JSON text. `[12.345678, 1234.5]` is ~20 bytes to carry
+two numbers that fit in 8 bytes binary, or 2-3 as deltas.
+
+Three levers, in increasing order of how much judgement they need:
+
+1. **Encoding — lossless.** Delta + varint (exactly what the polyline encoding
+   already does for coordinates). Elevation to 1 m and distance to 1 m is more
+   precision than the data actually has. Typically 5-10x smaller with zero
+   fidelity change, and it is most of the win.
+
+   The response is already gzipped, so the wire is smaller than 33 MB — but
+   the client still materialises 33 MB of JSON into hundreds of MB of Dart
+   objects. Binary encoding shrinks the wire *and* the decode *and* the heap.
+   The last of those is what matters if the remaining freeze is GC.
+
+2. **Resolution matched to purpose.** The chart is capped at 300 points
+   (`_kMaxChartPoints`) and LTTB-downsamples whatever arrives, so megabytes
+   are shipped and all but 300 discarded.
+
+   The real caveat: the profile *is* used at higher resolution than 300, for
+   the map-to-chart cursor sync. But the cursor maps distance to position, and
+   the position comes from `geo`, which stays full-resolution — so the profile
+   only needs enough density to resolve distance-to-elevation smoothly. One
+   sample per ~25 m loses nothing visible.
+
+3. **On demand.** A coarse whole-trip profile at load; a single activity's
+   full profile fetched only when it is selected.
+
+### The coarse tracks are a separate problem, and LOD makes them sharper
+
+Tracks currently look like straight lines because `kMaxTotalPolylinePoints`
+(6000) is shared across ~600 activities — roughly 10 points each. That is a
+client *render budget*, not a payload limit: the full-resolution geometry is
+already on the device.
+
+- **Today:** 6000 points spread over the whole trip regardless of zoom. Zoomed
+  into one day, that day still gets ~10 points.
+- **Viewport/zoom-aware LOD:** only activities intersecting the viewport get
+  budget, at the density the zoom actually resolves. Zoomed into one day, that
+  day gets the whole 6000.
+
+Which is the principle behind all of this: **LOD is not "less detail", it is
+"detail where you are looking, instead of detail spread so thin it is useless
+everywhere."** Server-side track tiles (Phase 4.1) are the same idea taken
+further — the basemap already works this way, which is why it stays sharp at
+every zoom without downloading the planet.
+
+### Compatibility
+
+Both halves ship as **additional endpoints**; the existing ones are not
+touched. `GET /{name}` keeps serving `elevation_profile` inside the full
+details payload, so the Android and iOS builds in the wild carry on working
+unchanged — there is no version gate and none is needed, because nothing a
+shipped client reads has changed shape.
+
+### What already exists, and what that means for the scope
+
+Two things found while building this, both of which shrink the work:
+
+* **A low-res profile is already stored and already served.**
+  `Activity.elevation_profile_low_res` (~300 points) lives in its own column,
+  and because `/meta` defers `elevation_profile_json`, `ProjectIO._ep_pairs`
+  already falls back to it. So `/meta` — 3.4 MB — *already* carries a
+  chart-ready profile, and the chart renders from it before the 33 MB details
+  payload arrives at all.
+* **The 33 MB fetch therefore buys only cursor precision.** Its one remaining
+  consumer is `buildFullTrackResult`, which pairs profile samples with geo
+  coordinates to build the distance-indexed track behind the map-to-chart
+  cursor. And when the profile is shorter than the coordinate list — which is
+  exactly the low-res case — that function already takes its haversine
+  fallback and derives distances from the geometry instead.
+
+Which raises the question the next slice has to answer honestly: **does the
+client need the full-resolution profile at all?** If the cursor is accurate
+enough from low-res elevation plus full-res geometry, the fix is not a smaller
+payload but *not fetching it on load*, and the 33 MB, its ~9 s fetch and its
+~5 s decode all disappear together.
