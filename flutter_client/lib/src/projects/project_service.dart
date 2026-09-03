@@ -116,6 +116,27 @@ class ProjectService {
   /// this is the wait before a *retry*, not before a visible failure.
   static const _kLoadTimeout = Duration(seconds: 60);
 
+  /// The cached full-res geo for [ref], or null when nothing is on file.
+  /// Never touches the network.
+  ///
+  /// Disk is read as raw bytes so a cold start's cached geo goes through the
+  /// same parse-derive-seed worker hop a network response does (issue #299).
+  /// Decoding it to a Map elsewhere produced fresh coordinate lists none of
+  /// map_geometry_memo.dart's identity-keyed caches had seen, so the map paid
+  /// the whole cold derivation on the UI isolate — the stall that tripped the
+  /// ANR watchdog mid-pan. L1 is preferred when present: that Map is the very
+  /// object the decode hop already seeded this session.
+  Future<Map<String, dynamic>?> readCachedGeo(ProjectRef ref) async {
+    final bytes = await projectDataCache.readFullGeoBytes(ref);
+    if (bytes != null) {
+      final geo = await perfSpans.stage(
+          'decode_geo_cached', () => heavy.decodeGeoOffIsolate(bytes));
+      projectDataCache.promoteFullGeo(ref, geo);
+      return geo;
+    }
+    return projectDataCache.readFullGeo(ref);
+  }
+
   /// Fetches the GeoJSON FeatureCollection for [ref].
   /// GET /api/geo/project?name={name}
   ///
@@ -128,7 +149,7 @@ class ProjectService {
   /// hit the network.
   Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) async {
     if (!bypassCache) {
-      final cached = await projectDataCache.readFullGeo(ref);
+      final cached = await readCachedGeo(ref);
       if (cached != null) return cached;
     }
     return _dedupFetch('geo:${ref.ownerId ?? 0}:${ref.name}', () async {

@@ -4,10 +4,15 @@
 /// current tab's lifetime (in-memory only).
 library;
 
+import 'dart:typed_data' show Uint8List;
+
 Future<void> cacheStoreInit() async {}
 
 Future<void> cacheStoreClearAll() async {}
 
 Future<Map<String, dynamic>?> cacheStoreRead(String key) async => null;
+
+Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
+    cacheStoreReadFullGeoBytes(String key) async => null;
 
 Future<void> cacheStoreWrite(String key, Map<String, dynamic> row) async {}

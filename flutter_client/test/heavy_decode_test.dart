@@ -22,6 +22,8 @@ import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/map/polyline_decoder.dart';
 import 'package:viewtrip_client/src/projects/heavy_decode.dart';
 import 'package:viewtrip_client/src/projects/map_geometry_memo.dart';
+import 'package:viewtrip_client/src/projects/project_cache_store_native.dart'
+    show gunzipToBytes, gzEncode;
 import 'package:viewtrip_client/src/projects/polyline_decimation.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
@@ -337,6 +339,41 @@ void main() {
         ],
       }));
       expect(decimatedLatLng(coordsOf(geo, 0)), isNull);
+    });
+  });
+
+  // Issue #299 follow-up. Geo served from the on-device cache used to be
+  // decoded straight to a Map, producing fresh coordinate lists that none of
+  // the identity-keyed geometry caches had seen — so a trip opened after an
+  // app restart paid the whole cold derivation on the UI isolate, which is
+  // the stall that tripped the ANR watchdog mid-pan. Reading the cache as
+  // bytes puts it through the same worker hop a network response takes.
+  group('cached geo takes the same seeding hop', () {
+    List coordsOf(Map<String, dynamic> geo, int i) =>
+        (geo['features'] as List)[i]['geometry']['coordinates'] as List;
+
+    test('bytes off the cache seed exactly like bytes off the wire', () async {
+      // The stored blob is gzip(utf8(jsonEncode(geo))), so gunzipping it
+      // yields precisely the bytes the network path receives.
+      final geo = await decodeGeoOffIsolate(bigGeoBytes);
+      coordsConversionCount = 0;
+      for (var i = 0; i < (geo['features'] as List).length; i++) {
+        final coords = coordsOf(geo, i);
+        memoCoordsToLatLng(coords);
+        expect(decimatedLatLng(coords), isNotNull);
+        expect(memoArcMidpoint(coords), isNotNull);
+      }
+      expect(coordsConversionCount, 0);
+    });
+
+    test('gunzipToBytes round-trips a stored payload to its JSON bytes', () {
+      final blob = gzEncode({'type': 'FeatureCollection', 'features': []});
+      expect(utf8.decode(gunzipToBytes(blob!)!),
+          jsonEncode({'type': 'FeatureCollection', 'features': []}));
+    });
+
+    test('an empty blob is a cache miss, not a crash', () {
+      expect(gunzipToBytes(const []), isNull);
     });
   });
 

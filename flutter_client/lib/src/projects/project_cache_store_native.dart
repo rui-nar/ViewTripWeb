@@ -100,6 +100,47 @@ Future<Map<String, dynamic>?> _ungz(Object? blob) {
   return compute(gzDecode, blob);
 }
 
+/// Gunzip without decoding — the stored blob is already exactly the JSON
+/// bytes of the payload (see [gzEncode]), so handing those back lets the
+/// full-res geo take the same parse-derive-seed hop on a worker that a
+/// network response takes (issue #299). Decoding it to a Map here instead
+/// produced fresh coordinate lists that none of map_geometry_memo.dart's
+/// identity-keyed caches had ever seen, so a trip served from disk paid the
+/// full cold derivation on the UI isolate — the 2.4 s stall that tripped the
+/// ANR watchdog mid-pan.
+@visibleForTesting
+Uint8List? gunzipToBytes(List<int> blob) =>
+    blob.isEmpty ? null : Uint8List.fromList(GZipCodec().decode(blob));
+
+Future<Uint8List?> _ungzBytes(Object? blob) {
+  if (blob is! List<int> || blob.isEmpty) return Future.value(null);
+  return compute(gunzipToBytes, blob);
+}
+
+/// The stored full-res geo as raw JSON bytes, with the row's versions so the
+/// caller can apply the same freshness checks [cacheStoreRead] does.
+Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
+    cacheStoreReadFullGeoBytes(String key) async {
+  try {
+    final db = await _open();
+    if (db == null) return null;
+    final rows = await db.query(_kTable,
+        columns: ['lock_version', 'schema_version', 'full_geo_gz'],
+        where: 'cache_key = ?',
+        whereArgs: [key],
+        limit: 1);
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return (
+      lockVersion: row['lock_version'] as int,
+      schemaVersion: row['schema_version'] as int,
+      bytes: await _ungzBytes(row['full_geo_gz']),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
   try {
     final db = await _open();

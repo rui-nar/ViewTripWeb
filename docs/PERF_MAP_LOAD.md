@@ -296,6 +296,25 @@ instead of marshalling anything.
 The async fallback stays for geometry the worker never saw: client-built E2EE
 geo, and locally patched segments merged in after a load.
 
+**The on-disk cache was a second door, and it was missed.** The first fix
+seeded only geometry that arrived over the network. A trip served from
+`projectDataCache`'s L2 — i.e. any open after an app restart — was decoded
+straight to a Map, producing fresh coordinate lists that none of the
+identity-keyed caches had ever seen, so it paid the entire cold derivation on
+the UI isolate. That is the same 2.4 s stall, on the more common path, and it
+is why aggressive panning still tripped the ANR watchdog after the first fix
+shipped.
+
+The stored blob is `gzip(utf8(jsonEncode(geo)))`, so gunzipping it without
+decoding yields precisely the bytes the network path receives. The cache now
+returns those bytes and they go through the identical parse-derive-seed hop.
+L1 is still preferred when present: that Map is the very object the decode hop
+seeded earlier in the session.
+
+The lesson worth keeping: **derived-geometry seeding has to be a property of
+where geo enters the app, not of one code path.** Both entry points now share
+`ProjectService.readCachedGeo`.
+
 *Verified:* a widget test asserting the `decimate_marshal` span is **never
 recorded** for geo that arrived through the decode hop, that the render budget
 is still applied, and that the fallback still runs for geo that did not.
