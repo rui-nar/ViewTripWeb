@@ -5,6 +5,9 @@ import 'dart:async';
 import 'package:flutter/scheduler.dart' show FrameTiming;
 import 'package:flutter/widgets.dart';
 
+import 'process_memory_stub.dart'
+    if (dart.library.io) 'process_memory_native.dart';
+
 /// Dev-only frame-timing recorder. Compiled in only when built with
 /// `--dart-define=PERF_TIMING=true`; in every normal/production build the const
 /// is false, [PerfTiming.start] is a no-op, and the tree-shaker drops the rest.
@@ -233,6 +236,26 @@ class PerfSpans {
   int _loads = 0;
   String? _lastBackgroundRefresh;
 
+  // How many times the watchdog has actually ticked. Reported because the
+  // watchdog recording *zero* stalls is only meaningful if it was running at
+  // all — and on issue #276 it reported nothing through a 2656 ms frame,
+  // which is either a broken instrument or evidence that the block does not
+  // delay Dart timers the way a plain busy loop would.
+  int _stallTicks = 0;
+
+  // Process RSS: the available proxy for the GC hypothesis. Dart exposes no
+  // public GC-pause API outside the VM service, but a major collection is
+  // attributed to whichever frame it interrupts — exactly the shape of a
+  // multi-second frame containing no instrumented work.
+  int _rssMaxBytes = 0;
+  int _rssAtWorstFrameBytes = 0;
+  double _worstFrameMs = 0;
+  int _freezeFrames = 0;
+
+  /// Frames whose build phase exceeded this are counted separately: a handful
+  /// of these back to back is what an ANR is made of, and they vanish in a p99.
+  static const double _kFreezeFrameMs = 500;
+
   /// Counts a project load. Session-scoped: a report saying "3 loads" is how
   /// an unexpected reload — the thing most likely to land heavy work in the
   /// middle of a gesture — becomes visible at all.
@@ -289,6 +312,16 @@ class PerfSpans {
   }
 
   void _onGestureFrames(List<FrameTiming> timings) {
+    for (final t in timings) {
+      final buildMs = t.buildDuration.inMicroseconds / 1000.0;
+      // Freeze accounting is deliberately NOT gesture-scoped: a 2.6 s frame
+      // matters whether or not the camera happened to be moving.
+      if (buildMs > _kFreezeFrameMs) _freezeFrames++;
+      if (buildMs > _worstFrameMs) {
+        _worstFrameMs = buildMs;
+        _rssAtWorstFrameBytes = currentRssBytes() ?? 0;
+      }
+    }
     if (!_withinGestureWindow) return;
     for (final t in timings) {
       _gestureBuild.add(t.buildDuration.inMicroseconds / 1000.0);
@@ -313,6 +346,23 @@ class PerfSpans {
   ({int loads, String? lastBackgroundRefresh}) get session =>
       (loads: _loads, lastBackgroundRefresh: _lastBackgroundRefresh);
 
+  /// Everything needed to judge the "is it GC?" question: whether the watchdog
+  /// ran at all, how many freeze-length frames occurred, and what process
+  /// memory looked like overall and at the worst frame.
+  ({
+    int stallTicks,
+    int freezeFrames,
+    double worstFrameMs,
+    int rssMaxBytes,
+    int rssAtWorstFrameBytes,
+  }) get diagnostics => (
+        stallTicks: _stallTicks,
+        freezeFrames: _freezeFrames,
+        worstFrameMs: _worstFrameMs,
+        rssMaxBytes: _rssMaxBytes,
+        rssAtWorstFrameBytes: _rssAtWorstFrameBytes,
+      );
+
   /// UI-isolate stall of a synchronous [body], recorded under [name].
   T blocking<T>(String name, T Function() body) {
     if (!enabled) return body();
@@ -331,8 +381,15 @@ class PerfSpans {
   /// Starts the event-loop stall watchdog. Idempotent; call once at startup.
   void start() {
     if (!enabled || _stallTimer != null) return;
+    // Hook frames here, not only on the first gesture: a freeze-length frame
+    // counts whether or not the camera was moving, and on issue #276 one
+    // arrived with no gesture in progress at all.
+    _hookFrames();
     _lastTick = DateTime.now();
     _stallTimer = Timer.periodic(_kStallInterval, (_) {
+      _stallTicks++;
+      final rss = currentRssBytes();
+      if (rss != null && rss > _rssMaxBytes) _rssMaxBytes = rss;
       final now = DateTime.now();
       final late = now.difference(_lastTick!).inMilliseconds -
           _kStallInterval.inMilliseconds;
@@ -427,6 +484,11 @@ class PerfSpans {
     _maxGestureStallMs = 0;
     _loads = 0;
     _lastBackgroundRefresh = null;
+    _stallTicks = 0;
+    _rssMaxBytes = 0;
+    _rssAtWorstFrameBytes = 0;
+    _worstFrameMs = 0;
+    _freezeFrames = 0;
     // Self-heals on the next camera event either way, but leaving it set
     // would make the next beginGesture() a no-op.
     _inGesture = false;
@@ -447,6 +509,7 @@ class PerfSpans {
         failures: _failures,
         loads: _loads,
         lastBackgroundRefresh: _lastBackgroundRefresh,
+        diagnostics: diagnostics,
         gestureBlocking: _gestureBlocking,
         worstStallMs: _maxStallMs,
         worstGestureStallMs: _maxGestureStallMs,
@@ -479,6 +542,13 @@ String perfFullReport(
   double worstGestureStallMs = 0,
   int loads = 0,
   String? lastBackgroundRefresh,
+  ({
+    int stallTicks,
+    int freezeFrames,
+    double worstFrameMs,
+    int rssMaxBytes,
+    int rssAtWorstFrameBytes,
+  })? diagnostics,
   int gestures = 0,
   List<double> gestureBuild = const [],
   List<double> gestureRaster = const [],
@@ -492,6 +562,18 @@ String perfFullReport(
       ..writeln('  ${perfSummaryLine(gestureBuild, gestureRaster)}');
     if (gestureBlocking.isNotEmpty) {
       buf.writeln(perfSpanReport('blocking DURING gestures', gestureBlocking));
+    }
+  }
+  if (diagnostics != null) {
+    final d = diagnostics;
+    String mb(int bytes) => (bytes / (1024 * 1024)).toStringAsFixed(0);
+    buf.writeln('[perf] frames: worst build ${d.worstFrameMs.toStringAsFixed(0)}ms,'
+        ' ${d.freezeFrames} frame(s) over 500ms');
+    // A watchdog that reported no stall is only informative if it was ticking.
+    buf.writeln('[perf] watchdog ticks: ${d.stallTicks}');
+    if (d.rssMaxBytes > 0) {
+      buf.writeln('[perf] process memory: peak ${mb(d.rssMaxBytes)} MB,'
+          ' ${mb(d.rssAtWorstFrameBytes)} MB at the worst frame');
     }
   }
   if (loads > 0 || lastBackgroundRefresh != null) {

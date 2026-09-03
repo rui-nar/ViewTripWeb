@@ -290,6 +290,58 @@ void main() {
     });
   });
 
+  group('freeze diagnostics', () {
+    // The three numbers that decide whether the remaining freeze on #276 is
+    // GC: was the watchdog even running, how many freeze-length frames
+    // happened, and what did process memory look like at the worst one.
+    test('report names the worst frame and the freeze count', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          diagnostics: (
+            stallTicks: 400,
+            freezeFrames: 3,
+            worstFrameMs: 2656.3,
+            rssMaxBytes: 720 * 1024 * 1024,
+            rssAtWorstFrameBytes: 710 * 1024 * 1024,
+          ));
+      expect(r, contains('worst build 2656ms'));
+      expect(r, contains('3 frame(s) over 500ms'));
+      expect(r, contains('watchdog ticks: 400'));
+      expect(r, contains('peak 720 MB'));
+      expect(r, contains('710 MB at the worst frame'));
+    });
+
+    test('a watchdog that never ticked says so', () {
+      // "No stall recorded" only means anything if the watchdog ran; zero
+      // ticks means the instrument is broken, not that nothing stalled.
+      final r = perfFullReport(const {}, const {}, const {},
+          diagnostics: (
+            stallTicks: 0,
+            freezeFrames: 0,
+            worstFrameMs: 0,
+            rssMaxBytes: 0,
+            rssAtWorstFrameBytes: 0,
+          ));
+      expect(r, contains('watchdog ticks: 0'));
+    });
+
+    test('process memory is omitted where the platform cannot answer it', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          diagnostics: (
+            stallTicks: 10,
+            freezeFrames: 0,
+            worstFrameMs: 12.0,
+            rssMaxBytes: 0,
+            rssAtWorstFrameBytes: 0,
+          ));
+      expect(r, isNot(contains('process memory')));
+    });
+
+    test('no diagnostics section when none were passed', () {
+      expect(perfFullReport(const {}, const {'a': [1.0]}, const {}),
+          isNot(contains('watchdog ticks')));
+    });
+  });
+
   group('stall reporting', () {
     // The number that corresponds to a freeze. Frames that never happen leave
     // no timing behind, so build/raster percentiles stay survivable through an
