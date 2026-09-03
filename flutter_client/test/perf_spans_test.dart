@@ -290,6 +290,41 @@ void main() {
     });
   });
 
+  group('perfEstimateStructBytes', () {
+    // Removing the 33 MB details payload took peak RSS from ~1.9 GB to
+    // ~1.5 GB, so it was a large contributor but not the bulk. This estimate
+    // exists to say whether our own structures account for the remainder or
+    // whether it is engine/GPU/native-image memory RSS lumps in — a question
+    // several rounds of guessing failed to answer.
+    test('scales with every input', () {
+      String est(int t, int p, int g) => perfEstimateStructBytes(
+          fullTrackPoints: t, perActivityTrackPoints: p, geoCoords: g);
+      expect(est(0, 0, 0), contains('0 MB'));
+      // Half a million track points and as many coordinates is the shape of a
+      // 180-day trip; the answer must land in hundreds of MB, not single MB.
+      final big = est(500000, 500000, 500000);
+      final mb = int.parse(RegExp(r'(\d+) MB').firstMatch(big)!.group(1)!);
+      expect(mb, greaterThan(100));
+      expect(mb, lessThan(1000));
+    });
+
+    test('is labelled an estimate, because it is one', () {
+      expect(
+          perfEstimateStructBytes(
+              fullTrackPoints: 1, perActivityTrackPoints: 1, geoCoords: 1),
+          contains('estimate'));
+    });
+
+    test('doubling the points roughly doubles the answer', () {
+      int mb(String s) => int.parse(RegExp(r'(\d+) MB').firstMatch(s)!.group(1)!);
+      final one = mb(perfEstimateStructBytes(
+          fullTrackPoints: 100000, perActivityTrackPoints: 0, geoCoords: 0));
+      final two = mb(perfEstimateStructBytes(
+          fullTrackPoints: 200000, perActivityTrackPoints: 0, geoCoords: 0));
+      expect(two, closeTo(one * 2, 2));
+    });
+  });
+
   group('freeze diagnostics', () {
     // The three numbers that decide whether the remaining freeze on #276 is
     // GC: was the watchdog even running, how many freeze-length frames
