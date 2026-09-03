@@ -1196,6 +1196,8 @@ class _PerfPanelState extends State<_PerfPanel> {
       perfSpans.stageSpans,
       perfSpans.notes,
       failures: perfSpans.failures,
+      loads: perfSpans.session.loads,
+      lastBackgroundRefresh: perfSpans.session.lastBackgroundRefresh,
       gestures: frames.gestures,
       gestureBuild: frames.build,
       gestureRaster: frames.raster,

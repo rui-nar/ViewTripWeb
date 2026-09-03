@@ -21,7 +21,7 @@ import '../auth/auth_notifier.dart';
 import '../core/current_location.dart' show currentDeviceLatLng;
 import '../core/design_tokens.dart' show kWarning, kWarningDark;
 import '../core/last_opened_project.dart';
-import '../core/perf_timing.dart' show kPerfNoMap;
+import '../core/perf_timing.dart' show kPerfNoMap, perfSpans;
 import '../core/project_ref.dart';
 import '../core/stale_shared_ref.dart';
 import 'project_notifier.dart';
@@ -137,6 +137,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
       // Guards against a missing GoRouter ancestor (e.g. this widget under
       // test in isolation) — context.replace() would otherwise throw.
       if (!mounted || GoRouter.maybeOf(context) == null) return;
+      // Recorded because this fires *while the user is panning* and performs a
+      // route change; if a remount/reload is what lands heavy work mid-gesture
+      // (issue #276), this is the line that starts it.
+      perfSpans.recordBackgroundRefresh('viewport_url_sync');
       final cam = _mapController.mapController.camera;
       context.replace(viewportSyncPath(
         basePath: '/app',
