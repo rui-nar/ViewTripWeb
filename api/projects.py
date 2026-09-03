@@ -5,6 +5,7 @@ Routes:
     POST   /api/projects/                — create new project
     GET    /api/projects/{name}          — get project data (GeoJSON + metadata)
     GET    /api/projects/{name}/meta     — get project metadata (lightweight)
+    GET    /api/projects/{name}/elevation  — compact per-activity elevation profiles
     GET    /api/projects/{name}/stats    — get project statistics
     PUT    /api/projects/{name}          — update project name or dates
     DELETE /api/projects/{name}          — delete a project
@@ -42,6 +43,7 @@ from api.geo import (
     project_cache_store,
 )
 from api.project_access import OwnerParam, require_role, resolve_project
+from src.project.elevation_codec import build_elevation_payload
 from api.project_shared import (
     _legacy_path,
     _refresh_stats_background,
@@ -212,6 +214,57 @@ def get_project(
     project_cache_store(cache_key, gz_bytes, gen)
     _log.info("project_details name=%s load=%.3fs gzip=%.3fs cache=MISS",
               name, t1 - t0, time.time() - t1)
+    return _gzip_response(gz_bytes, "MISS")
+
+
+@router.get("/{name}/elevation", summary="Elevation profiles (compact)")
+def get_project_elevation(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
+):
+    """Per-activity elevation profiles, delta+varint encoded (issue #295).
+
+    An *additional* endpoint, not a change to ``GET /{name}``: Android and iOS
+    builds in the wild expect elevation_profile to arrive inside the full
+    details payload, and they keep being served it.
+
+    That payload measures 33 MB on a 180-day trip — ~9 s to fetch and ~5 s to
+    decode on a real device — and elevation_profile is nearly all of it, as
+    JSON text spending ~20 bytes per [distance, elevation] pair. The encoding
+    here is lossless at the precision the data actually has (1 m distance,
+    0.1 m elevation; see src/project/elevation_codec.py) and typically 5-10x
+    smaller. Track geometry is untouched by any of this — it lives in
+    /api/geo/project and stays full resolution.
+
+    Rides the same payload cache and generation counter as every other
+    per-project response, so one bust per mutation still covers it.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+
+        cache_key = (owner_id, name, "elevation")
+        cached = project_cache_get(cache_key)
+        if cached is not None:
+            return _gzip_response(cached, "HIT")
+
+        gen = project_cache_generation(owner_id, name)
+        # journal_user_id scopes journal items to the caller, as every other
+        # read-only serialising path does. Without it this materialises every
+        # member's journal to serialise elevation — needless work on an
+        # endpoint whose whole purpose is spending less memory (#209, #276).
+        project = _repo.get_project(
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
+            journal_user_id=user_info_id,
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    gz_bytes = gzip_json(build_elevation_payload(project.activities))
+    project_cache_store(cache_key, gz_bytes, gen)
     return _gzip_response(gz_bytes, "MISS")
 
 
