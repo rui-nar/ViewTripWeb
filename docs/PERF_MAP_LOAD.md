@@ -315,6 +315,37 @@ The lesson worth keeping: **derived-geometry seeding has to be a property of
 where geo enters the app, not of one code path.** Both entry points now share
 `ProjectService.readCachedGeo`.
 
+**That fix was itself wrong, in an instructive way.** It skipped the bytes
+path whenever L1 already held the ref, on the reasoning that an L1 Map is the
+object the decode hop seeded. But `ProjectDataCache._readDisk` promotes an
+*entire disk row* into L1, and a load reads low-res geo first — so an
+unseeded full geo is already sitting in L1 by the time the check runs, and
+the fix never engaged on the path it was written for. Seeding is now asked of
+the geometry itself (`geoGeometrySeeded`) instead of inferred from cache
+residency. Low-res geo takes the same hop, since on a long trip it is over
+the render budget too.
+
+## Measuring the gesture, not just the load
+
+Three rounds of fixes were aimed at load-time work on the strength of
+load-time numbers, and the ANR outlived all of them. On a 180-day trip the
+device reported a worst blocking span of 102 ms — with Android's watchdog at
+~5 s, that is an order of magnitude too small to be the ANR. Every span in
+this app measured *loading*; nothing measured the pan.
+
+`PerfSpans` now captures frame build/raster times while the map camera is
+moving (driven from `setMapCameraActive`, which all three map screens already
+call), and the map records what it hands the renderer each frame:
+`rendered_points` and `markers`. Settings → Performance renders live rather
+than from the load-end snapshot, so panning and then opening it shows the
+gesture.
+
+Those two counts matter because `flutter_map` re-walks every point of every
+polyline overlapping the viewport, and repositions every marker, **on every
+camera frame**. On a 180-day trip the marker count is the untested suspect:
+every memory is a widget holding a network thumbnail, and nothing about that
+scales with the viewport.
+
 *Verified:* a widget test asserting the `decimate_marshal` span is **never
 recorded** for geo that arrived through the decode hop, that the render budget
 is still applied, and that the fallback still runs for geo that did not.
