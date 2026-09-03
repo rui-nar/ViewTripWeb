@@ -20,6 +20,7 @@ import '../core/perf_timing.dart' show kPerfTiming, perfSpans;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'bounded_byte_cache.dart';
 import 'map_geometry_memo.dart';
 import 'polyline_decimation.dart';
 import 'memory_detail_modal.dart';
@@ -1679,6 +1680,15 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
       perfSpans.note(
           'markers',
           '${_cachedActivityMarkers.length + _cachedSegmentMarkers.length + _cachedMemoryMarkers.length + _cachedJournalMarkers.length + _cachedEncounterMarkers.length}');
+      // Decoded bitmaps live in NATIVE memory, outside the Dart heap and
+      // outside every span in this app — which is why an ANR with no
+      // measurable UI-isolate work stayed invisible for so long (#276).
+      final imgCache = PaintingBinding.instance.imageCache;
+      perfSpans.note('image_cache',
+          '${(imgCache.currentSizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+          ' in ${imgCache.currentSize} images (${imgCache.liveImageCount} live)');
+      perfSpans.note('thumb_bytes',
+          '${(_MarkerThumbImage._cache.bytes / (1024 * 1024)).toStringAsFixed(1)} MB');
     }
 
     // Guard before flattening every polyline's points: this list is consumed
@@ -3088,7 +3098,14 @@ class _MarkerThumbImage extends StatefulWidget {
   final double size;
 
   static final ConcurrencyGate _gate = ConcurrencyGate(8);
-  static final Map<String, Uint8List> _cache = <String, Uint8List>{};
+
+  /// Encoded thumbnail bytes by URL, bounded (issue #276).
+  ///
+  /// Was an unbounded static Map: a long trip accumulated every thumbnail the
+  /// session ever showed and released none, which is also why hiding the
+  /// memories layer freed nothing. The decoded bitmaps are the expensive half
+  /// and are bounded separately, by cacheWidth/cacheHeight in build().
+  static final BoundedByteCache _cache = BoundedByteCache(24 * 1024 * 1024);
 
   @override
   State<_MarkerThumbImage> createState() => _MarkerThumbImageState();
@@ -3125,7 +3142,7 @@ class _MarkerThumbImageState extends State<_MarkerThumbImage> {
     // refetch from scratch on every cold start.
     final onDisk = await photoThumbCache.read(widget.url);
     if (onDisk != null) {
-      _MarkerThumbImage._cache[widget.url] = onDisk;
+      _MarkerThumbImage._cache.put(widget.url, onDisk);
       if (mounted) setState(() => _bytes = onDisk);
       return;
     }
@@ -3137,7 +3154,7 @@ class _MarkerThumbImageState extends State<_MarkerThumbImage> {
         }
         return res.bodyBytes;
       });
-      _MarkerThumbImage._cache[widget.url] = bytes;
+      _MarkerThumbImage._cache.put(widget.url, bytes);
       photoThumbCache.write(widget.url, bytes);
       if (mounted) setState(() => _bytes = bytes);
     } catch (_) {
@@ -3152,6 +3169,23 @@ class _MarkerThumbImageState extends State<_MarkerThumbImage> {
     }
     final bytes = _bytes;
     if (bytes == null) return const SizedBox.shrink();
-    return Image.memory(bytes, width: widget.size, height: widget.size, fit: BoxFit.cover);
+    // cacheWidth/cacheHeight, not just width/height: the latter are layout
+    // constraints and do NOT affect decoding. Without them Flutter decodes at
+    // the image's native resolution — and the server produces 400x400
+    // thumbnails (api/memories.py's _THUMB_SIZE) for a marker drawn at ~30
+    // logical pixels. That is ~640 KB of NATIVE memory per marker; on a
+    // 180-day trip with ~600 memory markers, ~375 MB, none of it visible to
+    // the Dart heap or to any span in this app. It is the leading explanation
+    // for issue #276's ANRs with no measurable UI-isolate work and no user
+    // interaction at all.
+    final px = (widget.size * MediaQuery.devicePixelRatioOf(context)).round();
+    return Image.memory(
+      bytes,
+      width: widget.size,
+      height: widget.size,
+      cacheWidth: px,
+      cacheHeight: px,
+      fit: BoxFit.cover,
+    );
   }
 }
