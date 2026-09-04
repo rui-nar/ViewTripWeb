@@ -608,18 +608,20 @@ class PerfSpans {
     _gestureEndedAt = null;
   }
 
-  /// The most recently completed load's report, or null if none has finished
-  /// in this session. A [ValueNotifier] so a Settings screen left open across
-  /// a load updates itself.
-  final ValueNotifier<String?> lastReport = ValueNotifier<String?>(null);
-
-  /// Snapshots both buckets into [lastReport] (and prints them on a
-  /// PERF_TIMING build). Called once per load, after the background phases
-  /// finish; a no-op when nothing was recorded.
-  void report() {
-    if (_blocking.isEmpty && _stage.isEmpty) return;
+  /// The whole report for the state this holds right now.
+  ///
+  /// The single source of truth for *every* reader. It exists because there
+  /// were two call sites assembling this argument list by hand — [report] and
+  /// the Settings screen — and the one a human actually reads had silently
+  /// fallen behind: it omitted `frameSpans` (so the map's own layout and paint
+  /// cost, the entire point of the instrumentation added for issue #276, never
+  /// appeared), `gestureBlocking`, and both stall maxima. Nothing warned,
+  /// because they are optional named parameters with harmless defaults. A
+  /// missing instrument reads exactly like an instrument that measured
+  /// nothing, which is the worst possible failure mode for a diagnostic.
+  String buildReport() {
     flushFrameSpans();
-    final text = perfFullReport(_blocking, _stage, _notes,
+    return perfFullReport(_blocking, _stage, _notes,
         frameSpans: _frameSpans,
         failures: _failures,
         loads: _loads,
@@ -631,6 +633,19 @@ class PerfSpans {
         gestures: _gestures,
         gestureBuild: _gestureBuild,
         gestureRaster: _gestureRaster);
+  }
+
+  /// The most recently completed load's report, or null if none has finished
+  /// in this session. A [ValueNotifier] so a Settings screen left open across
+  /// a load updates itself.
+  final ValueNotifier<String?> lastReport = ValueNotifier<String?>(null);
+
+  /// Snapshots both buckets into [lastReport] (and prints them on a
+  /// PERF_TIMING build). Called once per load, after the background phases
+  /// finish; a no-op when nothing was recorded.
+  void report() {
+    if (_blocking.isEmpty && _stage.isEmpty) return;
+    final text = buildReport();
     lastReport.value = text;
     if (kPerfTiming) debugPrint(text);
   }
