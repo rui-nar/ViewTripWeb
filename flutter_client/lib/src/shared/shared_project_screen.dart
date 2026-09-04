@@ -108,6 +108,15 @@ class _SharedProjectService extends ProjectService {
             'decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
       }();
 
+  /// There is no share-scoped zoom-simplified endpoint yet, and the owner one
+  /// is auth-gated on a real project name — calling it with a share token
+  /// would 401 on every shared load for nothing. Failing here immediately
+  /// takes the same fallback a 404 would, minus the round trip.
+  @override
+  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef _, double zoom) =>
+      Future.error(UnsupportedError(
+          'no share-scoped simplified geo endpoint (issue #295)'));
+
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>
       _getJson('decode_low_res_geo', '/api/share/$token/geo/low-res');
@@ -307,7 +316,12 @@ class _SharedProjectViewState extends State<_SharedProjectView>
   Timer? _cameraIdleTimer;
 
   void _onMapEvent(MapEvent event) {
-    context.read<SharedProjectNotifier>().setMapCameraActive(true);
+    context.read<SharedProjectNotifier>()
+      ..setMapCameraActive(true)
+      // Zoom level of detail (issue #295): the notifier fetches
+      // geometry matched to what is on screen, so it has to know
+      // what is on screen.
+      ..setMapZoom(_mapController.mapController.camera.zoom);
     _cameraIdleTimer?.cancel();
     _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
       if (mounted) context.read<SharedProjectNotifier>().setMapCameraActive(false);

@@ -209,7 +209,12 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
 
   void _onMapEvent(MapEvent event) {
     if (!shouldSyncViewport(event)) return;
-    context.read<ViewProjectNotifier>().setMapCameraActive(true);
+    context.read<ViewProjectNotifier>()
+      ..setMapCameraActive(true)
+      // Zoom level of detail (issue #295): the notifier fetches
+      // geometry matched to what is on screen, so it has to know
+      // what is on screen.
+      ..setMapZoom(_mapController.mapController.camera.zoom);
     _cameraIdleTimer?.cancel();
     _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
       if (mounted) context.read<ViewProjectNotifier>().setMapCameraActive(false);
@@ -274,6 +279,7 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
     ).then((_) {
       if (!mounted) return;
       notifier.markSynced();
+      if (widget.initialZoom != null) notifier.setMapZoom(widget.initialZoom!);
       notifier.loadView(projectRef);
     });
   }

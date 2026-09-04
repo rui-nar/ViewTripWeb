@@ -825,6 +825,14 @@ class ProjectNotifier extends ChangeNotifier
     _stopPhotoPolling();
     final token = _loadTrack.begin(ref);
     this.ref = ref;
+    // Zoom refetching is armed only once this load's own geometry lands, and
+    // never carries across projects: this notifier is a single app-wide
+    // provider, so a bucket left from the previous trip would let a refetch
+    // replace geometry it has nothing to do with — and on an E2EE trip, whose
+    // geo is built client-side and which the server cannot serve at all,
+    // replace the route with an empty FeatureCollection.
+    _zoomRefetchTimer?.cancel();
+    _loadedZoomBucket = null;
     if (perfSpans.enabled) perfSpans.reset();  // scope spans to this load
     // Counted session-wide: an unexpected reload is the likeliest way heavy
     // work lands mid-gesture, and it is invisible unless someone counts.
@@ -1054,6 +1062,76 @@ class ProjectNotifier extends ChangeNotifier
   /// MapPanel to rebuild every polyline and marker.
   bool _mapCameraActive = false;
 
+  // ── Zoom level of detail (issue #295) ──────────────────────────────────
+  //
+  // Geometry is fetched simplified to about one screen pixel at the current
+  // zoom, so what the client holds is a function of what is on screen rather
+  // than of trip length. Zoom in and it asks for more; zoom out and it drops
+  // back. The bucket is the whole level the server quantises to, so a pinch
+  // does not mint a request per frame.
+  double _mapZoom = 11;
+  int? _loadedZoomBucket;
+  Timer? _zoomRefetchTimer;
+
+  /// How long the camera must settle before a zoom change is acted on. Long
+  /// enough that a pinch through several levels causes one refetch, not five.
+  @visibleForTesting
+  Duration zoomRefetchDebounce = const Duration(milliseconds: 700);
+
+  int _bucketOf(double zoom) => zoom.ceil();
+
+  /// Told by the map screens on every camera event. Cheap: only a bucket
+  /// change that differs from what is loaded schedules anything.
+  void setMapZoom(double zoom) {
+    _mapZoom = zoom;
+    // Client-built geometry (E2EE) has no server counterpart to refetch.
+    if (encryption.isUnlocked) return;
+    final bucket = _bucketOf(zoom);
+    if (_loadedZoomBucket == null || bucket == _loadedZoomBucket) return;
+    _zoomRefetchTimer?.cancel();
+    _zoomRefetchTimer = Timer(zoomRefetchDebounce, () {
+      final r = ref;
+      if (r != null) unawaited(_refetchGeoForZoom(r));
+    });
+  }
+
+  /// Swaps in geometry for the current zoom bucket.
+  ///
+  /// Gated on the camera being idle for the same reason the load-time upgrade
+  /// is: replacing geo rebuilds every polyline and marker spec, and landing
+  /// that mid-gesture is what issue #276 was originally about.
+  Future<void> _refetchGeoForZoom(ProjectRef r) async {
+    final bucket = _bucketOf(_mapZoom);
+    if (bucket == _loadedZoomBucket) return;
+    final token = _loadTrack.token;
+    try {
+      final next = await _service.getSimplifiedGeo(r, _mapZoom);
+      if (!_isCurrent(token, r)) return;
+      // See the load path: a response with no feature list is not an empty
+      // trip. Keep what is on screen rather than blanking it.
+      if (next['features'] is! List) return;
+      await _waitForCameraIdle();
+      if (!_isCurrent(token, r)) return;
+      // Re-read the bucket: the user may have kept zooming while this was in
+      // flight, in which case a newer refetch is already scheduled and this
+      // result is for a level nobody is looking at.
+      if (_bucketOf(_mapZoom) != bucket) return;
+      reconcileSegmentOverlay(next);
+      geo = {
+        'type': 'FeatureCollection',
+        'features': mergePendingSegmentPatches(
+            List<dynamic>.from(next['features'] as List? ?? [])),
+      };
+      _loadedZoomBucket = bucket;
+      await _buildFullTrack();
+      if (!_isCurrent(token, r)) return;
+      notifyListeners();
+    } on Object {
+      // Non-fatal: the geometry already on screen stays. A failed refetch
+      // means slightly wrong detail, never a blank map.
+    }
+  }
+
   /// Completes the moment the camera settles. Non-null only while a wait is
   /// actually outstanding, so a camera event costs nothing when nobody is
   /// waiting on it.
@@ -1166,6 +1244,43 @@ class ProjectNotifier extends ChangeNotifier
       if (!_isCurrent(token, ref)) return;
       notifyListeners();
       return;
+    }
+
+    // Zoom level of detail first (issue #295): geometry simplified to the
+    // zoom actually on screen is a fraction of the full-resolution payload,
+    // and it is the client's largest single heap consumer. Falls through to
+    // the full-res path below on any failure — an older server without the
+    // endpoint, or offline, where the cached full payload is the answer.
+    try {
+      // Captured before the await: the fit-bounds animation runs during the
+      // fetch and the camera-idle wait, so reading _mapZoom afterwards would
+      // stamp a level that was never fetched — and then never refetch it.
+      final requestedZoom = _mapZoom;
+      final requestedBucket = _bucketOf(requestedZoom);
+      final lod = await _service.getSimplifiedGeo(ref, requestedZoom);
+      if (!_isCurrent(token, ref)) return;
+      // A 200 carrying no feature list is not an empty trip, it is a response
+      // this code did not ask for — an older server answering some catch-all,
+      // a proxy error page. Accepting it would blank the map; falling through
+      // to the full-resolution path recovers. An empty *list* is different and
+      // is honoured: a trip really can have no geometry.
+      if (lod['features'] is! List) {
+        throw StateError('simplified geo response carried no features');
+      }
+      reconcileSegmentOverlay(lod);
+      final lodFeatures = mergePendingSegmentPatches(
+          List<dynamic>.from(lod['features'] as List? ?? []));
+      await _waitForCameraIdle();
+      if (!_isCurrent(token, ref)) return;
+      geo = {'type': 'FeatureCollection', 'features': lodFeatures};
+      _loadedZoomBucket = requestedBucket;
+      await _buildFullTrack();
+      if (!_isCurrent(token, ref)) return;
+      isGeoLoaded = true;
+      notifyListeners();
+      return;
+    } on Object {
+      // Fall through to the full-resolution path.
     }
 
     // Fetch the full-res geo with one retry. A cold-cache miss can be slow
@@ -1570,6 +1685,8 @@ class ProjectNotifier extends ChangeNotifier
   int get buildFullTrackGen => _buildFullTrackGen;
 
   void clear() {
+    _zoomRefetchTimer?.cancel();
+    _loadedZoomBucket = null;
     ref = null;
     activities = [];
     items = [];
@@ -2167,6 +2284,7 @@ class ProjectNotifier extends ChangeNotifier
   void dispose() {
     _isDisposed = true;
     _stopPhotoPolling();
+    _zoomRefetchTimer?.cancel();
     stopDegradedRouteWatch(); // usually already stopped by the owning screen's dispose()
     previewArcNotifier.dispose();
     elevationCursorNotifier.dispose();

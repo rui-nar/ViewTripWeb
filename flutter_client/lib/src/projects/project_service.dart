@@ -182,6 +182,49 @@ class ProjectService {
     });
   }
 
+  /// Geometry simplified to roughly one screen pixel at [zoom] (issue #295).
+  ///
+  /// The client holds what this returns, so the size of its map geometry
+  /// becomes a function of what is on screen rather than of trip length. The
+  /// measurement behind it: a 219-activity trip carries 1,465,345 coordinates
+  /// and the map renders 6,051 of them, the rest costing roughly 180 MB of a
+  /// Dart heap that device profiling put at ~625 MB steady and ~804 MB during
+  /// load, on a process killed above ~1.3 GB.
+  ///
+  /// Deliberately not cached on disk. Entries would be per zoom bucket, they
+  /// are cheap for the server to rebuild and short-lived there, and the
+  /// full-resolution payload remains the offline fallback — see
+  /// `ProjectNotifier._loadFullGeoProgressively`, which falls back to it when
+  /// this fails for any reason, including an older server that has no such
+  /// endpoint.
+  ///
+  /// GET /api/geo/project/simplified?name={name}&zoom={zoom}
+  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef ref, double zoom) {
+    // Keyed by the server's own quantisation, so a mode toggle mid-load and a
+    // concurrent refetch for the same level share one 90 s request rather than
+    // racing two.
+    final bucket = zoom.ceil();
+    return _dedupFetch(
+        'geoLod:${ref.ownerId ?? 0}:${ref.name}:$bucket',
+        () => _fetchSimplifiedGeo(ref, zoom));
+  }
+
+  Future<Map<String, dynamic>> _fetchSimplifiedGeo(
+      ProjectRef ref, double zoom) async {
+    final encoded = Uri.encodeComponent(ref.name);
+    final bytes = await perfSpans.stage(
+        'fetch_geo_lod',
+        () => api.getBytes(
+            ref.withOwner(
+                '/api/geo/project/simplified?name=$encoded&zoom=$zoom'),
+            timeout: const Duration(seconds: 90)));
+    perfSpans.note('geo_lod', perfSizeLabel(bytes.length));
+    // Same hop as the full-res path, so the geometry caches are seeded and
+    // the map's first build after the swap does no O(points) work.
+    return perfSpans.stage(
+        'decode_geo_lod', () => heavy.decodeGeoOffIsolate(bytes));
+  }
+
   /// Expand any activity feature carrying a Google-encoded `polyline` property
   /// into a standard GeoJSON `coordinates` array (`[[lon, lat], …]`). No-op for
   /// features that already have coordinates (segments, straight-line fallbacks,

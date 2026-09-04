@@ -127,7 +127,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   void _onMapEvent(MapEvent event) {
     if (!shouldSyncViewport(event)) return;
-    context.read<ProjectNotifier>().setMapCameraActive(true);
+    context.read<ProjectNotifier>()
+      ..setMapCameraActive(true)
+      // Zoom level of detail (issue #295): the notifier fetches
+      // geometry matched to what is on screen, so it has to know
+      // what is on screen.
+      ..setMapZoom(_mapController.mapController.camera.zoom);
     _cameraIdleTimer?.cancel();
     _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
       if (mounted) context.read<ProjectNotifier>().setMapCameraActive(false);
@@ -251,6 +256,10 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           notifier.error == null) {
         afterLoad();
       } else {
+        // Seed the zoom before loading, so the first geometry fetch is for
+        // the level about to be shown rather than a hard-coded default that
+        // a second fetch would immediately correct (issue #295).
+        if (widget.initialZoom != null) notifier.setMapZoom(widget.initialZoom!);
         notifier.load(projectRef).then((_) => afterLoad());
       }
     });

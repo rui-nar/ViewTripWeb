@@ -678,6 +678,43 @@ an unprojected epsilon over-simplifies north-south.
 Additional endpoint; `/project` is unchanged, for shipped clients and for
 anything that genuinely needs every point (track editing, export).
 
-Still to do: a bounding box. Zoom alone bounds the *detail*, not the extent,
-so a deep zoom still returns the whole trip at that detail. That is the
-follow-up, and it is what makes the high-zoom case bounded too.
+### The client half
+
+The load fetches geometry for the zoom about to be shown, and refetches when
+the zoom *bucket* changes — quantised to whole levels, so a pinch through
+several of them causes one request rather than one per frame, and a pan within
+a level causes none. The refetch waits for the camera to settle, for the same
+reason every other background swap does.
+
+Three things that had to be got right, all of which review caught:
+
+* **Stamp the bucket that was requested, not the one in effect afterwards.**
+  The fit-bounds animation runs during the fetch and the camera-idle wait, so
+  reading the current zoom after the awaits records a level that was never
+  fetched — and then never refetches it. That is the common path on every
+  trip open, not an edge case.
+* **Never carry a bucket across projects.** `ProjectNotifier` is a single
+  app-wide provider. A bucket left from the previous trip arms refetching for
+  geometry it has nothing to do with, and on an E2EE trip — whose geo is built
+  client-side and which the server cannot serve at all — the refetch would
+  replace the route with an empty FeatureCollection. Zoom refetching is now
+  disarmed on `load()` and `clear()`, and never armed while encryption is
+  unlocked.
+* **A zoom change is not an authoritative snapshot.** The load path reconciles
+  the segment overlay against the server's view; a zoom refetch must not, or a
+  cached payload mentioning a segment id clears a pending patch and reverts an
+  optimistic edit on screen.
+
+Shared/public viewers keep the full-resolution path: there is no share-scoped
+simplified endpoint, and the owner one is auth-gated on a real project name,
+so calling it with a share token would 401 on every shared load.
+
+### Still to do
+
+* **A bounding box.** Zoom bounds the *detail*, not the *extent*, so a deep
+  zoom still returns the whole trip at that detail. This is what makes the
+  high-zoom case bounded too.
+* **Two known regressions**, filed as #317: the on-device full-geo cache is no
+  longer seeded (offline reopen degrades to low-res), and export/share
+  rendering reads the now-simplified geometry from the notifier rather than
+  fetching full resolution.
