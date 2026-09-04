@@ -9,23 +9,70 @@
 /// [kMaxTotalPolylinePoints] points in total, so returning it costs nothing.
 library;
 
-/// Total polyline points across every simultaneously-drawn line above which
-/// [decimatePolylinePoints] kicks in, capping the total at roughly this many
-/// (distributed proportionally per line). flutter_map's own PolylineLayer
-/// already reduces point density per line adaptively with zoom
-/// (simplificationTolerance, set below) — but that has no concept of the
-/// AGGREGATE across every line drawn at once, and the default (no
-/// selection) view always draws every activity's full track simultaneously.
-/// For a large trip whose activities' tracks overlap the same region, that
-/// aggregate is exactly what flutter_map's own per-camera-frame culling walk
-/// (it re-walks every point of every polyline overlapping the viewport, on
-/// every single frame — confirmed by reading flutter_map 8.3.1's source)
-/// pays for on every pan event, scaling linearly with trip size regardless
-/// of any of our own caching. Confirmed as the actual cause via an Android
-/// ANR trace: "Waited 5001ms for MotionEvent" with the app's main thread
-/// pegged near 100% CPU throughout a pan on a large (dozens-of-activities)
-/// trip — sustained main-isolate computation, not an I/O or lock wait.
-const kMaxTotalPolylinePoints = 6000;
+/// Safety valve on the combined point count of every simultaneously-drawn
+/// line. Above it, [decimatePolylinePoints] caps the total at roughly this
+/// many, distributed proportionally per line.
+///
+/// **This is no longer the thing that decides map resolution — the server is.**
+/// Since issue #295 the client asks `/api/geo/project/simplified` for geometry
+/// already simplified to about one screen pixel at the zoom on display, and
+/// since issue #324 that request is scoped to the viewport as well. Whatever
+/// comes back is, by construction, the finest detail the screen can resolve.
+///
+/// At 6000 this constant was binding *below* that guarantee and silently
+/// undoing it. Measured on a 219-activity trip:
+///
+/// ```
+/// geo_coords       13273   <- what the server sent, pixel-accurate at that zoom
+/// rendered_points   6029   <- what this budget let through
+/// ```
+///
+/// So the drawn track was about twice as coarse as the line the server had
+/// already built and paid to transfer — and the server's own floor
+/// (`min_points`, 32 per activity in src/models/simplify.py) had to be chosen
+/// against *this* number rather than against what the map needs, because a
+/// floor below what the renderer would draw anyway is a regression. Two
+/// resolution policies were fighting, and the coarser one won.
+///
+/// **Why 40,000.** It is set against the server's guarantee rather than
+/// against a round number or a frame budget:
+///
+/// * The server returns at most `max_input_points` (4,000) points per line,
+///   simplified to ~1 px at the requested zoom.
+/// * The largest trip this investigation has measured came back as 13,273
+///   coordinates for its *entire* length at the zoom in use. 40,000 is ~3x
+///   that, so the valve does not engage on pixel-accurate geometry even for a
+///   trip substantially larger, or a deeper zoom, than anything measured.
+/// * It still catches what it exists to catch: the full-resolution fallback
+///   path (`getGeo`, taken offline, on an older server, or for a client-built
+///   E2EE trip) hands the renderer 1,465,345 points on that same trip. 40,000
+///   cuts that by 97%.
+///
+/// If a device run shows `map_lines_paint` (issue #276's frame instrumentation)
+/// cannot afford what the server sends, the fix is the *server's* tolerance or
+/// its per-line cap — not this number. Lowering it here would only reinstate
+/// the disagreement above.
+///
+/// **Why it stays a single trip-wide budget.** A per-activity or
+/// per-visible-length allocation was considered: 6000 split across 219
+/// activities is ~27 points each whether the activity is 2 km or 200 km, on
+/// screen or 500 km away. But that allocation is exactly what the server now
+/// performs, with far better information — it knows each line's real geometry,
+/// the zoom, and (since #324) the viewport, and it gives an off-viewport line
+/// the same 32-point floor a whole-trip zoom would. A second, cruder allocator
+/// on the client would be second-guessing it. And the case this valve actually
+/// fires on — the full-resolution fallback — is a whole-payload problem, not a
+/// per-activity one.
+///
+/// The mechanism it guards is unchanged: flutter_map's PolylineLayer reduces
+/// point density per line adaptively with zoom (`simplificationTolerance`,
+/// set at the call site) but has no concept of the AGGREGATE across every
+/// line drawn at once, and its per-camera-frame culling walk re-walks every
+/// point of every polyline overlapping the viewport, on every frame
+/// (confirmed by reading flutter_map 8.3.1's source). Confirmed as a real
+/// cause via an Android ANR trace: "Waited 5001ms for MotionEvent" with the
+/// main thread pegged near 100% CPU throughout a pan on a large trip.
+const kMaxTotalPolylinePoints = 40000;
 
 /// Total points across [lines] — split out from [decimatePolylinePoints] so
 /// a caller can cheaply decide whether decimation is needed at all.
