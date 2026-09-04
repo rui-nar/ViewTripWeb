@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
-from src.models.simplify import simplify_for_zoom, snap_bbox_to_tiles
+from src.models.simplify import restrict_to_bbox, simplify_for_zoom, snap_bbox_to_tiles
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
@@ -60,6 +60,23 @@ _GEO_CACHE_TTL_S = 300.0
 # Zoom-simplified payloads expire sooner than everything else — see the store
 # call in project_geo_simplified for why.
 _SIMPLIFIED_CACHE_TTL_S = 60.0
+
+# Simplified *levels*, held as built features rather than gzipped bytes.
+#
+# A level is expensive and box-independent; a box is cheap and box-specific.
+# Keying the byte cache by both (issue #325) meant every pan to a new tile
+# range rebuilt the level from scratch — and a rebuild decodes every activity
+# polyline (1.83 s measured for a 219-activity trip) before it simplifies
+# anything. Three of those in one session measured 16.5 s of server CPU, on a
+# single-process uvicorn, which is also why unrelated requests came back 502:
+# the work is CPU-bound Python, so it holds the GIL and starves the loop.
+#
+# One entry per zoom level, reused by every box. A level of the trip above is
+# ~13k coordinates; the bound below is in coordinates because that is what
+# both the memory and the cost scale with.
+_LEVEL_CACHE_TTL_S = 900.0
+_LEVEL_CACHE_MAX_ENTRIES = 48
+_LEVEL_CACHE_MAX_COORDS = 400_000
 
 # Nothing evicted an entry whose project was never mutated again — the TTL above
 # only turns a stale HIT into a MISS on the next *read* of that same key; a key
@@ -224,6 +241,100 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int,
             if soonest == cache_key and len(_geo_cache) == 1:
                 break  # never evict the entry we were asked to store, alone
             _geo_cache.pop(soonest, None)
+
+
+_level_cache: Dict[tuple, tuple] = {}
+
+
+def _level_cache_coords() -> int:
+    """Total coordinates held. Callers must hold ``_geo_cache_lock``."""
+    return sum(v[3] for v in _level_cache.values())
+
+
+def _feature_coords(features: List[Dict[str, Any]]) -> int:
+    total = 0
+    for f in features:
+        coords = (f.get("geometry") or {}).get("coordinates")
+        if isinstance(coords, list):
+            total += len(coords)
+    return total
+
+
+def _level_cache_get(key: tuple) -> List[Dict[str, Any]] | None:
+    """Built features for a zoom level, or None when absent, expired or stale.
+
+    Mirrors :func:`_geo_cache_get`, including doing the generation check
+    outside the lock — it may hit Redis.
+    """
+    with _geo_cache_lock:
+        entry = _level_cache.get(key)
+        if entry is None:
+            return None
+        features, deadline, gen, _ = entry
+        if monotonic() >= deadline:
+            _level_cache.pop(key, None)
+            return None
+    if gen != _geo_generation(key[0], key[1]):
+        with _geo_cache_lock:
+            _level_cache.pop(key, None)
+        return None
+    return features
+
+
+def _level_cache_store(key: tuple, features: List[Dict[str, Any]], gen: int) -> None:
+    """Persist *features* unless the project was busted since generation *gen*."""
+    if _geo_generation(key[0], key[1]) != gen:
+        return
+    coords = _feature_coords(features)
+    now = monotonic()
+    with _geo_cache_lock:
+        for k in [k for k, v in list(_level_cache.items()) if v[1] <= now]:
+            _level_cache.pop(k, None)
+        if coords > _LEVEL_CACHE_MAX_COORDS:
+            _level_cache.pop(key, None)
+            return
+        _level_cache[key] = (features, now + _LEVEL_CACHE_TTL_S, gen, coords)
+        while _level_cache and (
+            _level_cache_coords() > _LEVEL_CACHE_MAX_COORDS
+            or len(_level_cache) > _LEVEL_CACHE_MAX_ENTRIES
+        ):
+            soonest = min(_level_cache, key=lambda k: _level_cache[k][1])
+            if soonest == key and len(_level_cache) == 1:
+                break
+            _level_cache.pop(soonest, None)
+
+
+def restrict_geo_features_to_bbox(
+    features: List[Dict[str, Any]], bbox: tuple
+) -> List[Dict[str, Any]]:
+    """Reduce every feature that *bbox* cannot show to the coarseness floor.
+
+    Runs over already-simplified features, so it is cheap: the expensive pass
+    has happened once for the level and is shared by every box.
+
+    Features are never dropped, for the reasons :func:`simplify_geo_features`
+    gives: `geo` is read as a whole-trip description by the segment-overlay
+    reconciliation, by fit-to-bounds and by the export path.
+    """
+    out: List[Dict[str, Any]] = []
+    for feature in features:
+        geom = feature.get("geometry") or {}
+        coords = geom.get("coordinates")
+        if not isinstance(coords, list) or len(coords) < 3:
+            out.append(feature)
+            continue
+        try:
+            reduced = restrict_to_bbox(coords, bbox)
+        except (TypeError, ValueError, IndexError):
+            out.append(feature)
+            continue
+        if reduced is coords:
+            out.append(feature)
+            continue
+        copy = dict(feature)
+        copy["geometry"] = {**geom, "coordinates": reduced}
+        out.append(copy)
+    return out
 
 
 # Public names for the three primitives above, used by the other per-project
@@ -665,41 +776,40 @@ def project_geo_simplified(
         box, tiles = snap_bbox_to_tiles(_parse_bbox(bbox), level)
         box_key = "{}.{}.{}.{}".format(*tiles)
     user_info_id = int(current_user["sub"])
+    # The *level* is what costs; the box is a cheap pass over the result. So
+    # the level is what gets cached, and every box is served from it — see
+    # _LEVEL_CACHE_TTL_S for the measurements behind that split. `box_key` is
+    # no longer part of any cache key: it was what made a pan rebuild a level.
+    gen = 0
+    project = None
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
         owner_id = row.user_info_id
-
-        cache_key = (owner_id, name, f"simplified-{level}-{box_key}")
-        cached_bytes = _geo_cache_get(cache_key)
-        if cached_bytes is not None:
-            return Response(
-                content=cached_bytes,
-                media_type="application/json",
-                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+        level_key = (owner_id, name, level)
+        features = _level_cache_get(level_key)
+        if features is None:
+            gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
+            project = _repo.get_project(
+                sess, owner_id, name,
+                legacy_path=_legacy_path(str(owner_id), name),
+                include_elevation=False,
             )
+            if project is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-        gen = _geo_generation(owner_id, name)
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-            include_elevation=False,
-        )
-    if project is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    cache_state = "HIT"
+    if features is None:
+        cache_state = "MISS"
+        features = simplify_geo_features(
+            _build_full_geo_features(project, encoded=False), level)
+        _level_cache_store(level_key, features, gen)
 
-    features = simplify_geo_features(
-        _build_full_geo_features(project, encoded=False), level, box)
-    gz_bytes = _gzip_geo(features)
-    # Short TTL on purpose. There are up to 23 of these per project in a cache
-    # shared with /project, /low-res and /meta, and eviction picks the entry
-    # closest to expiry — so without this, one user sweeping through zoom
-    # levels would flush every other project's warm payload. A shorter deadline
-    # makes these evict each other first, and they are the cheapest to rebuild.
-    _geo_cache_store(cache_key, gz_bytes, gen, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
+    served = restrict_geo_features_to_bbox(features, box) if box else features
     return Response(
-        content=gz_bytes,
+        content=_gzip_geo(served),
         media_type="application/json",
-        headers={"Content-Encoding": "gzip", "X-Cache": "MISS"},
+        headers={"Content-Encoding": "gzip", "X-Cache": cache_state},
     )
 
 

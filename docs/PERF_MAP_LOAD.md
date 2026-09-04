@@ -1103,6 +1103,94 @@ failed refetch means slightly wrong detail, never a blank map.
 * `fetch_geo_lod` worst, which should stop scaling with zoom.
 * `geo_coords` after a zoom-in, which should stop scaling with trip length.
 
+## Round 9 — the LOD endpoint, and measuring the right half
+
+Two runs after the viewport work, the client was healthy (worst frame 176 ms,
+zero over 500 ms, `dart_structs_est` ~3 MB) and the load was not:
+
+```
+fetch_geo_lod  n=3  total=16549.0ms  worst=6869.5ms
+[perf] FAILURES
+  fetch_low_res_geo  x1  ApiException(502)
+  fetch_meta         x1  ApiException(502)
+```
+
+No OOM kills on the server. The explanation is simpler and was in the
+Dockerfile all along:
+
+```
+exec uvicorn api.router:app --host 0.0.0.0 --port 8000
+```
+
+**One process, no `--workers`.** The geo endpoints are sync `def`, so FastAPI
+runs them in a threadpool — but they are CPU-bound *Python*, so the GIL means
+a multi-second build starves everything else in the process. That is one
+mechanism for both symptoms: the slow fetches are the builds, and the 502s are
+unrelated requests arriving while a build holds the GIL.
+
+### Where the time actually goes
+
+Measured for a 219-activity trip at ~6,700 points each:
+
+| phase | cost |
+|---|---|
+| decode every activity polyline | **1.83 s** |
+| build the GeoJSON features | 0.33 s |
+| simplify to a level | 0.3 s – 7 s (with track wiggliness and zoom) |
+| gzip the *simplified* result | ~0.06 s |
+
+The decode is a fixed floor paid on every cache miss, before anything is
+simplified. Which means the cost is **per build**, and the number of builds is
+what matters.
+
+### What issue #325 got wrong
+
+The viewport work made each build cheaper by skipping the RDP pass for
+off-screen lines — but it put the box in the cache key, so it also made builds
+*more numerous*: every pan to a new tile range was a fresh miss, paying the
+1.83 s decode again. It optimised the minority half and multiplied the
+majority.
+
+This is the second time in this investigation that a fix targeted the wrong
+half of a cost. The first (`compute()` copying its argument) was caught by an
+instrument; this one was caught by profiling the phases before designing —
+which is the cheaper order.
+
+### The split
+
+A **level** is expensive and box-independent. A **box** is cheap and
+box-specific. So the level is what gets cached, and every box is served from
+it:
+
+* `simplify_geo_features(features, zoom)` builds a level with no box in it.
+* `restrict_to_bbox` is a separate pass that floors off-box lines, run over
+  the already-simplified result.
+
+Flooring an already-simplified line rather than the original yields the same
+point count and the same endpoints, from geometry that is off screen by
+definition; visible lines are untouched, so what the user sees is identical.
+
+Measured on the same synthetic trip:
+
+| | cost |
+|---|---|
+| cold level build (decode + simplify) | 5.27 s |
+| serving another box from that level | **0.056 s** |
+
+**94× for a pan**, and the box no longer multiplies cache entries — there is
+one entry per zoom level, bounded in coordinates because that is what both the
+memory and the cost scale with, and generation-checked like the byte cache so
+an edit still busts it.
+
+### What this does not fix
+
+The *first* visit to a zoom level still pays the full build, and zooming
+through levels still pays one per level. Removing that needs either the decode
+cached in a compact form (~23 MB as typed arrays for this trip, against ~150 MB
+as Python lists) or the levels precomputed off the request path — and
+precomputing inside this process would starve it exactly as the request-time
+build does, so it belongs in the worker role the image already has (#173).
+Tracked in #324.
 ## Round 10 — the fetch that already had its answer
 
 ```

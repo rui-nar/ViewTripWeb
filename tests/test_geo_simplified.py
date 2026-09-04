@@ -135,7 +135,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
 from api.deps import get_current_user
-from api.geo import _geo_cache, _geo_gen, router as geo_router
+from api.geo import _geo_cache, _geo_gen, _level_cache, router as geo_router
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
 
@@ -153,6 +153,7 @@ def env(monkeypatch):
     SQLModel.metadata.create_all(engine)
     _geo_cache.clear()
     _geo_gen.clear()
+    _level_cache.clear()
 
     import polyline as polyline_lib
 
@@ -484,18 +485,41 @@ def test_whole_trip_zoom_degenerates_to_the_trip_bounds(env):
     assert _points(scoped) == _points(plain)
 
 
-def test_a_box_is_part_of_the_cache_key(env):
+def test_a_second_box_at_the_same_level_does_not_rebuild(env):
+    """The regression this replaces (issue #324).
+
+    With the box in the cache key, every pan to a new tile range rebuilt the
+    level — and a rebuild decodes every activity polyline before it simplifies
+    anything (1.83 s measured for a 219-activity trip), on a single-process
+    server where that CPU-bound work also starves unrelated requests. The
+    level is what costs; the box is a pass over the result.
+    """
     client, *_ = env
+    # zoom 17, where the on-box answer is far above the floor — at coarse
+    # zooms both boxes land on it and the assertion below could not tell a
+    # reused level from a rebuilt one.
+    first = client.get("/api/geo/project/simplified?name=Trip&zoom=17&bbox=6,44,9,46")
+    assert first.headers["x-cache"] == "MISS"
+    elsewhere = client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=17&bbox=20,50,21,51")
+    assert elsewhere.headers["x-cache"] == "HIT"
+    # Reused the level, but still answered for *this* box: the track is
+    # nowhere near it, so it comes back at the floor.
+    assert _points(elsewhere) <= 32 < _points(first)
+
+
+def test_a_bust_still_rebuilds_the_level(env):
+    # The level cache holds Python objects rather than bytes, so it needs the
+    # same generation guard the byte cache has, or an edit would leave a stale
+    # map served for the whole 15-minute TTL.
+    from api.geo import bust_geo_cache
+    client, uid, *_ = env
+    client.get("/api/geo/project/simplified?name=Trip&zoom=12")
     assert client.get(
-        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
-    ).headers["x-cache"] == "MISS"
+        "/api/geo/project/simplified?name=Trip&zoom=12").headers["x-cache"] == "HIT"
+    bust_geo_cache(uid, "Trip")
     assert client.get(
-        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
-    ).headers["x-cache"] == "HIT"
-    # A different region is a different answer, so a different entry.
-    assert client.get(
-        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=20,50,21,51"
-    ).headers["x-cache"] == "MISS"
+        "/api/geo/project/simplified?name=Trip&zoom=12").headers["x-cache"] == "MISS"
 
 
 def test_a_tiny_pan_reuses_the_cached_entry(env):
@@ -515,7 +539,10 @@ def test_a_boxed_response_does_not_poison_the_unboxed_one(env):
     # entry was served instead" would be unmissable.
     client.get("/api/geo/project/simplified?name=Trip&zoom=17&bbox=20,50,21,51")
     plain = client.get("/api/geo/project/simplified?name=Trip&zoom=17")
-    assert plain.headers["x-cache"] == "MISS"
+    # A cache hit here is correct now — the cached level is box-independent and
+    # the box is applied per request. What must hold is the *content*: the
+    # unboxed caller gets the unboxed answer, not the floored one the previous
+    # caller was served.
     assert _points(plain) > 32
 
 
