@@ -1450,11 +1450,44 @@ class ProjectNotifier extends ChangeNotifier
     }
   }
 
-  /// Fetches the full project details (including elevation_profile) in the
-  /// background and merges them into the already-rendered activity list so the
-  /// elevation chart and cursor-to-map sync become available without blocking
-  /// the initial panel render.
+  /// Fetches elevation profiles in the background and merges them into the
+  /// already-rendered activity list — but only when the meta load did not
+  /// already supply usable ones. See the guard below.
   Future<void> _loadElevationData(ProjectRef ref, int token) async {
+    // Nothing left to upgrade when /meta already carried profiles (issue
+    // #323). It does: ProjectIO.to_dict's _ep_pairs falls back to the
+    // precomputed ~300-point `elevation_profile_low_res_json`, which the
+    // lightweight load never defers — and ~300 points per activity is
+    // *everything* the two remaining consumers need. The chart
+    // LTTB-downsamples whatever it is given to _kMaxChartPoints = 300, and
+    // buildFullTrackFromTotals reads one number per activity, the profile's
+    // last distance, which the server's downsample keeps exactly (see
+    // src/project/elevation_downsample.py — first, last and both global
+    // extremes all survive it).
+    //
+    // Fetching full GPS resolution on top of that spent 2.8 MB and 4.3 s
+    // materialising 1,465,345 two-element lists on a 219-activity trip, to
+    // redraw the same 300 spots and re-read the same 219 doubles.
+    //
+    // A server old enough to have no low-res column sends no profiles at all,
+    // so it still falls through to the fetches below — as do a trip whose
+    // profiles failed to decrypt and one that genuinely has no elevation.
+    //
+    // E2EE trips are excluded deliberately, even though /meta serves their
+    // low-res profile too (as the ciphertext _revealActivities decrypts). The
+    // details payload they fall through to carries more than elevation: it is
+    // the only load-path source of a *decrypted* map.summary_polyline, which
+    // _openTrackEditor reads off the panel's own copy. Skipping it would send
+    // the editor to /activities/{id}/track instead, which answers with the
+    // envelope — so an encrypted trip would quietly lose track editing. That
+    // is not elevation's decision to make here.
+    if (!encryption.isUnlocked &&
+        activities.any((a) {
+          final profile = a['elevation_profile'];
+          return profile is List && profile.isNotEmpty;
+        })) {
+      return;
+    }
     perfSpans.recordBackgroundRefresh('elevation_load');
     // The compact endpoint (issue #295) carries the only part of the details
     // payload this load needs. That payload is 33 MB on a long trip — ~9 s to

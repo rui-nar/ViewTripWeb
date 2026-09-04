@@ -6,6 +6,11 @@
 // These pin the behaviour the camera-idle test cannot: it mocks both routes,
 // so it passes whichever path is taken. Here the details route *counts its
 // calls*, which is the only way to prove which one actually ran.
+//
+// Issue #323 added a third possibility above both: when /meta already carried
+// profiles (it does, via the precomputed low-res copy), neither fetch runs at
+// all. Every test below whose meta has no profiles therefore also pins that
+// the fallbacks still work when it doesn't.
 
 import 'dart:convert';
 
@@ -43,11 +48,11 @@ Map<String, dynamic> _geo() => {
       ],
     };
 
-Map<String, dynamic> _meta() => {
+Map<String, dynamic> _meta({List<List<num>>? profile}) => {
       'name': 'Trip',
       'lock_version': 1,
       'activities': [
-        {'id': '1'}
+        {'id': '1', if (profile != null) 'elevation_profile': profile}
       ],
       'items': [
         {'item_type': 'activity', 'activity_id': '1'}
@@ -62,12 +67,16 @@ class _Counts {
   int elevation = 0;
 }
 
-ApiClient _api(_Counts counts, {required http.Response Function() elevation}) =>
+ApiClient _api(_Counts counts,
+        {required http.Response Function() elevation,
+        List<List<num>>? metaProfile}) =>
     ApiClient(
       baseUrl: '',
       httpClient: MockClient((req) async {
         final path = req.url.path;
-        if (path == '/api/projects/Trip/meta') return _json(_meta());
+        if (path == '/api/projects/Trip/meta') {
+          return _json(_meta(profile: metaProfile));
+        }
         if (path == '/api/geo/project/low-res') {
           return _json({'type': 'FeatureCollection', 'features': <dynamic>[]});
         }
@@ -168,6 +177,77 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 200));
 
     expect(counts.details, 0);
+  });
+
+  // ── Issue #323: the meta payload's own profiles are enough ──
+
+  test('neither endpoint is fetched when /meta already carried profiles',
+      () async {
+    // /meta ships the precomputed low-res profile (~300 points per activity),
+    // and the chart LTTB-downsamples to 300 whatever it is given. Upgrading it
+    // to full GPS resolution cost 2.8 MB and 4.3 s to redraw the same chart.
+    final counts = _Counts();
+    api = _api(counts,
+        metaProfile: [
+          [0.0, 100],
+          [1.0, 110]
+        ],
+        elevation: () => _json({
+              'profiles': {'1': _encoded},
+              'encrypted': <String, dynamic>{},
+            }));
+    final n = ProjectNotifier(ProjectService());
+    await n.load(_ref);
+    await _settle(n);
+
+    expect(n.fullTrack, isNotEmpty, reason: 'the low-res profile must suffice');
+    expect(counts.elevation, 0);
+    expect(counts.details, 0);
+  });
+
+  test('the profile /meta carried is the one the chart and track keep',
+      () async {
+    // Not merely "no fetch happened": the samples that stay in `activities`
+    // must still be the meta ones, and the last distance — the number
+    // buildFullTrackFromTotals scales the geometry to — must be intact.
+    final counts = _Counts();
+    api = _api(counts,
+        metaProfile: [
+          [0.0, 100],
+          [0.4, 105],
+          [1.0, 110]
+        ],
+        elevation: () => _json({
+              'profiles': {'1': _encoded},
+              'encrypted': <String, dynamic>{},
+            }));
+    final n = ProjectNotifier(ProjectService());
+    await n.load(_ref);
+    await _settle(n);
+
+    final profile = n.activities.first['elevation_profile'] as List;
+    expect(profile, hasLength(3));
+    expect((profile.last as List)[0], 1.0);
+    expect(n.fullTrack.last.$1, closeTo(1.0, 1e-9));
+  });
+
+  test('an activity with an empty profile does not count as elevation data',
+      () async {
+    // `[]` is what a GPX entry looks like next to activities that do have a
+    // profile; treating it as "meta already has this" would silently drop the
+    // upgrade for a trip that genuinely needs it.
+    final counts = _Counts();
+    api = _api(counts,
+        metaProfile: const <List<num>>[],
+        elevation: () => _json({
+              'profiles': {'1': _encoded},
+              'encrypted': <String, dynamic>{},
+            }));
+    final n = ProjectNotifier(ProjectService());
+    await n.load(_ref);
+    await _settle(n);
+
+    expect(counts.elevation, 1);
   });
 
   test('the decoded profile reaches the activity it belongs to', () async {

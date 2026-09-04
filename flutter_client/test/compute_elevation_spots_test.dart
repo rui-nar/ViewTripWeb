@@ -8,6 +8,8 @@
 // elsewhere (map_panel.dart's buildDayIndex). This only exercises the pure
 // computation itself, same scope as build_day_index_test.dart.
 
+import 'dart:math' as math;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/projects/elevation_chart.dart';
 
@@ -96,5 +98,95 @@ void main() {
     // Downsampling must not distort the true range.
     expect(result.minY, 0);
     expect(result.maxY, 999);
+  });
+
+  // ── Issue #323: the chart drawn from ~300-point profiles ──
+  //
+  // The load no longer upgrades /meta's precomputed low-res profiles to full
+  // GPS resolution. These pin that the chart is unchanged by that, against a
+  // full-resolution fixture.
+  //
+  // [asServerDownsamples] stands in for src/project/elevation_downsample.py,
+  // and deliberately makes a *weaker* selection than it does: a uniform stride
+  // plus the four points that module guarantees to keep — first, last, the
+  // global minimum and the global maximum, each pinned by
+  // tests/test_elevation_downsample.py. The server picks its interior points
+  // by LTTB instead, so what survives this stand-in survives the real thing.
+  //
+  // Shape is not asserted point-for-point, and could not be: LTTB over an
+  // already-downsampled series does not select the same 300 samples as LTTB
+  // over the raw one. What the chart renders *from* — how many spots, what the
+  // y axis spans, where each activity starts on the x axis — is identical, and
+  // that is what is asserted.
+  List<List<num>> asServerDownsamples(List<List<num>> profile, int maxPoints) {
+    if (profile.length <= maxPoints) return profile;
+    var lo = 0, hi = 0;
+    for (var i = 0; i < profile.length; i++) {
+      if (profile[i][1] < profile[lo][1]) lo = i;
+      if (profile[i][1] > profile[hi][1]) hi = i;
+    }
+    final keep = <int>{0, profile.length - 1, lo, hi};
+    final step = (profile.length - 1) / (maxPoints - 1);
+    for (var i = 0; i < maxPoints; i++) {
+      keep.add((i * step).round());
+    }
+    final idx = keep.toList()..sort();
+    return [for (final i in idx) profile[i]];
+  }
+
+  /// A trip's worth of full-resolution profiles: a different length and a
+  /// different total distance per activity, so a lost or shifted per-activity
+  /// offset moves the x axis.
+  List<Map<String, dynamic>> fullResolutionTrip() => [
+        for (var a = 0; a < 4; a++)
+          activity(
+            a + 1,
+            List.generate(3000 + a * 500, (i) {
+              final n = 3000 + a * 500;
+              final t = i / (n - 1);
+              return [
+                t * (40.0 + a * 17.5),
+                600 + 400 * math.sin(t * 9 + a) + 30 * math.sin(t * 211),
+              ];
+            }),
+          ),
+      ];
+
+  List<Map<String, dynamic>> downsampledTrip(List<Map<String, dynamic>> full) => [
+        for (final a in full)
+          activity(a['id'],
+              asServerDownsamples(a['elevation_profile'] as List<List<num>>, 300)),
+      ];
+
+  test('~300-point profiles render the same chart as full-resolution ones', () {
+    final full = fullResolutionTrip();
+    final low = downsampledTrip(full);
+    // The shape the report measured, three orders of magnitude smaller: many
+    // samples per activity, each reduced to ~300.
+    expect((low.first['elevation_profile'] as List).length, lessThan(310));
+
+    final before = computeElevationSpots((activities: full, selectedId: null));
+    final after = computeElevationSpots((activities: low, selectedId: null));
+
+    expect(after.spots.length, before.spots.length);
+    expect(after.minY, before.minY);
+    expect(after.maxY, before.maxY);
+    expect(after.spots.first.x, before.spots.first.x);
+    // The last x is every activity's total distance summed, so it moves if any
+    // per-activity offset is lost or shifted.
+    expect(after.spots.last.x, closeTo(before.spots.last.x, 1e-9));
+  });
+
+  test('a selected activity renders the same chart from its ~300 points', () {
+    final full = fullResolutionTrip();
+    final low = downsampledTrip(full);
+
+    final before = computeElevationSpots((activities: full, selectedId: 3));
+    final after = computeElevationSpots((activities: low, selectedId: 3));
+
+    expect(after.minY, before.minY);
+    expect(after.maxY, before.maxY);
+    expect(after.spots.first.x, before.spots.first.x);
+    expect(after.spots.last.x, closeTo(before.spots.last.x, 1e-9));
   });
 }
