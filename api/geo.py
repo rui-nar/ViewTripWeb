@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip as gzip_lib
 import json
+import math
 import os
 import time
 from threading import Lock
@@ -22,6 +23,7 @@ from fastapi.responses import Response
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
+from src.models.simplify import midpoint_latitude, simplify_lonlat, zoom_tolerance_m
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
@@ -54,6 +56,10 @@ _repo = ProjectRepo()
 _geo_cache: dict[tuple, tuple[bytes, float, int]] = {}
 _geo_cache_lock = Lock()
 _GEO_CACHE_TTL_S = 300.0
+
+# Zoom-simplified payloads expire sooner than everything else — see the store
+# call in project_geo_simplified for why.
+_SIMPLIFIED_CACHE_TTL_S = 60.0
 
 # Nothing evicted an entry whose project was never mutated again — the TTL above
 # only turns a stale HIT into a MISS on the next *read* of that same key; a key
@@ -187,7 +193,8 @@ def _geo_cache_bytes() -> int:
     return sum(len(v[0]) for v in _geo_cache.values())
 
 
-def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
+def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int,
+                     ttl_s: float = _GEO_CACHE_TTL_S) -> None:
     """Persist *gz_bytes* only if nothing busted the project since generation *gen*.
 
     The caller still serves what it computed — that payload is as fresh as the
@@ -205,7 +212,7 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int) -> None:
             # Too big to be worth the room it would cost everything else.
             _geo_cache.pop(cache_key, None)
             return
-        _geo_cache[cache_key] = (gz_bytes, now + _GEO_CACHE_TTL_S, gen)
+        _geo_cache[cache_key] = (gz_bytes, now + ttl_s, gen)
         # Evict closest-to-expiry first, on both bounds, until within budget.
         # Bytes is the binding one; the entry cap only guards against a flood
         # of tiny payloads.
@@ -464,6 +471,57 @@ def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Di
     return features
 
 
+def simplify_geo_features(features: List[Dict[str, Any]], zoom: float) -> List[Dict[str, Any]]:
+    """Return *features* with each line simplified to about one pixel at *zoom*.
+
+    The saving this exists for: a 219-activity trip carries 1,465,345
+    coordinates and the client renders 6,051 of them, holding the rest as
+    roughly 180 MB of Dart heap on a device that gets killed above ~1.3 GB
+    (issue #276's device profiling). Simplifying to what the zoom can actually
+    resolve removes the difference instead of decimating it away client-side
+    after paying to transfer and materialise it.
+
+    Only expanded ``coordinates`` are touched. An encoded polyline is left
+    alone: re-encoding it here would cost a decode plus an encode per activity
+    to save bytes the caller did not ask to save, and the ``encoded`` variant
+    exists precisely to avoid that work.
+
+    Latitude is taken per feature, and from the same midpoint the
+    simplification itself projects against, so a trip spanning many latitudes
+    is simplified correctly along its whole length rather than against one
+    global scale factor.
+    """
+    out: List[Dict[str, Any]] = []
+    for feature in features:
+        geom = feature.get("geometry") or {}
+        coords = geom.get("coordinates")
+        if not isinstance(coords, list) or len(coords) < 3:
+            out.append(feature)
+            continue
+        try:
+            # The SAME latitude simplify_lonlat projects against. Taking it
+            # from the first point instead left a feature spanning 0 to 60
+            # degrees simplified at up to twice the intended tolerance along
+            # its northern half.
+            lat = float(midpoint_latitude(coords))
+            simplified = simplify_lonlat(coords, zoom_tolerance_m(zoom, lat))
+        except (TypeError, ValueError, IndexError):
+            # Malformed geometry is data, not a bug in the caller: one bad
+            # point must not 500 a whole project's map.
+            out.append(feature)
+            continue
+        if len(simplified) == len(coords):
+            out.append(feature)
+            continue
+        # Copy shallowly: the caller's features may be shared with a cache
+        # entry, and mutating those in place would poison it.
+        out.append({
+            **feature,
+            "geometry": {**geom, "coordinates": simplified},
+        })
+    return out
+
+
 def _gzip_geo(features: List[Dict[str, Any]]) -> bytes:
     json_bytes = json.dumps({"type": "FeatureCollection", "features": features}).encode()
     return gzip_lib.compress(json_bytes, compresslevel=6)
@@ -493,6 +551,80 @@ def warm_geo_cache(user_info_id: int, name: str) -> None:
             )
     except Exception:
         pass
+
+
+@router.get("/project/simplified", summary="Zoom-appropriate GeoJSON (gzip)")
+def project_geo_simplified(
+    name: str,
+    zoom: float,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
+):
+    """Full-res geometry simplified to roughly one pixel at *zoom*.
+
+    The client holds whatever this returns, so the size of that is the size of
+    its map geometry. At the zoom that shows a whole trip, a pixel covers
+    hundreds of metres and the geometry collapses to a fraction of its full
+    resolution — which is all the screen can show anyway. Zooming in asks for
+    more, and gets it.
+
+    An additional endpoint: ``/project`` is unchanged and still serves full
+    resolution, for shipped clients and for anything that genuinely needs
+    every point (track editing, export).
+
+    Rides the same payload cache as every other per-project response, keyed
+    per zoom, so one bust per mutation still covers every level.
+    """
+    if not (0 <= zoom <= 22):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Zoom must be between 0 and 22",
+        )
+    # Quantised to whole levels: a continuous camera zoom would otherwise mint
+    # a distinct cache entry per pixel of pinch.
+    #
+    # Rounded UP, not down. Flooring served zoom 11.9 the zoom-11 tolerance —
+    # 54 m instead of 29 m, a 1.87x over-simplification and about two pixels
+    # of visible drift. Ceiling errs towards more detail than asked for, which
+    # is invisible, and costs no extra cache entries.
+    level = math.ceil(zoom)
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        owner_id = row.user_info_id
+
+        cache_key = (owner_id, name, f"simplified-{level}")
+        cached_bytes = _geo_cache_get(cache_key)
+        if cached_bytes is not None:
+            return Response(
+                content=cached_bytes,
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+            )
+
+        gen = _geo_generation(owner_id, name)
+        project = _repo.get_project(
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
+            include_elevation=False,
+        )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    features = simplify_geo_features(
+        _build_full_geo_features(project, encoded=False), level)
+    gz_bytes = _gzip_geo(features)
+    # Short TTL on purpose. There are up to 23 of these per project in a cache
+    # shared with /project, /low-res and /meta, and eviction picks the entry
+    # closest to expiry — so without this, one user sweeping through zoom
+    # levels would flush every other project's warm payload. A shorter deadline
+    # makes these evict each other first, and they are the cheapest to rebuild.
+    _geo_cache_store(cache_key, gz_bytes, gen, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
+    return Response(
+        content=gz_bytes,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "X-Cache": "MISS"},
+    )
 
 
 @router.get("/project", summary="Full-resolution GeoJSON (gzip)")
