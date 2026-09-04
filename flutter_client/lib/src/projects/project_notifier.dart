@@ -198,20 +198,65 @@ int totalTrackCoordinatePoints(Map<String, dynamic>? geo) {
 /// precedent.
 const kInlineFullTrackThreshold = 5000;
 
-/// Builds the distance-indexed full-trip track (and per-activity tracks) from
-/// [args.geo] + [args.activities] — the pure computation behind
-/// [ProjectNotifier._buildFullTrack]. Pure and top-level (only plain
-/// JSON-shaped input/output) so it can run via [compute] on a background
-/// isolate for a large trip: iterating every point of every activity's
-/// elevation_profile with no size threshold (issue #276) was the same "big
-/// computation on the UI isolate" mistake this codebase's other per-trip-size
-/// computations (computeElevationSpots, hitTestMapTap, decimatePolylinePoints)
-/// already guard against. Exposed (not `_`-prefixed) only for testing this
-/// computation directly; every real caller is ProjectNotifier._buildFullTrack.
+/// The only thing [buildFullTrackFromTotals] needs from an activity: its id
+/// and its profile's total distance.
+///
+/// Since issue #295 that function derives distances from the *geometry* and
+/// scales them to the profile's total, so one double per activity is the
+/// entire contribution of a profile that can be hundreds of thousands of
+/// points. Projecting to this before the isolate hop is not a micro
+/// optimisation: `compute()` *copies its argument*, so passing the activity
+/// maps serialised every one of those points to read one number from each.
+typedef ActivityTotals = List<({String? id, double elevTotalKm})>;
+
+/// Projects [activities] to the [ActivityTotals] the track builder needs.
+///
+/// Skips exactly what the builder used to skip inline (no profile, or an
+/// empty one), so the resulting order and membership are unchanged.
+@visibleForTesting
+ActivityTotals activityElevationTotals(List<Map<String, dynamic>> activities) {
+  final out = <({String? id, double elevTotalKm})>[];
+  for (final a in activities) {
+    final profile = a['elevation_profile'];
+    if (profile is! List || profile.isEmpty) continue;
+    final last = profile.last;
+    out.add((
+      id: a['id']?.toString(),
+      elevTotalKm: (last is List && last.isNotEmpty)
+          ? (last[0] as num).toDouble()
+          : 0.0,
+    ));
+  }
+  return out;
+}
+
+/// Nested-input form of [buildFullTrackFromTotals], kept as the readable
+/// contract these computations are tested through.
 @visibleForTesting
 ({List<(double, GeoPoint)> fullTrack, Map<String, List<(double, GeoPoint)>> perActivityTracks})
     buildFullTrackResult(
-        ({Map<String, dynamic>? geo, List<Map<String, dynamic>> activities}) args) {
+        ({Map<String, dynamic>? geo, List<Map<String, dynamic>> activities}) args) =>
+        buildFullTrackFromTotals(
+            (geo: args.geo, totals: activityElevationTotals(args.activities)));
+
+/// Builds the distance-indexed full-trip track (and per-activity tracks) from
+/// [args.geo] + [args.totals] — the pure computation behind
+/// [ProjectNotifier._buildFullTrack]. Pure and top-level (only plain
+/// JSON-shaped input/output) so it can run via [compute] on a background
+/// isolate for a large trip: walking every coordinate of every activity with
+/// no size threshold (issue #276) was the same "big computation on the UI
+/// isolate" mistake this codebase's other per-trip-size computations
+/// (computeElevationSpots, hitTestMapTap, decimatePolylinePoints) already
+/// guard against.
+///
+/// It takes [ActivityTotals] rather than the activity maps because the
+/// argument to [compute] is *copied*: see that typedef. Exposed (not
+/// `_`-prefixed) only for testing this computation directly; every real
+/// caller is ProjectNotifier._buildFullTrack.
+@visibleForTesting
+({List<(double, GeoPoint)> fullTrack, Map<String, List<(double, GeoPoint)>> perActivityTracks})
+    buildFullTrackFromTotals(
+        ({Map<String, dynamic>? geo, ActivityTotals totals}) args) {
   // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
   // GeoJSON coordinates are [lon, lat] per spec.
   final geoCoords = <String, List>{};
@@ -231,15 +276,10 @@ const kInlineFullTrackThreshold = 5000;
   final combined = <(double, GeoPoint)>[];
   final perAct = <String, List<(double, GeoPoint)>>{};
   double offsetKm = 0;
-  for (final a in args.activities) {
-    final profile = a['elevation_profile'];
-    if (profile is! List || profile.isEmpty) continue;
-    final actId = a['id']?.toString();
+  for (final a in args.totals) {
+    final actId = a.id;
     final coords = actId != null ? geoCoords[actId] : null;
-    final last = profile.last;
-    final elevTotalKm = (last is List && last.isNotEmpty)
-        ? (last[0] as num).toDouble()
-        : 0.0;
+    final elevTotalKm = a.elevTotalKm;
     final actTrack = <(double, GeoPoint)>[];
     if (coords != null && coords.isNotEmpty) {
       // Always distance-based, never index-based.
@@ -1641,7 +1681,12 @@ class ProjectNotifier extends ChangeNotifier
       _noteTrackSizes();
       return;
     }
-    final r = await compute(buildFullTrackResult, (geo: geo, activities: activities));
+    // Project *before* the hop, not after: compute() copies its argument, so
+    // handing it `activities` serialised every elevation sample in the trip
+    // to read one double from each — measured as a 2.4 s frame (issue #276).
+    final totals =
+        perfSpans.blocking('elevation_totals', () => activityElevationTotals(activities));
+    final r = await compute(buildFullTrackFromTotals, (geo: geo, totals: totals));
     if (gen != _buildFullTrackGen) return; // superseded by a newer call
     _fullTrack = r.fullTrack;
     _perActivityTracks = r.perActivityTracks;
@@ -1666,6 +1711,10 @@ class ProjectNotifier extends ChangeNotifier
       ..note('full_track_points', '${_fullTrack.length}')
       ..note('per_activity_track_points', '$perAct')
       ..note('geo_coords', '$coords')
+      // Every sample is a 2-element List: the single largest object count
+      // this app holds, and the one the report used to omit entirely — which
+      // is how ~700k of them crossed an isolate boundary unnoticed (#276).
+      ..note('elevation_points', '${totalElevationProfilePoints(activities)}')
       ..note('activities', '${activities.length}')
       ..note('items', '${items.length}')
       ..note('dart_structs_est', perfEstimateStructBytes(

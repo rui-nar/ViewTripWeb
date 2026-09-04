@@ -774,3 +774,182 @@ which, with everything else now cheap and 586 markers on screen, points at
 `flutter_map`'s per-frame marker work and issue #296. A named span means
 something of ours is running alongside it. Either way it is the first
 instrument that distinguishes the two.
+## Round 8 — what the frame context caught: `compute()` copies its argument
+
+The instrument paid for itself on the first run. The worst frame came back
+named:
+
+```
+[perf] worst frame ran: elevation_chart_build
+[perf] frames=678  build p50=6.0 p90=13.2 p99=42.7 max=2436.6ms
+                 | raster p50=5.8 p90=10.7 p99=15.4 max=25.4ms
+[perf] no UI-isolate span over 16.7ms
+```
+
+Three facts, together, locate the bug exactly:
+
+* The frame ran `elevation_chart_build`, and **only** that — no `build_specs`,
+  no `style_markers`. So this is the frame in which the elevation data lands
+  and the chart rebuilds.
+* That span measured **0.3 ms**. The cost is in the same frame but outside it.
+* Raster peaked at 25.4 ms, so it is not the GPU. It is UI-thread work.
+
+`_compute` is called from `didUpdateWidget`, which runs in that frame but
+*before* `build()` — outside the span that wraps `build()`. That is precisely
+how a frame reads 2437 ms while its only named span reads 0.3 ms.
+
+### The mechanism
+
+`compute()` runs a function on another isolate, and **copies its argument to
+get it there**. The copy is done by the *calling* isolate: the UI one.
+
+Two per-trip computations were being handed the whole `activities` list:
+
+```dart
+compute(computeElevationSpots, (activities: activities, selectedId: null))
+compute(buildFullTrackResult,  (geo: geo, activities: activities))
+```
+
+Every activity map carries `elevation_profile`, shaped `[[distKm, elevM], …]`
+— **one Dart list object per sample**. This trip's profiles are ~700,000
+samples, so each call serialised on the order of a million small objects
+before any work began. Measured: **2437 ms**, on the UI isolate, to move work
+*off* the UI isolate.
+
+This is the same trap already hit and fixed once in this investigation, in
+`build_specs` (2402 ms of marshalling for the decimation hop) — the same
+magnitude, which is not a coincidence. Moving a computation to an isolate is
+not free, and the price is the size of its argument, not the size of its work.
+
+### Why nothing caught it
+
+Three separate blind spots lined up:
+
+* `blocking()` spans wrap the *body* of the work. The copy happens at the hop,
+  outside any of them.
+* `stage()` spans are wall clock, so an isolate hop looks the same whether it
+  blocked the UI isolate or not.
+* The payload report counted `full_track_points`, `geo_coords` and
+  `dart_structs_est` — but **never elevation samples**. `dart_structs_est`
+  read `~3 MB` while ~700k profile points sat outside the estimate entirely.
+
+The report now counts them (`elevation_points`), because the thing that isn't
+measured is the thing that grows.
+
+### The fix
+
+The two calls needed opposite treatments, and the difference is the point.
+
+**The track builder needed almost nothing.** Since the zoom-LOD work of issue
+#295 it derives distances from the *geometry* and scales them to the profile's
+total — so from each profile it reads exactly **one number**, `elevTotalKm`.
+It was copying 700,000 points to read 219 doubles. It is now given an
+`ActivityTotals`: one `(id, elevTotalKm)` record per activity. The profiles
+never cross the boundary at all.
+
+**The chart genuinely needs the samples** — it concatenates them all and
+LTTB-downsamples to 300 spots. So they still cross, but as a `Float64List`
+per activity instead of nested lists: the same numbers as one typed buffer,
+which copies as a memcpy rather than object by object.
+
+Both nested entry points (`computeElevationSpots`, `buildFullTrackResult`)
+were kept as thin delegating wrappers, since they are the readable contract
+the existing suite pins. `test/isolate_payload_test.dart` compares the flat
+implementations against a reference implementation of the original nested
+walk, because comparing them against the wrappers that now delegate to them
+would prove nothing.
+
+The subtle invariant worth naming: an activity whose samples are *partly*
+malformed contributes no spots for them but **still advances the running
+distance offset** by its raw last entry. Flattening had to preserve that, or
+every activity after it would shift along the x axis.
+
+### What this does and does not claim
+
+It removes a measured 2437 ms of UI-isolate work, and it is the first
+explanation in this investigation that accounts for every number in the report
+rather than being consistent with some of them. It should also fix the
+"panning blocks when the low-res tracks are replaced" symptom, since every
+zoom-bucket change calls `_buildFullTrack` and therefore paid this copy again.
+
+It is not yet proof the freeze is gone. The next run says: `elevation_flatten`
+and `elevation_totals` are now spans, so their residual cost is visible, and
+the worst-frame context will name whatever is left.
+
+### The adversarial review of that fix, and what it caught
+
+Two blockers, both from one structural mistake: the nested wrapper flattened
+**before** filtering by `selectedId`.
+
+The original walk filtered first and then walked only the surviving profile.
+Flattening first inverted that, and the selected-activity path is the *inline*
+branch — the one deliberately taken without any size threshold, on the
+assumption that "a single selected activity's profile is bounded". That
+assumption was still true of the resulting *series* and no longer true of the
+*work*: tapping an activity on the measured trip would have walked all ~700k
+samples and allocated ~11 MB of `Float64List` across 219 buffers to keep one,
+synchronously, inside `didUpdateWidget`. The fix moved a 2437 ms frame off the
+elevation-landing path and would have created a new one on every activity tap.
+
+The second blocker is the same bug seen from a different angle, and the reason
+it is a correctness issue rather than only a performance one: flattening
+activities the filter would have excluded means *reading* their samples, so a
+malformed entry in an activity the user did not select now throws — out of
+`initState`/`didUpdateWidget`, synchronously, into the build phase. The suite
+already pinned that such input must not throw.
+
+Both are fixed by filtering before flattening, and `computeElevationSpotsFlat`
+no longer takes a `selectedId` at all: selection is the caller's business, and
+removing the parameter removes the chance of getting the order wrong again.
+`test/isolate_payload_test.dart` pins the ordering with a *poisoned
+neighbour* — an activity whose samples would throw if read — which makes "did
+not touch the other activities" observable rather than merely faster.
+
+The review also caught a **pre-existing** bug in the same method:
+`_computeGen` was bumped only on the isolate branch, so an inline call could
+not supersede a hop already in flight. Select an activity while the full-trip
+hop is running and the stale full-trip series lands afterwards and overwrites
+it — leaving the chart showing the whole trip while `widget.track` is the
+per-activity track, so the cursor mapping disagrees too. This is the exact bug
+already fixed in `ProjectNotifier._buildFullTrack`, whose comment names the
+scenario; the chart was its un-fixed twin. The counter is now bumped before
+the branch.
+
+One more, worth stating because it cuts against the headline: **on web this
+change would have been a pure cost.** `compute` has no isolate to hop to
+there and runs its callback inline, so there is no argument copy to save, and
+flattening would simply have added a second full pass over every sample on the
+main thread. Web now takes the single-pass inline path explicitly. The 2437 ms
+saving is Android/iOS only.
+
+#### One finding rejected
+
+The review argued that `decodeElevationProfiles`' *result* — a
+`Map<String, List<List<double>>>`, i.e. the same ~700k nested lists — is
+copied back onto the UI isolate by `compute`, and that this is the larger half
+of the same bug.
+
+It isn't. `compute` is `Isolate.run`, whose result "is sent using `exit`,
+which means it's sent to this isolate without copying"; `Isolate.exit`'s
+object graph is reassigned to the receiving isolate, "in most cases … in
+constant time". Arguments are copied, results are not — which is exactly why
+this whole class of bug is asymmetric and easy to miss.
+
+What survives from that finding is a *memory* point, not a frame-time one:
+those ~700k two-element lists really are allocated and really do end up in the
+UI isolate's heap. That is what the new `elevation_points` counter measures,
+and a flat representation for `elevation_profile` would remove it — but it is
+a heap question for the 16 call sites that read `[[distKm, elevM], …]`, not
+something to smuggle into this fix.
+
+Also deferred, and now tracked as **issue #321**: viewers arriving through a
+share link have no simplified endpoint, so `geo` crosses the boundary at full
+resolution for them (~1.46M nested lists — more than the elevation payload
+removed here). The claim that this fix addresses the "panning blocks when
+low-res tracks are replaced" symptom holds for the owner path only.
+
+The scope there is narrower than "unauthenticated means no LOD":
+`/api/geo/project/simplified` already takes the same `owner` parameter and
+auth dependency as `/api/geo/project`, so a signed-in collaborator opening
+someone else's trip by name is already covered. It is the token-scoped routes
+in `api/share.py` — the public ones — that have no zoom-aware equivalent.
