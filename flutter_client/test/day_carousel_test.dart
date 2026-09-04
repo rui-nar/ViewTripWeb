@@ -233,4 +233,101 @@ void main() {
 
     expect(find.byType(ListWheelScrollView), findsNothing);
   });
+
+  // Issue #322: the map is the other half of this control. Tapping an
+  // activity there calls selectActivity(), and the strip has to follow it.
+  group('following a map selection', () {
+    testWidgets('scrolls the strip to the tapped activity\'s day',
+        (tester) async {
+      final notifier = await pumpCarousel(tester, const Size(1200, 900));
+      expect(find.text('Day 1'), findsOneWidget);
+
+      // Activity 2 is on 2026-06-03 — the trip's third day.
+      notifier.selectActivity(2);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Day 3'), findsOneWidget);
+      expect(find.text('5 km'), findsOneWidget);
+      expect(find.text('Day 1'), findsNothing);
+    });
+
+    testWidgets('does not turn the map selection into a day selection',
+        (tester) async {
+      final notifier = await pumpCarousel(tester, const Size(1200, 900));
+      notifier.selectActivity(2);
+      await tester.pumpAndSettle();
+
+      // The wheel moved for a selection it did not make, so it must not
+      // commit one of its own: selectDays() clears selectedActivityId, which
+      // would undo the tap and bounce the wheel back — the feedback loop
+      // this guard exists to prevent.
+      expect(notifier.selectedActivityId, 2);
+      expect(notifier.selectedDays, isEmpty);
+      expect(notifier.selectedDay, isNull);
+    });
+
+    testWidgets('a second tap mid-scroll still leaves the map selection alone',
+        (tester) async {
+      final notifier = await pumpCarousel(tester, const Size(1200, 900));
+
+      notifier.selectActivity(2); // day 3
+      await tester.pump(const Duration(milliseconds: 100)); // mid-animation
+      notifier.selectActivity(1); // day 1, before the first scroll lands
+      await tester.pumpAndSettle();
+
+      // The superseded animation completes as soon as the second one starts;
+      // if that were allowed to lower the loop guard, the rest of the second
+      // scroll would commit a day and clear the activity under it.
+      expect(notifier.selectedActivityId, 1);
+      expect(notifier.selectedDays, isEmpty);
+      expect(find.text('Day 1'), findsOneWidget);
+    });
+
+    testWidgets('leaves the strip alone for an activity on no day',
+        (tester) async {
+      final notifier = await pumpCarousel(tester, const Size(1200, 900));
+
+      // Activity 99 is in no item of the trip, so it belongs to no day.
+      notifier.selectActivity(99);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Day 1'), findsOneWidget);
+      expect(notifier.selectedDays, isEmpty);
+    });
+
+    testWidgets('leaves the strip where it is when the map deselects',
+        (tester) async {
+      final notifier = await pumpCarousel(tester, const Size(1200, 900));
+      notifier.selectActivity(2);
+      await tester.pumpAndSettle();
+
+      // A second tap on the same activity deselects it.
+      notifier.selectActivity(2);
+      await tester.pumpAndSettle();
+
+      expect(notifier.selectedActivityId, isNull);
+      expect(find.text('Day 3'), findsOneWidget);
+    });
+
+    testWidgets('a map selection is harmless when the strip has no days',
+        (tester) async {
+      final notifier = ProjectNotifier(ProjectService());
+      await tester.pumpWidget(
+        ChangeNotifierProvider<ProjectNotifier>.value(
+          value: notifier,
+          child: MaterialApp(
+            home: Scaffold(body: DayCarousel(notifier: notifier)),
+          ),
+        ),
+      );
+
+      // Nothing rendered means the wheel controller has no clients — the
+      // follow must no-op rather than throw.
+      notifier.selectActivity(1);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ListWheelScrollView), findsNothing);
+      expect(notifier.selectedActivityId, 1);
+    });
+  });
 }
