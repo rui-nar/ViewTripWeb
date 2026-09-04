@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import '../core/perf_timing.dart' show perfSpans;
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart' show compute, visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
@@ -77,20 +77,32 @@ FlatProfiles flattenProfiles(List<Map<String, dynamic>> activities) {
 }
 
 /// Nested-input form of [computeElevationSpotsFlat], kept as the readable
-/// contract this computation is tested through. The isolate path flattens
-/// first — see [FlatProfiles] for why it must.
+/// contract this computation is tested through.
+///
+/// Filters by [args.selectedId] *before* flattening, which is the whole
+/// ordering. Flattening first would walk — and allocate a [Float64List] for —
+/// every activity in the trip only to discard all but one, turning the cheap
+/// bounded selected-activity path into the single most expensive path there
+/// is. That path runs inline with no size threshold (see
+/// `_ElevationChartState._compute`), so the cost would land straight in the
+/// build phase this whole exercise is about. It would also reach malformed
+/// samples in activities the caller never asked about, throwing where the
+/// filtered walk returned cleanly.
 @visibleForTesting
 ({List<FlSpot> spots, double minY, double maxY}) computeElevationSpots(
   ({List<Map<String, dynamic>> activities, dynamic selectedId}) args,
-) =>
-    computeElevationSpotsFlat((
-      profiles: flattenProfiles(args.activities),
-      selectedId: args.selectedId,
-    ));
+) {
+  final source = args.selectedId == null
+      ? args.activities
+      : args.activities
+          .where((a) => a['id']?.toString() == args.selectedId.toString())
+          .toList();
+  return computeElevationSpotsFlat(flattenProfiles(source));
+}
 
-/// Concatenates the profile of every activity in [args.profiles] (or just the
-/// one matching [args.selectedId], when set) into one spot series, then
-/// LTTB-downsamples it. Pure and top-level so it can run via [compute] on a
+/// Concatenates every profile in [profiles] into one spot series, then
+/// LTTB-downsamples it. Selecting a single activity is the caller's job — see
+/// [computeElevationSpots] for why that has to happen before flattening. Pure and top-level so it can run via [compute] on a
 /// background isolate — a long trip's *full* elevation payload (every
 /// activity's profile concatenated, with no activity selected) can be tens of
 /// thousands of points, and doing that concatenation + downsampling
@@ -102,17 +114,11 @@ FlatProfiles flattenProfiles(List<Map<String, dynamic>> activities) {
 /// this computation directly; every real caller is in this file.
 @visibleForTesting
 ({List<FlSpot> spots, double minY, double maxY}) computeElevationSpotsFlat(
-  ({FlatProfiles profiles, dynamic selectedId}) args,
+  FlatProfiles profiles,
 ) {
-  final source = args.selectedId == null
-      ? args.profiles
-      : args.profiles
-          .where((p) => p.id == args.selectedId.toString())
-          .toList();
-
   final spots = <FlSpot>[];
   double offsetKm = 0;
-  for (final a in source) {
+  for (final a in profiles) {
     // No `continue` on an empty buffer: an activity whose samples were all
     // malformed contributed no spots but still advanced the offset before
     // this was flattened, and the offsets must not shift.
@@ -274,12 +280,26 @@ class _ElevationChartState extends State<ElevationChart> {
 
   void _compute(List<Map<String, dynamic>> activities, dynamic selectedId) {
     final args = (activities: activities, selectedId: selectedId);
-    // A single selected activity's profile is always bounded — and the
-    // common case (map/panel activity click) shouldn't pay an isolate-hop
-    // latency or flash "No elevation data" for a frame. Only the unfiltered
-    // full-trip aggregate can get big enough to need moving off the UI
-    // isolate — see computeElevationSpots's doc comment.
-    if (selectedId != null || _totalProfilePoints(activities) <= _kInlineComputeThreshold) {
+    // Bumped unconditionally, before the branch below — not just on the
+    // compute() path. An inline call must be able to supersede a hop still in
+    // flight, or the older full-trip series lands after the user has selected
+    // an activity and overwrites it, leaving the chart showing the whole trip
+    // while `widget.track` is the per-activity track (so the cursor mapping
+    // disagrees too). This is the same bug, and the same fix, as
+    // ProjectNotifier._buildFullTrack's _buildFullTrackGen.
+    final gen = ++_computeGen;
+    // A single *selected* activity's profile is bounded — and the common case
+    // (map/panel activity click) shouldn't pay an isolate-hop latency or flash
+    // "No elevation data" for a frame. Only the unfiltered full-trip aggregate
+    // can get big enough to need moving off the UI isolate.
+    //
+    // Web takes this path too, whatever the size: `compute` has no isolate to
+    // hop to there and runs its callback inline, so the hop buys nothing and
+    // flattening first would only add a second full pass over every sample on
+    // the main thread.
+    if (selectedId != null ||
+        kIsWeb ||
+        _totalProfilePoints(activities) <= _kInlineComputeThreshold) {
       // No setState here: called synchronously from initState (too early —
       // Flutter forbids setState there) and from didUpdateWidget (already
       // part of the build Flutter is about to run for this widget) — both
@@ -291,14 +311,13 @@ class _ElevationChartState extends State<ElevationChart> {
       _maxY = result.maxY;
       return;
     }
-    final gen = ++_computeGen;
     // Flatten *before* the hop, not inside it: compute() copies its argument,
     // so handing it the activity maps serialised a million-odd small list
-    // objects on the UI isolate — see [FlatProfiles].
+    // objects on the UI isolate — see [FlatProfiles]. `selectedId` is null on
+    // this branch, so there is nothing to filter out first.
     final flat = perfSpans
         .blocking('elevation_flatten', () => flattenProfiles(activities));
-    compute(computeElevationSpotsFlat, (profiles: flat, selectedId: selectedId))
-        .then((result) {
+    compute(computeElevationSpotsFlat, flat).then((result) {
       if (!mounted || gen != _computeGen) return;
       setState(() {
         _spots = result.spots;

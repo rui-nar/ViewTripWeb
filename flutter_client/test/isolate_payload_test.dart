@@ -156,8 +156,7 @@ void main() {
 
     test('the spot series is identical to the nested walk', () {
       final acts = _acts(4, 60);
-      final flat = computeElevationSpotsFlat(
-          (profiles: flattenProfiles(acts), selectedId: null));
+      final flat = computeElevationSpotsFlat(flattenProfiles(acts));
       final reference = _referenceSpots(acts, null);
       expect(flat.spots, hasLength(reference.length));
       for (var i = 0; i < reference.length; i++) {
@@ -168,11 +167,48 @@ void main() {
 
     test('a selected activity still filters to just that activity', () {
       final acts = _acts(4, 20);
-      final flat = computeElevationSpotsFlat(
-          (profiles: flattenProfiles(acts), selectedId: '2'));
-      expect(flat.spots, hasLength(20));
-      expect(flat.spots.first.x, closeTo(0.0, 1e-9),
+      final got = computeElevationSpots((activities: acts, selectedId: '2'));
+      expect(got.spots, hasLength(20));
+      expect(got.spots.first.x, closeTo(0.0, 1e-9),
           reason: 'a single activity starts at its own zero, with no offset');
+      final reference = _referenceSpots(acts, '2');
+      for (var i = 0; i < reference.length; i++) {
+        expect(got.spots[i].x, closeTo(reference[i].x, 1e-9));
+        expect(got.spots[i].y, closeTo(reference[i].y, 1e-9));
+      }
+    });
+
+    test('selecting an activity does not read any other activity samples', () {
+      // The ordering that matters. Flattening before filtering would walk the
+      // whole trip to build a series for one activity — turning the cheap
+      // bounded path (inline, and with no size threshold in front of it) into
+      // the most expensive one there is.
+      //
+      // A poisoned neighbour makes that observable rather than merely slow:
+      // the filtered walk this replaces never looked at it, so neither may
+      // this one.
+      final acts = <Map<String, dynamic>>[
+        {
+          'id': 'wanted',
+          'elevation_profile': [
+            [0.0, 10.0],
+            [1.0, 20.0],
+          ]
+        },
+        {
+          'id': 'poison',
+          'elevation_profile': [
+            [0.0, 1.0],
+            ['not a number', 1.0],
+          ]
+        },
+      ];
+      expect(_referenceSpots(acts, 'wanted').map((s) => s.y).toList(),
+          [10.0, 20.0],
+          reason: 'the walk being preserved returns cleanly on this input');
+      final got =
+          computeElevationSpots((activities: acts, selectedId: 'wanted'));
+      expect(got.spots.map((s) => s.y).toList(), [10.0, 20.0]);
     });
 
     test('a malformed sample is skipped without shifting the offsets', () {
@@ -196,8 +232,7 @@ void main() {
           ]
         },
       ];
-      final flat = computeElevationSpotsFlat(
-          (profiles: flattenProfiles(acts), selectedId: null));
+      final flat = computeElevationSpotsFlat(flattenProfiles(acts));
       expect(flat.spots.map((s) => s.x).toList(), [0.0, 2.0, 2.0, 3.0]);
       expect(flat.spots.map((s) => s.y).toList(), [10.0, 30.0, 5.0, 6.0]);
       expect(flat.spots.map((s) => s.x).toList(),
@@ -206,8 +241,7 @@ void main() {
 
     test('min and max still come from the full series', () {
       final acts = _acts(2, 40);
-      final flat = computeElevationSpotsFlat(
-          (profiles: flattenProfiles(acts), selectedId: null));
+      final flat = computeElevationSpotsFlat(flattenProfiles(acts));
       final reference = _referenceSpots(acts, null);
       expect(
           flat.minY, reference.map((s) => s.y).reduce((a, b) => a < b ? a : b));

@@ -875,3 +875,75 @@ zoom-bucket change calls `_buildFullTrack` and therefore paid this copy again.
 It is not yet proof the freeze is gone. The next run says: `elevation_flatten`
 and `elevation_totals` are now spans, so their residual cost is visible, and
 the worst-frame context will name whatever is left.
+
+### The adversarial review of that fix, and what it caught
+
+Two blockers, both from one structural mistake: the nested wrapper flattened
+**before** filtering by `selectedId`.
+
+The original walk filtered first and then walked only the surviving profile.
+Flattening first inverted that, and the selected-activity path is the *inline*
+branch — the one deliberately taken without any size threshold, on the
+assumption that "a single selected activity's profile is bounded". That
+assumption was still true of the resulting *series* and no longer true of the
+*work*: tapping an activity on the measured trip would have walked all ~700k
+samples and allocated ~11 MB of `Float64List` across 219 buffers to keep one,
+synchronously, inside `didUpdateWidget`. The fix moved a 2437 ms frame off the
+elevation-landing path and would have created a new one on every activity tap.
+
+The second blocker is the same bug seen from a different angle, and the reason
+it is a correctness issue rather than only a performance one: flattening
+activities the filter would have excluded means *reading* their samples, so a
+malformed entry in an activity the user did not select now throws — out of
+`initState`/`didUpdateWidget`, synchronously, into the build phase. The suite
+already pinned that such input must not throw.
+
+Both are fixed by filtering before flattening, and `computeElevationSpotsFlat`
+no longer takes a `selectedId` at all: selection is the caller's business, and
+removing the parameter removes the chance of getting the order wrong again.
+`test/isolate_payload_test.dart` pins the ordering with a *poisoned
+neighbour* — an activity whose samples would throw if read — which makes "did
+not touch the other activities" observable rather than merely faster.
+
+The review also caught a **pre-existing** bug in the same method:
+`_computeGen` was bumped only on the isolate branch, so an inline call could
+not supersede a hop already in flight. Select an activity while the full-trip
+hop is running and the stale full-trip series lands afterwards and overwrites
+it — leaving the chart showing the whole trip while `widget.track` is the
+per-activity track, so the cursor mapping disagrees too. This is the exact bug
+already fixed in `ProjectNotifier._buildFullTrack`, whose comment names the
+scenario; the chart was its un-fixed twin. The counter is now bumped before
+the branch.
+
+One more, worth stating because it cuts against the headline: **on web this
+change would have been a pure cost.** `compute` has no isolate to hop to
+there and runs its callback inline, so there is no argument copy to save, and
+flattening would simply have added a second full pass over every sample on the
+main thread. Web now takes the single-pass inline path explicitly. The 2437 ms
+saving is Android/iOS only.
+
+#### One finding rejected
+
+The review argued that `decodeElevationProfiles`' *result* — a
+`Map<String, List<List<double>>>`, i.e. the same ~700k nested lists — is
+copied back onto the UI isolate by `compute`, and that this is the larger half
+of the same bug.
+
+It isn't. `compute` is `Isolate.run`, whose result "is sent using `exit`,
+which means it's sent to this isolate without copying"; `Isolate.exit`'s
+object graph is reassigned to the receiving isolate, "in most cases … in
+constant time". Arguments are copied, results are not — which is exactly why
+this whole class of bug is asymmetric and easy to miss.
+
+What survives from that finding is a *memory* point, not a frame-time one:
+those ~700k two-element lists really are allocated and really do end up in the
+UI isolate's heap. That is what the new `elevation_points` counter measures,
+and a flat representation for `elevation_profile` would remove it — but it is
+a heap question for the 16 call sites that read `[[distKm, elevM], …]`, not
+something to smuggle into this fix.
+
+Also deferred: shared/public viewers have no simplified endpoint, so `geo`
+crosses the boundary at full resolution for them (~1.46M nested lists — more
+than the elevation payload removed here). The claim that this fix addresses
+the "panning blocks when low-res tracks are replaced" symptom holds for the
+owner path only.
