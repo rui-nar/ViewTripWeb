@@ -289,6 +289,26 @@ class PerfSpans {
   final Set<String> _sinceLastFrame = <String>{};
   Set<String> _worstFrameContext = <String>{};
 
+  // ── Layout/paint of a named widget subtree (issue #276) ────────────────
+  //
+  // The largest measurement gap this investigation had: nothing measured
+  // flutter_map's own layout and paint. `FrameTiming.buildDuration` covers
+  // build + layout + paint as one number, and every [blocking] span in this
+  // app wraps a *build* callback we wrote — so a 2437 ms frame was traced to
+  // work outside every span, and the report could only say "(no instrumented
+  // work)". [recordFrameSpan] closes that: `PerfSubtree` times
+  // `performLayout` and `paint` of a subtree and reports here.
+  //
+  // Aggregated PER FRAME, not per call: paint can run several times in one
+  // frame (a repaint boundary flushing more than one layer), and a list of
+  // per-call samples would answer the wrong question and grow at 60 Hz. Only
+  // (count, total, worst) is kept per name, so this is O(names) forever
+  // rather than O(frames) — the same unbounded-growth mistake the payload
+  // cache and the thumbnail cache both had to be fixed for.
+  final Map<String, ({int n, double total, double worst})> _frameSpans = {};
+  final Map<String, double> _framePending = {};
+  Object? _framePendingId;
+
   /// Frames whose build phase exceeded this are counted separately: a handful
   /// of these back to back is what an ANR is made of, and they vanish in a p99.
   static const double _kFreezeFrameMs = 500;
@@ -420,6 +440,48 @@ class PerfSpans {
     }
   }
 
+  /// Adds [ms] of layout or paint time for [name], observed during the frame
+  /// identified by [frameId]. Samples accumulate until a different [frameId]
+  /// arrives, so one frame contributes exactly one sample per name however
+  /// many times the framework called into the subtree.
+  ///
+  /// [frameId] is `SchedulerBinding.currentFrameTimeStamp` in production; a
+  /// test passes whatever it likes, which is the point — the aggregation is
+  /// testable without a frame pipeline.
+  void recordFrameSpan(String name, double ms, Object frameId) {
+    if (!enabled) return;
+    if (_framePendingId != frameId) {
+      flushFrameSpans();
+      _framePendingId = frameId;
+    }
+    _framePending[name] = (_framePending[name] ?? 0) + ms;
+  }
+
+  /// Folds the frame currently accumulating into the totals. Called when a new
+  /// frame starts and before anything reads [frameSpans], so the last frame of
+  /// a session is never silently dropped.
+  void flushFrameSpans() {
+    if (_framePending.isEmpty) return;
+    for (final e in _framePending.entries) {
+      final prev = _frameSpans[e.key];
+      _frameSpans[e.key] = (
+        n: (prev?.n ?? 0) + 1,
+        total: (prev?.total ?? 0) + e.value,
+        worst: (prev != null && prev.worst > e.value) ? prev.worst : e.value,
+      );
+      // So the worst-frame context can name framework layout/paint instead of
+      // reporting "(no instrumented work)".
+      _sinceLastFrame.add(e.key);
+    }
+    _framePending.clear();
+  }
+
+  /// Per-name layout/paint cost, one sample per frame. Flushes first.
+  Map<String, ({int n, double total, double worst})> get frameSpans {
+    flushFrameSpans();
+    return Map.unmodifiable(_frameSpans);
+  }
+
   /// Starts the event-loop stall watchdog. Idempotent; call once at startup.
   void start() {
     if (!enabled || _stallTimer != null) return;
@@ -533,6 +595,13 @@ class PerfSpans {
     _freezeFrames = 0;
     _sinceLastFrame.clear();
     _worstFrameContext = <String>{};
+    // Session-level like the gesture frames above, and for the same reason:
+    // map layout/paint is what a *pan* costs, and reset() runs at the start
+    // of every load — clearing it there would erase the evidence of the very
+    // rebuild worth diagnosing.
+    _frameSpans.clear();
+    _framePending.clear();
+    _framePendingId = null;
     // Self-heals on the next camera event either way, but leaving it set
     // would make the next beginGesture() a no-op.
     _inGesture = false;
@@ -549,7 +618,9 @@ class PerfSpans {
   /// finish; a no-op when nothing was recorded.
   void report() {
     if (_blocking.isEmpty && _stage.isEmpty) return;
+    flushFrameSpans();
     final text = perfFullReport(_blocking, _stage, _notes,
+        frameSpans: _frameSpans,
         failures: _failures,
         loads: _loads,
         lastBackgroundRefresh: _lastBackgroundRefresh,
@@ -563,6 +634,38 @@ class PerfSpans {
     lastReport.value = text;
     if (kPerfTiming) debugPrint(text);
   }
+}
+
+/// The map's own layout and paint cost, next to what it was drawing.
+///
+/// These two facts only mean something together. "map_paint worst 41 ms" is
+/// unreadable on its own; "41 ms to paint 13,273 points across 586 markers"
+/// is a number a human can divide. Issue #276 spent three rounds unable to
+/// attribute a 2.4 s frame precisely because `rendered_points` and the frame
+/// cost were never printed against each other.
+///
+/// Pure + testable: [frameSpans] is [PerfSpans.frameSpans], [notes] is
+/// [PerfSpans.notes] (for `rendered_points` / `markers`).
+String perfMapFrameLine(
+  Map<String, ({int n, double total, double worst})> frameSpans,
+  Map<String, String> notes,
+) {
+  if (frameSpans.isEmpty) return '';
+  final drawn = notes['rendered_points'] ?? '?';
+  final markers = notes['markers'] ?? '?';
+  final buf = StringBuffer(
+      '[perf] map frame cost (layout/paint, one sample per frame) '
+      '— drawing $drawn points, $markers markers');
+  final names = frameSpans.keys.toList()
+    ..sort((a, b) => frameSpans[b]!.worst.compareTo(frameSpans[a]!.worst));
+  for (final name in names) {
+    final st = frameSpans[name]!;
+    buf.write('\n  $name  frames=${st.n}  '
+        'total=${st.total.toStringAsFixed(1)}ms  '
+        'worst=${st.worst.toStringAsFixed(1)}ms  '
+        'avg=${(st.total / st.n).toStringAsFixed(2)}ms');
+  }
+  return buf.toString();
 }
 
 /// The full report for one load: UI-isolate stalls, wall-clock stages, and an
@@ -580,6 +683,7 @@ String perfFullReport(
   Map<String, List<double>> blocking,
   Map<String, List<double>> stage,
   Map<String, String> notes, {
+  Map<String, ({int n, double total, double worst})> frameSpans = const {},
   Map<String, List<String>> failures = const {},
   Map<String, List<double>> gestureBlocking = const {},
   double worstStallMs = 0,
@@ -608,6 +712,9 @@ String perfFullReport(
     if (gestureBlocking.isNotEmpty) {
       buf.writeln(perfSpanReport('blocking DURING gestures', gestureBlocking));
     }
+  }
+  if (frameSpans.isNotEmpty) {
+    buf.writeln(perfMapFrameLine(frameSpans, notes));
   }
   if (diagnostics != null) {
     final d = diagnostics;

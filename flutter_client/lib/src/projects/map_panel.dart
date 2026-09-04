@@ -16,6 +16,7 @@ import '../core/concurrency_gate.dart';
 import '../core/design_tokens.dart'
     show kAccent, kShadow2, monoStyle, activityTypeBucket, segmentTypeBucket,
         resolveTypeStyle, LineStyleKind;
+import '../core/perf_subtree.dart';
 import '../core/perf_timing.dart' show kPerfTiming, perfSpans;
 import '../map/geo_point.dart';
 import 'activity_panel.dart';
@@ -1061,9 +1062,22 @@ class SelectionStatsOverlay extends StatelessWidget {
 // follows) — every one of the five marker layers in both classes needs it, so
 // it's centralised here rather than left as five copy-pasted `if` blocks per
 // class that could silently drift back to unkeyed.
+// Wrapped in a PerfSubtree so the five layers' combined per-frame layout and
+// paint is a named number (issue #276). flutter_map repositions every marker
+// on every camera frame, 586 of them on the measured trip, and nothing in this
+// app could see that cost — `buildDuration` lumps it in with build, and every
+// blocking() span wraps a build callback. The wrapper is a RenderProxyBox:
+// same constraints, same size, same paint offset. All five share one span
+// name, so the report reads "what do markers cost this frame", not five lines.
 List<Widget> _keyedMarkerLayer(String key, bool visible, List<Marker> markers) =>
     visible && markers.isNotEmpty
-        ? [MarkerLayer(key: ValueKey(key), markers: markers)]
+        ? [
+            PerfSubtree(
+              key: ValueKey('perf-$key'),
+              name: 'map_markers',
+              child: MarkerLayer(key: ValueKey(key), markers: markers),
+            )
+          ]
         : const [];
 
 // ── MapPanel ──────────────────────────────────────────────────────────────────
@@ -1744,7 +1758,13 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
     // overlaid on top while data is in flight.
     return Stack(
       children: [
-        FlutterMap(
+        // The whole map subtree, timed (issue #276). `map_lines` and
+        // `map_markers` below are nested inside this, so `map` is the total
+        // and the difference is the basemap plus flutter_map's own per-frame
+        // work — which is the part no instrument in this app could see.
+        PerfSubtree(
+          name: 'map',
+          child: FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
             initialCenter: widget.initialLat != null
@@ -1805,10 +1825,17 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
                 maxNativeZoom: 15,
               ),
             if (polylines.isNotEmpty)
-              PolylineLayer(
-                polylines: polylines,
-                // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
-                simplificationTolerance: 0.5,
+              // Timed for the same reason as the marker layers: flutter_map
+              // re-walks every point of every polyline overlapping the
+              // viewport on every camera frame, and `rendered_points` in the
+              // report below is meaningless without the milliseconds it buys.
+              PerfSubtree(
+                name: 'map_lines',
+                child: PolylineLayer(
+                  polylines: polylines,
+                  // Reduce GPU path vertices at low zoom — detail preserved when zoomed in.
+                  simplificationTolerance: 0.5,
+                ),
               ),
             ..._keyedMarkerLayer(
                 'activities-layer', _showActivities, _cachedActivityMarkers),
@@ -1870,7 +1897,7 @@ class _MapPanelState extends State<MapPanel> with _PolarstepsOverlayFit {
               },
             ),
           ],
-        ),
+        )),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
         if (showPolarstepsBanner) polarstepsOverlayBanner(notifier),
@@ -2669,7 +2696,13 @@ class ManageMapPanelState extends State<ManageMapPanel>
 
     final perfBuilt = Stack(
       children: [
-        FlutterMap(
+        // The whole map subtree, timed (issue #276). `map_lines` and
+        // `map_markers` below are nested inside this, so `map` is the total
+        // and the difference is the basemap plus flutter_map's own per-frame
+        // work — which is the part no instrument in this app could see.
+        PerfSubtree(
+          name: 'map',
+          child: FlutterMap(
           mapController: widget.mapController.mapController,
           options: MapOptions(
             initialCenter: widget.initialLat != null
@@ -2708,9 +2741,12 @@ class ManageMapPanelState extends State<ManageMapPanel>
                 maxNativeZoom: 22,
               ),
             if (_cachedPolylines.isNotEmpty)
-              PolylineLayer(
-                polylines: _cachedPolylines,
-                simplificationTolerance: 0.5,
+              PerfSubtree(
+                name: 'map_lines',
+                child: PolylineLayer(
+                  polylines: _cachedPolylines,
+                  simplificationTolerance: 0.5,
+                ),
               ),
             ..._keyedMarkerLayer(
                 'activities-layer', true, _cachedActivityMarkers),
@@ -2765,7 +2801,7 @@ class ManageMapPanelState extends State<ManageMapPanel>
               },
             ),
           ],
-        ),
+        )),
         if (notifier.isLoading)
           const Center(child: CircularProgressIndicator()),
         if (_cachedMemoryMarkers.isNotEmpty)
