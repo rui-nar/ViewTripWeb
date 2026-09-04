@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
-from src.models.simplify import midpoint_latitude, simplify_lonlat, zoom_tolerance_m
+from src.models.simplify import simplify_for_zoom
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
@@ -499,12 +499,11 @@ def simplify_geo_features(features: List[Dict[str, Any]], zoom: float) -> List[D
             out.append(feature)
             continue
         try:
-            # The SAME latitude simplify_lonlat projects against. Taking it
-            # from the first point instead left a feature spanning 0 to 60
-            # degrees simplified at up to twice the intended tolerance along
-            # its northern half.
-            lat = float(midpoint_latitude(coords))
-            simplified = simplify_lonlat(coords, zoom_tolerance_m(zoom, lat))
+            # simplify_for_zoom, not the bare tolerance call: it bounds both
+            # the work (a 1.47 M-point trip measured 21.6 s per request in
+            # pure RDP) and the coarseness (that same trip came back as ~2.4
+            # points per activity — straight lines).
+            simplified = simplify_for_zoom(coords, zoom)
         except (TypeError, ValueError, IndexError):
             # Malformed geometry is data, not a bug in the caller: one bad
             # point must not 500 a whole project's map.

@@ -718,3 +718,59 @@ so calling it with a share token would 401 on every shared load.
   longer seeded (offline reopen degrades to low-res), and export/share
   rendering reads the now-simplified geometry from the notifier rather than
   fetching full resolution.
+
+## Measured: zoom LOD works, and the freeze does not care
+
+First device run with the client half live:
+
+| | before | after |
+|---|---|---|
+| `geo_coords` | 1,465,345 | **515** |
+| geo payload | 4.5 MB | **284 KB** |
+| Dart heap (`Unknown`) | 625 MB | **210 MB** |
+| TOTAL PSS | ~1,037 MB | **582 MB** |
+| peak RSS | 1733 MB | **847 MB** |
+
+The memory problem is solved: the client no longer holds a trip's worth of
+geometry to draw a screen's worth.
+
+**And the freeze survived it** — `worst build 2640ms` at 779 MB, roughly half
+the memory at which it used to happen. Garbage collection over a large heap
+was the leading hypothesis for three rounds and the data has now falsified it.
+No instrumented span exceeds 16.7 ms, and `buildDuration` covers build, layout
+*and* paint, so the time is inside the framework's own work on a tree this app
+does not time.
+
+### Two regressions the same run exposed
+
+* **21.6 s worst fetch**, 4 fetches totalling 55.8 s. Simplification ran per
+  request over the whole trip, and the 60 s cache TTL added earlier — to stop
+  these entries evicting everyone else's — guaranteed repeated cold builds.
+  Measured: Ramer-Douglas-Peucker over 200k wiggly points takes 1.29 s at zoom
+  13, so ~10 s across this trip. Bounded now by striding to at most 4,000
+  points per line before the RDP pass: 0.04 s for the same input, and the
+  guarantee it costs (every dropped point provably within tolerance) is not a
+  distinction the screen can render at a GPS sample every few metres.
+* **515 coordinates for 219 activities** — 2.4 per activity, a straight line
+  per leg. Correct by the tolerance and useless as a map. There is now a floor
+  of 32 points per line, chosen against what the client renders rather than
+  against the tolerance: its own 6,000-point budget worked out at ~27 per
+  activity for this trip, and a floor below what the renderer would have drawn
+  anyway is a regression however defensible the arithmetic.
+
+### Instrumenting the frame itself
+
+A multi-second frame with no span over budget says the time went somewhere
+unmeasured — but not whether that frame was doing any of our work at all. The
+report now names the instrumented spans that ran between one frame's timings
+and the next, for the worst frame:
+
+```
+[perf] worst frame ran: (no instrumented work)
+```
+
+An empty context means the cost is entirely framework layout and paint —
+which, with everything else now cheap and 586 markers on screen, points at
+`flutter_map`'s per-frame marker work and issue #296. A named span means
+something of ours is running alongside it. Either way it is the first
+instrument that distinguishes the two.

@@ -47,6 +47,64 @@ def midpoint_latitude(poly: list) -> float:
     return (poly[0][1] + poly[-1][1]) / 2
 
 
+def _stride_to(poly: list, target: int) -> list:
+    """Uniformly reduce *poly* to at most *target* points, keeping both ends.
+
+    A cheap O(n) pre-pass so the O(n log n) RDP below runs over a bounded
+    working set. Straight Ramer-Douglas-Peucker over a 219-activity trip's
+    1.47 M points measured **21.6 s per request** in pure Python — the
+    endpoint was slower than the full-resolution one it replaced.
+
+    This does cost the strict RDP guarantee (every dropped point provably
+    within tolerance of the line replacing it) for inputs above the cap: a
+    strided point could in principle sit further out. At a GPS sample every
+    few metres against a tolerance of hundreds, that is not a distinction the
+    screen can render.
+    """
+    if len(poly) <= target or target < 2:
+        return poly
+    step = (len(poly) - 1) / (target - 1)
+    out = [poly[0]]
+    for i in range(1, target - 1):
+        out.append(poly[round(i * step)])
+    out.append(poly[-1])
+    return out
+
+
+def simplify_for_zoom(
+    poly: list,
+    zoom: float,
+    *,
+    min_points: int = 32,
+    max_input_points: int = 4000,
+) -> list:
+    """Simplify *poly* for *zoom*, bounded in both cost and coarseness.
+
+    Two guards the plain tolerance-based call needs in production:
+
+    * ``max_input_points`` bounds the work — see :func:`_stride_to`.
+    * ``min_points`` bounds the *result*. At whole-trip zoom a pixel covers
+      hundreds of metres, and RDP legitimately collapses an activity to its
+      two endpoints: measured, a 219-activity trip came back as 515
+      coordinates — 2.4 per activity, a straight line per leg. Correct by the
+      tolerance, useless as a map. Below the floor the line is strided to it
+      instead, keeping its shape at a resolution the eye can still read.
+
+      32 is chosen against what the client renders, not against the
+      tolerance: its own budget (``kMaxTotalPolylinePoints``, 6000) worked out
+      at ~27 points per activity for this trip, and that was already being
+      described as straight lines. A floor below what the renderer would have
+      drawn anyway is a regression however defensible the arithmetic.
+    """
+    if len(poly) < 3:
+        return poly
+    working = _stride_to(poly, max_input_points)
+    reduced = simplify_lonlat(working, zoom_tolerance_m(zoom, midpoint_latitude(working)))
+    if len(reduced) >= min_points:
+        return reduced
+    return _stride_to(working, min(min_points, len(working)))
+
+
 def simplify_lonlat(poly: list, tolerance_m: float) -> list:
     """Ramer-Douglas-Peucker: drop points within *tolerance_m* of the line
     their neighbours already describe.
