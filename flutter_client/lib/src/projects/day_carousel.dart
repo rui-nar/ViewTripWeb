@@ -4,8 +4,10 @@
 /// Scrolls through the trip's days; the centered day becomes the active map
 /// selection via `notifier.selectDays()`, so `MapPanel`'s highlight/
 /// auto-zoom-to-selection behaviour (also added for view mode by this same
-/// change — see map_panel.dart) applies. Idle-dims and retracts toward the
-/// screen edge to stay unobtrusive.
+/// change — see map_panel.dart) applies. The reverse direction holds too
+/// (issue #322): tapping an activity on the map scrolls the strip to that
+/// activity's day. Idle-dims and retracts toward the screen edge to stay
+/// unobtrusive.
 library;
 
 import 'dart:async' show Timer;
@@ -14,6 +16,7 @@ import 'dart:ui' show lerpDouble;
 import 'package:flutter/material.dart';
 
 import '../core/design_tokens.dart' show kShadow2, monoStyle;
+import 'map_panel.dart' show dayForSelection;
 import 'project_notifier.dart';
 
 /// Pure index → day-key mapping for [DayCarousel]'s `onSelectedItemChanged`,
@@ -75,6 +78,19 @@ class _DayCarouselState extends State<DayCarousel> {
   Timer? _selectDebounce;
   late FixedExtentScrollController _scrollController;
 
+  // Last map selection the wheel reacted to, so it only follows a *new* one —
+  // same convention as ActivityPanel's _prevSelectedActivityIdStr (issue #322).
+  String? _prevSelectedActivityIdStr;
+  String? _prevSelectedSegmentIdStr;
+
+  // The index a follow-the-map-selection scroll is currently heading for, or
+  // null when the wheel is at rest / being dragged; see _followSelection. The
+  // generation counter goes with it so a superseded animation's own
+  // completion can't clear it out from under the follow that replaced it
+  // (same idiom as MapPanel's _hitTestGen).
+  int? _followingIndex;
+  int _followGen = 0;
+
   int _activeIndex(List<String> days) {
     final active = widget.notifier.selectedDays.isNotEmpty
         ? widget.notifier.selectedDays.first
@@ -90,7 +106,65 @@ class _DayCarouselState extends State<DayCarousel> {
     _scrollController = FixedExtentScrollController(
       initialItem: _activeIndex(widget.notifier.orderedDayKeys()),
     );
+    _prevSelectedActivityIdStr = widget.notifier.selectedActivityId?.toString();
+    _prevSelectedSegmentIdStr = widget.notifier.selectedSegmentId?.toString();
+    widget.notifier.addListener(_onNotifierChanged);
     _scheduleRetract();
+  }
+
+  /// Issue #322: a tap on the map selects an activity/segment; the wheel
+  /// follows it so the strip shows the day that activity belongs to.
+  void _onNotifierChanged() {
+    final actId = widget.notifier.selectedActivityId?.toString();
+    final segId = widget.notifier.selectedSegmentId?.toString();
+    final changed = actId != _prevSelectedActivityIdStr ||
+        segId != _prevSelectedSegmentIdStr;
+    _prevSelectedActivityIdStr = actId;
+    _prevSelectedSegmentIdStr = segId;
+    // Nothing selected any more — a second tap on the same activity
+    // deselects it, and the day selection this carousel itself commits
+    // clears it too. Leave the wheel where it is rather than jumping it
+    // somewhere arbitrary.
+    if (!changed || (actId == null && segId == null)) return;
+    // A map selection is newer intent than a day commit still sitting in the
+    // scroll debounce, and selectDays() would clear it — drop the older one.
+    _selectDebounce?.cancel();
+    final day = dayForSelection(
+      widget.notifier.items,
+      widget.notifier.activities,
+      activityId: widget.notifier.selectedActivityId,
+      segmentId: segId,
+    );
+    // Unscheduled, or a day the strip doesn't list: same, leave the wheel be.
+    if (day == null) return;
+    final index = widget.notifier.orderedDayKeys().indexOf(day);
+    if (index < 0 || !_scrollController.hasClients) return;
+    // Where the wheel will end up, not where it happens to be right now: a
+    // follow already in flight has not reached its own target yet.
+    if ((_followingIndex ?? _scrollController.selectedItem) == index) return;
+    _followSelection(index);
+  }
+
+  /// Scrolls the wheel to [index] *without* committing a day selection of its
+  /// own. `animateToItem` crosses every intermediate index and each crossing
+  /// fires [_onSelectedItemChanged]; letting that commit `selectDays()` would
+  /// clear the very activity selection that moved the wheel (selectActivity
+  /// and selectDays are mutually exclusive on ProjectNotifier) and notify
+  /// again — so a non-null [_followingIndex] suppresses the commit for the
+  /// animation's duration, which is what keeps map selection and wheel from
+  /// ping-ponging.
+  Future<void> _followSelection(int index) async {
+    final gen = ++_followGen;
+    _followingIndex = index;
+    try {
+      await _scrollController.animateToItem(index,
+          duration: _animDuration, curve: Curves.easeInOut);
+    } finally {
+      // A second map tap mid-animation supersedes this one: starting its
+      // animation completes *this* future early, so only the newest follow
+      // may clear the target.
+      if (gen == _followGen) _followingIndex = null;
+    }
   }
 
   @override
@@ -101,14 +175,22 @@ class _DayCarouselState extends State<DayCarousel> {
     // remount — see ViewScreen's ChangeNotifierProvider), re-center the
     // wheel on the new notifier's active day instead of leaving the old
     // project's scroll position/index behind.
-    if (!identical(widget.notifier, oldWidget.notifier) &&
-        _scrollController.hasClients) {
-      _scrollController.jumpToItem(_activeIndex(widget.notifier.orderedDayKeys()));
+    if (!identical(widget.notifier, oldWidget.notifier)) {
+      oldWidget.notifier.removeListener(_onNotifierChanged);
+      widget.notifier.addListener(_onNotifierChanged);
+      _prevSelectedActivityIdStr =
+          widget.notifier.selectedActivityId?.toString();
+      _prevSelectedSegmentIdStr = widget.notifier.selectedSegmentId?.toString();
+      if (_scrollController.hasClients) {
+        _scrollController
+            .jumpToItem(_activeIndex(widget.notifier.orderedDayKeys()));
+      }
     }
   }
 
   @override
   void dispose() {
+    widget.notifier.removeListener(_onNotifierChanged);
     _idleTimer?.cancel();
     _selectDebounce?.cancel();
     _scrollController.dispose();
@@ -136,6 +218,8 @@ class _DayCarouselState extends State<DayCarousel> {
   void _onSelectedItemChanged(int index, List<String> days) {
     _reveal();
     _selectDebounce?.cancel();
+    // Programmatic scroll following a map selection — see _followSelection.
+    if (_followingIndex != null) return;
     _selectDebounce = Timer(_selectDebounceDelay, () {
       final key = dayCarouselSelection(index, days);
       if (key != null) widget.notifier.selectDays({key});

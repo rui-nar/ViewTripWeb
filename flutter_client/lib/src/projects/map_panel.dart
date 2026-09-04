@@ -232,6 +232,36 @@ Map<String, ({Set<String> actIds, Set<String> segIds})> buildDayIndex(
   return index;
 }
 
+/// The day key ("YYYY-MM-DD") a selected activity/segment belongs to, or null
+/// when it belongs to no day at all.
+///
+/// Deliberately routed through [buildDayIndex] instead of reading the
+/// activity's own `start_date_local`: the day the carousel follows a map tap
+/// to (issue #322) is then by construction the same day whose highlight the
+/// map draws when that day is selected, including buildDayIndex's
+/// carry-forward rule for an activity/segment with no date of its own.
+/// Building the whole index per lookup is deliberate too — this runs once per
+/// map tap, next to a hit-test that already scans every coordinate in the
+/// trip, and a cheaper direct scan would mean a second copy of that rule.
+String? dayForSelection(
+  List<Map<String, dynamic>> items,
+  List<Map<String, dynamic>> activities, {
+  dynamic activityId,
+  String? segmentId,
+}) {
+  final actId = activityId?.toString();
+  if (actId == null && segmentId == null) return null;
+  final index =
+      buildDayIndex(items, {for (final a in activities) a['id']: a});
+  for (final entry in index.entries) {
+    if (actId != null && entry.value.actIds.contains(actId)) return entry.key;
+    if (segmentId != null && entry.value.segIds.contains(segmentId)) {
+      return entry.key;
+    }
+  }
+  return null;
+}
+
 /// A solid coloured disc with a white ring — used for the selected activity's
 /// start (green) / end (red) markers so they read on any basemap.
 Marker _dotMarker(LatLng point, Color color, {double size = 16}) => Marker(

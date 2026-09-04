@@ -69,4 +69,43 @@ void main() {
     expect(index['2026-06-01']!.actIds, {'1'});
     expect(index['2026-06-01']!.segIds, {'10'});
   });
+
+  // dayForSelection — the inverse lookup the view-mode day carousel uses to
+  // follow a map tap (issue #322). Routed through buildDayIndex on purpose,
+  // so the day the carousel scrolls to is the same day the map highlights.
+  group('dayForSelection', () {
+    final activities = [act(1, '2026-06-01'), act(2, '2026-06-02')];
+    final items = [actItem(1), segItem(10), actItem(2)];
+
+    test('finds the day of a tapped activity', () {
+      expect(dayForSelection(items, activities, activityId: 2), '2026-06-02');
+    });
+
+    test('matches ids across int/String, like the rest of the selection code',
+        () {
+      expect(dayForSelection(items, activities, activityId: '1'),
+          '2026-06-01');
+    });
+
+    test('finds a segment\'s day via the same carry-forward rule', () {
+      // Segment 10 has no date of its own; buildDayIndex gives it the day of
+      // the activity before it, and this lookup must agree.
+      expect(dayForSelection(items, activities, segmentId: '10'),
+          '2026-06-01');
+    });
+
+    test('returns null for an activity that is on no day', () {
+      // Not in `items` at all — e.g. a feature the map draws but the day
+      // index never bucketed. The carousel must not jump for this.
+      expect(dayForSelection(items, activities, activityId: 99), isNull);
+    });
+
+    test('returns null when nothing is selected', () {
+      expect(dayForSelection(items, activities), isNull);
+    });
+
+    test('returns null for an empty trip', () {
+      expect(dayForSelection(const [], const [], activityId: 1), isNull);
+    });
+  });
 }
