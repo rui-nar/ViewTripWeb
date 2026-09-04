@@ -315,3 +315,238 @@ def test_endpoints_survive_the_floor_path():
     out = simplify_for_zoom(poly, 4)
     assert out[0] == poly[0]
     assert out[-1] == poly[-1]
+
+
+# ── Viewport bounding box (issue #324) ────────────────────────────────
+#
+# Zoom bounds the *detail*, not the *extent*: at zoom 15 a deep zoom still
+# returned the whole trip at that detail, and simplified all of it. Measured on
+# a 219-activity trip, simplification alone cost 0.19 s at zoom 9, 2.94 s at
+# zoom 12 and 6.98 s at zoom 15 — the cost rises with zoom while the saving
+# falls. The box makes the deep-zoom case bounded in both directions.
+
+from src.models.simplify import bboxes_intersect, line_bbox, snap_bbox_to_tiles
+
+
+def _at(lon: float, lat: float, n: int = 400) -> list[list[float]]:
+    """A wobbling line near (lon, lat), small enough to sit inside one viewport."""
+    return [[lon + i * 0.00002, lat + (0.0002 if i % 2 else 0.0)] for i in range(n)]
+
+
+def test_a_line_outside_the_box_falls_to_the_whole_trip_floor():
+    # Not dropped, and not two points: exactly what a whole-trip zoom would
+    # have produced for it. That equivalence is the safety argument — the
+    # feature is no coarser than something the client already renders and
+    # exports at another zoom.
+    poly = _at(7.0, 45.0, 5000)
+    off = simplify_for_zoom(poly, 15, bbox=(20.0, 20.0, 21.0, 21.0))
+    assert len(off) == 32
+    assert off[0] == poly[0] and off[-1] == poly[-1]
+    assert off == simplify_for_zoom(poly, 3)
+
+
+def test_a_line_inside_the_box_is_untouched_by_it():
+    poly = _at(7.0, 45.0, 5000)
+    assert (simplify_for_zoom(poly, 15, bbox=(6.0, 44.0, 8.0, 46.0))
+            == simplify_for_zoom(poly, 15))
+
+
+def test_a_line_merely_clipping_the_box_still_counts_as_visible():
+    # Its bbox overlaps even though most of it is off screen; drawing only the
+    # part inside would leave a visible gap at the edge of the viewport.
+    poly = _at(7.0, 45.0, 5000)
+    assert len(simplify_for_zoom(poly, 15, bbox=(7.05, 44.9, 9.0, 46.0))) > 32
+
+
+def test_malformed_geometry_still_passes_through_with_a_box():
+    # The intersection test compares coordinates, so bad data reaches it
+    # first now. One bad point must still not 500 a whole project's map.
+    for geom in ({}, {"coordinates": None},
+                 {"coordinates": [["x", "y"], [1, 2], [3, 4]]},
+                 {"coordinates": [[1], [2], [3]]}):
+        out = simplify_geo_features(
+            [{"type": "Feature", "geometry": geom}], 12, (6.0, 44.0, 8.0, 46.0))
+        assert len(out) == 1
+
+
+def test_a_line_entering_the_box_late_is_still_visible():
+    # The intersection test short-circuits on the first point, because at
+    # whole-trip zoom every line is on screen and the full walk would be pure
+    # added cost (measured 0.24 s -> 0.34 s on a 1.47 M-point trip). A line
+    # that starts outside and enters must not be lost to that shortcut.
+    poly = [[7.0 + i * 0.001, 45.0 + (0.0002 if i % 2 else 0.0)]
+            for i in range(2000)]
+    kept = simplify_for_zoom(poly, 15, bbox=(8.0, 44.9, 8.5, 45.1))
+    assert len(kept) > 32
+    assert kept == simplify_for_zoom(poly, 15), "kept exactly as if unscoped"
+
+
+def test_the_box_never_drops_a_feature():
+    # geo is read as a description of the WHOLE trip by the segment-overlay
+    # reconciliation (a tombstone is cleared when the server geo no longer
+    # mentions its id), by fit-to-bounds, and by the export path. A missing
+    # feature would silently break all three.
+    features = [_feature(_at(7.0, 45.0)), _feature(_at(30.0, 60.0))]
+    out = simplify_geo_features(features, 15, (6.0, 44.0, 8.0, 46.0))
+    assert len(out) == 2
+    assert all(len(f["geometry"]["coordinates"]) >= 2 for f in out)
+
+
+def test_the_box_is_where_the_server_cpu_goes(monkeypatch):
+    # The saving is structural, not incidental: an off-box line must not reach
+    # the Ramer-Douglas-Peucker pass at all.
+    import src.models.simplify as simplify_mod
+
+    calls = []
+    real = simplify_mod.simplify_lonlat
+    monkeypatch.setattr(simplify_mod, "simplify_lonlat",
+                        lambda poly, tol: calls.append(len(poly)) or real(poly, tol))
+    features = [_feature(_at(7.0, 45.0)) for _ in range(3)]
+    features += [_feature(_at(30.0 + i, 60.0)) for i in range(20)]
+    simplify_geo_features(features, 15, (6.0, 44.0, 8.0, 46.0))
+    assert len(calls) == 3, "only the three visible lines are worth simplifying"
+
+
+# ── Snapping, which is what bounds the cache ────────────────────────────────
+
+def test_snapping_is_outward_so_the_answer_is_a_superset():
+    box = (7.3, 45.3, 7.4, 45.4)
+    snapped, _ = snap_bbox_to_tiles(box, 12)
+    assert snapped[0] <= box[0] and snapped[1] <= box[1]
+    assert snapped[2] >= box[2] and snapped[3] >= box[3]
+
+
+def test_neighbouring_viewports_share_one_key():
+    # Raw viewport floats would mean a distinct cache entry per pan pixel.
+    # This project has already OOM-killed its API container once with a payload
+    # cache bounded by the wrong thing.
+    a = snap_bbox_to_tiles((7.30, 45.30, 7.32, 45.32), 12)[1]
+    b = snap_bbox_to_tiles((7.3001, 45.3001, 7.3201, 45.3201), 12)[1]
+    assert a == b
+
+
+def test_a_far_pan_does_get_its_own_key():
+    a = snap_bbox_to_tiles((7.3, 45.3, 7.4, 45.4), 12)[1]
+    b = snap_bbox_to_tiles((9.3, 45.3, 9.4, 45.4), 12)[1]
+    assert a != b
+
+
+def test_a_degenerate_box_still_covers_a_whole_tile():
+    snapped, tiles = snap_bbox_to_tiles((7.0, 45.0, 7.0000001, 45.0000001), 12)
+    assert tiles[2] > tiles[0] and tiles[3] > tiles[1]
+    assert snapped[0] < snapped[2] and snapped[1] < snapped[3]
+
+
+def test_snapping_clamps_to_the_world():
+    snapped, tiles = snap_bbox_to_tiles((-180.0, -89.0, 180.0, 89.0), 3)
+    assert tiles == (0, 0, 8, 8)
+    assert snapped[0] == -180.0 and snapped[2] == 180.0
+
+
+def test_line_bbox_tolerates_an_elevation_third_element():
+    # GeoJSON positions legally carry one; `for x, y in poly` would raise.
+    assert line_bbox([[1.0, 2.0, 300.0], [3.0, 4.0, 310.0]]) == (1.0, 2.0, 3.0, 4.0)
+
+
+def test_touching_boxes_intersect():
+    assert bboxes_intersect((0, 0, 1, 1), (1, 1, 2, 2))
+    assert not bboxes_intersect((0, 0, 1, 1), (1.001, 1, 2, 2))
+
+
+# ── The route ────────────────────────────────────────────────────────────────
+
+def test_the_box_shrinks_the_payload_for_an_off_screen_trip(env):
+    client, *_ = env
+    whole = client.get("/api/geo/project/simplified?name=Trip&zoom=15")
+    # A viewport on the other side of Europe: the trip is off screen entirely.
+    scoped = client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=15&bbox=20,50,21,51")
+    assert scoped.status_code == 200
+    assert _points(scoped) < _points(whole)
+    assert len(scoped.json()["features"]) == len(whole.json()["features"])
+
+
+def test_the_box_keeps_full_detail_for_what_is_on_screen(env):
+    client, *_ = env
+    whole = client.get("/api/geo/project/simplified?name=Trip&zoom=15")
+    on_screen = client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=15&bbox=6,44,9,46")
+    assert _points(on_screen) == _points(whole)
+
+
+def test_whole_trip_zoom_degenerates_to_the_trip_bounds(env):
+    # At a zoom that shows the entire trip the box contains it, so nothing is
+    # scoped away. This must fall out, not need a special mode.
+    client, *_ = env
+    scoped = client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=6&bbox=-20,30,40,60")
+    plain = client.get("/api/geo/project/simplified?name=Trip&zoom=6")
+    assert _points(scoped) == _points(plain)
+
+
+def test_a_box_is_part_of_the_cache_key(env):
+    client, *_ = env
+    assert client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
+    ).headers["x-cache"] == "MISS"
+    assert client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
+    ).headers["x-cache"] == "HIT"
+    # A different region is a different answer, so a different entry.
+    assert client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=20,50,21,51"
+    ).headers["x-cache"] == "MISS"
+
+
+def test_a_tiny_pan_reuses_the_cached_entry(env):
+    client, *_ = env
+    client.get("/api/geo/project/simplified?name=Trip&zoom=12&bbox=7.30,45.30,7.32,45.32")
+    hit = client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=7.3001,45.3001,7.3201,45.3201")
+    assert hit.headers["x-cache"] == "HIT", (
+        "the server snaps the box itself, so an unsnapped client cannot mint "
+        "an entry per pan pixel"
+    )
+
+
+def test_a_boxed_response_does_not_poison_the_unboxed_one(env):
+    client, *_ = env
+    # zoom 17, where the unboxed answer is far above the floor, so "the boxed
+    # entry was served instead" would be unmissable.
+    client.get("/api/geo/project/simplified?name=Trip&zoom=17&bbox=20,50,21,51")
+    plain = client.get("/api/geo/project/simplified?name=Trip&zoom=17")
+    assert plain.headers["x-cache"] == "MISS"
+    assert _points(plain) > 32
+
+
+def test_an_older_client_sending_no_box_is_unaffected(env):
+    client, *_ = env
+    before = _points(client.get("/api/geo/project/simplified?name=Trip&zoom=12"))
+    client.get("/api/geo/project/simplified?name=Trip&zoom=12&bbox=20,50,21,51")
+    assert _points(client.get("/api/geo/project/simplified?name=Trip&zoom=12")) == before
+
+
+@pytest.mark.parametrize("bad", [
+    "1,2,3",
+    "1,2,3,4,5",
+    "a,b,c,d",
+    "9,44,6,46",       # inverted longitude
+    "6,46,9,44",       # inverted latitude
+    "-200,44,9,46",    # out of range
+    "6,-95,9,46",
+    "",
+])
+def test_a_malformed_box_is_rejected_rather_than_ignored(env, bad):
+    # Falling through as "no box" would serve the whole trip while the client
+    # believed it held viewport-scoped geometry.
+    client, *_ = env
+    assert client.get(
+        f"/api/geo/project/simplified?name=Trip&zoom=12&bbox={bad}").status_code == 400
+
+
+def test_the_box_does_not_change_the_auth_boundary(env):
+    client, _uid, sid, act_as = env
+    act_as(sid)
+    assert client.get(
+        "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
+    ).status_code in (403, 404)

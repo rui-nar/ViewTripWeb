@@ -71,4 +71,37 @@ void main() {
       expect(result[0], lines[0]);
     });
   });
+
+  // ── The budget as a safety valve, not a resolution policy (issue #276) ──
+  //
+  // At 6000 this constant bound *below* the server's own pixel-accurate
+  // output: a 219-activity trip's simplified payload was 13,273 coordinates
+  // and the map drew 6,029 of them, so the track on screen was about twice as
+  // coarse as the line the server had already built and paid to transfer.
+  group('kMaxTotalPolylinePoints', () {
+    test('does not bind on the measured pixel-accurate whole-trip payload', () {
+      // 219 activities, 13,273 coordinates: the real numbers from the device
+      // report that prompted this. Nothing may be discarded.
+      final lines = [for (var i = 0; i < 219; i++) _line(61, lonStart: i * 1000.0)];
+      final total = totalPolylinePoints(lines);
+      expect(total, greaterThan(13000));
+      expect(total, lessThan(kMaxTotalPolylinePoints),
+          reason: 'the server decides resolution now; this must not undo it');
+      final result =
+          decimatePolylinePoints((lines: lines, budget: kMaxTotalPolylinePoints));
+      expect(identical(result, lines), isTrue,
+          reason: 'under budget, the input is passed straight through');
+    });
+
+    test('still catches the full-resolution fallback payload', () {
+      // getGeo() — offline, an older server, or a client-built E2EE trip —
+      // hands the renderer 1,465,345 points on that same trip.
+      final lines = [for (var i = 0; i < 219; i++) _line(6700, lonStart: i * 1000.0)];
+      expect(totalPolylinePoints(lines), greaterThan(1400000));
+      final result =
+          decimatePolylinePoints((lines: lines, budget: kMaxTotalPolylinePoints));
+      expect(totalPolylinePoints(result),
+          lessThanOrEqualTo(kMaxTotalPolylinePoints + lines.length));
+    });
+  });
 }

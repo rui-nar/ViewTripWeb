@@ -23,7 +23,7 @@ from fastapi.responses import Response
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
-from src.models.simplify import simplify_for_zoom
+from src.models.simplify import simplify_for_zoom, snap_bbox_to_tiles
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
@@ -471,8 +471,24 @@ def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Di
     return features
 
 
-def simplify_geo_features(features: List[Dict[str, Any]], zoom: float) -> List[Dict[str, Any]]:
+def simplify_geo_features(
+    features: List[Dict[str, Any]],
+    zoom: float,
+    bbox: tuple | None = None,
+) -> List[Dict[str, Any]]:
     """Return *features* with each line simplified to about one pixel at *zoom*.
+
+    With *bbox* — a snapped ``(min_lon, min_lat, max_lon, max_lat)`` — a line
+    that does not intersect it is reduced to the ``min_points`` floor instead,
+    exactly as a whole-trip zoom would have reduced it, and skips the
+    Ramer-Douglas-Peucker pass. Zoom bounds the *detail*; the box bounds the
+    *extent*, which is what makes the deep-zoom case bounded too: at zoom 15 a
+    long trip is almost entirely off screen and was being simplified in full on
+    every request (measured at 6.98 s for a 219-activity trip — issue #324).
+
+    Features are never dropped. `geo` is read as a description of the whole
+    trip by the segment-overlay reconciliation, by fit-to-bounds and by the
+    export path, and a missing feature would silently break all three.
 
     The saving this exists for: a 219-activity trip carries 1,465,345
     coordinates and the client renders 6,051 of them, holding the rest as
@@ -503,7 +519,7 @@ def simplify_geo_features(features: List[Dict[str, Any]], zoom: float) -> List[D
             # the work (a 1.47 M-point trip measured 21.6 s per request in
             # pure RDP) and the coarseness (that same trip came back as ~2.4
             # points per activity — straight lines).
-            simplified = simplify_for_zoom(coords, zoom)
+            simplified = simplify_for_zoom(coords, zoom, bbox=bbox)
         except (TypeError, ValueError, IndexError):
             # Malformed geometry is data, not a bug in the caller: one bad
             # point must not 500 a whole project's map.
@@ -552,12 +568,47 @@ def warm_geo_cache(user_info_id: int, name: str) -> None:
         pass
 
 
+def _parse_bbox(raw: str) -> tuple:
+    """``"minLon,minLat,maxLon,maxLat"`` to a validated tuple, or 400.
+
+    Deliberately strict. A malformed box that fell through as "no box" would
+    silently serve the whole trip, and the client would then believe it holds
+    viewport-scoped geometry it does not have — the failure would show up as a
+    mysterious payload size, not as an error.
+
+    An antimeridian-crossing box (min_lon >= max_lon) is rejected rather than
+    split. The client omits the parameter in that case, which serves the whole
+    trip at the requested zoom — correct, just not scoped.
+    """
+    parts = raw.split(",")
+    if len(parts) != 4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="bbox must be minLon,minLat,maxLon,maxLat",
+        )
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(p) for p in parts)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="bbox must be four numbers",
+        )
+    if not (-180.0 <= min_lon < max_lon <= 180.0
+            and -90.0 <= min_lat < max_lat <= 90.0):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="bbox is out of range or inverted",
+        )
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
 @router.get("/project/simplified", summary="Zoom-appropriate GeoJSON (gzip)")
 def project_geo_simplified(
     name: str,
     zoom: float,
     current_user: Annotated[dict, Depends(get_current_user)],
     owner: OwnerParam = None,
+    bbox: str | None = None,
 ):
     """Full-res geometry simplified to roughly one pixel at *zoom*.
 
@@ -571,8 +622,26 @@ def project_geo_simplified(
     resolution, for shipped clients and for anything that genuinely needs
     every point (track editing, export).
 
+    ``bbox`` — ``minLon,minLat,maxLon,maxLat`` — additionally scopes it to
+    what is on screen (issue #324). Zoom bounds the detail, not the extent, so
+    without it a deep zoom still returns the whole trip at that detail and
+    simplifies all of it: measured at 6.98 s of server CPU for a 219-activity
+    trip at zoom 15, against 0.19 s at zoom 9 — the cost RISES with zoom while
+    the saving falls (issue #324). A line outside the box is reduced to the
+    floor a whole-trip zoom would have given it and skips simplification
+    entirely; no feature is ever dropped, because `geo` is read as a
+    description of the whole trip elsewhere in the client.
+
+    Optional, and ignorable. An older client sends no box and gets exactly
+    what it did before; an older server ignores the parameter and serves the
+    whole trip, which is a superset of what was asked for.
+
     Rides the same payload cache as every other per-project response, keyed
-    per zoom, so one bust per mutation still covers every level.
+    per zoom, so one bust per mutation still covers every level. The box is
+    part of that key, snapped to the tile grid at the level so a pan of a few
+    pixels reuses an entry rather than minting one — see
+    :func:`snap_bbox_to_tiles`, and the byte/entry/TTL bounds on this module's
+    cache, which are what keep the extra dimension from mattering.
     """
     if not (0 <= zoom <= 22):
         raise HTTPException(
@@ -587,12 +656,20 @@ def project_geo_simplified(
     # of visible drift. Ceiling errs towards more detail than asked for, which
     # is invisible, and costs no extra cache entries.
     level = math.ceil(zoom)
+    # Snapped here, not trusted from the client: the snapped box is both what
+    # gets filtered against and what keys the cache, so an unsnapped one would
+    # mint an entry per pan pixel.
+    box = None
+    box_key = "all"
+    if bbox is not None:
+        box, tiles = snap_bbox_to_tiles(_parse_bbox(bbox), level)
+        box_key = "{}.{}.{}.{}".format(*tiles)
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
         owner_id = row.user_info_id
 
-        cache_key = (owner_id, name, f"simplified-{level}")
+        cache_key = (owner_id, name, f"simplified-{level}-{box_key}")
         cached_bytes = _geo_cache_get(cache_key)
         if cached_bytes is not None:
             return Response(
@@ -611,7 +688,7 @@ def project_geo_simplified(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     features = simplify_geo_features(
-        _build_full_geo_features(project, encoded=False), level)
+        _build_full_geo_features(project, encoded=False), level, box)
     gz_bytes = _gzip_geo(features)
     # Short TTL on purpose. There are up to 23 of these per project in a cache
     # shared with /project, /low-res and /meta, and eviction picks the entry

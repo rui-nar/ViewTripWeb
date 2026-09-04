@@ -16,6 +16,7 @@ import '../auth/auth_notifier.dart';
 import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
 import '../projects/basemaps.dart';
+import '../projects/geo_viewport.dart';
 import '../projects/heavy_decode.dart' as heavy;
 import '../projects/elevation_chart.dart' show ElevationChart, ElevationLoadingPlaceholder;
 import '../projects/map_panel.dart';
@@ -113,7 +114,8 @@ class _SharedProjectService extends ProjectService {
   /// would 401 on every shared load for nothing. Failing here immediately
   /// takes the same fallback a 404 would, minus the round trip.
   @override
-  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef _, double zoom) =>
+  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef _, double zoom,
+          {GeoBox? bbox}) =>
       Future.error(UnsupportedError(
           'no share-scoped simplified geo endpoint (issue #321)'));
 
@@ -316,12 +318,19 @@ class _SharedProjectViewState extends State<_SharedProjectView>
   Timer? _cameraIdleTimer;
 
   void _onMapEvent(MapEvent event) {
+    final camera = _mapController.mapController.camera;
     context.read<SharedProjectNotifier>()
       ..setMapCameraActive(true)
-      // Zoom level of detail (issue #295): the notifier fetches
-      // geometry matched to what is on screen, so it has to know
-      // what is on screen.
-      ..setMapZoom(_mapController.mapController.camera.zoom);
+      // Zoom level of detail (issue #295) and its viewport box (#324): the
+      // notifier fetches geometry matched to what is on screen, so it has to
+      // know what is on screen. Shared viewers have no simplified endpoint
+      // (issue #321), so this currently arms nothing here — passing it anyway
+      // keeps the three map screens' camera wiring identical, which is how
+      // this screen came to be missing setMapCameraActive in the first place.
+      ..setMapZoom(camera.zoom,
+          viewport: viewportBox(camera.visibleBounds.west,
+              camera.visibleBounds.south, camera.visibleBounds.east,
+              camera.visibleBounds.north));
     _cameraIdleTimer?.cancel();
     _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
       if (mounted) context.read<SharedProjectNotifier>().setMapCameraActive(false);

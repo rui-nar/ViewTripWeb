@@ -27,7 +27,10 @@ import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
 const _acts = 20;
-const _pts = 900; // 18k points total — comfortably over the render budget
+// 50k points total — comfortably over the render budget, which issue #276
+// raised to 40,000 so it stops binding below the server's own pixel-accurate
+// output.
+const _pts = 2500;
 
 Map<String, dynamic> _rawGeo() => {
       'type': 'FeatureCollection',

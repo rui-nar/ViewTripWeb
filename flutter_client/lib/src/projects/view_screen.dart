@@ -21,6 +21,7 @@ import '../core/project_ref.dart';
 import '../core/stale_shared_ref.dart';
 import 'activity_panel.dart';
 import 'basemaps.dart';
+import 'geo_viewport.dart';
 import 'day_carousel.dart';
 import 'elevation_chart.dart';
 import 'map_panel.dart';
@@ -209,12 +210,16 @@ class _ViewBodyState extends State<_ViewBody> with TickerProviderStateMixin {
 
   void _onMapEvent(MapEvent event) {
     if (!shouldSyncViewport(event)) return;
+    final camera = _mapController.mapController.camera;
+    final visible = camera.visibleBounds;
     context.read<ViewProjectNotifier>()
       ..setMapCameraActive(true)
-      // Zoom level of detail (issue #295): the notifier fetches
-      // geometry matched to what is on screen, so it has to know
-      // what is on screen.
-      ..setMapZoom(_mapController.mapController.camera.zoom);
+      // Zoom level of detail (issue #295) and its viewport box (#324): the
+      // notifier fetches geometry matched to what is on screen, so it has to
+      // know what is on screen — both how much detail, and which region.
+      ..setMapZoom(camera.zoom,
+          viewport: viewportBox(
+              visible.west, visible.south, visible.east, visible.north));
     _cameraIdleTimer?.cancel();
     _cameraIdleTimer = Timer(const Duration(milliseconds: 250), () {
       if (mounted) context.read<ViewProjectNotifier>().setMapCameraActive(false);
