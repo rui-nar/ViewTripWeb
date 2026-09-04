@@ -117,6 +117,46 @@ Future<T> retryFetch<T>(
   );
 }
 
+/// Cursor-track resolution kept per activity.
+///
+/// These tracks exist for one job: mapping a distance to a position, for the
+/// map-to-chart cursor and for `hitTestMapTap`'s nearest-point scan. They do
+/// not draw anything — the polylines the map renders come from `geo` and are
+/// separately capped at [kMaxTotalPolylinePoints].
+///
+/// A 219-activity trip measured 1,465,345 points in `fullTrack` and the same
+/// again in `perActivityTracks` (issue #276's diagnostics), roughly 200 MB
+/// held to answer a question a fraction of that resolves. At 1000 points a
+/// 50 km activity resolves to ~50 m, which is sub-pixel at any zoom that
+/// shows the whole activity, and the scan `hitTestMapTap` runs on every tap
+/// gets an order of magnitude cheaper with it.
+///
+/// This regressed in #295: removing the index-aligned pairing made the track
+/// follow the geometry (~6,700 points per activity here) rather than the
+/// elevation profile (~300).
+const int kMaxTrackPointsPerActivity = 1000;
+
+/// Uniformly reduces [track] to at most [maxPoints], keeping the first and
+/// last exactly.
+///
+/// Uniform in index rather than in distance: track points come from GPS
+/// samples, which are already roughly evenly spaced along the path, and
+/// preserving the endpoints is what keeps the distance range — and therefore
+/// the chart's X axis — intact.
+@visibleForTesting
+List<(double, GeoPoint)> downsampleTrack(
+    List<(double, GeoPoint)> track, int maxPoints) {
+  if (maxPoints < 2 || track.length <= maxPoints) return track;
+  final out = <(double, GeoPoint)>[track.first];
+  // Stride across the interior, then append the true last point.
+  final step = (track.length - 1) / (maxPoints - 1);
+  for (var i = 1; i < maxPoints - 1; i++) {
+    out.add(track[(i * step).round()]);
+  }
+  out.add(track.last);
+  return out;
+}
+
 /// Cheap O(activities) count of raw elevation samples. Mirrors
 /// elevation_chart.dart's private `_totalProfilePoints`.
 @visibleForTesting
@@ -225,8 +265,9 @@ const kInlineFullTrackThreshold = 5000;
       }
       actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
     }
-    if (actId != null) perAct[actId] = actTrack;
-    for (final pt in actTrack) {
+    final reduced = downsampleTrack(actTrack, kMaxTrackPointsPerActivity);
+    if (actId != null) perAct[actId] = reduced;
+    for (final pt in reduced) {
       combined.add((pt.$1 + offsetKm, pt.$2));
     }
     if (elevTotalKm > 0) offsetKm += elevTotalKm;
