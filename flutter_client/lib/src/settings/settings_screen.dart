@@ -10,7 +10,7 @@ import 'package:vector_map_tiles/vector_map_tiles.dart' show VectorTileLayerMode
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
 import '../billing/billing_section.dart';
-import '../core/perf_timing.dart' show perfFullReport, perfSpans;
+import '../core/perf_timing.dart' show perfSpans;
 import '../projects/basemaps.dart' show kMapTileModePref, mapTileModeNotifier;
 import '../core/version_reload_stub.dart'
     if (dart.library.html) '../core/version_reload_web.dart';
@@ -1189,21 +1189,10 @@ class _PerfPanel extends StatefulWidget {
 }
 
 class _PerfPanelState extends State<_PerfPanel> {
-  String _report() {
-    final frames = perfSpans.gestureFrames;
-    return perfFullReport(
-      perfSpans.blockingSpans,
-      perfSpans.stageSpans,
-      perfSpans.notes,
-      failures: perfSpans.failures,
-      loads: perfSpans.session.loads,
-      lastBackgroundRefresh: perfSpans.session.lastBackgroundRefresh,
-      diagnostics: perfSpans.diagnostics,
-      gestures: frames.gestures,
-      gestureBuild: frames.build,
-      gestureRaster: frames.raster,
-    );
-  }
+  // Deliberately not assembling perfFullReport's argument list here: this
+  // panel is the report a human reads, and hand-building it is how it came to
+  // be missing four instruments (see PerfSpans.buildReport).
+  String _report() => perfSpans.buildReport();
 
   @override
   Widget build(BuildContext context) {

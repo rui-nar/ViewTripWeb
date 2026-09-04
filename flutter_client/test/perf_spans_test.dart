@@ -528,4 +528,47 @@ void main() {
       expect(lines[3], contains('cheap'));
     });
   });
+
+  // Issue #276. The report a human reads is assembled by the Settings panel,
+// and it had drifted from the one `report()` builds: it omitted `frameSpans`,
+// `gestureBlocking` and both stall maxima, because they are optional named
+// parameters whose defaults are silently harmless.
+//
+// The cost was that the map's own layout and paint cost — the whole point of
+// the instrumentation added for the viewport work — was collected on every
+// frame and never shown, so a device run came back unable to answer the one
+// question it was taken to answer. A missing instrument reads exactly like an
+// instrument that measured nothing.
+//
+// Both readers now go through PerfSpans.buildReport, and these pin that.
+
+  group('buildReport carries every instrument', () {
+    setUp(() {
+      perfSpans.resetSession();
+      perfSpans.reset();
+      perfSpans.enabled = true;
+    });
+
+    test('the map layout and paint line is present', () {
+      perfSpans.blocking('something', () {});
+      perfSpans.recordFrameSpan('map_paint', 12.5, 1);
+      perfSpans.recordFrameSpan('map_lines_paint', 4.0, 1);
+      final report = perfSpans.buildReport();
+      expect(report, contains('map_paint'),
+          reason: 'collected on every frame and never shown is the bug');
+      expect(report, contains('map_lines_paint'));
+    });
+
+    test('work recorded during a gesture is present', () {
+      perfSpans.beginGesture();
+      perfSpans.blocking('during_pan', () {});
+      perfSpans.endGesture();
+      expect(perfSpans.buildReport(), contains('during_pan'));
+    });
+
+    test('an empty frame-span set does not print an empty section', () {
+      perfSpans.blocking('something', () {});
+      expect(perfSpans.buildReport(), isNot(contains('map_paint')));
+    });
+  });
 }
