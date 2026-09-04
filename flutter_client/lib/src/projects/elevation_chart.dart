@@ -1,5 +1,7 @@
 library;
 
+import 'dart:typed_data';
+
 import '../core/perf_timing.dart' show perfSpans;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
@@ -31,45 +33,94 @@ int _totalProfilePoints(List<Map<String, dynamic>> activities) {
   return total;
 }
 
-/// Concatenates the elevation_profile of every activity in [args.activities]
-/// (or just the one matching [args.selectedId], when set) into one spot
-/// series, then LTTB-downsamples it. Pure and top-level so it can run via
-/// [compute] on a background isolate — a long trip's *full* elevation
-/// payload (every activity's profile concatenated, with no activity
-/// selected) can be tens of thousands of points, and doing that
-/// concatenation + downsampling synchronously on the UI isolate is the same
-/// "big computation on the UI isolate" mistake that caused the day-carousel
-/// ANR (see map_panel.dart's buildDayIndex doc comment). A single selected
-/// activity's profile is bounded and cheap, so that path stays synchronous —
-/// see _ElevationChartState._compute. Exposed (not `_`-prefixed) only for
-/// testing this computation directly; every real caller is in this file.
+/// A trip's elevation profiles flattened into typed buffers, for crossing an
+/// isolate boundary.
+///
+/// [compute] *copies its argument*. A profile shaped `[[distKm, elevM], …]`
+/// is one Dart list object per sample, so a long trip's profiles are on the
+/// order of a million small objects and copying them was measured as a 2.4 s
+/// frame — the cost landing on the UI isolate that the hop exists to keep it
+/// off (issue #276). The same samples in a [Float64List] copy as one buffer.
+typedef FlatProfiles
+    = List<({String? id, Float64List points, double elevTotalKm})>;
+
+/// Flattens every activity's `elevation_profile` into [FlatProfiles].
+///
+/// Skips exactly what the nested walk below used to skip inline — activities
+/// with no profile or an empty one, and individual malformed samples — so the
+/// series is unchanged. `elevTotalKm` is read from the raw last entry, before
+/// that filtering, to keep the per-activity distance offsets identical.
+@visibleForTesting
+FlatProfiles flattenProfiles(List<Map<String, dynamic>> activities) {
+  final out = <({String? id, Float64List points, double elevTotalKm})>[];
+  for (final a in activities) {
+    final profile = a['elevation_profile'];
+    if (profile is! List || profile.isEmpty) continue;
+    final lastPt = profile.last;
+    final buf = Float64List(profile.length * 2);
+    var n = 0;
+    for (int i = 0; i < profile.length; i++) {
+      final point = profile[i];
+      if (point is! List || point.length < 2) continue;
+      buf[n++] = (point[0] as num).toDouble();
+      buf[n++] = (point[1] as num).toDouble();
+    }
+    out.add((
+      id: a['id']?.toString(),
+      points: n == buf.length ? buf : buf.sublist(0, n),
+      elevTotalKm: (lastPt is List && lastPt.isNotEmpty)
+          ? (lastPt[0] as num).toDouble()
+          : 0.0,
+    ));
+  }
+  return out;
+}
+
+/// Nested-input form of [computeElevationSpotsFlat], kept as the readable
+/// contract this computation is tested through. The isolate path flattens
+/// first — see [FlatProfiles] for why it must.
 @visibleForTesting
 ({List<FlSpot> spots, double minY, double maxY}) computeElevationSpots(
   ({List<Map<String, dynamic>> activities, dynamic selectedId}) args,
+) =>
+    computeElevationSpotsFlat((
+      profiles: flattenProfiles(args.activities),
+      selectedId: args.selectedId,
+    ));
+
+/// Concatenates the profile of every activity in [args.profiles] (or just the
+/// one matching [args.selectedId], when set) into one spot series, then
+/// LTTB-downsamples it. Pure and top-level so it can run via [compute] on a
+/// background isolate — a long trip's *full* elevation payload (every
+/// activity's profile concatenated, with no activity selected) can be tens of
+/// thousands of points, and doing that concatenation + downsampling
+/// synchronously on the UI isolate is the same "big computation on the UI
+/// isolate" mistake that caused the day-carousel ANR (see map_panel.dart's
+/// buildDayIndex doc comment). A single selected activity's profile is
+/// bounded and cheap, so that path stays synchronous — see
+/// _ElevationChartState._compute. Exposed (not `_`-prefixed) only for testing
+/// this computation directly; every real caller is in this file.
+@visibleForTesting
+({List<FlSpot> spots, double minY, double maxY}) computeElevationSpotsFlat(
+  ({FlatProfiles profiles, dynamic selectedId}) args,
 ) {
   final source = args.selectedId == null
-      ? args.activities
-      : args.activities
-          .where((a) => a['id']?.toString() == args.selectedId.toString())
+      ? args.profiles
+      : args.profiles
+          .where((p) => p.id == args.selectedId.toString())
           .toList();
 
   final spots = <FlSpot>[];
   double offsetKm = 0;
   for (final a in source) {
-    final profile = a['elevation_profile'];
-    if (profile is! List || profile.isEmpty) continue;
-    final lastPt = profile.last;
-    final elevTotalKm = (lastPt is List && lastPt.isNotEmpty)
-        ? (lastPt[0] as num).toDouble()
-        : 0.0;
-    for (int i = 0; i < profile.length; i++) {
-      final point = profile[i];
-      if (point is! List || point.length < 2) continue;
-      spots.add(FlSpot(
-          (point[0] as num).toDouble() + offsetKm,
-          (point[1] as num).toDouble()));
+    // No `continue` on an empty buffer: an activity whose samples were all
+    // malformed contributed no spots but still advanced the offset before
+    // this was flattened, and the offsets must not shift.
+    final pts = a.points;
+    for (int i = 0; i < pts.length; i += 2) {
+      spots.add(FlSpot(pts[i] + offsetKm, pts[i + 1]));
     }
-    if (elevTotalKm > 0) offsetKm += elevTotalKm;
+    if (a.elevTotalKm > 0) offsetKm += a.elevTotalKm;
   }
 
   double minY = 0, maxY = 0;
@@ -241,7 +292,13 @@ class _ElevationChartState extends State<ElevationChart> {
       return;
     }
     final gen = ++_computeGen;
-    compute(computeElevationSpots, args).then((result) {
+    // Flatten *before* the hop, not inside it: compute() copies its argument,
+    // so handing it the activity maps serialised a million-odd small list
+    // objects on the UI isolate — see [FlatProfiles].
+    final flat = perfSpans
+        .blocking('elevation_flatten', () => flattenProfiles(activities));
+    compute(computeElevationSpotsFlat, (profiles: flat, selectedId: selectedId))
+        .then((result) {
       if (!mounted || gen != _computeGen) return;
       setState(() {
         _spots = result.spots;
