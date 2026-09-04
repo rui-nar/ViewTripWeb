@@ -115,7 +115,7 @@ class _SharedProjectService extends ProjectService {
   @override
   Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef _, double zoom) =>
       Future.error(UnsupportedError(
-          'no share-scoped simplified geo endpoint (issue #295)'));
+          'no share-scoped simplified geo endpoint (issue #321)'));
 
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>

@@ -942,8 +942,14 @@ and a flat representation for `elevation_profile` would remove it — but it is
 a heap question for the 16 call sites that read `[[distKm, elevM], …]`, not
 something to smuggle into this fix.
 
-Also deferred: shared/public viewers have no simplified endpoint, so `geo`
-crosses the boundary at full resolution for them (~1.46M nested lists — more
-than the elevation payload removed here). The claim that this fix addresses
-the "panning blocks when low-res tracks are replaced" symptom holds for the
-owner path only.
+Also deferred, and now tracked as **issue #321**: viewers arriving through a
+share link have no simplified endpoint, so `geo` crosses the boundary at full
+resolution for them (~1.46M nested lists — more than the elevation payload
+removed here). The claim that this fix addresses the "panning blocks when
+low-res tracks are replaced" symptom holds for the owner path only.
+
+The scope there is narrower than "unauthenticated means no LOD":
+`/api/geo/project/simplified` already takes the same `owner` parameter and
+auth dependency as `/api/geo/project`, so a signed-in collaborator opening
+someone else's trip by name is already covered. It is the token-scoped routes
+in `api/share.py` — the public ones — that have no zoom-aware equivalent.
