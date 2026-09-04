@@ -48,6 +48,8 @@ Raises HafasError on any failure — callers fall back to coordinate-only mode.
 from __future__ import annotations
 
 import math
+
+from src.models.simplify import simplify_lonlat
 import re
 import time
 from dataclasses import dataclass
@@ -641,59 +643,19 @@ def _trim_polyline(poly: list[list[float]], stops: list[dict]) -> list[list[floa
 
 def _simplify(poly: list[list[float]],
               tolerance_m: float = _SIMPLIFY_TOLERANCE_M) -> list[list[float]]:
-    """Ramer-Douglas-Peucker: drop points that lie within *tolerance_m* of the
-    line their neighbours already describe.
+    """Trim MOTIS shape points to what anything downstream can actually use.
 
-    MOTIS ships shape points ~74 m apart over the whole journey, which is far
-    finer than anything downstream needs and is not free: the polyline is
-    persisted, returned by /geo on every load, and turned into one draggable
-    marker per vertex by the track editor, which has no cap of its own.
-    Hamburg->Offenburg goes from 9,717 points / 242 KiB of JSON to 2,023 /
-    49 KiB, with every dropped point provably within the tolerance of the line
-    that replaces it.
+    MOTIS ships points ~74 m apart over the whole journey, which is far finer
+    than anything needs and is not free: the polyline is persisted, returned
+    by /geo on every load, and turned into one draggable marker per vertex by
+    the track editor, which has no cap of its own. Hamburg->Offenburg goes
+    from 9,717 points / 242 KiB of JSON to 2,023 / 49 KiB, with every dropped
+    point provably within the tolerance of the line that replaces it.
 
-    Iterative, not recursive: an 11k-point trip would otherwise risk blowing the
-    stack. Distances are measured on a locally-equirectangular projection
-    (longitude scaled by cos(latitude)) rather than on raw [lon, lat] degrees:
-    a degree of longitude is only ~63% of a degree of latitude at these
-    latitudes, so an unprojected epsilon silently allows up to 1/cos times the
-    tolerance in the north-south direction — measured at 3.10 m for a nominal
-    2 m on this very route. One scale factor is used for the whole line, so
-    the effective tolerance still drifts a few percent across a long
-    north-south route (measured 2.07 m for a nominal 2 m on ICE 75).
+    The algorithm itself lives in src/models/simplify.py, shared with the geo
+    endpoints' zoom-level-of-detail (issue #295).
     """
-    if len(poly) < 3 or tolerance_m <= 0:
-        return poly
-    mid_lat = (poly[0][1] + poly[-1][1]) / 2
-    scale = max(math.cos(math.radians(mid_lat)), 0.01)   # lon degrees -> lat degrees
-    eps = tolerance_m / 111_000.0
-    proj = [(x * scale, y) for x, y in poly]
-
-    keep = [False] * len(poly)
-    keep[0] = keep[-1] = True
-    stack = [(0, len(poly) - 1)]
-    while stack:
-        i, j = stack.pop()
-        if j - i < 2:
-            continue
-        ax, ay = proj[i]
-        bx, by = proj[j]
-        dx, dy = bx - ax, by - ay
-        den = math.hypot(dx, dy)
-        worst, at = -1.0, -1
-        for k in range(i + 1, j):
-            px, py = proj[k]
-            if den == 0:
-                dist = math.hypot(px - ax, py - ay)
-            else:
-                dist = abs(dy * px - dx * py + bx * ay - by * ax) / den
-            if dist > worst:
-                worst, at = dist, k
-        if worst > eps:
-            keep[at] = True
-            stack.append((i, at))
-            stack.append((at, j))
-    return [p for p, k in zip(poly, keep) if k]
+    return simplify_lonlat(poly, tolerance_m)
 
 
 def _nearest_point(poly: list[list[float]], stop: dict) -> int:

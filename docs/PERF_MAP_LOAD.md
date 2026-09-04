@@ -627,3 +627,57 @@ Aggregate load time would have shown an improvement and hidden a duplicated
 `/api/share/{token}` and there is no share-scoped elevation endpoint yet, so
 it keeps fetching the full payload; the compact endpoint 404s there and falls
 back. That is the next thing to close.
+
+## Device profiling: what 1.5 GB actually was
+
+Five `dumpsys meminfo` captures over ~7 minutes settled a question three
+rounds of inference had not.
+
+| | A | B | C | D | E |
+|---|---|---|---|---|---|
+| Dart heap (`Unknown`) | 505 | 804 | 622 | 627 | 625 MB |
+| `GL mtrack` | 102 | 250 | 273 | 265 | 234 MB |
+| Native heap | 49 | 61 | 63 | 72 | 52 MB |
+| TOTAL PSS | 798 | 1235 | 1079 | 1085 | 1037 MB |
+
+**Nothing leaks.** Graphics fills a bounded cache and then declines; the
+native heap does the same. The app reaches a stable ~1.04 GB PSS.
+
+Two readings along the way were wrong, and both came from too few samples: at
+three rising points graphics looked unbounded, and it is not. Four points was
+the minimum that distinguished a filling cache from a leak.
+
+`Unknown` is the Dart heap — it *shrank* 169 MB between captures, which fixed
+mappings do not do. The Dart VM allocates through anonymous `mmap`, so
+`dumpsys` cannot attribute it; it never appears under `Native Heap` (malloc,
+and only ~50 MB here).
+
+So the budget is: **Dart heap ~625 MB steady and ~804 MB during load**,
+graphics ~320 MB at its plateau, everything else ~120 MB. The Dart heap is
+both the largest component and the one that spikes, and GC over a heap that
+size is what produces the multi-second frames. Graphics is map surfaces and
+is not reducible.
+
+That rules out raster track tiles (Phase 4.1) outright: they would move
+geometry out of the Dart heap and into the one pool already at its ceiling.
+Zoom level of detail on vector geometry is the answer instead.
+
+## Phase 4.1 replaced: zoom level of detail
+
+`GET /api/geo/project/simplified?name=…&zoom=…` returns geometry
+Ramer-Douglas-Peucker-simplified to about one screen pixel at that zoom. The
+client holds what it asks for, so the size of the client's geometry becomes a
+function of what is on screen rather than of trip length.
+
+The algorithm is the one already used to trim MOTIS shape points, moved to
+`src/models/simplify.py` and shared — including its equirectangular
+correction, which matters here for the same reason it mattered there: a
+degree of longitude is ~63% of a degree of latitude at European latitudes, so
+an unprojected epsilon over-simplifies north-south.
+
+Additional endpoint; `/project` is unchanged, for shipped clients and for
+anything that genuinely needs every point (track editing, export).
+
+Still to do: a bounding box. Zoom alone bounds the *detail*, not the extent,
+so a deep zoom still returns the whole trip at that detail. That is the
+follow-up, and it is what makes the high-zoom case bounded too.
