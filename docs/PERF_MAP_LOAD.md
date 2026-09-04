@@ -1191,3 +1191,72 @@ as Python lists) or the levels precomputed off the request path — and
 precomputing inside this process would starve it exactly as the request-time
 build does, so it belongs in the worker role the image already has (#173).
 Tracked in #324.
+## Round 10 — the fetch that already had its answer
+
+```
+elevation_points   1465345
+elevation          2.8 MB
+fetch_elevation    4360.0ms
+elevation_flatten  n=2 total=115.5ms worst=113.1ms   <- the last span over 16.7ms
+```
+
+1,465,345 samples to draw 300 spots and read 219 doubles. Issue #323 proposed
+downsampling `GET /{name}/elevation` to chart resolution, mirroring #295.
+
+**It did not need writing.** `/meta` has carried a ~300-point profile per
+activity since the low-res-first work: `ProjectIO.to_dict`'s `_ep_pairs` falls
+back to `elevation_profile_low_res_json`, and the lightweight load never
+defers that column. The client was already rendering from it — `loadView` and
+`loadShared` say so in as many words — and then spending 2.8 MB and 4.3 s
+replacing it with data no consumer can tell apart:
+
+* the chart LTTB-downsamples whatever it is given to `_kMaxChartPoints` = 300,
+  and a *selected* activity is capped at 300 too;
+* `buildFullTrackFromTotals` reads one number per activity, the profile's last
+  distance — which `downsample_elevation` keeps exactly, along with the first
+  point and both global extremes.
+
+The reason it used to be necessary is gone. Before #295 the track builder
+paired profile samples with geometry *index-wise*, so a 300-point profile
+mapped the whole distance range onto the leading 300 coordinates of the track.
+It now derives distances from the geometry and scales them to the profile's
+total, and a total is all it takes.
+
+So the fix is one guard on the Phase-2 upgrade: **skip it when the meta load
+already supplied profiles.** No server change, no new downsampler, and the
+2.8 MB fetch and its decode disappear rather than shrinking.
+
+Measured in the test container (desktop-class, so roughly half the device's
+times — the device read 113 ms where this reads 54):
+
+| | 219 × 6,690 samples | 219 × 300 samples |
+|---|---|---|
+| `flattenProfiles` | 54.2 ms | **1.2 ms** |
+| `computeElevationSpotsFlat` | 205.7 ms | **4.8 ms** |
+
+`elevation_flatten` lands ~2.5 ms on the device: under budget by 6x.
+
+**The isolate hop stays.** Inline it would now be 1.2 + 4.8 = 6 ms here, so
+~13 ms on the device — under 16.7 ms, but not by enough to be worth spending
+the whole margin on, and `_kInlineComputeThreshold` = 5,000 keeps 65,700
+samples on the isolate anyway. The hop's *argument* was the problem, and at
+this size it is a 1 MB `Float64List` memcpy.
+
+### What this deliberately does not touch
+
+* **E2EE trips still fetch the details payload.** Their low-res profile does
+  arrive through `/meta` (as the ciphertext `_revealActivities` decrypts), so
+  elevation alone would not need it — but that payload is also the only
+  load-path source of a *decrypted* `map.summary_polyline`, which
+  `_openTrackEditor` reads off the panel's copy. Skipping it would send the
+  editor to `/activities/{id}/track`, which answers with the envelope, and an
+  encrypted trip would quietly lose track editing. That is a separate change
+  with a separate argument.
+* **`GET /{name}/elevation` is unchanged**, and still serves full resolution.
+  It remains the fallback for a server with no low-res column, for a trip
+  whose profiles failed to decrypt, and for one that genuinely has no
+  elevation — all three of which send no profiles through `/meta` and so still
+  fall through.
+* **`_silentReload` still re-fetches the full details payload** after an
+  activity CRUD, so `elevation_points` goes back to full resolution until the
+  next load. Pre-existing, and unchanged by this.
