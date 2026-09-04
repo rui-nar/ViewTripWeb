@@ -48,6 +48,13 @@ library;
 ///   E2EE trip) hands the renderer 1,465,345 points on that same trip. 40,000
 ///   cuts that by 97%.
 ///
+/// One number worth keeping honest: 13,273 is what a *real* trip returned at
+/// the zoom it was measured at. A synthetic 219-activity trip strung across
+/// Europe returns 66,418 at zoom 15 with no bounding box — above this valve.
+/// The viewport box is what keeps the payload under it (7,544 for the same
+/// trip and zoom, scoped to one screen), which is why these two changes belong
+/// together and why raising this without #324 would have been reckless.
+///
 /// If a device run shows `map_lines_paint` (issue #276's frame instrumentation)
 /// cannot afford what the server sends, the fix is the *server's* tolerance or
 /// its per-line cap — not this number. Lowering it here would only reinstate

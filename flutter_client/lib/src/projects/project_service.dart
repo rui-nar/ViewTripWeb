@@ -7,6 +7,7 @@ import '../api/client.dart';
 import '../core/perf_timing.dart';
 import '../core/project_ref.dart';
 import 'elevation_codec.dart';
+import 'geo_viewport.dart';
 import 'heavy_decode.dart' as heavy;
 import 'map_geometry_memo.dart' show geoGeometrySeeded;
 import 'project_data_cache.dart';
@@ -198,25 +199,35 @@ class ProjectService {
   /// this fails for any reason, including an older server that has no such
   /// endpoint.
   ///
-  /// GET /api/geo/project/simplified?name={name}&zoom={zoom}
-  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef ref, double zoom) {
+  /// [bbox], when given, additionally scopes the answer to what is on screen
+  /// (issue #324). Zoom bounds the detail, not the extent, so without it a
+  /// deep zoom still ships — and makes the server simplify — the whole trip.
+  /// A line outside the box comes back at the floor a whole-trip zoom would
+  /// have given it; no feature is ever dropped. An older server ignores the
+  /// parameter and returns the whole trip, which is a superset.
+  ///
+  /// GET /api/geo/project/simplified?name={name}&zoom={zoom}&bbox={bbox}
+  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef ref, double zoom,
+      {GeoBox? bbox}) {
     // Keyed by the server's own quantisation, so a mode toggle mid-load and a
     // concurrent refetch for the same level share one 90 s request rather than
-    // racing two.
+    // racing two. The box is part of that key for the same reason: two
+    // requests for different regions are two different answers.
     final bucket = zoom.ceil();
     return _dedupFetch(
-        'geoLod:${ref.ownerId ?? 0}:${ref.name}:$bucket',
-        () => _fetchSimplifiedGeo(ref, zoom));
+        'geoLod:${ref.ownerId ?? 0}:${ref.name}:$bucket:${bbox?.param ?? 'all'}',
+        () => _fetchSimplifiedGeo(ref, zoom, bbox));
   }
 
   Future<Map<String, dynamic>> _fetchSimplifiedGeo(
-      ProjectRef ref, double zoom) async {
+      ProjectRef ref, double zoom, GeoBox? bbox) async {
     final encoded = Uri.encodeComponent(ref.name);
+    final box = bbox == null ? '' : '&bbox=${bbox.param}';
     final bytes = await perfSpans.stage(
         'fetch_geo_lod',
         () => api.getBytes(
             ref.withOwner(
-                '/api/geo/project/simplified?name=$encoded&zoom=$zoom'),
+                '/api/geo/project/simplified?name=$encoded&zoom=$zoom$box'),
             timeout: const Duration(seconds: 90)));
     perfSpans.note('geo_lod', perfSizeLabel(bytes.length));
     // Same hop as the full-res path, so the geometry caches are seeded and

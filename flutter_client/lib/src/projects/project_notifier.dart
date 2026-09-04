@@ -17,6 +17,7 @@ import '../map/geo_point.dart';
 import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
 import 'client_geo_builder.dart' as client_geo;
+import 'geo_viewport.dart';
 import 'members_service.dart';
 import 'project_data_cache.dart';
 import 'project_filter_mixin.dart';
@@ -873,6 +874,10 @@ class ProjectNotifier extends ChangeNotifier
     // replace the route with an empty FeatureCollection.
     _zoomRefetchTimer?.cancel();
     _loadedZoomBucket = null;
+    // Dropped with the bucket for the same reason: a box from the previous
+    // trip describes a region this one may be nowhere near.
+    _loadedGeoBox = null;
+    _mapViewport = null;
     if (perfSpans.enabled) perfSpans.reset();  // scope spans to this load
     // Counted session-wide: an unexpected reload is the likeliest way heavy
     // work lands mid-gesture, and it is invisible unless someone counts.
@@ -1113,6 +1118,23 @@ class ProjectNotifier extends ChangeNotifier
   int? _loadedZoomBucket;
   Timer? _zoomRefetchTimer;
 
+  // ── Viewport scoping (issue #324) ──────────────────────────────────────
+  //
+  // Zoom bounds the detail, not the extent, so a deep zoom still fetched the
+  // whole trip at that detail — and made the server simplify all of it, at
+  // 4.0 s per request for a 219-activity trip against 0.26 s at whole-trip
+  // zoom (issue #324). The camera's box is sent with the request and
+  // remembered; leaving it is a reason to refetch, exactly like changing
+  // level is.
+  //
+  // Both are null until geometry has been loaded, and _loadedGeoBox stays
+  // null whenever the geometry on hand covers the whole trip — which is a
+  // superset of any viewport, so it is never a reason to refetch. That is the
+  // state after every load, since the notifier has no camera box before the
+  // map's first event.
+  GeoBox? _mapViewport;
+  GeoBox? _loadedGeoBox;
+
   /// How long the camera must settle before a zoom change is acted on. Long
   /// enough that a pinch through several levels causes one refetch, not five.
   @visibleForTesting
@@ -1120,14 +1142,35 @@ class ProjectNotifier extends ChangeNotifier
 
   int _bucketOf(double zoom) => zoom.ceil();
 
-  /// Told by the map screens on every camera event. Cheap: only a bucket
-  /// change that differs from what is loaded schedules anything.
-  void setMapZoom(double zoom) {
+  /// Whether the geometry on hand is the wrong geometry for where the camera
+  /// is now. False while nothing has been loaded, so a camera event during a
+  /// load — or one carrying a bucket left over from the previous project —
+  /// arms nothing.
+  bool _geoIsStaleForCamera() {
+    if (_loadedZoomBucket == null) return false;
+    if (_bucketOf(_mapZoom) != _loadedZoomBucket) return true;
+    final loaded = _loadedGeoBox;
+    final viewport = _mapViewport;
+    // No box means whole-trip geometry: nothing the camera does makes that
+    // insufficient at the same level.
+    if (loaded == null || viewport == null) return false;
+    return !loaded.contains(viewport);
+  }
+
+  /// Told by the map screens on every camera event, with the camera's visible
+  /// bounds when they are usable as a box. Cheap: only geometry that is
+  /// actually wrong for the camera schedules anything.
+  void setMapZoom(double zoom, {GeoBox? viewport}) {
     _mapZoom = zoom;
+    // Only overwritten by a usable box. A null one means the camera reported
+    // something that cannot be a bbox — crossing the antimeridian, or not laid
+    // out yet — and keeping the last good box is the conservative choice: it
+    // can leave the detail slightly stale, where clearing it would fire a
+    // whole-trip fetch off a transient reading.
+    if (viewport != null) _mapViewport = viewport;
     // Client-built geometry (E2EE) has no server counterpart to refetch.
     if (encryption.isUnlocked) return;
-    final bucket = _bucketOf(zoom);
-    if (_loadedZoomBucket == null || bucket == _loadedZoomBucket) return;
+    if (!_geoIsStaleForCamera()) return;
     _zoomRefetchTimer?.cancel();
     _zoomRefetchTimer = Timer(zoomRefetchDebounce, () {
       final r = ref;
@@ -1141,11 +1184,18 @@ class ProjectNotifier extends ChangeNotifier
   /// is: replacing geo rebuilds every polyline and marker spec, and landing
   /// that mid-gesture is what issue #276 was originally about.
   Future<void> _refetchGeoForZoom(ProjectRef r) async {
+    if (!_geoIsStaleForCamera()) return;
     final bucket = _bucketOf(_mapZoom);
-    if (bucket == _loadedZoomBucket) return;
+    // Captured before the awaits, for the same reason the load path captures
+    // its bucket: the camera keeps moving during the fetch and the idle wait,
+    // and stamping a box that was never requested would leave the geometry
+    // permanently mismatched to what is on screen. Null when the camera has
+    // no usable box — the whole trip is then fetched, as before.
+    final viewport = _mapViewport;
+    final box = viewport == null ? null : fetchBoxFor(viewport, bucket);
     final token = _loadTrack.token;
     try {
-      final next = await _service.getSimplifiedGeo(r, _mapZoom);
+      final next = await _service.getSimplifiedGeo(r, _mapZoom, bbox: box);
       if (!_isCurrent(token, r)) return;
       // See the load path: a response with no feature list is not an empty
       // trip. Keep what is on screen rather than blanking it.
@@ -1154,7 +1204,11 @@ class ProjectNotifier extends ChangeNotifier
       if (!_isCurrent(token, r)) return;
       // Re-read the bucket: the user may have kept zooming while this was in
       // flight, in which case a newer refetch is already scheduled and this
-      // result is for a level nobody is looking at.
+      // result is for a level nobody is looking at. The BOX is deliberately
+      // not re-checked: a result for the right level but a stale region is
+      // still better than the older geometry it replaces, and if the camera
+      // has left the box, the pan events that took it there have already
+      // scheduled the next refetch.
       if (_bucketOf(_mapZoom) != bucket) return;
       reconcileSegmentOverlay(next);
       geo = {
@@ -1163,6 +1217,7 @@ class ProjectNotifier extends ChangeNotifier
             List<dynamic>.from(next['features'] as List? ?? [])),
       };
       _loadedZoomBucket = bucket;
+      _loadedGeoBox = box;
       await _buildFullTrack();
       if (!_isCurrent(token, r)) return;
       notifyListeners();
@@ -1736,6 +1791,8 @@ class ProjectNotifier extends ChangeNotifier
   void clear() {
     _zoomRefetchTimer?.cancel();
     _loadedZoomBucket = null;
+    _loadedGeoBox = null;
+    _mapViewport = null;
     ref = null;
     activities = [];
     items = [];

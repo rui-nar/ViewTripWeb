@@ -711,9 +711,7 @@ so calling it with a share token would 401 on every shared load.
 
 ### Still to do
 
-* **A bounding box.** Zoom bounds the *detail*, not the *extent*, so a deep
-  zoom still returns the whole trip at that detail. This is what makes the
-  high-zoom case bounded too.
+* **A bounding box** — *done, see Round 9 below.*
 * **Two known regressions**, filed as #317: the on-device full-geo cache is no
   longer seeded (offline reopen degrades to low-res), and export/share
   rendering reads the now-simplified geometry from the notifier rather than
@@ -953,3 +951,154 @@ The scope there is narrower than "unauthenticated means no LOD":
 auth dependency as `/api/geo/project`, so a signed-in collaborator opening
 someone else's trip by name is already covered. It is the token-scoped routes
 in `api/share.py` — the public ones — that have no zoom-aware equivalent.
+
+## Round 9 — the map's own layout and paint, and the extent the zoom never bounded
+
+Three changes that only make sense together, in this order.
+
+### 1. Nothing measured flutter_map
+
+The report's most useful line was also its most frustrating:
+
+```
+[perf] worst frame ran: (no instrumented work)
+```
+
+An empty context means the 2437 ms went somewhere none of this app's spans
+wrap. But "somewhere" was as far as it went, because
+`FrameTiming.buildDuration` covers build, layout *and* paint as one number,
+and every `perfSpans.blocking()` span in this codebase wraps a **build**
+callback we wrote. Layout and paint — where flutter_map re-walks every point
+of every polyline overlapping the viewport, and repositions every marker, on
+every camera frame — were structurally invisible.
+
+`PerfSubtree` is a `RenderProxyBox` that times `performLayout` and `paint` of
+the subtree it wraps. It is layout-transparent (same constraints, same size,
+same paint offset) and costs one bool read when recording is off. The map
+subtree (`map`), the track `PolylineLayer` (`map_lines`) and all five marker
+layers together (`map_markers`) are wrapped in both map panels.
+
+Two things it had to get right:
+
+* **Aggregate per frame, not per call.** `paint` can run several times in one
+  frame. A per-call sample list recorded at 60 Hz would also have been the
+  third unbounded cache in this investigation, after the server payload cache
+  and the thumbnail cache — so only `(count, total, worst)` is kept per name,
+  which is O(names) forever.
+* **Print it next to what was being drawn.** `rendered_points` and
+  `map_lines_paint` mean very little apart and quite a lot together. The
+  report now puts them on the same line.
+
+The worst-frame context can now name `map_paint` instead of saying nothing.
+
+### 2. The client cap was undoing the server's work
+
+```
+geo_coords       13273   <- what the server sent, pixel-accurate at that zoom
+rendered_points   6029   <- what kMaxTotalPolylinePoints let through
+```
+
+Since the zoom LOD of #295 the server has been simplifying to about one screen
+pixel and the client has been throwing away 55% of the result — so the drawn
+track was roughly twice as coarse as the line that arrived, and the server's
+own floor (`min_points`) had to be justified against the *client's* budget
+rather than against what the map needs. Two resolution policies were
+disagreeing and the coarser one won.
+
+Raised to 40,000, against the server's guarantee rather than a round number:
+at most 4,000 points per line at ~1 px, and the largest trip measured came
+back as 13,273 for its entire length. It still catches what it exists for —
+the full-resolution fallback path hands the renderer 1,465,345 points on that
+trip.
+
+Kept as one trip-wide budget. A per-activity split was considered (6000 over
+219 activities is ~27 each whether the leg is 2 km or 200 km) and rejected:
+that allocation is exactly what the server now performs, with the geometry,
+the zoom and the viewport to go on.
+
+### 3. Zoom bounds the detail; it never bounded the extent
+
+This was already written down as "still to do" after #295, and it is what
+makes the deep-zoom case bounded in both directions. `GET
+/api/geo/project/simplified` now takes `bbox=minLon,minLat,maxLon,maxLat`.
+
+Measured on a synthetic 219-activity, 1,467,300-coordinate trip strung across
+Europe, with a viewport one screen wide:
+
+| zoom | no box | with box |
+|---|---|---|
+| 9 | 0.25 s / 7,008 coords | 0.10 s / 7,008 coords |
+| 12 | 3.81 s / 19,949 coords | 0.17 s / 7,124 coords |
+| 15 | 4.02 s / 66,418 coords | 0.18 s / 7,544 coords |
+
+That reproduces the shape the device reported — `fetch_geo_lod worst 6841 ms`
+— and it is issue #324 directly: simplification cost rises with zoom while the
+saving falls, because the endpoint was simplifying a whole trip to draw one
+screen. Note also the 66,418 at zoom 15: **above the raised client cap.** The
+box is what keeps the payload under the valve, which is why raising the cap
+without this would have been reckless.
+
+Four decisions worth keeping:
+
+* **A feature is never dropped.** An off-box line is reduced to the
+  `min_points` floor — *exactly* what a whole-trip zoom already gives it — and
+  skips the Ramer-Douglas-Peucker pass. Dropping it instead would have broken
+  three things that read `geo` as a description of the whole trip: the
+  segment-overlay reconciliation (a tombstone is cleared when the server geo
+  no longer mentions its id), fit-to-bounds, and the export path. The
+  equivalence to a coarser zoom is the entire safety argument, and it is
+  asserted rather than described.
+* **The box is snapped to the tile grid at the level, by the server.** Raw
+  viewport floats mean a cache entry per pan pixel, and this project has
+  already OOM-killed its API container once with a payload cache bounded by
+  the wrong thing (#209's third incident, and again from the client side in
+  #276). The client snaps too, and uses its own snapped box to decide when to
+  refetch; the server snapping again is what makes an older or hostile client
+  unable to mint entries. Snapping is outward, so the answer is always a
+  superset and pads for free.
+* **The intersection test short-circuits on the first point.** `line_bbox`
+  walks every coordinate, and at whole-trip zoom — where every line is on
+  screen and the box removes nothing — that walk is pure added cost: measured
+  0.24 s to 0.34 s before the short-circuit, 0.25 s after, i.e. free. A line
+  whose first point is outside still pays the walk, and there it buys skipping
+  RDP.
+* **The initial load sends no box, and that falls out rather than being a
+  special case.** The notifier has no camera box until the map's first event,
+  so the first fetch is the whole trip at the load zoom — which is what
+  fit-to-bounds and the whole-trip elevation cursor are built from. Scoping
+  engages from the first zoom-bucket change onwards.
+
+Refetching now triggers on the camera leaving the fetched box as well as on
+the level changing, debounced and camera-idle-gated exactly as the zoom
+refetch already was. The previous geometry stays on screen throughout; a
+failed refetch means slightly wrong detail, never a blank map.
+
+### What this does NOT fix
+
+* **Issue #317 is not resolved, and is marginally deepened.** The on-device
+  full-geo cache is still not seeded by the simplified path (offline reopen
+  still degrades to low-res) — unchanged, nothing new is written or skipped.
+  The export/share path still reads the simplified geometry out of the
+  notifier, and now, when the user is zoomed in, off-screen activities in it
+  are at the `min_points` floor rather than at the current zoom's detail. That
+  is bounded by the equivalence above — it is the resolution a whole-trip zoom
+  already produces, which is roughly the zoom an export renders at — but it is
+  a deepening and should be stated as one. The fix is #317's: those paths
+  should fetch full resolution rather than read the map's copy.
+* **The first fetch of a deep-zoom URL is still whole-trip.** Arriving on
+  `/app?...&zoom=15` fetches the entire trip at zoom 15, because no camera box
+  exists yet. Seeding one from the route's centre and zoom plus the map's size
+  would close it; it needs the map to be laid out first, so it is a separate
+  change.
+* **Shared/public viewers still have no simplified endpoint** (issue #321), so
+  none of this reaches them.
+
+### What the next device run should say
+
+* `map_lines_paint` / `map_markers_layout` / `map_paint` worst values, against
+  `rendered_points` and `markers` on the same line. This is the number that
+  says whether 40,000 is affordable — and if it is not, the fix is the
+  server's tolerance, not the client's valve.
+* `worst frame ran:` naming something instead of `(no instrumented work)`.
+* `fetch_geo_lod` worst, which should stop scaling with zoom.
+* `geo_coords` after a zoom-in, which should stop scaling with trip length.
