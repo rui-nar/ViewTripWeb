@@ -179,6 +179,29 @@ def _line_touches(poly: list, bbox: tuple) -> bool:
     return bboxes_intersect(line_bbox(poly), bbox)
 
 
+def restrict_to_bbox(poly: list, bbox: tuple | None, *, min_points: int = 32) -> list:
+    """Reduce a line that cannot be seen in *bbox* to the ``min_points`` floor.
+
+    The same reduction :func:`simplify_for_zoom` applies when given a box, but
+    as a *separate* pass so it can run over an already-simplified line.
+
+    That separation is the point. Simplifying with the box folded in produces a
+    result that is only valid for that one box, so every pan to a new box paid
+    a full rebuild — and a rebuild is dominated by decoding every activity's
+    polyline (measured 1.83 s for a 219-activity trip) plus the
+    Ramer-Douglas-Peucker pass, not by the box. Simplifying *without* the box
+    yields one result per zoom level that every box can be served from.
+
+    Flooring an already-simplified line rather than the original gives the same
+    point count and the same endpoints, from geometry that is off screen by
+    definition. Lines that *are* visible are untouched here, so what the user
+    can actually see is identical either way.
+    """
+    if bbox is None or len(poly) <= min_points or _line_touches(poly, bbox):
+        return poly
+    return _stride_to(poly, min_points)
+
+
 def simplify_for_zoom(
     poly: list,
     zoom: float,
