@@ -337,6 +337,7 @@ void main() {
             worstFrameMs: 2656.3,
             rssMaxBytes: 720 * 1024 * 1024,
             rssAtWorstFrameBytes: 710 * 1024 * 1024,
+            worstFrameContext: const <String>{},
           ));
       expect(r, contains('worst build 2656ms'));
       expect(r, contains('3 frame(s) over 500ms'));
@@ -355,6 +356,7 @@ void main() {
             worstFrameMs: 0,
             rssMaxBytes: 0,
             rssAtWorstFrameBytes: 0,
+            worstFrameContext: const <String>{},
           ));
       expect(r, contains('watchdog ticks: 0'));
     });
@@ -367,8 +369,38 @@ void main() {
             worstFrameMs: 12.0,
             rssMaxBytes: 0,
             rssAtWorstFrameBytes: 0,
+            worstFrameContext: const <String>{'build_specs'},
           ));
       expect(r, isNot(contains('process memory')));
+    });
+
+    test('an empty worst-frame context is stated, not omitted', () {
+      // The decisive line for #276: "the worst frame ran none of our
+      // instrumented work" is a finding, and a blank would read as missing
+      // data rather than as the answer.
+      final r = perfFullReport(const {}, const {}, const {},
+          diagnostics: (
+            stallTicks: 100,
+            freezeFrames: 1,
+            worstFrameMs: 2640.0,
+            rssMaxBytes: 0,
+            rssAtWorstFrameBytes: 0,
+            worstFrameContext: const <String>{},
+          ));
+      expect(r, contains('worst frame ran: (no instrumented work)'));
+    });
+
+    test('a worst-frame context names its spans, sorted', () {
+      final r = perfFullReport(const {}, const {}, const {},
+          diagnostics: (
+            stallTicks: 100,
+            freezeFrames: 1,
+            worstFrameMs: 2640.0,
+            rssMaxBytes: 0,
+            rssAtWorstFrameBytes: 0,
+            worstFrameContext: const <String>{'style_markers', 'build_specs'},
+          ));
+      expect(r, contains('worst frame ran: build_specs, style_markers'));
     });
 
     test('no diagnostics section when none were passed', () {

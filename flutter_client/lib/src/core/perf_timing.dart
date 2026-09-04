@@ -279,6 +279,16 @@ class PerfSpans {
   double _worstFrameMs = 0;
   int _freezeFrames = 0;
 
+  // What instrumented work ran between one frame's timings and the next.
+  //
+  // A 2640 ms frame with no span over 16.7 ms says the time went somewhere
+  // none of this app's spans wrap — but not whether that frame was doing
+  // anything of ours at all. If the worst frame's context is empty, the cost
+  // is entirely inside the framework's own layout and paint (issue #276);
+  // if it names a span, that span is running alongside something expensive.
+  final Set<String> _sinceLastFrame = <String>{};
+  Set<String> _worstFrameContext = <String>{};
+
   /// Frames whose build phase exceeded this are counted separately: a handful
   /// of these back to back is what an ANR is made of, and they vanish in a p99.
   static const double _kFreezeFrameMs = 500;
@@ -347,8 +357,10 @@ class PerfSpans {
       if (buildMs > _worstFrameMs) {
         _worstFrameMs = buildMs;
         _rssAtWorstFrameBytes = currentRssBytes() ?? 0;
+        _worstFrameContext = Set<String>.from(_sinceLastFrame);
       }
     }
+    _sinceLastFrame.clear();
     if (!_withinGestureWindow) return;
     for (final t in timings) {
       _gestureBuild.add(t.buildDuration.inMicroseconds / 1000.0);
@@ -382,12 +394,14 @@ class PerfSpans {
     double worstFrameMs,
     int rssMaxBytes,
     int rssAtWorstFrameBytes,
+    Set<String> worstFrameContext,
   }) get diagnostics => (
         stallTicks: _stallTicks,
         freezeFrames: _freezeFrames,
         worstFrameMs: _worstFrameMs,
         rssMaxBytes: _rssMaxBytes,
         rssAtWorstFrameBytes: _rssAtWorstFrameBytes,
+        worstFrameContext: Set<String>.unmodifiable(_worstFrameContext),
       );
 
   /// UI-isolate stall of a synchronous [body], recorded under [name].
@@ -399,6 +413,7 @@ class PerfSpans {
     } finally {
       final ms = sw.elapsedMicroseconds / 1000.0;
       (_blocking[name] ??= []).add(ms);
+      _sinceLastFrame.add(name);
       // Same measurement, scoped to gestures: session totals cannot say which
       // work happens while the user is actually panning.
       if (_inGesture) (_gestureBlocking[name] ??= []).add(ms);
@@ -516,6 +531,8 @@ class PerfSpans {
     _rssAtWorstFrameBytes = 0;
     _worstFrameMs = 0;
     _freezeFrames = 0;
+    _sinceLastFrame.clear();
+    _worstFrameContext = <String>{};
     // Self-heals on the next camera event either way, but leaving it set
     // would make the next beginGesture() a no-op.
     _inGesture = false;
@@ -575,6 +592,7 @@ String perfFullReport(
     double worstFrameMs,
     int rssMaxBytes,
     int rssAtWorstFrameBytes,
+    Set<String> worstFrameContext,
   })? diagnostics,
   int gestures = 0,
   List<double> gestureBuild = const [],
@@ -598,6 +616,11 @@ String perfFullReport(
         ' ${d.freezeFrames} frame(s) over 500ms');
     // A watchdog that reported no stall is only informative if it was ticking.
     buf.writeln('[perf] watchdog ticks: ${d.stallTicks}');
+    // The decisive line for issue #276: an empty context means the worst
+    // frame ran none of our instrumented work, so the cost is framework
+    // layout/paint — markers and polylines — not anything this app times.
+    buf.writeln('[perf] worst frame ran: '
+        '${d.worstFrameContext.isEmpty ? "(no instrumented work)" : (d.worstFrameContext.toList()..sort()).join(", ")}');
     if (d.rssMaxBytes > 0) {
       buf.writeln('[perf] process memory: peak ${mb(d.rssMaxBytes)} MB,'
           ' ${mb(d.rssAtWorstFrameBytes)} MB at the worst frame');

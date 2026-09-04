@@ -255,3 +255,63 @@ def test_full_resolution_endpoint_is_unchanged(env):
     # expect.
     client, *_ = env
     assert _points(client.get("/api/geo/project?name=Trip")) == _POINTS
+
+
+# ── Cost and coarseness bounds (issue #295 regressions) ──────────────────────
+#
+# The first cut of this endpoint measured 21.6 s per request on a 219-activity
+# trip and returned 515 coordinates for it — 2.4 per activity, a straight line
+# per leg. Both are bounded now, and both bounds are asserted because either
+# one silently drifting makes the endpoint worse than what it replaced.
+
+from src.models.simplify import simplify_for_zoom
+
+
+def _wiggly(n: int) -> list[list[float]]:
+    lat, lon, out = 45.0, 7.0, []
+    for i in range(n):
+        lon += 0.00003 + math.sin(i / 50.0) * 0.00002
+        lat += math.cos(i / 37.0) * 0.00002
+        out.append([lon, lat])
+    return out
+
+
+def test_a_track_never_collapses_below_the_floor():
+    # Whole-trip zoom, where a pixel is hundreds of metres.
+    out = simplify_for_zoom(_wiggly(5000), 5)
+    assert len(out) >= 32
+
+
+def test_the_floor_is_at_least_what_the_client_would_render_anyway():
+    # The client's own budget worked out at ~27 points per activity on the
+    # trip that prompted this. A floor below that is a regression.
+    assert simplify_for_zoom(_wiggly(5000), 5).__len__() >= 27
+
+
+def test_the_floor_keeps_the_shape_rather_than_just_the_ends():
+    out = simplify_for_zoom(_wiggly(5000), 4)
+    # A strided sample of a winding path visits many distinct latitudes; two
+    # endpoints would not.
+    assert len({round(p[1], 4) for p in out}) > 5
+
+
+def test_work_is_bounded_regardless_of_input_size():
+    small = simplify_for_zoom(_wiggly(4000), 13)
+    large = simplify_for_zoom(_wiggly(200000), 13)
+    # Both run over at most max_input_points, so the larger input cannot
+    # return a wildly larger result — that boundedness is the cost guarantee.
+    assert len(large) <= 4000
+    assert len(small) <= 4000
+
+
+def test_zooming_in_still_yields_more_detail_than_the_floor():
+    coarse = simplify_for_zoom(_wiggly(20000), 5)
+    fine = simplify_for_zoom(_wiggly(20000), 15)
+    assert len(fine) > len(coarse)
+
+
+def test_endpoints_survive_the_floor_path():
+    poly = _wiggly(5000)
+    out = simplify_for_zoom(poly, 4)
+    assert out[0] == poly[0]
+    assert out[-1] == poly[-1]
