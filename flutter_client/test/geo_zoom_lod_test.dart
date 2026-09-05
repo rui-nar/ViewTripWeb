@@ -65,6 +65,12 @@ class _Calls {
   final boxes = <String?>[];
   int fullGeo = 0;
   bool failLod = false;
+  /// Highest number of simplified requests outstanding at once. The refetch
+  /// awaits a fetch, a camera-idle wait and _buildFullTrack, and the last of
+  /// those copies `geo` into an isolate — so overlapping them is what turned
+  /// one unsatisfiable staleness check into gigabytes (issue #332).
+  int inFlight = 0;
+  int inFlightPeak = 0;
 }
 
 /// A camera box over the Alps, small enough that a tile-snapped fetch box
@@ -85,6 +91,14 @@ ApiClient _api(_Calls calls,
           return _json({'type': 'FeatureCollection', 'features': <dynamic>[]});
         }
         if (path == '/api/geo/project/simplified') {
+          calls.inFlight++;
+          if (calls.inFlight > calls.inFlightPeak) {
+            calls.inFlightPeak = calls.inFlight;
+          }
+          // Long enough that a second refetch starting before this one
+          // finishes is observable rather than a race.
+          await Future<void>.delayed(const Duration(milliseconds: 15));
+          calls.inFlight--;
           if (lodStatus != 200) return http.Response('nope', lodStatus);
           final z = req.url.queryParameters['zoom']!;
           calls.zooms.add(z);
@@ -286,7 +300,19 @@ void main() {
       expect(calls.boxes, [null]);
     });
 
-    test('a zoom change carries the box the camera is looking at', () async {
+    test('a zoom change sends no box, because scoping is off', () async {
+      // Issue #332. Viewport scoping shipped with a staleness predicate that
+      // could not be satisfied: _geoIsStaleForCamera asks whether the fetched
+      // box contains the camera, fetchBoxFor clamps latitude to +/-90, and
+      // _latToTileY clamps to the Mercator limit of +/-85.05 — so a viewport
+      // reaching past 85 got a box that could never contain it. Every camera
+      // event then scheduled another refetch, and each refetch copied the
+      // whole trip's geometry into a compute() isolate. Measured on device:
+      // a 2.6 GB Dart heap and an ANR.
+      //
+      // Until fetchBoxFor is guaranteed to return a box containing its own
+      // viewport, no box is sent at all — which keeps _loadedGeoBox null, the
+      // "whole trip, nothing the camera does invalidates it" branch.
       final calls = _Calls();
       api = _api(calls);
       final n = ProjectNotifier(ProjectService())
@@ -297,15 +323,17 @@ void main() {
       expect(await _waitFor(() => _points(n) == 9), isTrue);
 
       n.setMapZoom(15, viewport: _vp);
-      expect(await _waitFor(() => _points(n) == 15), isTrue);
-      expect(calls.boxes.last, isNotNull);
-      // Snapped, not raw: an unsnapped box means a server cache entry per pan
-      // pixel, and this project has already OOM-killed its API container once
-      // with a payload cache bounded by the wrong thing.
-      expect(calls.boxes.last, fetchBoxFor(_vp, 15).param);
+      expect(await _waitFor(() => _points(n) == 15), isTrue,
+          reason: 'zoom LOD itself still works');
+      expect(calls.boxes.where((b) => b != null), isEmpty,
+          reason: 'a box is what made the refetch unable to satisfy itself');
     });
 
-    test('panning inside the fetched box refetches nothing', () async {
+    test('a camera that never leaves its level refetches once, not forever',
+        () async {
+      // The runaway, from the outside: with scoping off the geometry is never
+      // stale for the camera, so repeated camera events at one level must not
+      // keep going back to the server.
       final calls = _Calls();
       api = _api(calls);
       final n = ProjectNotifier(ProjectService())
@@ -314,138 +342,38 @@ void main() {
 
       await n.load(_ref);
       expect(await _waitFor(() => _points(n) == 9), isTrue);
-      n.setMapZoom(15, viewport: _vp);
-      expect(await _waitFor(() => _points(n) == 15), isTrue);
       final before = calls.zooms.length;
 
-      // A nudge of a thousandth of a degree, many times, as a real drag does.
-      for (var i = 1; i <= 10; i++) {
-        n.setMapZoom(15,
-            viewport: GeoBox(_vp.west + i * 0.0001, _vp.south + i * 0.0001,
-                _vp.east + i * 0.0001, _vp.north + i * 0.0001));
+      for (var i = 0; i < 25; i++) {
+        n.setMapZoom(9, viewport: _vp);
       }
-      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await Future<void>.delayed(const Duration(milliseconds: 120));
       expect(calls.zooms, hasLength(before),
-          reason: 'the box is padded and tile-snapped precisely so a small '
-              'pan costs nothing');
+          reason: 'nothing about the camera invalidates whole-trip geometry');
     });
 
-    test('panning OUT of the fetched box refetches, at the same zoom', () async {
-      // The trigger the zoom bucket alone could never provide: the level has
-      // not changed, but the geometry on hand describes somewhere else.
+    test('only one refetch runs at a time', () async {
+      // Each refetch awaits a fetch, a camera-idle wait and _buildFullTrack,
+      // and _buildFullTrack copies `geo` into an isolate. Overlapping them is
+      // how one stale predicate became gigabytes.
       final calls = _Calls();
       api = _api(calls);
       final n = ProjectNotifier(ProjectService())
         ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
-
-      await n.load(_ref);
-      expect(await _waitFor(() => _points(n) == 9), isTrue);
-      n.setMapZoom(15, viewport: _vp);
-      expect(await _waitFor(() => calls.boxes.length == 2), isTrue);
-      final firstBox = calls.boxes.last;
-
-      n.setMapZoom(15, viewport: const GeoBox(20.0, 50.0, 20.2, 50.2));
-      expect(await _waitFor(() => calls.boxes.length == 3), isTrue,
-          reason: 'a pan to another region must fetch that region');
-      expect(calls.boxes.last, isNot(firstBox));
-      expect(calls.zooms.last, '15.0',
-          reason: 'same level, different extent');
-    });
-
-    test('the map is never blanked while a refetch is in flight', () async {
-      // Never blank the map: whatever is drawn stays drawn until new geometry
-      // actually lands.
-      final calls = _Calls();
-      api = _api(calls, lodDelay: const Duration(milliseconds: 120));
-      final n = ProjectNotifier(ProjectService())
-        ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
+        ..zoomRefetchDebounce = const Duration(milliseconds: 1);
 
       await n.load(_ref);
       expect(await _waitFor(() => _points(n) == 9), isTrue);
 
-      n.setMapZoom(15, viewport: _vp);
-      for (var i = 0; i < 8; i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-        expect(_points(n), greaterThan(0),
-            reason: 'the previous geometry must stay on screen');
+      // Walk the zoom up fast: every step is a new bucket, so every step
+      // would schedule a refetch if nothing serialised them.
+      for (var z = 10; z <= 20; z++) {
+        n.setMapZoom(z.toDouble(), viewport: _vp);
+        await Future<void>.delayed(const Duration(milliseconds: 2));
       }
-      expect(await _waitFor(() => _points(n) == 15), isTrue);
-    });
-
-    test('a failed boxed refetch keeps what is already drawn', () async {
-      final calls = _Calls();
-      api = _api(calls);
-      final n = ProjectNotifier(ProjectService())
-        ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
-
-      await n.load(_ref);
-      expect(await _waitFor(() => _points(n) == 9), isTrue);
-
-      calls.failLod = true;
-      n.setMapZoom(15, viewport: _vp);
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      expect(_points(n), 9, reason: 'slightly wrong detail, never a blank map');
-    });
-
-    test('a camera box does not survive into the next project', () async {
-      // ProjectNotifier is a single app-wide provider; a box left from the
-      // previous trip describes a region this one may be nowhere near.
-      final calls = _Calls();
-      api = _api(calls);
-      final n = ProjectNotifier(ProjectService())
-        ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
-
-      await n.load(_ref);
-      expect(await _waitFor(() => _points(n) == 9), isTrue);
-      n.setMapZoom(15, viewport: _vp);
-      expect(await _waitFor(() => calls.boxes.length == 2), isTrue);
-
-      calls.boxes.clear();
-      await n.load(const ProjectRef(name: 'Other'));
-      expect(await _waitFor(() => calls.boxes.isNotEmpty), isTrue);
-      expect(calls.boxes.first, isNull,
-          reason: 'the second load must ask for the whole of ITS trip');
-    });
-
-    test('a camera with no usable box asks for the whole trip', () async {
-      // An antimeridian-crossing or not-yet-laid-out camera. Null means "ask
-      // for everything", which is what the code did before the box existed.
-      final calls = _Calls();
-      api = _api(calls);
-      final n = ProjectNotifier(ProjectService())
-        ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
-
-      await n.load(_ref);
-      expect(await _waitFor(() => _points(n) == 9), isTrue);
-      // viewportBox() returns null for a crossing box, so nothing is passed.
-      n.setMapZoom(15, viewport: viewportBox(179.0, 45.0, -179.0, 46.0));
-      expect(await _waitFor(() => calls.boxes.length == 2), isTrue);
-      expect(calls.boxes.last, isNull);
-    });
-
-    test('whole-trip zoom asks for a box that covers the world', () async {
-      // At a zoom that shows everything the box degenerates to the trip
-      // bounds. That has to fall out of the arithmetic, not need a mode.
-      final calls = _Calls();
-      api = _api(calls);
-      final n = ProjectNotifier(ProjectService())
-        ..setMapZoom(9, viewport: _vp)
-        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
-
-      await n.load(_ref);
-      expect(await _waitFor(() => _points(n) == 9), isTrue);
-
-      n.setMapZoom(2, viewport: const GeoBox(-170, -80, 170, 80));
-      expect(await _waitFor(() => calls.boxes.length == 2), isTrue);
-      final box = fetchBoxFor(const GeoBox(-170, -80, 170, 80), 2);
-      expect(calls.boxes.last, box.param);
-      expect(box.west, -180.0);
-      expect(box.east, 180.0);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(calls.inFlightPeak, lessThanOrEqualTo(1),
+          reason: 'refetches must not overlap');
     });
   });
 }

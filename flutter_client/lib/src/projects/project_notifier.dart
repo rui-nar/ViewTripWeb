@@ -1185,14 +1185,39 @@ class ProjectNotifier extends ChangeNotifier
   /// that mid-gesture is what issue #276 was originally about.
   Future<void> _refetchGeoForZoom(ProjectRef r) async {
     if (!_geoIsStaleForCamera()) return;
+    // At most one at a time. This is fired unawaited from a debounce timer and
+    // then awaits a fetch, a camera-idle wait and _buildFullTrack — so without
+    // this a new one starts every time the camera settles while the last is
+    // still running, and each of those copies `geo` into a compute() isolate.
+    // Measured on device: a 2.6 GB Dart heap and an ANR.
+    if (_refetchInFlight) return;
+    _refetchInFlight = true;
+    try {
+      await _refetchGeoForZoomInner(r);
+    } finally {
+      _refetchInFlight = false;
+    }
+  }
+
+  bool _refetchInFlight = false;
+
+  Future<void> _refetchGeoForZoomInner(ProjectRef r) async {
     final bucket = _bucketOf(_mapZoom);
     // Captured before the awaits, for the same reason the load path captures
     // its bucket: the camera keeps moving during the fetch and the idle wait,
     // and stamping a box that was never requested would leave the geometry
     // permanently mismatched to what is on screen. Null when the camera has
     // no usable box — the whole trip is then fetched, as before.
-    final viewport = _mapViewport;
-    final box = viewport == null ? null : fetchBoxFor(viewport, bucket);
+    // Viewport scoping is OFF (issue #332). It shipped with a staleness
+    // predicate that could not be satisfied: `_geoIsStaleForCamera` asks
+    // whether the fetched box contains the camera, `fetchBoxFor` builds that
+    // box by clamping latitude to +/-90, and `_latToTileY` clamps to the
+    // Mercator limit of +/-85.05 — so a viewport reaching past 85 got a box
+    // that could never contain it, every camera event scheduled another
+    // refetch, and each refetch copied the whole trip's geometry into an
+    // isolate. Sending no box makes `_loadedGeoBox` stay null, which is the
+    // "whole trip, nothing the camera does invalidates it" branch.
+    const GeoBox? box = null;
     final token = _loadTrack.token;
     try {
       final next = await _service.getSimplifiedGeo(r, _mapZoom, bbox: box);
