@@ -125,8 +125,10 @@ void main() {
     test('the built track is unchanged', () {
       final acts = _acts(3, 50);
       final geo = _geo(3, 80);
-      final viaTotals = buildFullTrackFromTotals(
-          (geo: geo, totals: activityElevationTotals(acts)));
+      final viaTotals = buildFullTrackFromTotals((
+        coords: flattenGeoCoords(geo),
+        totals: activityElevationTotals(acts),
+      ));
       // buildFullTrackResult is the nested contract the existing suite pins;
       // it must keep agreeing with the flat form it now delegates to.
       final viaMaps = buildFullTrackResult((geo: geo, activities: acts));
@@ -249,4 +251,100 @@ void main() {
           flat.maxY, reference.map((s) => s.y).reduce((a, b) => a > b ? a : b));
     });
   });
+
+  group('geometry crosses the isolate boundary as typed buffers', () {
+    // The third instance of compute() copying its argument in this codebase,
+    // and the one that amplified #332's refetch loop into a 2.6 GB Dart heap:
+    // GeoJSON coordinates are one Dart list object per point, ~1.47 M of them
+    // on the trip measured.
+    test('coordinates become one Float64List per activity', () {
+      final flat = flattenGeoCoords(_geo(2, 5));
+      expect(flat, hasLength(2));
+      expect(flat['0'], isA<Float64List>(),
+          reason: 'typed data copies as a buffer, not object by object');
+      expect(flat['0'], hasLength(10), reason: '5 interleaved lon/lat pairs');
+    });
+
+    test('the interleaving is lon, lat — GeoJSON order', () {
+      final flat = flattenGeoCoords(_geo(1, 2));
+      expect(flat['0']![0], closeTo(7.0, 1e-9));
+      expect(flat['0']![1], closeTo(45.0, 1e-9));
+    });
+
+    test('segments are skipped, as the nested walk skipped them', () {
+      final geo = {
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'properties': {'type': 'segment', 'activity_id': 'seg'},
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [7.0, 45.0],
+                [7.1, 45.1]
+              ]
+            },
+          },
+        ],
+      };
+      expect(flattenGeoCoords(geo), isEmpty);
+    });
+
+    test('features with no id, no coordinates or empty ones are skipped', () {
+      final geo = {
+        'type': 'FeatureCollection',
+        'features': [
+          {'type': 'Feature', 'properties': <String, dynamic>{}, 'geometry': <String, dynamic>{}},
+          {
+            'type': 'Feature',
+            'properties': {'activity_id': 'empty'},
+            'geometry': {'type': 'LineString', 'coordinates': <dynamic>[]},
+          },
+        ],
+      };
+      expect(flattenGeoCoords(geo), isEmpty);
+    });
+
+    test('a malformed point is dropped, leaving the rest intact', () {
+      final geo = {
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'properties': {'activity_id': 'a'},
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [7.0, 45.0],
+                'junk',
+                [7.2, 45.2],
+              ]
+            },
+          },
+        ],
+      };
+      final flat = flattenGeoCoords(geo);
+      expect(flat['a'], hasLength(4), reason: 'two usable pairs');
+      expect(flat['a']![2], closeTo(7.2, 1e-9));
+    });
+
+    test('a null geo yields no coordinates rather than throwing', () {
+      expect(flattenGeoCoords(null), isEmpty);
+    });
+
+    test('the built track is the same as the nested walk produced', () {
+      final acts = _acts(3, 50);
+      final geo = _geo(3, 80);
+      final viaFlat = buildFullTrackFromTotals((
+        coords: flattenGeoCoords(geo),
+        totals: activityElevationTotals(acts),
+      ));
+      final viaMaps = buildFullTrackResult((geo: geo, activities: acts));
+      expect(viaFlat.fullTrack, viaMaps.fullTrack);
+      expect(viaFlat.perActivityTracks.keys.toList(),
+          viaMaps.perActivityTracks.keys.toList());
+    });
+  });
+
 }

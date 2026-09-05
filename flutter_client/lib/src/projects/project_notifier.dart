@@ -237,8 +237,52 @@ ActivityTotals activityElevationTotals(List<Map<String, dynamic>> activities) {
 ({List<(double, GeoPoint)> fullTrack, Map<String, List<(double, GeoPoint)>> perActivityTracks})
     buildFullTrackResult(
         ({Map<String, dynamic>? geo, List<Map<String, dynamic>> activities}) args) =>
-        buildFullTrackFromTotals(
-            (geo: args.geo, totals: activityElevationTotals(args.activities)));
+        buildFullTrackFromTotals((
+          coords: flattenGeoCoords(args.geo),
+          totals: activityElevationTotals(args.activities),
+        ));
+
+/// A trip's activity geometry, flattened for crossing an isolate boundary.
+///
+/// GeoJSON coordinates arrive as `[[lon, lat], …]` — one Dart list object per
+/// point, ~1.47 M of them on the trip this was measured against. [compute]
+/// *copies its argument*, so handing it the GeoJSON serialised every one of
+/// those; interleaved in a [Float64List] the same numbers copy as one buffer
+/// per activity. This is the third instance of that trap in this codebase
+/// (issue #276's `build_specs`, #320's `activities`, and this), and the one
+/// that amplified #332's refetch loop into a 2.6 GB heap.
+typedef FlatGeoCoords = Map<String, Float64List>;
+
+/// Projects [geo]'s activity features into [FlatGeoCoords].
+///
+/// Applies exactly the skips the nested walk applied inline — non-map
+/// features, segments, features with no activity_id, empty coordinate lists,
+/// and individual points that are not a pair — so membership and point counts
+/// are unchanged.
+@visibleForTesting
+FlatGeoCoords flattenGeoCoords(Map<String, dynamic>? geo) {
+  final out = <String, Float64List>{};
+  final features = geo?['features'];
+  if (features is! List) return out;
+  for (final f in features) {
+    if (f is! Map) continue;
+    final props = f['properties'] as Map? ?? {};
+    if (props['type'] == 'segment') continue;
+    final actId = props['activity_id']?.toString();
+    if (actId == null) continue;
+    final coords = (f['geometry'] as Map? ?? {})['coordinates'];
+    if (coords is! List || coords.isEmpty) continue;
+    final buf = Float64List(coords.length * 2);
+    var n = 0;
+    for (final c in coords) {
+      if (c is! List || c.length < 2) continue;
+      buf[n++] = (c[0] as num).toDouble();
+      buf[n++] = (c[1] as num).toDouble();
+    }
+    out[actId] = n == buf.length ? buf : buf.sublist(0, n);
+  }
+  return out;
+}
 
 /// Builds the distance-indexed full-trip track (and per-activity tracks) from
 /// [args.geo] + [args.totals] — the pure computation behind
@@ -257,23 +301,8 @@ ActivityTotals activityElevationTotals(List<Map<String, dynamic>> activities) {
 @visibleForTesting
 ({List<(double, GeoPoint)> fullTrack, Map<String, List<(double, GeoPoint)>> perActivityTracks})
     buildFullTrackFromTotals(
-        ({Map<String, dynamic>? geo, ActivityTotals totals}) args) {
-  // Build a raw-coords map from GeoJSON without creating LatLng objects yet.
-  // GeoJSON coordinates are [lon, lat] per spec.
-  final geoCoords = <String, List>{};
-  final features = args.geo?['features'];
-  if (features is List) {
-    for (final f in features) {
-      if (f is! Map) continue;
-      final props = f['properties'] as Map? ?? {};
-      if (props['type'] == 'segment') continue;
-      final actId = props['activity_id']?.toString();
-      if (actId == null) continue;
-      final coords = (f['geometry'] as Map? ?? {})['coordinates'];
-      if (coords is List && coords.isNotEmpty) geoCoords[actId] = coords;
-    }
-  }
-
+        ({FlatGeoCoords coords, ActivityTotals totals}) args) {
+  final geoCoords = args.coords;
   final combined = <(double, GeoPoint)>[];
   final perAct = <String, List<(double, GeoPoint)>>{};
   double offsetKm = 0;
@@ -298,11 +327,11 @@ ActivityTotals activityElevationTotals(List<Map<String, dynamic>> activities) {
       // already carries could not be used. Distances come from the geometry
       // and are scaled to the profile's total, so the only thing needed from
       // the profile is that one number — at any resolution.
+      // Interleaved [lon, lat, lon, lat, …] — malformed points were already
+      // dropped by flattenGeoCoords, so every pair here is usable.
       final pts = <GeoPoint>[];
-      for (final c in coords) {
-        if (c is List && c.length >= 2) {
-          pts.add((lat: (c[1] as num).toDouble(), lon: (c[0] as num).toDouble()));
-        }
+      for (var i = 0; i + 1 < coords.length; i += 2) {
+        pts.add((lat: coords[i + 1], lon: coords[i]));
       }
       actTrack.addAll(buildTrackFromPolyline(pts, elevTotalKm: elevTotalKm));
     }
@@ -1797,7 +1826,11 @@ class ProjectNotifier extends ChangeNotifier
     final coordPoints = totalTrackCoordinatePoints(geo);
     final samplePoints = totalElevationProfilePoints(activities);
     final work = coordPoints > samplePoints ? coordPoints : samplePoints;
-    if (work <= kInlineFullTrackThreshold) {
+    // Web takes the inline path whatever the size: `compute` has no isolate to
+    // hop to there and runs its callback inline, so the hop buys nothing and
+    // flattening first would only add a pass over every coordinate on the main
+    // thread. Same reasoning as _ElevationChartState._compute.
+    if (kIsWeb || work <= kInlineFullTrackThreshold) {
       // No staleness check needed here: buildFullTrackResult() is synchronous,
       // so nothing can bump _buildFullTrackGen between the increment above and
       // this line — unlike the compute() branch below, which awaits across an
@@ -1813,7 +1846,13 @@ class ProjectNotifier extends ChangeNotifier
     // to read one double from each — measured as a 2.4 s frame (issue #276).
     final totals =
         perfSpans.blocking('elevation_totals', () => activityElevationTotals(activities));
-    final r = await compute(buildFullTrackFromTotals, (geo: geo, totals: totals));
+    // Flatten before the hop, for the same reason as `totals`: compute()
+    // copies its argument, and GeoJSON coordinates are one list object per
+    // point. See [FlatGeoCoords] — this is the third time that copy has cost
+    // this project a production problem.
+    final coords =
+        perfSpans.blocking('geo_flatten', () => flattenGeoCoords(geo));
+    final r = await compute(buildFullTrackFromTotals, (coords: coords, totals: totals));
     if (gen != _buildFullTrackGen) return; // superseded by a newer call
     _fullTrack = r.fullTrack;
     _perActivityTracks = r.perActivityTracks;
