@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
 import 'package:viewtrip_client/src/auth/login_screen.dart';
+import 'package:viewtrip_client/src/core/app_version.dart';
 import 'package:viewtrip_client/src/core/server_config.dart';
 
 /// Mutable box so a test can read the dialog's pop() result after tapping
@@ -178,6 +179,24 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.byType(LoginScreen), findsOneWidget);
+    });
+
+    // Issue #275: the card's footer names both versions. The mount test above
+    // is what guards the longer label against re-overflowing the 420px card.
+    testWidgets('the footer names both the app and the server version',
+        (tester) async {
+      addTearDown(() => serverVersion.value = null);
+      serverVersion.value = 'v9.9.9';
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<AuthNotifier>(
+          create: (_) => AuthNotifier(AuthService()),
+          child: const MaterialApp(home: LoginScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('app dev · server v9.9.9'), findsOneWidget);
     });
   });
 }

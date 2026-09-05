@@ -15,6 +15,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 
 import '../auth/auth_notifier.dart';
+import 'app_version.dart';
 import 'brand_mark.dart';
 
 /// Product name, as shown on the Android launcher and traxjourney.com.
@@ -24,10 +25,6 @@ const _tagline = 'Merge · Visualise · Export';
 /// The app's own one-liner, kept in step with web/manifest.json.
 const _blurb =
     'Merge Strava rides, segments and memories into one continuous journey.';
-
-/// Set by `--dart-define=APP_VERSION` at build time; already carries its `v`
-/// prefix from the release tag, so it is shown verbatim as elsewhere in the app.
-const _version = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
 /// Width at which the wide layout fits: mark + divider + a 380 px text column.
 const double kSplashWideBreakpoint = 760;
@@ -199,7 +196,14 @@ class _StackedLayout extends StatelessWidget {
             children: [
               const _ProgressBar(width: 132),
               const SizedBox(height: 16),
-              Text(_version, style: _footerStyle()),
+              // Both versions, so a screenshot of the splash is enough to
+              // report a bug against (#275). The server version usually lands
+              // while the splash is still up — the fetch starts in the same
+              // frame — but reads "unknown" if it never does.
+              VersionText(
+                  style: _footerStyle(),
+                  textAlign: TextAlign.center,
+                  omitUnknownServer: true),
             ],
           ),
         ),
@@ -253,7 +257,8 @@ class _WideLayout extends StatelessWidget {
         Positioned(
           left: 40,
           bottom: 32,
-          child: Text(_version, style: _footerStyle(size: 12)),
+          child: VersionText(
+              style: _footerStyle(size: 12), omitUnknownServer: true),
         ),
         Positioned(
           right: 40,

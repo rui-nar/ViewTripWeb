@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/app_version.dart';
 import '../core/design_tokens.dart';
 
 // ── Layout constants ──────────────────────────────────────────────────────────
@@ -388,8 +389,10 @@ class _HeroText extends StatelessWidget {
                   gradient: _gradBlue,
                   borderRadius: BorderRadius.circular(999),
                 ),
-                child: Text(
-                    const String.fromEnvironment('APP_VERSION', defaultValue: 'dev'),
+                // The release badge, not a diagnostic readout: it names the
+                // build a visitor would download. The pair of versions lives in
+                // this page's footer, where it fits (#275).
+                child: Text(kClientVersion,
                     style: _mono(10, FontWeight.w700, Colors.white)
                         .copyWith(letterSpacing: 0.05)),
               ),
@@ -1752,10 +1755,18 @@ class _FootBottom extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fg2 = theme.colorScheme.onSurfaceVariant;
-    return Row(
+    // Wrap, not Row + Spacer: this bar is also the phone footer, where the two
+    // lines never fitted side by side and silently overflowed — and naming both
+    // versions here (#275) makes the left one longer still. Laid out as one
+    // row when it fits, stacked when it does not.
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      spacing: 16,
+      runSpacing: 8,
       children: [
-        Text('© ${DateTime.now().year} ViewTrip · ${const String.fromEnvironment('APP_VERSION', defaultValue: 'dev')}', style: _mono(12, FontWeight.w500, fg2)),
-        const Spacer(),
+        VersionText(
+            prefix: '© ${DateTime.now().year} ViewTrip · ',
+            style: _mono(12, FontWeight.w500, fg2)),
         Text('Built on Flutter + FastAPI · Designed in slate',
             style: _mono(12, FontWeight.w500, fg2)),
       ],

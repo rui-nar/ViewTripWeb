@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:viewtrip_client/src/auth/auth_notifier.dart';
 import 'package:viewtrip_client/src/auth/auth_service.dart';
+import 'package:viewtrip_client/src/core/app_version.dart';
 import 'package:viewtrip_client/src/core/brand_mark.dart';
 import 'package:viewtrip_client/src/core/splash_screen.dart';
 
@@ -129,11 +130,40 @@ void main() {
       expect(wide.width, greaterThan(stacked.width));
     });
 
-    testWidgets('shows the build version, which is "dev" untouched by a define',
+    testWidgets('names the app version alone until the server one is known',
         (tester) async {
       await _pumpSplash(tester, const Size(390, 844));
 
-      expect(find.text('dev'), findsOneWidget);
+      // The splash omits the clause rather than saying `server unknown`: it
+      // shows for a few hundred milliseconds, long enough for /api/version to
+      // land mid-display, so stating the absence would visibly flip while the
+      // user watches. Every other surface is a diagnostic readout and does say
+      // `unknown` — see app_version_test.dart.
+      expect(find.text('app dev'), findsOneWidget);
+      expect(find.textContaining('server'), findsNothing);
+    });
+
+    // The splash is up before any request can have come back, and stays up on
+    // a cold offline start — so "unknown" is the state it must render first,
+    // and it must fill itself in without a rebuild of the screen (#275).
+    testWidgets('fills the server half in when the check answers',
+        (tester) async {
+      addTearDown(() => serverVersion.value = null);
+      await _pumpSplash(tester, const Size(390, 844));
+      expect(find.text('app dev'), findsOneWidget);
+
+      serverVersion.value = 'v9.9.9';
+      await tester.pump();
+
+      expect(find.text('app dev · server v9.9.9'), findsOneWidget);
+    });
+
+    testWidgets('the longer label still fits a narrow phone', (tester) async {
+      addTearDown(() => serverVersion.value = null);
+      serverVersion.value = 'validation-0a1b2c3';
+      await _pumpSplash(tester, const Size(320, 568));
+
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('lays out without overflow on a short, wide window',
@@ -157,7 +187,7 @@ void main() {
       for (final label in [
         find.text('TraxJourney'),
         find.text('MERGE · VISUALISE · EXPORT'),
-        find.text('dev'),
+        find.text('app dev'),
       ]) {
         expect(_paintedStyle(tester, label).decoration, TextDecoration.none,
             reason: '${(label.evaluate().single.widget as Text).data} '

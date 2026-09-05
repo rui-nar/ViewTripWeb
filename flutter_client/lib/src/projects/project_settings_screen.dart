@@ -5,11 +5,10 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../api/client.dart';
+import '../core/app_version.dart';
 import '../core/design_tokens.dart' show LineStyleKind, resolveTypeStyle, lineStyleName;
 import 'project_notifier.dart';
 import 'travel_companions_section.dart';
-
-const _kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 const _kBg        = Color(0xFF0A1320);
@@ -1087,8 +1086,8 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
           const Divider(height: 1, color: _kBorder),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
-            child: Text(
-              '© ${DateTime.now().year} ViewTrip · v$_kAppVersion',
+            child: VersionText(
+              prefix: '© ${DateTime.now().year} ViewTrip · ',
               style: const TextStyle(
                 fontFamily: 'monospace', fontSize: 10.5, color: _kDim, letterSpacing: 0.5,
               ),
@@ -1629,8 +1628,11 @@ class _StickyHeader extends StatelessWidget {
           ),
           // Version
           const SizedBox(width: 16),
+          // Header chip: the app's own version only. The pair is in this
+          // screen's footer, and there is no room for it beside a project
+          // name on a phone (#275).
           const Text(
-            'v$_kAppVersion',
+            kClientVersion,
             style: TextStyle(fontFamily: 'monospace', fontSize: 10, color: _kDim),
           ),
         ],
