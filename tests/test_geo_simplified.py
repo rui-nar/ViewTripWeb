@@ -577,3 +577,111 @@ def test_the_box_does_not_change_the_auth_boundary(env):
     assert client.get(
         "/api/geo/project/simplified?name=Trip&zoom=12&bbox=6,44,9,46"
     ).status_code in (403, 404)
+
+
+# ── The level cache, after the adversarial review of #328 ────────────────────
+#
+# The review found three things the route tests could not see, because
+# X-Cache reads the same either way: a level too large to cache rebuilt
+# forever and silently; a bust left the entry resident, so a dropped Redis
+# generation bump would serve a pre-edit map for the full 15-minute TTL; and
+# eviction was oldest-inserted rather than least-recently-used, so a level
+# being panned around lost to a cold one on age alone.
+
+from api.geo import (
+    _LEVEL_CACHE_MAX_ENTRY_COORDS,
+    _level_cache_get,
+    _level_cache_store,
+    restrict_geo_features_to_bbox,
+)
+from src.models.simplify import restrict_to_bbox, simplify_for_zoom
+
+
+def _feat(n: int, lon: float = 7.0) -> dict:
+    return _feature([[lon + i * 0.0001, 45.0] for i in range(n)])
+
+
+def test_a_level_too_large_to_cache_is_not_stored():
+    _level_cache.clear()
+    big = [_feat(_LEVEL_CACHE_MAX_ENTRY_COORDS + 10)]
+    _level_cache_store((1, "Big", 17), big, 0)
+    assert _level_cache_get((1, "Big", 17)) is None, (
+        "storing it would let one entry evict everything else and still not fit"
+    )
+
+
+def test_a_level_within_the_entry_cap_is_stored():
+    _level_cache.clear()
+    _level_cache_store((1, "Ok", 12), [_feat(100)], 0)
+    assert _level_cache_get((1, "Ok", 12)) is not None
+
+
+def test_a_bust_drops_the_entry_rather_than_only_marking_it_stale():
+    # Not the same as the route-level bust test: that one passes on the
+    # generation guard alone. This pins the *direct* drop, which is what still
+    # holds if the shared generation bump is lost.
+    from api.geo import bust_geo_cache
+    _level_cache.clear()
+    _level_cache_store((7, "Trip", 12), [_feat(100)], 0)
+    assert (7, "Trip", 12) in _level_cache
+    bust_geo_cache(7, "Trip")
+    assert (7, "Trip", 12) not in _level_cache
+
+
+def test_reading_a_level_refreshes_its_deadline():
+    # Eviction picks the entry closest to expiry, and every level shares one
+    # TTL — so without this, "closest to expiry" means "stored first" and a hot
+    # level is evicted before a cold one.
+    _level_cache.clear()
+    _level_cache_store((1, "Old", 12), [_feat(100)], 0)
+    _level_cache_store((1, "New", 12), [_feat(100)], 0)
+    before = _level_cache[(1, "Old", 12)][1]
+    _level_cache_get((1, "Old", 12))
+    assert _level_cache[(1, "Old", 12)][1] > before
+    assert _level_cache[(1, "Old", 12)][1] > _level_cache[(1, "New", 12)][1]
+
+
+# ── restrict_to_bbox, which production now calls and the older bbox tests
+#    (which go through simplify_geo_features) no longer reach ────────────────
+
+def test_a_visible_line_is_returned_unchanged_and_unaliased():
+    poly = [[7.0 + i * 0.001, 45.0] for i in range(200)]
+    assert restrict_to_bbox(poly, (6.0, 44.0, 9.0, 46.0)) is poly
+
+
+def test_an_off_box_line_is_floored_keeping_both_ends():
+    poly = [[7.0 + i * 0.001, 45.0] for i in range(200)]
+    out = restrict_to_bbox(poly, (20.0, 50.0, 21.0, 51.0))
+    assert len(out) == 32
+    assert out[0] == poly[0] and out[-1] == poly[-1]
+
+
+def test_a_line_already_at_the_floor_is_left_alone():
+    poly = [[7.0 + i * 0.001, 45.0] for i in range(20)]
+    assert restrict_to_bbox(poly, (20.0, 50.0, 21.0, 51.0)) is poly
+
+
+def test_flooring_a_simplified_line_matches_flooring_the_original():
+    # The equivalence the split rests on: applying the box *after* the level
+    # was simplified must give what simplifying with the box gave. Same count,
+    # same endpoints — the interior differs only for geometry that is off
+    # screen by definition.
+    poly = [[7.0 + i * 0.0001, 45.0 + (0.0002 if i % 2 else 0.0)]
+            for i in range(3000)]
+    far = (20.0, 50.0, 21.0, 51.0)
+    in_one_pass = simplify_for_zoom(poly, 14, bbox=far)
+    after_the_fact = restrict_to_bbox(simplify_for_zoom(poly, 14), far)
+    assert len(in_one_pass) == len(after_the_fact)
+    assert in_one_pass[0] == after_the_fact[0]
+    assert in_one_pass[-1] == after_the_fact[-1]
+
+
+def test_restricting_features_never_mutates_the_cached_level():
+    # The cache holds these objects and hands them to every later request, so
+    # a single in-place write would corrupt the map for everyone.
+    level = [_feat(200)]
+    original = [list(c) for c in level[0]["geometry"]["coordinates"]]
+    out = restrict_geo_features_to_bbox(level, (20.0, 50.0, 21.0, 51.0))
+    assert level[0]["geometry"]["coordinates"] == original
+    assert out[0] is not level[0]
+    assert out[0]["geometry"]["coordinates"] is not level[0]["geometry"]["coordinates"]
