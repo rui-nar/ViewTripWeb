@@ -76,7 +76,26 @@ _SIMPLIFIED_CACHE_TTL_S = 60.0
 # both the memory and the cost scale with.
 _LEVEL_CACHE_TTL_S = 900.0
 _LEVEL_CACHE_MAX_ENTRIES = 48
+# Measured with tracemalloc against the shape actually held (feature ->
+# geometry -> [[lon, lat], ...]): **128 bytes per coordinate** — 72 for the
+# two-element list, 2x24 for the floats, 8 for the parent slot. So this bound
+# is ~51 MB steady, and up to ~103 MB for the instant of a store, since the
+# new entry is inserted before eviction brings the total back inside budget.
+#
+# That is per *process*. Adding --workers N multiplies it, as it does
+# _GEO_CACHE_MAX_BYTES.
 _LEVEL_CACHE_MAX_COORDS = 400_000
+# A single level bigger than this is not cached at all, mirroring
+# _GEO_CACHE_MAX_ENTRY_BYTES: one entry must not be able to evict everything
+# else and still not fit.
+#
+# It is reachable. A very long trip at deep zoom approaches
+# len(activities) * max_input_points -- 219 * 4000 = 876,000 coordinates, or
+# ~112 MB -- because a level is built for the whole trip regardless of the
+# box. Those requests fall back to the per-(level, box) byte cache below, so
+# repeats are still free and only a *new* box rebuilds. Fixing it properly
+# means not building whole-trip levels at deep zoom at all; see issue #324.
+_LEVEL_CACHE_MAX_ENTRY_COORDS = 250_000
 
 # Nothing evicted an entry whose project was never mutated again — the TTL above
 # only turns a stale HIT into a MISS on the next *read* of that same key; a key
@@ -170,6 +189,14 @@ def bust_geo_cache(user_info_id: int, project_name: str) -> None:
             _geo_cache.pop(key, None)
         gen_key = (user_info_id, project_name)
         _geo_gen[gen_key] = _geo_gen.get(gen_key, 0) + 1
+    # The level cache holds Python objects rather than bytes and has only the
+    # generation guard to fall back on. That guard depends on the counter bump
+    # above actually landing — the Redis path swallows and logs its failures —
+    # so a dropped bump would leave a pre-edit map served for the whole 15
+    # minute TTL. Dropping the entries directly is the belt to that braces.
+    with _geo_cache_lock:
+        for k in [k for k in _level_cache if k[0] == user_info_id and k[1] == project_name]:
+            _level_cache.pop(k, None)
 
 
 def _geo_generation(user_info_id: int, project_name: str) -> int:
@@ -270,10 +297,15 @@ def _level_cache_get(key: tuple) -> List[Dict[str, Any]] | None:
         entry = _level_cache.get(key)
         if entry is None:
             return None
-        features, deadline, gen, _ = entry
+        features, deadline, gen, coords = entry
         if monotonic() >= deadline:
             _level_cache.pop(key, None)
             return None
+        # Refresh on read, so eviction is least-recently-*used* rather than
+        # oldest-inserted. Every level shares one TTL, so without this
+        # "closest to expiry" means "stored first", and a level being panned
+        # around right now loses to a cold one on age alone.
+        _level_cache[key] = (features, monotonic() + _LEVEL_CACHE_TTL_S, gen, coords)
     if gen != _geo_generation(key[0], key[1]):
         with _geo_cache_lock:
             _level_cache.pop(key, None)
@@ -290,7 +322,13 @@ def _level_cache_store(key: tuple, features: List[Dict[str, Any]], gen: int) -> 
     with _geo_cache_lock:
         for k in [k for k, v in list(_level_cache.items()) if v[1] <= now]:
             _level_cache.pop(k, None)
-        if coords > _LEVEL_CACHE_MAX_COORDS:
+        if coords > _LEVEL_CACHE_MAX_ENTRY_COORDS:
+            # Logged, not silent: this is the difference between "the cache is
+            # working" and "every request at this zoom rebuilds forever", and
+            # it is invisible from the outside — X-Cache reads MISS either way.
+            _log.info(
+                "geo level too large to cache: %s coords at zoom %s (cap %s)",
+                coords, key[2], _LEVEL_CACHE_MAX_ENTRY_COORDS)
             _level_cache.pop(key, None)
             return
         _level_cache[key] = (features, now + _LEVEL_CACHE_TTL_S, gen, coords)
@@ -747,12 +785,24 @@ def project_geo_simplified(
     what it did before; an older server ignores the parameter and serves the
     whole trip, which is a superset of what was asked for.
 
-    Rides the same payload cache as every other per-project response, keyed
-    per zoom, so one bust per mutation still covers every level. The box is
-    part of that key, snapped to the tile grid at the level so a pan of a few
-    pixels reuses an entry rather than minting one — see
-    :func:`snap_bbox_to_tiles`, and the byte/entry/TTL bounds on this module's
-    cache, which are what keep the extra dimension from mattering.
+    Cached in two layers, because the two costs are different sizes.
+
+    The *level* — the whole trip simplified for this zoom, with no box in it —
+    is what is expensive: building one decodes every activity polyline (1.83 s
+    measured for a 219-activity trip) before it simplifies anything. It is
+    box-independent, so one entry serves every viewport at that zoom, and a
+    pan costs a cheap :func:`restrict_geo_features_to_bbox` pass instead of a
+    rebuild. That is the whole point of the split (issue #324): putting the box
+    in this key made every pan a rebuild.
+
+    The *bytes* — this level restricted to this box and gzipped — are cached in
+    front of it, keyed by the tile-snapped box as well, because serialising is
+    not free either (~0.5 s for a large level) and a repeat request should cost
+    nothing. A miss there falls through to the level, never to a rebuild.
+
+    The box is snapped server-side (:func:`snap_bbox_to_tiles`) so an unsnapped
+    client cannot mint an entry per pan pixel. Both layers are generation
+    checked, so one bust per mutation still covers every level and every box.
     """
     if not (0 <= zoom <= 22):
         raise HTTPException(
@@ -785,6 +835,16 @@ def project_geo_simplified(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner)
         owner_id = row.user_info_id
+        # Cheapest path first: the exact bytes this caller asked for.
+        byte_key = (owner_id, name, f"simplified-{level}-{box_key}")
+        cached_bytes = _geo_cache_get(byte_key)
+        if cached_bytes is not None:
+            return Response(
+                content=cached_bytes,
+                media_type="application/json",
+                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+            )
+        gen_for_bytes = _geo_generation(owner_id, name)
         level_key = (owner_id, name, level)
         features = _level_cache_get(level_key)
         if features is None:
@@ -806,8 +866,22 @@ def project_geo_simplified(
         _level_cache_store(level_key, features, gen)
 
     served = restrict_geo_features_to_bbox(features, box) if box else features
+    gz_bytes = _gzip_geo(served)
+    # Serialising is not free, and reusing a level does not avoid it: gzipping
+    # a large level measured ~0.5 s, which on a single-process server is still
+    # enough GIL-holding CPU to time out someone else's request. So the bytes
+    # are cached per (level, box) in front of the level.
+    #
+    # This is not the cache #325 had. A miss here falls through to the *level*,
+    # not to a rebuild, so a pan to a new box costs one restrict + one gzip
+    # rather than decoding every polyline in the trip again. Keeping the short
+    # TTL for the reason the original comment gave: there are many of these,
+    # they share a cache with /project, /low-res and /meta, and they are by far
+    # the cheapest thing in it to rebuild.
+    _geo_cache_store((owner_id, name, f"simplified-{level}-{box_key}"),
+                     gz_bytes, gen_for_bytes, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
     return Response(
-        content=_gzip_geo(served),
+        content=gz_bytes,
         media_type="application/json",
         headers={"Content-Encoding": "gzip", "X-Cache": cache_state},
     )
