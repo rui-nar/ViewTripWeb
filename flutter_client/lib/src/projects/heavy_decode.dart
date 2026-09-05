@@ -71,16 +71,25 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
   List<List<LatLng>> points,
   List<LatLng?> midpoints,
   List<List<LatLng>?> decimated,
+  List<Float64List?> flat,
 }) decodeGeoWithPoints(Uint8List bytes) {
   final geo = decodeGeoBytes(bytes);
   final features = geo['features'];
   final points = <List<LatLng>>[];
   final midpoints = <LatLng?>[];
+  // The track builder's input, flattened here rather than at the isolate
+  // boundary — issue #337. Null for every feature the track is not built from,
+  // so no buffer is produced (or retained) for a segment or an id-less
+  // feature; the skip decision is [trackFeatureCoords]', shared with
+  // `flattenGeoCoords`, which is the only reader.
+  final flat = <Float64List?>[];
   if (features is List) {
     for (final f in features) {
       final coords = f is Map ? (f['geometry'] as Map? ?? {})['coordinates'] : null;
       points.add(coords is List ? coordsToLatLng(coords) : const []);
       midpoints.add(coords is List ? arcMidpoint(coords) : null);
+      final t = trackFeatureCoords(f);
+      flat.add(t == null ? null : flatCoords(t.coords));
     }
   }
 
@@ -103,7 +112,13 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
         : [for (final (lat, lon) in reduced[k]) LatLng(lat, lon)];
   }
 
-  return (geo: geo, points: points, midpoints: midpoints, decimated: decimated);
+  return (
+    geo: geo,
+    points: points,
+    midpoints: midpoints,
+    decimated: decimated,
+    flat: flat,
+  );
 }
 
 /// [decodeGeoBytes] on a background isolate when the payload is big enough,
@@ -122,11 +137,18 @@ Future<Map<String, dynamic>> decodeJsonMapOffIsolate(Uint8List bytes) =>
 /// Web's answer is to stop shipping payloads this size at all (Phase 4 of
 /// docs/PERF_MAP_LOAD.md), not more [compute] calls.
 ///
-/// Note this deliberately does NOT restructure geometry into `Float64List`
-/// buffers, which the original plan proposed: flutter_map's `Polyline` takes
-/// `List<LatLng>`, so typed buffers would have to be materialised back into
-/// exactly this list on the render path — moving the cost rather than
-/// removing it. See docs/PERF_MAP_LOAD.md.
+/// The trip's *render* geometry deliberately stays `List<LatLng>`, which the
+/// original plan proposed replacing with `Float64List` buffers: flutter_map's
+/// `Polyline` takes `List<LatLng>`, so typed buffers would have to be
+/// materialised back into exactly this list on the render path — moving the
+/// cost rather than removing it. See docs/PERF_MAP_LOAD.md.
+///
+/// The *track builder's* geometry is a different consumer with the opposite
+/// need — it crosses an isolate boundary, where one Dart list per point is
+/// the expensive shape — so its `Float64List` per activity is produced here
+/// too (issue #337) and seeded alongside the rest. It rides back on the same
+/// zero-copy hop, so it costs the UI isolate nothing; before, the UI isolate
+/// walked every coordinate to build it, measured at 22.6 ms.
 Future<Map<String, dynamic>> decodeGeoOffIsolate(Uint8List bytes) async {
   final decoded = bytes.length <= kInlineDecodeThresholdBytes
       ? decodeGeoWithPoints(bytes)
@@ -142,6 +164,8 @@ Future<Map<String, dynamic>> decodeGeoOffIsolate(Uint8List bytes) async {
       if (mid != null) seedArcMidpoint(coords, mid);
       final dec = i < decoded.decimated.length ? decoded.decimated[i] : null;
       if (dec != null) seedDecimatedLatLng(coords, dec);
+      final fl = i < decoded.flat.length ? decoded.flat[i] : null;
+      if (fl != null) seedFlatCoords(coords, fl);
     }
   }
   return decoded.geo;

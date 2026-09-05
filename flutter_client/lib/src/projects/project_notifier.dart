@@ -18,6 +18,7 @@ import '../map/polyline_decoder.dart';
 import '../share/share_content_generator.dart';
 import 'client_geo_builder.dart' as client_geo;
 import 'geo_viewport.dart';
+import 'map_geometry_memo.dart';
 import 'members_service.dart';
 import 'project_data_cache.dart';
 import 'project_filter_mixin.dart';
@@ -258,28 +259,25 @@ typedef FlatGeoCoords = Map<String, Float64List>;
 /// Applies exactly the skips the nested walk applied inline — non-map
 /// features, segments, features with no activity_id, empty coordinate lists,
 /// and individual points that are not a pair — so membership and point counts
-/// are unchanged.
+/// are unchanged. [trackFeatureCoords] is the first four of those;
+/// [flatCoords], behind [memoFlatCoords], is the last.
+///
+/// **O(features), not O(points), on a geo that came through
+/// `decodeGeoOffIsolate`** (issue #337). Flattening a real trip's coordinates
+/// measured 22.6 ms here, over the frame budget on its own, so the decode
+/// worker — which is already holding these coordinates, and returns its
+/// result zero-copy — produces the buffers and seeds them. This walk then
+/// only looks them up. A feature the worker never saw still flattens on
+/// demand, so client-built geometry keeps working; it is slower, never empty.
 @visibleForTesting
 FlatGeoCoords flattenGeoCoords(Map<String, dynamic>? geo) {
   final out = <String, Float64List>{};
   final features = geo?['features'];
   if (features is! List) return out;
   for (final f in features) {
-    if (f is! Map) continue;
-    final props = f['properties'] as Map? ?? {};
-    if (props['type'] == 'segment') continue;
-    final actId = props['activity_id']?.toString();
-    if (actId == null) continue;
-    final coords = (f['geometry'] as Map? ?? {})['coordinates'];
-    if (coords is! List || coords.isEmpty) continue;
-    final buf = Float64List(coords.length * 2);
-    var n = 0;
-    for (final c in coords) {
-      if (c is! List || c.length < 2) continue;
-      buf[n++] = (c[0] as num).toDouble();
-      buf[n++] = (c[1] as num).toDouble();
-    }
-    out[actId] = n == buf.length ? buf : buf.sublist(0, n);
+    final t = trackFeatureCoords(f);
+    if (t == null) continue;
+    out[t.activityId] = memoFlatCoords(t.coords);
   }
   return out;
 }
@@ -1850,6 +1848,11 @@ class ProjectNotifier extends ChangeNotifier
     // copies its argument, and GeoJSON coordinates are one list object per
     // point. See [FlatGeoCoords] — this is the third time that copy has cost
     // this project a production problem.
+    //
+    // Since #337 this is a per-feature cache lookup rather than a pass over
+    // every coordinate: the decode worker already produced the buffers. The
+    // span stays so a geo that arrived by some other path — and so pays the
+    // real flatten here — is visible rather than assumed.
     final coords =
         perfSpans.blocking('geo_flatten', () => flattenGeoCoords(geo));
     final r = await compute(buildFullTrackFromTotals, (coords: coords, totals: totals));
