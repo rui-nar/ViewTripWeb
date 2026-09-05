@@ -10,6 +10,8 @@ import json
 import math
 import os
 import time
+from array import array
+from itertools import chain
 from threading import Lock
 from time import monotonic
 from typing import Annotated, Any, Dict, List
@@ -23,7 +25,14 @@ from fastapi.responses import Response
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
-from src.models.simplify import restrict_to_bbox, simplify_for_zoom, snap_bbox_to_tiles
+from src.models.simplify import (
+    bboxes_intersect,
+    floor_line,
+    line_bbox,
+    simplify_for_zoom,
+    snap_bbox_to_tiles,
+    working_set,
+)
 from src.models.project import Project
 from src.project.project_io import ProjectIO
 from src.project.project_repo import ProjectRepo, _compute_low_res_geo
@@ -61,41 +70,58 @@ _GEO_CACHE_TTL_S = 300.0
 # call in project_geo_simplified for why.
 _SIMPLIFIED_CACHE_TTL_S = 60.0
 
-# Simplified *levels*, held as built features rather than gzipped bytes.
+# Trips *prepared for simplification*, held per project rather than per zoom
+# level. See _PreparedTrack for what an entry holds and issue #338 for why the
+# unit of caching is the line and not the level.
+_TRACK_CACHE_TTL_S = 900.0
+_TRACK_CACHE_MAX_ENTRIES = 32
+
+# Measured with tracemalloc against the shape actually held: a [lon, lat]
+# Python list costs **128 bytes** — 72 for the two-element list, 2x24 for the
+# floats, 8 for the parent slot. The same pair inside a flat array("d") costs
+# **16**, which is why the working sets — by far the biggest thing here — are
+# held as one and the simplified results, which are small, are not.
+_LIST_COORD_BYTES = 128
+_ARRAY_COORD_BYTES = 16
+
+# Worst case, per *process*: 48 MB steady, and up to ~96 MB for the instant of
+# a store, since a new entry is inserted before eviction brings the total back
+# inside budget. That is the same shape of bound the level cache had, and
+# slightly under its 400,000 x 128 = 51 MB.
 #
-# A level is expensive and box-independent; a box is cheap and box-specific.
-# Keying the byte cache by both (issue #325) meant every pan to a new tile
-# range rebuilt the level from scratch — and a rebuild decodes every activity
-# polyline (1.83 s measured for a 219-activity trip) before it simplifies
-# anything. Three of those in one session measured 16.5 s of server CPU, on a
-# single-process uvicorn, which is also why unrelated requests came back 502:
-# the work is CPU-bound Python, so it holds the GIL and starves the loop.
+# That is the bound on what is *cached*, and it is not the process's peak. A
+# whole-trip request at a deep level materialises every newly simplified line
+# into a list-of-lists before any cap applies — for the trip the perf doc
+# measures that is ~876,000 coordinates, about 112 MB live at once, and only
+# then is it memoised and trimmed. This is not new (the level cache built the
+# same level and then refused to store it, so the peak was identical) but it
+# is the number that matters on a container which has been OOM-killed at
+# ~779 MB against a 768 MB cap. The cached bound is 48 MB; the transient peak
+# is roughly twice what the largest single response contains.
 #
-# One entry per zoom level, reused by every box. A level of the trip above is
-# ~13k coordinates; the bound below is in coordinates because that is what
-# both the memory and the cost scale with.
-_LEVEL_CACHE_TTL_S = 900.0
-_LEVEL_CACHE_MAX_ENTRIES = 48
-# Measured with tracemalloc against the shape actually held (feature ->
-# geometry -> [[lon, lat], ...]): **128 bytes per coordinate** — 72 for the
-# two-element list, 2x24 for the floats, 8 for the parent slot. So this bound
-# is ~51 MB steady, and up to ~103 MB for the instant of a store, since the
-# new entry is inserted before eviction brings the total back inside budget.
+# Adding --workers N multiplies it, as it does _GEO_CACHE_MAX_BYTES.
+_TRACK_CACHE_MAX_BYTES = 48 * 1024 * 1024
+# The working sets and floors of one trip.
 #
-# That is per *process*. Adding --workers N multiplies it, as it does
-# _GEO_CACHE_MAX_BYTES.
-_LEVEL_CACHE_MAX_COORDS = 400_000
-# A single level bigger than this is not cached at all, mirroring
-# _GEO_CACHE_MAX_ENTRY_BYTES: one entry must not be able to evict everything
-# else and still not fit.
+# Equal to the whole budget on purpose. This bound is *zoom-independent* — it
+# is a property of the trip, not of the level being asked for — so unlike the
+# level cache's per-level refusal it does not go away at shallow zoom. A trip
+# past it is not cached at ANY zoom, and every request then repeats the DB
+# load and the polyline decode: ~4 s of CPU-bound Python holding the GIL on a
+# single-process uvicorn, which is the mechanism that produced real 502s on
+# /meta and /low-res. At 32 MB that cliff arrived at ~490 activities, which is
+# a shape this project's own comments treat as real (a long trip at a few
+# activities a day).
 #
-# It is reachable. A very long trip at deep zoom approaches
-# len(activities) * max_input_points -- 219 * 4000 = 876,000 coordinates, or
-# ~112 MB -- because a level is built for the whole trip regardless of the
-# box. Those requests fall back to the per-(level, box) byte cache below, so
-# repeats are still free and only a *new* box rebuilds. Fixing it properly
-# means not building whole-trip levels at deep zoom at all; see issue #324.
-_LEVEL_CACHE_MAX_ENTRY_COORDS = 250_000
+# So the only trip refused is one that could not be held even alone. That
+# permits a single large trip to occupy the entire cache and evict every other
+# — which is the right trade: evicting a warm trip costs one rebuild, refusing
+# to cache costs a rebuild on every request, forever.
+_TRACK_CACHE_MAX_ENTRY_BYTES = _TRACK_CACHE_MAX_BYTES
+# The memoised simplification results of one trip, across every level and
+# line. Bounded separately because it is the part that grows *after* the entry
+# is stored, as a session visits levels.
+_TRACK_CACHE_MAX_SIMPLIFIED_BYTES = 16 * 1024 * 1024
 
 # Nothing evicted an entry whose project was never mutated again — the TTL above
 # only turns a stale HIT into a MISS on the next *read* of that same key; a key
@@ -189,14 +215,13 @@ def bust_geo_cache(user_info_id: int, project_name: str) -> None:
             _geo_cache.pop(key, None)
         gen_key = (user_info_id, project_name)
         _geo_gen[gen_key] = _geo_gen.get(gen_key, 0) + 1
-    # The level cache holds Python objects rather than bytes and has only the
+    # The track cache holds Python objects rather than bytes and has only the
     # generation guard to fall back on. That guard depends on the counter bump
     # above actually landing — the Redis path swallows and logs its failures —
     # so a dropped bump would leave a pre-edit map served for the whole 15
     # minute TTL. Dropping the entries directly is the belt to that braces.
     with _geo_cache_lock:
-        for k in [k for k in _level_cache if k[0] == user_info_id and k[1] == project_name]:
-            _level_cache.pop(k, None)
+        _track_cache.pop((user_info_id, project_name), None)
 
 
 def _geo_generation(user_info_id: int, project_name: str) -> int:
@@ -270,109 +295,270 @@ def _geo_cache_store(cache_key: tuple, gz_bytes: bytes, gen: int,
             _geo_cache.pop(soonest, None)
 
 
-_level_cache: Dict[tuple, tuple] = {}
+class _PreparedLine:
+    """One line of a trip, prepared so any zoom and any box can serve from it.
+
+    Three things, all zoom-independent:
+
+    * ``points`` — the *working set*: the line already reduced by
+      :func:`working_set` to the cap :func:`simplify_for_zoom` applies before
+      it simplifies anything. Simplifying from it is identical to simplifying
+      from the original at every zoom, and it is at most 4,000 points however
+      long the track is. Held as a flat ``array("d")`` — 16 bytes per
+      coordinate against 128 for a ``[lon, lat]`` list — because this is the
+      one part large enough for the difference to decide whether caching a
+      decoded trip is affordable at all: 15 MB rather than 112 MB for the
+      219-activity trip issue #276 measured.
+    * ``bbox`` — of the working set, which is exactly the geometry that can be
+      served, so "can this box show it" is O(1) instead of a walk over every
+      coordinate (0.24 s to 0.34 s per whole-trip request, measured).
+    * ``floor`` — what a line the viewport cannot show is served at.
+      Precomputed because it is the answer for most lines of a long trip at
+      most zooms.
+
+    ``points`` is a plain list rather than an array for a line whose positions
+    carry a third element, which simplification preserves and packing to pairs
+    would drop, and None for a line nothing can simplify — one shorter than
+    three points (a two-point GPX fallback) or one whose coordinates are not
+    numbers. ``floor`` then holds that line verbatim and is always what is
+    served, which is what it got before anything simplified it.
+    """
+
+    __slots__ = ("properties", "bbox", "points", "floor")
+
+    def __init__(self, properties: Dict[str, Any], bbox: tuple | None,
+                 points, floor: list) -> None:
+        self.properties = properties
+        self.bbox = bbox
+        self.points = points
+        self.floor = floor
+
+    def working(self) -> list:
+        """The working set as ``[[lon, lat], ...]``, ready to simplify."""
+        pts = self.points
+        if isinstance(pts, array):
+            return list(map(list, zip(pts[0::2], pts[1::2])))
+        return pts
+
+    def nbytes(self) -> int:
+        pts = self.points
+        if pts is None:
+            return len(self.floor) * _LIST_COORD_BYTES
+        if isinstance(pts, array):
+            base = len(pts) // 2 * _ARRAY_COORD_BYTES
+        else:
+            base = len(pts) * _LIST_COORD_BYTES
+        if self.floor is pts:
+            # A line short enough that striding returned its argument.
+            return base
+        return base + len(self.floor) * _LIST_COORD_BYTES
 
 
-def _level_cache_coords() -> int:
-    """Total coordinates held. Callers must hold ``_geo_cache_lock``."""
-    return sum(v[3] for v in _level_cache.values())
+class _PreparedTrack:
+    """A whole trip prepared once, plus its simplifications so far.
+
+    The unit of caching is the *line*, not the level (issue #338). #325 put the
+    viewport box in the cache key: each build was cheap, because it skipped the
+    Ramer-Douglas-Peucker pass for lines the box could not show, but no build
+    was reusable and every pan paid a fresh one. #331 took the box out again:
+    one level then served every viewport, but a box-free build cannot skip
+    anything, so every cold level ran RDP over the whole trip — measured 2.8 s
+    to 4.8 s per level here, six times over in a zoom-heavy session.
+
+    Both cached the wrong thing. A *line* simplified to a level is
+    box-independent, so it is shareable like a level; and which lines to
+    simplify is exactly what the box decides, so a build is cheap like a
+    per-box one. ``simplified`` memoises them per ``(level, line index)``, and
+    a level fills in incrementally as boxes bring lines on screen.
+
+    It also means the decode — 1.83 s for a 219-activity trip, a fixed floor on
+    every cold build before anything is simplified — happens once per trip
+    rather than once per level.
+    """
+
+    __slots__ = ("lines", "base_bytes", "simplified", "simplified_bytes")
+
+    def __init__(self, lines: List[_PreparedLine]) -> None:
+        self.lines = lines
+        self.base_bytes = sum(line.nbytes() for line in lines)
+        # Insertion-ordered, and trimmed from the front — see :meth:`memoise`.
+        self.simplified: Dict[tuple, list] = {}
+        # Kept as a running total rather than summed on demand. The cache
+        # budget is checked on every store and every merge, so a sum over
+        # every memoised result would put a walk of the whole cache on the
+        # request path — the exact shape of cost this change exists to remove.
+        self.simplified_bytes = 0
+
+    def nbytes(self) -> int:
+        return self.base_bytes + self.simplified_bytes
+
+    def memoise(self, fresh: Dict[tuple, list], cap: int) -> None:
+        """Keep *fresh*, then drop the oldest results until within *cap*.
+
+        Oldest first. A session moves forward through levels, so insertion
+        order stands in for least-recently-used well enough, and a per-key
+        timestamp would cost more to keep than the recompute it saves.
+        """
+        for key, coords in fresh.items():
+            previous = self.simplified.get(key)
+            if previous is not None:
+                self.simplified_bytes -= len(previous) * _LIST_COORD_BYTES
+            self.simplified[key] = coords
+            self.simplified_bytes += len(coords) * _LIST_COORD_BYTES
+        while self.simplified and self.simplified_bytes > cap:
+            oldest = next(iter(self.simplified))
+            self.simplified_bytes -= len(self.simplified.pop(oldest)) * _LIST_COORD_BYTES
 
 
-def _feature_coords(features: List[Dict[str, Any]]) -> int:
-    total = 0
-    for f in features:
-        coords = (f.get("geometry") or {}).get("coordinates")
-        if isinstance(coords, list):
-            total += len(coords)
-    return total
+def _prepare_track(features: List[Dict[str, Any]]) -> _PreparedTrack:
+    """Turn built features into lines that can be simplified for any zoom."""
+    lines: List[_PreparedLine] = []
+    for feature in features:
+        geom = feature.get("geometry") or {}
+        coords = geom.get("coordinates")
+        properties = feature.get("properties") or {}
+        if not isinstance(coords, list) or len(coords) < 3:
+            lines.append(_PreparedLine(
+                properties, None, None, coords if isinstance(coords, list) else []))
+            continue
+        try:
+            work = working_set(coords)
+            flat = array("d", chain.from_iterable(work))
+            widths = set(map(len, work))
+            box = line_bbox(work)
+            floor = floor_line(work)
+        except (TypeError, ValueError, IndexError):
+            # Malformed geometry is data, not a bug in the caller: one bad
+            # point must not 500 a whole project's map. Serve it verbatim,
+            # which is also what it got before anything simplified it.
+            lines.append(_PreparedLine(properties, None, None, coords))
+            continue
+        # A GeoJSON position legally carries a third element, and
+        # simplification preserves it, so a line with one stays a list of its
+        # original positions rather than quietly losing elevation to the
+        # packing. A line already at the floor is its own floor, and packing it
+        # would hold the same points twice for no saving.
+        if floor is work:
+            packed = work
+        else:
+            packed = flat if widths == {2} else work
+        lines.append(_PreparedLine(properties, box, packed, floor))
+    return _PreparedTrack(lines)
 
 
-def _level_cache_get(key: tuple) -> List[Dict[str, Any]] | None:
-    """Built features for a zoom level, or None when absent, expired or stale.
+def _features_for(track: _PreparedTrack, level: int, box: tuple | None):
+    """Features for *level* scoped to *box*, and the results newly computed.
+
+    Fresh results are returned rather than written straight into *track*: the
+    track is a shared cache entry, and the merge is what has to happen under
+    the lock — the simplification, which is the expensive part, must not.
+
+    Features are never dropped. `geo` is read as a description of the whole
+    trip by the segment-overlay reconciliation, by fit-to-bounds and by the
+    export path, and a missing feature would silently break all three. A line
+    the box cannot show is served at its floor, which keeps its shape and both
+    its endpoints.
+    """
+    out: List[Dict[str, Any]] = []
+    fresh: Dict[tuple, list] = {}
+    for index, line in enumerate(track.lines):
+        if line.points is None or (
+                box is not None and not bboxes_intersect(line.bbox, box)):
+            coords = line.floor
+        else:
+            key = (level, index)
+            coords = track.simplified.get(key)
+            if coords is None:
+                coords = simplify_for_zoom(line.working(), level)
+                fresh[key] = coords
+        out.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": coords},
+            "properties": line.properties,
+        })
+    return out, fresh
+
+
+_track_cache: Dict[tuple, tuple] = {}
+
+
+def _track_cache_bytes() -> int:
+    """Total bytes currently held. Callers must hold ``_geo_cache_lock``."""
+    return sum(t.nbytes() for t, _, _ in _track_cache.values())
+
+
+def _track_cache_get(key: tuple) -> "_PreparedTrack | None":
+    """The prepared trip for *key*, or None when absent, expired or stale.
 
     Mirrors :func:`_geo_cache_get`, including doing the generation check
     outside the lock — it may hit Redis.
     """
     with _geo_cache_lock:
-        entry = _level_cache.get(key)
+        entry = _track_cache.get(key)
         if entry is None:
             return None
-        features, deadline, gen, coords = entry
+        track, deadline, gen = entry
         if monotonic() >= deadline:
-            _level_cache.pop(key, None)
+            _track_cache.pop(key, None)
             return None
         # Refresh on read, so eviction is least-recently-*used* rather than
-        # oldest-inserted. Every level shares one TTL, so without this
-        # "closest to expiry" means "stored first", and a level being panned
-        # around right now loses to a cold one on age alone.
-        _level_cache[key] = (features, monotonic() + _LEVEL_CACHE_TTL_S, gen, coords)
+        # oldest-inserted: every entry shares one TTL, so without this
+        # "closest to expiry" means "stored first", and the trip being looked
+        # at right now loses to a cold one on age alone.
+        _track_cache[key] = (track, monotonic() + _TRACK_CACHE_TTL_S, gen)
     if gen != _geo_generation(key[0], key[1]):
         with _geo_cache_lock:
-            _level_cache.pop(key, None)
+            _track_cache.pop(key, None)
         return None
-    return features
+    return track
 
 
-def _level_cache_store(key: tuple, features: List[Dict[str, Any]], gen: int) -> None:
-    """Persist *features* unless the project was busted since generation *gen*."""
+def _evict_tracks(protect: tuple) -> None:
+    """Bring the track cache inside both bounds. Callers must hold the lock."""
+    while _track_cache and (
+        _track_cache_bytes() > _TRACK_CACHE_MAX_BYTES
+        or len(_track_cache) > _TRACK_CACHE_MAX_ENTRIES
+    ):
+        soonest = min(_track_cache, key=lambda k: _track_cache[k][1])
+        if soonest == protect and len(_track_cache) == 1:
+            break  # never evict the entry we were asked to store, alone
+        _track_cache.pop(soonest, None)
+
+
+def _track_cache_store(key: tuple, track: _PreparedTrack, gen: int) -> None:
+    """Persist *track* unless the project was busted since generation *gen*."""
     if _geo_generation(key[0], key[1]) != gen:
         return
-    coords = _feature_coords(features)
     now = monotonic()
     with _geo_cache_lock:
-        for k in [k for k, v in list(_level_cache.items()) if v[1] <= now]:
-            _level_cache.pop(k, None)
-        if coords > _LEVEL_CACHE_MAX_ENTRY_COORDS:
+        for k in [k for k, v in list(_track_cache.items()) if v[1] <= now]:
+            _track_cache.pop(k, None)
+        if track.base_bytes > _TRACK_CACHE_MAX_ENTRY_BYTES:
             # Logged, not silent: this is the difference between "the cache is
-            # working" and "every request at this zoom rebuilds forever", and
+            # working" and "every request on this trip rebuilds forever", and
             # it is invisible from the outside — X-Cache reads MISS either way.
-            _log.info(
-                "geo level too large to cache: %s coords at zoom %s (cap %s)",
-                coords, key[2], _LEVEL_CACHE_MAX_ENTRY_COORDS)
-            _level_cache.pop(key, None)
+            # warning, not info: every request on this trip now repeats the
+            # decode, holding the GIL, for as long as it is being viewed.
+            _log.warning(
+                "geo track too large to cache: %.1f MB for %r (cap %.0f MB)",
+                track.base_bytes / 1e6, key[1], _TRACK_CACHE_MAX_ENTRY_BYTES / 1e6)
+            _track_cache.pop(key, None)
             return
-        _level_cache[key] = (features, now + _LEVEL_CACHE_TTL_S, gen, coords)
-        while _level_cache and (
-            _level_cache_coords() > _LEVEL_CACHE_MAX_COORDS
-            or len(_level_cache) > _LEVEL_CACHE_MAX_ENTRIES
-        ):
-            soonest = min(_level_cache, key=lambda k: _level_cache[k][1])
-            if soonest == key and len(_level_cache) == 1:
-                break
-            _level_cache.pop(soonest, None)
+        _track_cache[key] = (track, now + _TRACK_CACHE_TTL_S, gen)
+        _evict_tracks(key)
 
 
-def restrict_geo_features_to_bbox(
-    features: List[Dict[str, Any]], bbox: tuple
-) -> List[Dict[str, Any]]:
-    """Reduce every feature that *bbox* cannot show to the coarseness floor.
-
-    Runs over already-simplified features, so it is cheap: the expensive pass
-    has happened once for the level and is shared by every box.
-
-    Features are never dropped, for the reasons :func:`simplify_geo_features`
-    gives: `geo` is read as a whole-trip description by the segment-overlay
-    reconciliation, by fit-to-bounds and by the export path.
-    """
-    out: List[Dict[str, Any]] = []
-    for feature in features:
-        geom = feature.get("geometry") or {}
-        coords = geom.get("coordinates")
-        if not isinstance(coords, list) or len(coords) < 3:
-            out.append(feature)
-            continue
-        try:
-            reduced = restrict_to_bbox(coords, bbox)
-        except (TypeError, ValueError, IndexError):
-            out.append(feature)
-            continue
-        if reduced is coords:
-            out.append(feature)
-            continue
-        copy = dict(feature)
-        copy["geometry"] = {**geom, "coordinates": reduced}
-        out.append(copy)
-    return out
+def _track_cache_merge(key: tuple, track: _PreparedTrack,
+                       fresh: Dict[tuple, list]) -> None:
+    """Memoise *fresh* on *track*, then bring the cache back inside budget."""
+    if not fresh:
+        return
+    with _geo_cache_lock:
+        entry = _track_cache.get(key)
+        if entry is None or entry[0] is not track:
+            return  # evicted, busted or superseded while we were simplifying
+        track.memoise(fresh, _TRACK_CACHE_MAX_SIMPLIFIED_BYTES)
+        _evict_tracks(key)
 
 
 # Public names for the three primitives above, used by the other per-project
@@ -620,72 +806,6 @@ def _build_full_geo_features(project: Project, encoded: bool = False) -> List[Di
     return features
 
 
-def simplify_geo_features(
-    features: List[Dict[str, Any]],
-    zoom: float,
-    bbox: tuple | None = None,
-) -> List[Dict[str, Any]]:
-    """Return *features* with each line simplified to about one pixel at *zoom*.
-
-    With *bbox* — a snapped ``(min_lon, min_lat, max_lon, max_lat)`` — a line
-    that does not intersect it is reduced to the ``min_points`` floor instead,
-    exactly as a whole-trip zoom would have reduced it, and skips the
-    Ramer-Douglas-Peucker pass. Zoom bounds the *detail*; the box bounds the
-    *extent*, which is what makes the deep-zoom case bounded too: at zoom 15 a
-    long trip is almost entirely off screen and was being simplified in full on
-    every request (measured at 6.98 s for a 219-activity trip — issue #324).
-
-    Features are never dropped. `geo` is read as a description of the whole
-    trip by the segment-overlay reconciliation, by fit-to-bounds and by the
-    export path, and a missing feature would silently break all three.
-
-    The saving this exists for: a 219-activity trip carries 1,465,345
-    coordinates and the client renders 6,051 of them, holding the rest as
-    roughly 180 MB of Dart heap on a device that gets killed above ~1.3 GB
-    (issue #276's device profiling). Simplifying to what the zoom can actually
-    resolve removes the difference instead of decimating it away client-side
-    after paying to transfer and materialise it.
-
-    Only expanded ``coordinates`` are touched. An encoded polyline is left
-    alone: re-encoding it here would cost a decode plus an encode per activity
-    to save bytes the caller did not ask to save, and the ``encoded`` variant
-    exists precisely to avoid that work.
-
-    Latitude is taken per feature, and from the same midpoint the
-    simplification itself projects against, so a trip spanning many latitudes
-    is simplified correctly along its whole length rather than against one
-    global scale factor.
-    """
-    out: List[Dict[str, Any]] = []
-    for feature in features:
-        geom = feature.get("geometry") or {}
-        coords = geom.get("coordinates")
-        if not isinstance(coords, list) or len(coords) < 3:
-            out.append(feature)
-            continue
-        try:
-            # simplify_for_zoom, not the bare tolerance call: it bounds both
-            # the work (a 1.47 M-point trip measured 21.6 s per request in
-            # pure RDP) and the coarseness (that same trip came back as ~2.4
-            # points per activity — straight lines).
-            simplified = simplify_for_zoom(coords, zoom, bbox=bbox)
-        except (TypeError, ValueError, IndexError):
-            # Malformed geometry is data, not a bug in the caller: one bad
-            # point must not 500 a whole project's map.
-            out.append(feature)
-            continue
-        if len(simplified) == len(coords):
-            out.append(feature)
-            continue
-        # Copy shallowly: the caller's features may be shared with a cache
-        # entry, and mutating those in place would poison it.
-        out.append({
-            **feature,
-            "geometry": {**geom, "coordinates": simplified},
-        })
-    return out
-
-
 def _gzip_geo(features: List[Dict[str, Any]]) -> bytes:
     json_bytes = json.dumps({"type": "FeatureCollection", "features": features}).encode()
     return gzip_lib.compress(json_bytes, compresslevel=6)
@@ -787,18 +907,26 @@ def project_geo_simplified(
 
     Cached in two layers, because the two costs are different sizes.
 
-    The *level* — the whole trip simplified for this zoom, with no box in it —
-    is what is expensive: building one decodes every activity polyline (1.83 s
-    measured for a 219-activity trip) before it simplifies anything. It is
-    box-independent, so one entry serves every viewport at that zoom, and a
-    pan costs a cheap :func:`restrict_geo_features_to_bbox` pass instead of a
-    rebuild. That is the whole point of the split (issue #324): putting the box
-    in this key made every pan a rebuild.
+    The *trip* — decoded, and each line reduced to the working set, bounding
+    box and coarseness floor that every zoom is served from — is what is
+    expensive: preparing one decodes every activity polyline (1.83 s measured
+    for a 219-activity trip) before anything is simplified. It is both zoom-
+    and box-independent, so one entry serves every level and every viewport,
+    and the decode is paid once per trip rather than once per level.
+
+    Simplification results are memoised on that entry per ``(level, line)``.
+    A line simplified to a level does not depend on the box, so it is
+    shareable; and the box decides which lines are worth simplifying at all,
+    so a request only pays for what it can show. A new box at a known level
+    costs the lines it newly brought on screen, and a level fills in
+    incrementally across a session (issue #338). Neither #325's per-box builds
+    (cheap but unshareable) nor #331's box-free levels (shareable but
+    unskippable) had both.
 
     The *bytes* — this level restricted to this box and gzipped — are cached in
-    front of it, keyed by the tile-snapped box as well, because serialising is
-    not free either (~0.5 s for a large level) and a repeat request should cost
-    nothing. A miss there falls through to the level, never to a rebuild.
+    front of that, keyed by the tile-snapped box as well, because serialising
+    is not free either and a repeat request should cost nothing. A miss there
+    falls through to the prepared trip, never to a rebuild.
 
     The box is snapped server-side (:func:`snap_bbox_to_tiles`) so an unsnapped
     client cannot mint an entry per pan pixel. Both layers are generation
@@ -826,10 +954,6 @@ def project_geo_simplified(
         box, tiles = snap_bbox_to_tiles(_parse_bbox(bbox), level)
         box_key = "{}.{}.{}.{}".format(*tiles)
     user_info_id = int(current_user["sub"])
-    # The *level* is what costs; the box is a cheap pass over the result. So
-    # the level is what gets cached, and every box is served from it — see
-    # _LEVEL_CACHE_TTL_S for the measurements behind that split. `box_key` is
-    # no longer part of any cache key: it was what made a pan rebuild a level.
     gen = 0
     project = None
     with get_session() as sess:
@@ -845,9 +969,9 @@ def project_geo_simplified(
                 headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
             )
         gen_for_bytes = _geo_generation(owner_id, name)
-        level_key = (owner_id, name, level)
-        features = _level_cache_get(level_key)
-        if features is None:
+        track_key = (owner_id, name)
+        track = _track_cache_get(track_key)
+        if track is None:
             gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
             project = _repo.get_project(
                 sess, owner_id, name,
@@ -859,27 +983,31 @@ def project_geo_simplified(
                     status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     cache_state = "HIT"
-    if features is None:
+    if track is None:
         cache_state = "MISS"
-        features = simplify_geo_features(
-            _build_full_geo_features(project, encoded=False), level)
-        _level_cache_store(level_key, features, gen)
+        track = _prepare_track(_build_full_geo_features(project, encoded=False))
+        _track_cache_store(track_key, track, gen)
 
-    served = restrict_geo_features_to_bbox(features, box) if box else features
-    gz_bytes = _gzip_geo(served)
-    # Serialising is not free, and reusing a level does not avoid it: gzipping
-    # a large level measured ~0.5 s, which on a single-process server is still
-    # enough GIL-holding CPU to time out someone else's request. So the bytes
-    # are cached per (level, box) in front of the level.
+    features, fresh = _features_for(track, level, box)
+    if fresh:
+        # Honest: this request simplified something. A pan that brings no new
+        # line on screen reads HIT, one that does reads MISS.
+        cache_state = "MISS"
+        _track_cache_merge(track_key, track, fresh)
+    gz_bytes = _gzip_geo(features)
+    # Serialising is not free, and reusing a prepared trip does not avoid it:
+    # gzipping a large level measured ~0.5 s, which on a single-process server
+    # is still enough GIL-holding CPU to time out someone else's request. So
+    # the bytes are cached per (level, box) in front of it.
     #
-    # This is not the cache #325 had. A miss here falls through to the *level*,
-    # not to a rebuild, so a pan to a new box costs one restrict + one gzip
-    # rather than decoding every polyline in the trip again. Keeping the short
-    # TTL for the reason the original comment gave: there are many of these,
-    # they share a cache with /project, /low-res and /meta, and they are by far
-    # the cheapest thing in it to rebuild.
-    _geo_cache_store((owner_id, name, f"simplified-{level}-{box_key}"),
-                     gz_bytes, gen_for_bytes, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
+    # This is not the cache #325 had. A miss here falls through to the
+    # *prepared trip*, not to a rebuild, so a pan to a new box costs the lines
+    # it newly revealed plus one gzip, rather than decoding every polyline in
+    # the trip again. Keeping the short TTL for the reason the original comment
+    # gave: there are many of these, they share a cache with /project,
+    # /low-res and /meta, and they are by far the cheapest thing in it to
+    # rebuild.
+    _geo_cache_store(byte_key, gz_bytes, gen_for_bytes, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
     return Response(
         content=gz_bytes,
         media_type="application/json",

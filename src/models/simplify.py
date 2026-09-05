@@ -161,6 +161,40 @@ def _stride_to(poly: list, target: int) -> list:
     return out
 
 
+# The two bounds :func:`simplify_for_zoom` applies, named because a caller
+# that wants to prepare a line once and simplify it many times has to use the
+# same numbers or the results stop matching.
+MAX_INPUT_POINTS = 4000
+MIN_POINTS = 32
+
+
+def working_set(poly: list, *, max_input_points: int = MAX_INPUT_POINTS) -> list:
+    """The bounded set of points :func:`simplify_for_zoom` actually reads.
+
+    Zoom-independent, so a caller can compute it once and simplify from it at
+    every zoom: ``simplify_for_zoom(working_set(poly), z)`` is identical to
+    ``simplify_for_zoom(poly, z)`` for every ``z``, because the first thing
+    :func:`simplify_for_zoom` does is take this same set and
+    :func:`_stride_to` returns its argument unchanged when it is already
+    within the cap.
+
+    Exposed for issue #338: keeping this instead of the original is what makes
+    caching a decoded trip affordable — it is at most ``max_input_points``
+    points per line however long the track is.
+    """
+    return _stride_to(poly, max_input_points)
+
+
+def floor_line(poly: list, *, min_points: int = MIN_POINTS) -> list:
+    """*poly* reduced to the coarseness floor, keeping its shape and both ends.
+
+    What a line gets when the viewport cannot show it, and what
+    :func:`simplify_for_zoom` falls back to when the tolerance would collapse
+    a line below what the eye can read.
+    """
+    return _stride_to(poly, min(min_points, len(poly)))
+
+
 def _line_touches(poly: list, bbox: tuple) -> bool:
     """Whether *poly* is at all inside *bbox*, cheaply for the common answer.
 
@@ -179,7 +213,7 @@ def _line_touches(poly: list, bbox: tuple) -> bool:
     return bboxes_intersect(line_bbox(poly), bbox)
 
 
-def restrict_to_bbox(poly: list, bbox: tuple | None, *, min_points: int = 32) -> list:
+def restrict_to_bbox(poly: list, bbox: tuple | None, *, min_points: int = MIN_POINTS) -> list:
     """Reduce a line that cannot be seen in *bbox* to the ``min_points`` floor.
 
     The same reduction :func:`simplify_for_zoom` applies when given a box, but
@@ -199,15 +233,15 @@ def restrict_to_bbox(poly: list, bbox: tuple | None, *, min_points: int = 32) ->
     """
     if bbox is None or len(poly) <= min_points or _line_touches(poly, bbox):
         return poly
-    return _stride_to(poly, min_points)
+    return floor_line(poly, min_points=min_points)
 
 
 def simplify_for_zoom(
     poly: list,
     zoom: float,
     *,
-    min_points: int = 32,
-    max_input_points: int = 4000,
+    min_points: int = MIN_POINTS,
+    max_input_points: int = MAX_INPUT_POINTS,
     bbox: tuple | None = None,
 ) -> list:
     """Simplify *poly* for *zoom*, bounded in both cost and coarseness.
@@ -248,12 +282,12 @@ def simplify_for_zoom(
         # feature instead would have broken the segment-overlay reconciliation,
         # fit-to-bounds and the whole-trip elevation cursor, all of which read
         # `geo` as a description of the entire trip.
-        return _stride_to(poly, min(min_points, len(poly)))
-    working = _stride_to(poly, max_input_points)
+        return floor_line(poly, min_points=min_points)
+    working = working_set(poly, max_input_points=max_input_points)
     reduced = simplify_lonlat(working, zoom_tolerance_m(zoom, midpoint_latitude(working)))
     if len(reduced) >= min_points:
         return reduced
-    return _stride_to(working, min(min_points, len(working)))
+    return floor_line(working, min_points=min_points)
 
 
 def simplify_lonlat(poly: list, tolerance_m: float) -> list:
