@@ -604,7 +604,9 @@ def test_the_box_does_not_change_the_auth_boundary(env):
 from array import array
 
 from api.geo import (
+    _track_cache_bytes,
     _LIST_COORD_BYTES,
+    _TRACK_CACHE_MAX_BYTES,
     _TRACK_CACHE_MAX_ENTRY_BYTES,
     _TRACK_CACHE_MAX_SIMPLIFIED_BYTES,
     _evict_tracks,
@@ -785,6 +787,44 @@ def test_a_trip_within_the_entry_cap_is_stored():
     _track_cache.clear()
     _track_cache_store((1, "Ok"), _track(), 0)
     assert _track_cache_get((1, "Ok")) is not None
+
+
+def test_a_long_trip_is_still_cached_rather_than_rebuilt_every_request():
+    """The regression the entry cap used to cause.
+
+    ``base_bytes`` is a property of the *trip*, not of the level being asked
+    for — so unlike the level cache's per-level refusal, this one does not go
+    away at shallow zoom. A trip past the cap was uncacheable at EVERY zoom,
+    and every request then repeated the DB load and the polyline decode:
+    seconds of CPU-bound Python holding the GIL on a single-process uvicorn,
+    which is the mechanism behind real 502s on /meta and /low-res.
+
+    500 activities at the working-set cap is ~32 MB — a long trip at a few
+    activities a day, not a pathological one. It must be cached.
+    """
+    _track_cache.clear()
+    track = _track(n_lines=500, n_points=MAX_INPUT_POINTS)
+    assert track.base_bytes > 32 * 1024 * 1024, "fixture must clear the old cap"
+    _track_cache_store((1, "LongTrip"), track, 0)
+    assert _track_cache_get((1, "LongTrip")) is not None, (
+        "refusing to cache costs a rebuild on every request, forever; evicting "
+        "another trip costs one rebuild"
+    )
+
+
+def test_a_large_trip_evicts_others_rather_than_being_refused():
+    # The corollary: the only trip refused is one that could not be held even
+    # alone. A trip big enough to push the cache past its budget is stored, and
+    # the room comes from evicting older entries — one rebuild for them, rather
+    # than a rebuild on every request for it.
+    _track_cache.clear()
+    _track_cache_store((1, "Small"), _track(), 0)
+    big = _track(n_lines=700, n_points=MAX_INPUT_POINTS)
+    assert big.base_bytes > _TRACK_CACHE_MAX_BYTES // 2
+    _track_cache_store((2, "Big"), big, 0)
+    assert _track_cache_get((2, "Big")) is not None, 'stored, not refused'
+    assert _track_cache_bytes() <= _TRACK_CACHE_MAX_BYTES, 'budget still holds'
+
 
 
 def test_a_bust_drops_the_entry_rather_than_only_marking_it_stale():

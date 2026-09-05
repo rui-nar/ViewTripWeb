@@ -89,13 +89,35 @@ _ARRAY_COORD_BYTES = 16
 # inside budget. That is the same shape of bound the level cache had, and
 # slightly under its 400,000 x 128 = 51 MB.
 #
+# That is the bound on what is *cached*, and it is not the process's peak. A
+# whole-trip request at a deep level materialises every newly simplified line
+# into a list-of-lists before any cap applies — for the trip the perf doc
+# measures that is ~876,000 coordinates, about 112 MB live at once, and only
+# then is it memoised and trimmed. This is not new (the level cache built the
+# same level and then refused to store it, so the peak was identical) but it
+# is the number that matters on a container which has been OOM-killed at
+# ~779 MB against a 768 MB cap. The cached bound is 48 MB; the transient peak
+# is roughly twice what the largest single response contains.
+#
 # Adding --workers N multiplies it, as it does _GEO_CACHE_MAX_BYTES.
 _TRACK_CACHE_MAX_BYTES = 48 * 1024 * 1024
-# The working sets and floors of one trip. 32 MB is 2,000,000 coordinates,
-# i.e. 500 activities each at the 4,000-point working-set cap — the
-# 219-activity trip the perf doc measures needs 15 MB. A trip past this is not
-# cached, and logged rather than silently rebuilt forever.
-_TRACK_CACHE_MAX_ENTRY_BYTES = 32 * 1024 * 1024
+# The working sets and floors of one trip.
+#
+# Equal to the whole budget on purpose. This bound is *zoom-independent* — it
+# is a property of the trip, not of the level being asked for — so unlike the
+# level cache's per-level refusal it does not go away at shallow zoom. A trip
+# past it is not cached at ANY zoom, and every request then repeats the DB
+# load and the polyline decode: ~4 s of CPU-bound Python holding the GIL on a
+# single-process uvicorn, which is the mechanism that produced real 502s on
+# /meta and /low-res. At 32 MB that cliff arrived at ~490 activities, which is
+# a shape this project's own comments treat as real (a long trip at a few
+# activities a day).
+#
+# So the only trip refused is one that could not be held even alone. That
+# permits a single large trip to occupy the entire cache and evict every other
+# — which is the right trade: evicting a warm trip costs one rebuild, refusing
+# to cache costs a rebuild on every request, forever.
+_TRACK_CACHE_MAX_ENTRY_BYTES = _TRACK_CACHE_MAX_BYTES
 # The memoised simplification results of one trip, across every level and
 # line. Bounded separately because it is the part that grows *after* the entry
 # is stored, as a session visits levels.
@@ -515,7 +537,9 @@ def _track_cache_store(key: tuple, track: _PreparedTrack, gen: int) -> None:
             # Logged, not silent: this is the difference between "the cache is
             # working" and "every request on this trip rebuilds forever", and
             # it is invisible from the outside — X-Cache reads MISS either way.
-            _log.info(
+            # warning, not info: every request on this trip now repeats the
+            # decode, holding the GIL, for as long as it is being viewed.
+            _log.warning(
                 "geo track too large to cache: %.1f MB for %r (cap %.0f MB)",
                 track.base_bytes / 1e6, key[1], _TRACK_CACHE_MAX_ENTRY_BYTES / 1e6)
             _track_cache.pop(key, None)
