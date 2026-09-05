@@ -342,6 +342,105 @@ void main() {
     });
   });
 
+  // Issue #337. The track builder's input used to be flattened on the UI
+  // isolate, immediately before the compute() hop that consumes it — 22.6 ms
+  // on a real trip, the only span left over the frame budget. The decode
+  // worker is already holding those coordinates and already returns its
+  // result zero-copy, so it produces the buffers too and the UI isolate only
+  // looks them up.
+  group('flat track coordinate seeding', () {
+    List coordsOf(Map<String, dynamic> geo, int i) =>
+        (geo['features'] as List)[i]['geometry']['coordinates'] as List;
+
+    test('an unseeded geo pays a flatten per feature on first use', () {
+      // Baseline: without seeding the UI isolate does the work. If this ever
+      // reports 0 the assertions below have stopped proving anything.
+      final geo = decodeGeoBytes(jsonBytes(buildEncodedGeo(activities: 5, pointsPer: 10)));
+      flatCoordsConversionCount = 0;
+      for (var i = 0; i < 5; i++) {
+        memoFlatCoords(coordsOf(geo, i));
+      }
+      expect(flatCoordsConversionCount, 5);
+    });
+
+    test('decodeGeoOffIsolate leaves the flat coordinates warm — zero '
+        'UI-isolate flattening', () async {
+      final geo = await decodeGeoOffIsolate(bigGeoBytes);
+      flatCoordsConversionCount = 0;
+      var totalPairs = 0;
+      for (var i = 0; i < (geo['features'] as List).length; i++) {
+        totalPairs += memoFlatCoords(coordsOf(geo, i)).length ~/ 2;
+      }
+      expect(flatCoordsConversionCount, 0,
+          reason: 'the track builder must not re-flatten coordinates the '
+              'decode hop already flattened');
+      expect(totalPairs, 100 * 5000,
+          reason: 'the seeded buffers must be the real flattening, not empties');
+    });
+
+    test('seeded buffers are correct, not just present', () async {
+      final geo = await decodeGeoOffIsolate(
+          jsonBytes(buildEncodedGeo(activities: 1, pointsPer: 3)));
+      final coords = coordsOf(geo, 0);
+      final reference = flatCoords(coords);
+      flatCoordsConversionCount = 0;
+      expect(memoFlatCoords(coords), reference);
+      expect(flatCoordsConversionCount, 0,
+          reason: 'read from the seed, not recomputed — otherwise this only '
+              'tests flatCoords against itself');
+      // Interleaved lon, lat — GeoJSON order, not LatLng order.
+      expect(memoFlatCoords(coords)[0], closeTo(7.0, 1e-4));
+      expect(memoFlatCoords(coords)[1], closeTo(45.0, 1e-4));
+    });
+
+    test('the inline path below the threshold seeds too', () async {
+      final small = jsonBytes(buildEncodedGeo(activities: 1, pointsPer: 4));
+      expect(small.length, lessThan(kInlineDecodeThresholdBytes));
+      final geo = await decodeGeoOffIsolate(small);
+      flatCoordsConversionCount = 0;
+      memoFlatCoords(coordsOf(geo, 0));
+      expect(flatCoordsConversionCount, 0,
+          reason: 'both sides of the threshold must behave identically');
+    });
+
+    test('a feature the track is not built from gets no buffer', () async {
+      // Segments and id-less features are skipped by flattenGeoCoords, so
+      // flattening them on the worker would only retain memory nothing reads.
+      final geo = await decodeGeoOffIsolate(jsonBytes({
+        'type': 'FeatureCollection',
+        'features': [
+          {
+            'type': 'Feature',
+            'properties': {'type': 'segment', 'activity_id': 'seg'},
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [7.0, 45.0],
+                [7.1, 45.1]
+              ],
+            },
+          },
+          {
+            'type': 'Feature',
+            'properties': <String, dynamic>{},
+            'geometry': {
+              'type': 'LineString',
+              'coordinates': [
+                [7.0, 45.0],
+                [7.1, 45.1]
+              ],
+            },
+          },
+        ],
+      }));
+      flatCoordsConversionCount = 0;
+      memoFlatCoords(coordsOf(geo, 0));
+      memoFlatCoords(coordsOf(geo, 1));
+      expect(flatCoordsConversionCount, 2,
+          reason: 'neither should have been seeded');
+    });
+  });
+
   // Issue #299 follow-up. Geo served from the on-device cache used to be
   // decoded straight to a Map, producing fresh coordinate lists that none of
   // the identity-keyed geometry caches had seen — so a trip opened after an

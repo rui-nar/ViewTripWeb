@@ -1260,3 +1260,84 @@ this size it is a 1 MB `Float64List` memcpy.
 * **`_silentReload` still re-fetches the full details payload** after an
   activity CRUD, so `elevation_points` goes back to full resolution until the
   next load. Pre-existing, and unchanged by this.
+
+## Round 11 — the flatten that replaced the copy
+
+```
+geo_flatten  n=2  total=22.9ms  worst=22.6ms
+[perf] OVER BUDGET (>16.7ms on the UI isolate): geo_flatten
+```
+
+Round 8's lesson applied once more: `compute()` copies its *argument*, so
+issue #332's last fix stopped handing `_buildFullTrack`'s isolate the raw
+GeoJSON — one Dart list object per point — and handed it one `Float64List` per
+activity instead. That removed a ~150 MB transient copy and left the flatten
+itself on the UI isolate, where it became the only span over the frame budget.
+
+The trade was still favourable. It was also unnecessary: `geo` is *already*
+decoded on a worker (`decodeGeoOffIsolate`), which already derives the map's
+points, arc midpoints and decimated geometry there and seeds them back into
+the identity-keyed caches in `map_geometry_memo.dart`. A `compute()` return
+value is not copied — `Isolate.exit` reassigns the object graph — so anything
+that worker produces arrives free. The flatten is now produced there too and
+seeded the same way; `flattenGeoCoords` on the UI isolate became O(features)
+cache lookups instead of O(points) of arithmetic.
+
+Measured in the test container (desktop-class, so roughly half the device's
+times — the device read 113 ms where this reads 54 in Round 10):
+
+| coordinates | flatten, cold | flatten, seeded |
+|---|---|---|
+| 7,000 | 0.72 ms | 0.04 ms |
+| 100,000 | 9.5 ms | 0.07 ms |
+| 1,465,110 | 117 ms | 0.07 ms |
+
+The seeded column is flat because it no longer depends on the number of
+points at all — 219 map lookups, whatever is behind them.
+
+### Where the skips live now
+
+`flattenGeoCoords` skipped non-Map features, segments, features with no
+`activity_id`, and empty coordinate lists. The worker has to skip *exactly*
+the same ones: one it wrongly skips costs a cache miss, one it wrongly
+flattens retains a buffer nothing ever reads. So the predicate moved into
+`trackFeatureCoords`, called by both, returning the coords list as well as the
+id so neither side re-derives it.
+
+A miss is a fallback, not a failure: geometry that never went through that
+worker — client-built E2EE geo, a locally patched feature — flattens on demand
+exactly as before. Slower, never empty.
+
+### `kInlineFullTrackThreshold` re-checked, and left alone
+
+The worry on #337 was that viewport scoping has brought a typical `geo` to
+~7,000 coordinates, just over the 5,000 threshold, so the hop is taken for a
+payload it may no longer pay for. Measured on a seeded geo, per branch, in the
+container:
+
+| coordinates | inline branch, UI stall | isolate branch, UI stall | hop, wall clock |
+|---|---|---|---|
+| 5,000 | 4.78 ms | 0.065 ms | 6.6 ms |
+| 7,000 | 5.69 ms | 0.014 ms | 7.1 ms |
+| 10,000 | 7.98 ms | 0.012 ms | 9.9 ms |
+| 20,000 | 19.01 ms | 0.010 ms | 28.4 ms |
+
+The hypothesis is false, and it is this change that falsifies it. The hop's
+wall clock is longer than the inline build at every size — it always was — but
+almost none of it lands on the UI isolate any more: what used to make the hop
+expensive *there* was the flatten in front of it, and that is now ~0.01 ms.
+Doubling the threshold to keep ~7,000-point trips inline would move ~5.7 ms
+here (~11 ms on the device) back onto the UI isolate to save an isolate spawn.
+
+So 5,000 stays. It is not a tuned number and does not need to be: above it the
+isolate branch is nearly free on the UI isolate, and below it the inline build
+is a few milliseconds and an isolate spawn is not worth its latency.
+
+### What this costs
+
+The seeded buffers are retained for as long as their coordinate lists are —
+they hang off the same `Expando`s as the points and the decimated geometry, so
+they are collected with the feature. That is 16 bytes per point on top of a
+GeoJSON point that already costs ~100, so ~15% more geometry memory, and it
+was previously paid transiently (twice, since the hop copied it) on every
+build rather than once per decode.

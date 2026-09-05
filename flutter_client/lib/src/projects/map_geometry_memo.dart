@@ -6,6 +6,10 @@
 /// *every* rebuild, which dominated build-thread cost and produced load-time
 /// map jank.
 ///
+/// It also holds the trip's other per-feature geometry derivations — the arc
+/// midpoint, the decimated render geometry, and the flattened track
+/// coordinates — all keyed the same way and all producible on a worker.
+///
 /// This memoizes that work keyed by the **identity** of the raw coordinates
 /// list. Only changed features get a new coords list, so unchanged features
 /// hit the cache — "rebuild only changed features" with no signature or
@@ -13,7 +17,8 @@
 /// GC'd (Expando). Selection- and style-dependent bits (colour, dimming) are
 /// cheap and stay recomputed.
 ///
-/// Returned point lists are shared — callers must treat them as read-only.
+/// Returned point lists and coordinate buffers are shared — callers must
+/// treat them as read-only.
 ///
 /// Lives in its own file rather than inside `map_panel.dart` so
 /// `heavy_decode.dart` can seed it without a UI-layer import. Measured on a
@@ -24,6 +29,7 @@
 library;
 
 import 'dart:math' show sqrt;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:latlong2/latlong.dart';
@@ -165,3 +171,75 @@ LatLng? arcMidpoint(List coords) {
   return LatLng((last[1] as num).toDouble(), (last[0] as num).toDouble());
 }
 
+// ── Flat track coordinates ──────────────────────────────────────────────────
+
+final Expando<Float64List> _flatCoordsCache = Expando('flatCoords');
+
+/// How many flattenings [memoFlatCoords] has actually performed (cache
+/// misses). Mirrors [coordsConversionCount], and exists for the same reason:
+/// so a test can assert a pre-seeded cache does *zero* work.
+@visibleForTesting
+int flatCoordsConversionCount = 0;
+
+/// The activity id and raw coordinate list [feature] contributes to the trip's
+/// distance-indexed track, or null if it contributes nothing.
+///
+/// The single definition of which features that track is built from — non-Map
+/// entries, segments, features carrying no `activity_id` and features with no
+/// coordinates all contribute nothing. Shared so that the worker deciding
+/// what to flatten and the UI isolate deciding what to look up cannot drift
+/// apart: a worker that skipped a feature the builder wants would only cost a
+/// cache miss, but a worker that flattened one the builder ignores would
+/// retain a buffer nothing ever reads. Returning the coords list as well as
+/// the id means both sides key on the same object rather than re-deriving it.
+({String activityId, List coords})? trackFeatureCoords(Object? feature) {
+  if (feature is! Map) return null;
+  final props = feature['properties'] as Map? ?? {};
+  if (props['type'] == 'segment') return null;
+  final actId = props['activity_id']?.toString();
+  if (actId == null) return null;
+  final coords = (feature['geometry'] as Map? ?? {})['coordinates'];
+  if (coords is! List || coords.isEmpty) return null;
+  return (activityId: actId, coords: coords);
+}
+
+/// [flatCoords] for [coords], memoized on the coords list's identity.
+///
+/// The miss path is what issue #337 is about: it is O(points) on whichever
+/// isolate calls it, and on the UI isolate a real trip measured 22.6 ms of it
+/// — the only span left over the frame budget. `heavy_decode.dart` produces
+/// this on the decode worker and [seedFlatCoords]s it, so the UI isolate hits
+/// the cache instead. A miss is still correct, just slower: geometry that
+/// never went through that decode (client-built E2EE geo, a locally patched
+/// feature) flattens here on demand.
+Float64List memoFlatCoords(List coords) {
+  final cached = _flatCoordsCache[coords];
+  if (cached != null) return cached;
+  flatCoordsConversionCount++;
+  final flat = flatCoords(coords);
+  _flatCoordsCache[coords] = flat;
+  return flat;
+}
+
+/// GeoJSON [coords] interleaved into one `[lon, lat, lon, lat, …]` buffer.
+///
+/// Typed data crosses an isolate boundary as a buffer rather than object by
+/// object, which is why the track builder takes this shape — see
+/// `FlatGeoCoords` in project_notifier.dart. Pure, so it can run on a worker.
+/// Entries that are not a pair are skipped rather than thrown on, exactly as
+/// [coordsToLatLng] skips them.
+Float64List flatCoords(List coords) {
+  final buf = Float64List(coords.length * 2);
+  var n = 0;
+  for (final c in coords) {
+    if (c is! List || c.length < 2) continue;
+    buf[n++] = (c[0] as num).toDouble();
+    buf[n++] = (c[1] as num).toDouble();
+  }
+  return n == buf.length ? buf : buf.sublist(0, n);
+}
+
+/// Records [flat] as the flattening of [coords]. See [seedCoordsLatLng].
+void seedFlatCoords(List coords, Float64List flat) {
+  _flatCoordsCache[coords] = flat;
+}
