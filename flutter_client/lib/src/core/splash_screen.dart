@@ -200,7 +200,10 @@ class _StackedLayout extends StatelessWidget {
               // report a bug against (#275). The server version usually lands
               // while the splash is still up — the fetch starts in the same
               // frame — but reads "unknown" if it never does.
-              VersionText(style: _footerStyle(), textAlign: TextAlign.center),
+              VersionText(
+                  style: _footerStyle(),
+                  textAlign: TextAlign.center,
+                  omitUnknownServer: true),
             ],
           ),
         ),
@@ -254,7 +257,8 @@ class _WideLayout extends StatelessWidget {
         Positioned(
           left: 40,
           bottom: 32,
-          child: VersionText(style: _footerStyle(size: 12)),
+          child: VersionText(
+              style: _footerStyle(size: 12), omitUnknownServer: true),
         ),
         Positioned(
           right: 40,

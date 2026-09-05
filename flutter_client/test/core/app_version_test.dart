@@ -164,6 +164,33 @@ void main() {
       expect(serverVersion.value, isNull);
     });
   });
+  group('the splash omits an unknown server version', () {
+    test('the clause is dropped, not filled with a placeholder', () {
+      expect(versionLabel('v1.0.0', null, omitUnknownServer: true), 'app v1.0.0');
+      expect(versionLabel('v1.0.0', '', omitUnknownServer: true), 'app v1.0.0');
+    });
+
+    test('once known it reads exactly as everywhere else', () {
+      expect(versionLabel('v1.0.0', 'v1.0.1', omitUnknownServer: true),
+          versionLabel('v1.0.0', 'v1.0.1'));
+    });
+
+    test('every other surface still says unknown', () {
+      expect(versionLabel('v1.0.0', null), 'app v1.0.0 · server unknown');
+    });
+
+    testWidgets('VersionText drops the clause, then shows it on arrival',
+        (tester) async {
+      serverVersion.value = null;
+      await tester.pumpWidget(const MaterialApp(
+          home: Scaffold(body: VersionText(omitUnknownServer: true))));
+      expect(find.textContaining('server'), findsNothing);
+      serverVersion.value = 'v9.9.9';
+      await tester.pump();
+      expect(find.textContaining('server v9.9.9'), findsOneWidget);
+      serverVersion.value = null;
+    });
+  });
 }
 
 /// A stand-in for a dead network: MockClient only needs the call to throw.

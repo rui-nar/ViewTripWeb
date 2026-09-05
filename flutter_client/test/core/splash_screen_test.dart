@@ -130,11 +130,17 @@ void main() {
       expect(wide.width, greaterThan(stacked.width));
     });
 
-    testWidgets('names both versions, the app half being the "dev" default',
+    testWidgets('names the app version alone until the server one is known',
         (tester) async {
       await _pumpSplash(tester, const Size(390, 844));
 
-      expect(find.text('app dev · server unknown'), findsOneWidget);
+      // The splash omits the clause rather than saying `server unknown`: it
+      // shows for a few hundred milliseconds, long enough for /api/version to
+      // land mid-display, so stating the absence would visibly flip while the
+      // user watches. Every other surface is a diagnostic readout and does say
+      // `unknown` — see app_version_test.dart.
+      expect(find.text('app dev'), findsOneWidget);
+      expect(find.textContaining('server'), findsNothing);
     });
 
     // The splash is up before any request can have come back, and stays up on
@@ -144,7 +150,7 @@ void main() {
         (tester) async {
       addTearDown(() => serverVersion.value = null);
       await _pumpSplash(tester, const Size(390, 844));
-      expect(find.text('app dev · server unknown'), findsOneWidget);
+      expect(find.text('app dev'), findsOneWidget);
 
       serverVersion.value = 'v9.9.9';
       await tester.pump();
@@ -181,7 +187,7 @@ void main() {
       for (final label in [
         find.text('TraxJourney'),
         find.text('MERGE · VISUALISE · EXPORT'),
-        find.text('app dev · server unknown'),
+        find.text('app dev'),
       ]) {
         expect(_paintedStyle(tester, label).decoration, TextDecoration.none,
             reason: '${(label.evaluate().single.widget as Text).data} '
