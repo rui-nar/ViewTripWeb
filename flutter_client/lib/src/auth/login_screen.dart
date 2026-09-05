@@ -14,6 +14,7 @@ import 'package:provider/provider.dart';
 import 'google_button_stub.dart'
     if (dart.library.html) 'google_button_web.dart';
 
+import '../core/app_version.dart';
 import '../core/platform.dart';
 import '../core/return_to.dart';
 import '../core/server_config.dart';
@@ -300,8 +301,8 @@ class _LoginScreenState extends State<LoginScreen> {
                         const SelfHostingLink(),
                       ],
                       const SizedBox(height: 24),
-                      Text(
-                        '© ${DateTime.now().year} ViewTrip · ${const String.fromEnvironment('APP_VERSION', defaultValue: 'dev')}',
+                      VersionText(
+                        prefix: '© ${DateTime.now().year} ViewTrip · ',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),

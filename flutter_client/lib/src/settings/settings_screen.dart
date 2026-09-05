@@ -10,6 +10,7 @@ import 'package:vector_map_tiles/vector_map_tiles.dart' show VectorTileLayerMode
 import '../auth/auth_notifier.dart';
 import '../auth/auth_service.dart';
 import '../billing/billing_section.dart';
+import '../core/app_version.dart';
 import '../core/perf_timing.dart' show perfSpans;
 import '../projects/basemaps.dart' show kMapTileModePref, mapTileModeNotifier;
 import '../core/version_reload_stub.dart'
@@ -1110,8 +1111,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       Text('ViewTripWeb',
                           style: theme.textTheme.titleMedium),
                       const SizedBox(height: 4),
-                      const Text(
-                        String.fromEnvironment('APP_VERSION', defaultValue: 'dev'),
+                      // Both halves, named: this is the line a user is asked
+                      // to read out in a bug report (#275).
+                      const VersionText(
                         style: TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 12,

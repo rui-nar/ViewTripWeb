@@ -13,6 +13,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../api/client.dart';
+import 'app_version.dart';
 import 'version_reload_stub.dart'
     if (dart.library.html) 'version_reload_web.dart';
 
@@ -36,22 +37,21 @@ class VersionGate extends StatefulWidget {
 }
 
 class _VersionGateState extends State<VersionGate> with WidgetsBindingObserver {
-  static const _clientVersion =
-      String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
-
   bool _stale = false;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    // Only relevant on web — native apps update through their store, and the
-    // page-reload action is a no-op there.
+    // The check runs everywhere, because its result also feeds [serverVersion],
+    // which every version label in the app reads (issue #275). Re-checking on
+    // resume is what lets a client that started offline fill that in later.
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _check());
+    // Periodic re-check so a long-lived tab notices a deploy without a manual
+    // reload; cheap (one tiny GET). Web only — a native app is not serving
+    // itself a cached bundle, so there is nothing for it to notice mid-session.
     if (kIsWeb) {
-      WidgetsBinding.instance.addObserver(this);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _check());
-      // Periodic re-check so a long-lived tab notices a deploy without a manual
-      // reload; cheap (one tiny GET).
       _timer = Timer.periodic(const Duration(minutes: 15), (_) => _check());
     }
   }
@@ -65,8 +65,12 @@ class _VersionGateState extends State<VersionGate> with WidgetsBindingObserver {
     if (_stale || !mounted) return;
     try {
       final data = await api.get('/api/version') as Map<String, dynamic>;
-      final serverVersion = (data['version'] as String?) ?? '';
-      if (mounted && isClientStale(_clientVersion, serverVersion)) {
+      final version = (data['version'] as String?) ?? '';
+      if (!mounted) return;
+      if (version.isNotEmpty) serverVersion.value = version;
+      // The stale-bundle prompt stays web-only: a native app updates through
+      // its store, is expected to lag the server, and cannot reload itself.
+      if (kIsWeb && isClientStale(kClientVersion, version)) {
         setState(() => _stale = true);
       }
     } catch (_) {
@@ -77,7 +81,7 @@ class _VersionGateState extends State<VersionGate> with WidgetsBindingObserver {
   @override
   void dispose() {
     _timer?.cancel();
-    if (kIsWeb) WidgetsBinding.instance.removeObserver(this);
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
