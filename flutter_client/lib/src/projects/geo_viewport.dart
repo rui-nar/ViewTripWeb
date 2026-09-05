@@ -70,7 +70,18 @@ GeoBox? viewportBox(double west, double south, double east, double north) {
   }
   if (west >= east || south >= north) return null;
   if (west < -180 || east > 180 || south < -90 || north > 90) return null;
-  return GeoBox(west, south, east, north);
+  // Clamped to what Web Mercator can represent, before anything compares
+  // against it. A camera zoomed far out reports latitudes past 85.05, and no
+  // tile-aligned box can ever cover those — so an unclamped viewport is one
+  // [fetchBoxFor] cannot satisfy, and `_geoIsStaleForCamera` would then stay
+  // true forever (issue #332). Clamping here means every GeoBox that reaches
+  // the refetch trigger is one a box can actually contain.
+  final s = south.clamp(-_kMaxMercatorLat, _kMaxMercatorLat);
+  final n = north.clamp(-_kMaxMercatorLat, _kMaxMercatorLat);
+  // Both ends past the limit collapse to the same latitude. Degenerate is not
+  // a box; null means "ask for the whole trip", the pre-scoping behaviour.
+  if (s >= n) return null;
+  return GeoBox(west, s, east, n);
 }
 
 double _lonToTileX(double lon, int n) => (lon + 180.0) / 360.0 * n;
@@ -106,6 +117,18 @@ double _tileYToLat(int y, int n) {
 ///
 /// Snapping is outward, never inward: the answer must be a superset of what is
 /// on screen or the map draws a gap at the edge.
+///
+/// **Postcondition: `fetchBoxFor(v, level).contains(v)` for every `v`.** That
+/// is not a nicety — it is the entire contract with [GeoBox.contains], which
+/// `ProjectNotifier._geoIsStaleForCamera` uses as its refetch trigger. It did
+/// not hold, and nothing tested it: the padded latitudes are clamped to +/-90
+/// while [_latToTileY] clamps to the Mercator limit of +/-85.05, so a viewport
+/// reaching past 85 got back a box stopping at 85.05 — a box that could not
+/// contain the viewport it was built from. The camera was then permanently
+/// stale, every camera event scheduled another refetch, and each refetch
+/// copied the trip's geometry into an isolate: 2.6 GB of Dart heap and an ANR
+/// on device (issue #332). See the pole handling below and the property test
+/// in geo_viewport_test.dart.
 GeoBox fetchBoxFor(GeoBox viewport, int level, {double padFraction = 0.25}) {
   final n = 1 << level.clamp(0, 22);
   final padX = (viewport.east - viewport.west) * padFraction;
@@ -130,6 +153,17 @@ GeoBox fetchBoxFor(GeoBox viewport, int level, {double padFraction = 0.25}) {
     y1 = math.min(n, y0 + 1);
     y0 = y1 - 1;
   }
-  return GeoBox(_tileXToLon(x0, n), _tileYToLat(y1, n), _tileXToLon(x1, n),
-      _tileYToLat(y0, n));
+  // Widened to cover the viewport unconditionally. Snapping outward should
+  // already guarantee this, and the property test asserts it — but the
+  // postcondition is what the refetch loop's termination depends on, so it is
+  // enforced here rather than argued for. A float edge at a tile boundary, or
+  // a later change to the projection helpers, then costs a slightly larger box
+  // instead of an app that cannot stop fetching. The server re-snaps whatever
+  // it receives, so its cache keys stay bounded either way.
+  return GeoBox(
+    math.min(_tileXToLon(x0, n), viewport.west),
+    math.min(_tileYToLat(y1, n), viewport.south),
+    math.max(_tileXToLon(x1, n), viewport.east),
+    math.max(_tileYToLat(y0, n), viewport.north),
+  );
 }

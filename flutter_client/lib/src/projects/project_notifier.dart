@@ -1192,6 +1192,12 @@ class ProjectNotifier extends ChangeNotifier
     // Measured on device: a 2.6 GB Dart heap and an ANR.
     if (_refetchInFlight) return;
     _refetchInFlight = true;
+    // Always counted. The perf report is written at load time and read from
+    // Settings, so an app stuck in a refetch loop never reaches it — but the
+    // count is what makes the loop obvious the moment a report *is* produced,
+    // and "how many times did we go back to the server" was the one line that
+    // would have diagnosed #332 immediately.
+    perfSpans.note('geo_refetches', '${++_geoRefetchCount}');
     try {
       await _refetchGeoForZoomInner(r);
     } finally {
@@ -1200,6 +1206,7 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   bool _refetchInFlight = false;
+  int _geoRefetchCount = 0;
 
   Future<void> _refetchGeoForZoomInner(ProjectRef r) async {
     final bucket = _bucketOf(_mapZoom);
@@ -1208,16 +1215,8 @@ class ProjectNotifier extends ChangeNotifier
     // and stamping a box that was never requested would leave the geometry
     // permanently mismatched to what is on screen. Null when the camera has
     // no usable box — the whole trip is then fetched, as before.
-    // Viewport scoping is OFF (issue #332). It shipped with a staleness
-    // predicate that could not be satisfied: `_geoIsStaleForCamera` asks
-    // whether the fetched box contains the camera, `fetchBoxFor` builds that
-    // box by clamping latitude to +/-90, and `_latToTileY` clamps to the
-    // Mercator limit of +/-85.05 — so a viewport reaching past 85 got a box
-    // that could never contain it, every camera event scheduled another
-    // refetch, and each refetch copied the whole trip's geometry into an
-    // isolate. Sending no box makes `_loadedGeoBox` stay null, which is the
-    // "whole trip, nothing the camera does invalidates it" branch.
-    const GeoBox? box = null;
+    final viewport = _mapViewport;
+    final box = viewport == null ? null : fetchBoxFor(viewport, bucket);
     final token = _loadTrack.token;
     try {
       final next = await _service.getSimplifiedGeo(r, _mapZoom, bbox: box);
@@ -1243,6 +1242,21 @@ class ProjectNotifier extends ChangeNotifier
       };
       _loadedZoomBucket = bucket;
       _loadedGeoBox = box;
+      // Self-healing, and the reason this cannot loop again.
+      //
+      // A refetch exists to make `_geoIsStaleForCamera` false. If it is still
+      // true right after a *successful* one, the predicate is not satisfiable
+      // by the action taken to satisfy it — which is precisely the bug that
+      // took the app to a 2.6 GB heap and an ANR (issue #332): every camera
+      // event scheduled another refetch, forever. fetchBoxFor now guarantees
+      // its box contains its viewport, so this should be unreachable; if it
+      // ever is reachable again, dropping the box disarms the box branch for
+      // the rest of the session and the map falls back to whole-trip
+      // geometry — slightly coarser, never wedged.
+      if (_geoIsStaleForCamera()) {
+        _loadedGeoBox = null;
+        perfSpans.note('geo_box_unsatisfiable', 'yes');
+      }
       await _buildFullTrack();
       if (!_isCurrent(token, r)) return;
       notifyListeners();

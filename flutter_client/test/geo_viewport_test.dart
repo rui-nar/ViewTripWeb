@@ -115,4 +115,64 @@ void main() {
           const GeoBox(7.5, 45.25, 8.5, 46.75).param);
     });
   });
+
+  group('the postcondition the refetch loop depends on', () {
+    // Latitudes chosen around the failure: inside the Mercator range, exactly
+    // at it, and beyond it where no tile-aligned box can reach.
+    const lats = <double>[
+      0.0, 45.0, -45.0, 60.0, 84.0, 85.0, 85.05112878, 85.06, 88.0, 89.9,
+      -84.0, -85.05112878, -89.9,
+    ];
+    const lons = <double>[-180.0, -179.9, -7.0, 0.0, 7.0, 179.9, 180.0];
+
+    test('a fetched box contains its own viewport, at every zoom', () {
+      for (var level = 0; level <= 22; level++) {
+        for (var i = 0; i + 1 < lats.length; i++) {
+          for (var j = 0; j + 1 < lons.length; j++) {
+            final v = viewportBox(lons[j], lats[i], lons[j + 1], lats[i + 1]);
+            if (v == null) continue; // degenerate or unrepresentable: no box
+            final box = fetchBoxFor(v, level);
+            expect(box.contains(v), isTrue,
+                reason: 'level $level, viewport $v produced $box — a box that '
+                    'cannot contain its viewport makes the camera '
+                    'permanently stale');
+          }
+        }
+      }
+    });
+
+    test('a viewport thinner than a tile still gets a containing box', () {
+      for (var level = 0; level <= 22; level++) {
+        final v = viewportBox(7.0, 45.0, 7.0000001, 45.0000001);
+        if (v == null) continue;
+        expect(fetchBoxFor(v, level).contains(v), isTrue, reason: 'level $level');
+      }
+    });
+
+    test('a camera past the Mercator limit is clamped, not rejected outright',
+        () {
+      // 88N is off the tile grid. The viewport must come back usable and
+      // inside the range, so the box built from it can contain it.
+      final v = viewportBox(-10.0, 80.0, 10.0, 88.0);
+      expect(v, isNotNull);
+      expect(v!.north, lessThanOrEqualTo(85.05112878));
+      expect(fetchBoxFor(v, 6).contains(v), isTrue);
+    });
+
+    test('a viewport entirely beyond the limit degrades to no box', () {
+      // Both ends clamp to the same latitude, which is not a box. Null means
+      // "ask for the whole trip" — the behaviour before scoping existed.
+      expect(viewportBox(-10.0, 86.0, 10.0, 89.0), isNull);
+    });
+
+    test('the box still snaps outward, so it is never a subset', () {
+      final v = viewportBox(7.1, 45.1, 7.2, 45.2)!;
+      final box = fetchBoxFor(v, 10);
+      expect(box.west, lessThanOrEqualTo(v.west));
+      expect(box.south, lessThanOrEqualTo(v.south));
+      expect(box.east, greaterThanOrEqualTo(v.east));
+      expect(box.north, greaterThanOrEqualTo(v.north));
+    });
+  });
+
 }

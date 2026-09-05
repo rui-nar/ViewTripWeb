@@ -300,19 +300,12 @@ void main() {
       expect(calls.boxes, [null]);
     });
 
-    test('a zoom change sends no box, because scoping is off', () async {
-      // Issue #332. Viewport scoping shipped with a staleness predicate that
-      // could not be satisfied: _geoIsStaleForCamera asks whether the fetched
-      // box contains the camera, fetchBoxFor clamps latitude to +/-90, and
-      // _latToTileY clamps to the Mercator limit of +/-85.05 — so a viewport
-      // reaching past 85 got a box that could never contain it. Every camera
-      // event then scheduled another refetch, and each refetch copied the
-      // whole trip's geometry into a compute() isolate. Measured on device:
-      // a 2.6 GB Dart heap and an ANR.
-      //
-      // Until fetchBoxFor is guaranteed to return a box containing its own
-      // viewport, no box is sent at all — which keeps _loadedGeoBox null, the
-      // "whole trip, nothing the camera does invalidates it" branch.
+    test('a zoom change carries a box that contains the camera', () async {
+      // Issue #332. Scoping is back on, and the property that makes it safe is
+      // that the box contains the viewport it was built from — see the
+      // postcondition tests in geo_viewport_test.dart. Without it,
+      // _geoIsStaleForCamera stays true after a successful refetch and every
+      // camera event schedules another one: 2.6 GB of Dart heap and an ANR.
       final calls = _Calls();
       api = _api(calls);
       final n = ProjectNotifier(ProjectService())
@@ -323,10 +316,36 @@ void main() {
       expect(await _waitFor(() => _points(n) == 9), isTrue);
 
       n.setMapZoom(15, viewport: _vp);
-      expect(await _waitFor(() => _points(n) == 15), isTrue,
-          reason: 'zoom LOD itself still works');
-      expect(calls.boxes.where((b) => b != null), isEmpty,
-          reason: 'a box is what made the refetch unable to satisfy itself');
+      expect(await _waitFor(() => _points(n) == 15), isTrue);
+      final sent = calls.boxes.where((b) => b != null).toList();
+      expect(sent, isNotEmpty, reason: 'the refetch must scope to the camera');
+      expect(fetchBoxFor(_vp, 15).contains(_vp), isTrue,
+          reason: 'the box sent is one the camera fits inside');
+    });
+
+    test('a settled camera stops refetching once its box is loaded', () async {
+      // The runaway, from the outside: after a successful scoped refetch the
+      // camera is no longer stale, so further camera events at the same place
+      // must not go back to the server.
+      final calls = _Calls();
+      api = _api(calls);
+      final n = ProjectNotifier(ProjectService())
+        ..setMapZoom(9, viewport: _vp)
+        ..zoomRefetchDebounce = const Duration(milliseconds: 10);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 9), isTrue);
+      n.setMapZoom(15, viewport: _vp);
+      expect(await _waitFor(() => _points(n) == 15), isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final settled = calls.zooms.length;
+
+      for (var i = 0; i < 25; i++) {
+        n.setMapZoom(15, viewport: _vp);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(calls.zooms, hasLength(settled),
+          reason: 'a refetch that satisfied the camera must not repeat');
     });
 
     test('a camera that never leaves its level refetches once, not forever',
