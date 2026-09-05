@@ -1260,3 +1260,116 @@ this size it is a 1 MB `Float64List` memcpy.
 * **`_silentReload` still re-fetches the full details payload** after an
   activity CRUD, so `elevation_points` goes back to full resolution until the
   next load. Pre-existing, and unchanged by this.
+
+## Round 11 — the unit of caching was the level, and it should have been the line
+
+```
+fetch_geo_lod  n=6  total=37636.4ms  worst=8577.6ms   (geo_lod 233 KB)
+geo_refetches  6
+```
+
+Six distinct zoom levels in one session, each a cold whole-trip build at 6 to
+8.5 s, for a payload of 233 KB. The client half was healthy — `geo_refetches`
+matches `fetch_geo_lod` exactly, so the box contract from #334 held and there
+was no refetch loop. All of it was server build cost.
+
+### The trade that produced it
+
+* **#325** put the viewport box in the cache key. Each build was **cheap** — it
+  skipped the Ramer-Douglas-Peucker pass for every line the box could not show
+  — but no build was reusable, so every pan to a new tile range paid a fresh
+  one, decode included.
+* **#331** took the box out of the key. One level then served every viewport,
+  and a pan cost 0.056 s instead of a rebuild. But a box-free build cannot skip
+  anything, so every cold level ran RDP over the whole trip.
+
+Panning got much better; zooming got worse; the measured session was
+zoom-heavy. Both rounds cached the same wrong thing: a *level*.
+
+### The line is the right unit
+
+A **line** simplified to a level is box-independent, so it is shareable the way
+a level is. And which lines are worth simplifying is exactly what the box
+decides, so a build is cheap the way a per-box one was. Both properties at
+once, from the same object.
+
+`api/geo.py` now caches a **prepared trip** per project instead of a level per
+zoom. Per line it holds:
+
+* the **working set** — the line already strided to `max_input_points`, which
+  is all `simplify_for_zoom` ever reads, so simplifying from it is *identical*
+  to simplifying from the original at every zoom. Held as a flat `array("d")`:
+  16 bytes per coordinate against the 128 a `[lon, lat]` list costs, which is
+  15 MB rather than 112 MB for the 219-activity trip;
+* its **bounding box**, so "can this box show it" is O(1) rather than a walk
+  over every coordinate;
+* its **floor**, the reduction an off-screen line is served at.
+
+Simplification results are memoised per `(level, line)`. A level therefore
+fills in incrementally as boxes bring lines on screen, and the decode — the
+fixed 1.83 s floor paid before anything is simplified — happens once per trip
+rather than once per level.
+
+`_LEVEL_CACHE_MAX_ENTRY_COORDS` is gone with the level cache. It existed
+because a whole-trip level at deep zoom approaches
+`len(activities) * max_input_points`; at 219 × 4,000 = 876,000 coordinates the
+trip this document measures exceeded the 250,000 cap and so was **never cached
+at all** at deep zoom. Nothing holds a whole trip at deep zoom now.
+
+### Measured
+
+Synthetic 219-activity trip at 6,700 points each, viewport tracking the zoom,
+same machine, back to back. Every request is a distinct viewport or level; the
+byte cache is never the thing being measured.
+
+| scenario | before (#331) | after | |
+|---|---|---|---|
+| six distinct levels, one session | 22,736 ms | **2,209 ms** | 10.3× |
+| six boxes at one level, off the trip | 3,310 ms | **2,015 ms** | 1.6× |
+| six boxes along the trip, each revealing new activities | 3,330 ms | **1,884 ms** | 1.8× |
+| three levels with the whole trip on screen | 6,644 ms | **4,040 ms** | 1.6× |
+| three levels, no box at all (older client) | 7,880 ms | **5,511 ms** | 1.4× |
+| cache held after the zoom sweep | 16.6 MB | 15.5 MB | |
+
+Per request, the second and later levels of a sweep fall from 3.1–4.3 s to
+**36–63 ms**. The pan-along-the-trip case is the adversarial one — every step
+brings new activities on screen, so every step does real work — and it costs
+34–46 ms, indistinguishable from the pan that reveals nothing.
+
+**What got worse.** The first, cold request now also packs the working sets and
+precomputes the bounding boxes and floors: 135 ms of new work for this trip
+(104 ms packing, 31 ms width checking), against ~55 ms of `line_bbox` walking
+it removes. With the whole trip on screen — where the box saves nothing and the
+extra preparation is pure cost — the cold build measured 2,000 ms before and
+2,258 ms after, about 13% worse. With a box that scopes anything, the cold
+build is *faster* (3,363 → 1,999 ms at zoom 9), because the box now skips RDP
+on a cold build too, which #331 could not.
+
+### Memory
+
+Bounded in bytes rather than coordinates, since the cache now mixes typed
+arrays with Python lists:
+
+* 48 MB across the whole cache, checked after every store and every memoise;
+* 32 MB of working sets and floors for one trip — 2,000,000 coordinates, i.e.
+  500 activities at the 4,000-point cap. A trip past that is not cached, and
+  logged rather than silently rebuilt forever;
+* 16 MB of memoised results per trip, bounded separately because that is the
+  part that grows *after* the entry is stored, as a session visits levels.
+
+The lone-entry escape means one entry may reach 32 + 16 = 48 MB, so the steady
+ceiling is 48 MB either way, and ~96 MB for the instant of a store, since the
+new entry is inserted before eviction brings the total back inside budget.
+Against the level cache's 400,000 × 128 = 51 MB steady and ~103 MB transient.
+Per process; `--workers N` multiplies it.
+
+### What this does not fix
+
+* The **first** request on a trip still decodes it. That cost is now paid once
+  per trip rather than once per level, but it is still on the request path, on
+  a single-process uvicorn where it holds the GIL. Precomputing in the worker
+  role (#173) is still the only thing that removes it.
+* `restrict_to_bbox` and `simplify_for_zoom`'s `bbox` argument are no longer on
+  the request path — the box is applied by choosing which lines to simplify,
+  not by reducing an already-simplified level. They are kept as the library
+  statement of what flooring means, and their tests still pin it.

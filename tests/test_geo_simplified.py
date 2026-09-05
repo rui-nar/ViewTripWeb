@@ -13,8 +13,19 @@ import math
 
 import pytest
 
-from api.geo import simplify_geo_features
+from api.geo import _features_for, _prepare_track
 from src.models.simplify import simplify_lonlat, zoom_tolerance_m
+
+
+def _simplified(features: list[dict], zoom: float, box: tuple | None = None) -> list[dict]:
+    """Run *features* through the production path: prepare, then serve.
+
+    Not a helper of its own: this is exactly what the route does between
+    building the features and gzipping them, so these assertions pin
+    production rather than a wrapper that only tests use (issue #338).
+    """
+    served, _ = _features_for(_prepare_track(features), zoom, box)
+    return served
 
 
 def _line(n: int, *, jitter: float = 0.0) -> list[list[float]]:
@@ -63,8 +74,8 @@ def test_endpoints_are_always_kept():
 
 def test_a_coarser_zoom_yields_fewer_points():
     poly = _line(2000, jitter=0.0002)
-    far = simplify_geo_features([_feature(poly)], 8)
-    near = simplify_geo_features([_feature(poly)], 16)
+    far = _simplified([_feature(poly)], 8)
+    near = _simplified([_feature(poly)], 16)
     n_far = len(far[0]["geometry"]["coordinates"])
     n_near = len(near[0]["geometry"]["coordinates"])
     assert n_far < n_near <= len(poly)
@@ -74,14 +85,14 @@ def test_whole_trip_zoom_collapses_a_dense_track():
     # The case that matters: at the zoom that shows a whole trip, a pixel is
     # hundreds of metres and almost nothing survives.
     poly = _line(5000, jitter=0.00005)
-    out = simplify_geo_features([_feature(poly)], 6)
+    out = _simplified([_feature(poly)], 6)
     assert len(out[0]["geometry"]["coordinates"]) < len(poly) // 10
 
 
 def test_short_lines_are_returned_untouched():
     for n in (0, 1, 2):
         poly = _line(n)
-        out = simplify_geo_features([_feature(poly)], 10)
+        out = _simplified([_feature(poly)], 10)
         assert out[0]["geometry"]["coordinates"] == poly
 
 
@@ -89,7 +100,7 @@ def test_the_input_features_are_not_mutated():
     # They may be shared with a cache entry; mutating in place would poison it.
     poly = _line(2000, jitter=0.0002)
     feature = _feature(poly)
-    simplify_geo_features([feature], 8)
+    _simplified([feature], 8)
     assert len(feature["geometry"]["coordinates"]) == 2000
 
 
@@ -102,14 +113,14 @@ def test_an_encoded_polyline_is_left_alone():
         "properties": {"activity_id": "1", "polyline": "abcdef"},
         "geometry": {"type": "LineString", "coordinates": []},
     }
-    out = simplify_geo_features([feature], 6)
+    out = _simplified([feature], 6)
     assert out[0]["properties"]["polyline"] == "abcdef"
     assert out[0]["geometry"]["coordinates"] == []
 
 
 def test_malformed_geometry_passes_through_rather_than_raising():
     for geom in ({}, {"coordinates": None}, {"coordinates": [["x", "y"], [1, 2], [3, 4]]}):
-        out = simplify_geo_features([{"type": "Feature", "geometry": geom}], 10)
+        out = _simplified([{"type": "Feature", "geometry": geom}], 10)
         assert len(out) == 1
 
 
@@ -118,7 +129,7 @@ def test_latitude_is_taken_per_feature():
     # whole length, not against one global scale factor.
     equator = [[0.0 + i * 0.0001, 0.0 + (0.0002 if i % 2 else 0.0)] for i in range(1000)]
     north = [[0.0 + i * 0.0001, 60.0 + (0.0002 if i % 2 else 0.0)] for i in range(1000)]
-    out = simplify_geo_features([_feature(equator), _feature(north)], 12)
+    out = _simplified([_feature(equator), _feature(north)], 12)
     # Same shape at different latitudes: the northern one keeps at least as
     # much detail, because a pixel there covers less ground.
     assert len(out[1]["geometry"]["coordinates"]) >= len(out[0]["geometry"]["coordinates"])
@@ -135,7 +146,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 import models.db as db_module
 from api.deps import get_current_user
-from api.geo import _geo_cache, _geo_gen, _level_cache, router as geo_router
+from api.geo import _geo_cache, _geo_gen, _track_cache, router as geo_router
 from models.project_db import DBActivity, DBProject, DBProjectItem
 from models.user import UserInfo
 
@@ -153,7 +164,7 @@ def env(monkeypatch):
     SQLModel.metadata.create_all(engine)
     _geo_cache.clear()
     _geo_gen.clear()
-    _level_cache.clear()
+    _track_cache.clear()
 
     import polyline as polyline_lib
 
@@ -365,7 +376,7 @@ def test_malformed_geometry_still_passes_through_with_a_box():
     for geom in ({}, {"coordinates": None},
                  {"coordinates": [["x", "y"], [1, 2], [3, 4]]},
                  {"coordinates": [[1], [2], [3]]}):
-        out = simplify_geo_features(
+        out = _simplified(
             [{"type": "Feature", "geometry": geom}], 12, (6.0, 44.0, 8.0, 46.0))
         assert len(out) == 1
 
@@ -388,7 +399,7 @@ def test_the_box_never_drops_a_feature():
     # mentions its id), by fit-to-bounds, and by the export path. A missing
     # feature would silently break all three.
     features = [_feature(_at(7.0, 45.0)), _feature(_at(30.0, 60.0))]
-    out = simplify_geo_features(features, 15, (6.0, 44.0, 8.0, 46.0))
+    out = _simplified(features, 15, (6.0, 44.0, 8.0, 46.0))
     assert len(out) == 2
     assert all(len(f["geometry"]["coordinates"]) >= 2 for f in out)
 
@@ -404,7 +415,7 @@ def test_the_box_is_where_the_server_cpu_goes(monkeypatch):
                         lambda poly, tol: calls.append(len(poly)) or real(poly, tol))
     features = [_feature(_at(7.0, 45.0)) for _ in range(3)]
     features += [_feature(_at(30.0 + i, 60.0)) for i in range(20)]
-    simplify_geo_features(features, 15, (6.0, 44.0, 8.0, 46.0))
+    _simplified(features, 15, (6.0, 44.0, 8.0, 46.0))
     assert len(calls) == 3, "only the three visible lines are worth simplifying"
 
 
@@ -579,41 +590,201 @@ def test_the_box_does_not_change_the_auth_boundary(env):
     ).status_code in (403, 404)
 
 
-# ── The level cache, after the adversarial review of #328 ────────────────────
+# ── The track cache (issue #338) ─────────────────────────────────────────────
 #
-# The review found three things the route tests could not see, because
-# X-Cache reads the same either way: a level too large to cache rebuilt
-# forever and silently; a bust left the entry resident, so a dropped Redis
-# generation bump would serve a pre-edit map for the full 15-minute TTL; and
-# eviction was oldest-inserted rather than least-recently-used, so a level
-# being panned around lost to a cold one on age alone.
+# The unit of caching is the line, not the level. These pin the parts X-Cache
+# cannot see: that a trip too large to cache is refused and logged rather than
+# silently rebuilt forever; that a bust drops the entry directly, which is what
+# still holds when the shared Redis generation bump is lost; that eviction is
+# least-recently-used; that memoised results stay inside their budget; and,
+# above all, that simplifying from the cached working set gives exactly what
+# simplifying from the original gave, since that equivalence is the whole
+# safety argument for keeping the working set instead of the track.
+
+from array import array
 
 from api.geo import (
-    _LEVEL_CACHE_MAX_ENTRY_COORDS,
-    _level_cache_get,
-    _level_cache_store,
-    restrict_geo_features_to_bbox,
+    _LIST_COORD_BYTES,
+    _TRACK_CACHE_MAX_ENTRY_BYTES,
+    _TRACK_CACHE_MAX_SIMPLIFIED_BYTES,
+    _evict_tracks,
+    _geo_cache_lock,
+    _track_cache,
+    _track_cache_bytes,
+    _track_cache_get,
+    _track_cache_merge,
+    _track_cache_store,
 )
-from src.models.simplify import restrict_to_bbox, simplify_for_zoom
+from src.models.simplify import (
+    MAX_INPUT_POINTS,
+    floor_line,
+    restrict_to_bbox,
+    simplify_for_zoom,
+    working_set,
+)
 
 
 def _feat(n: int, lon: float = 7.0) -> dict:
     return _feature([[lon + i * 0.0001, 45.0] for i in range(n)])
 
 
-def test_a_level_too_large_to_cache_is_not_stored():
-    _level_cache.clear()
-    big = [_feat(_LEVEL_CACHE_MAX_ENTRY_COORDS + 10)]
-    _level_cache_store((1, "Big", 17), big, 0)
-    assert _level_cache_get((1, "Big", 17)) is None, (
+def _track(n_lines: int = 1, n_points: int = 100) -> "object":
+    return _prepare_track([_feat(n_points, lon=7.0 + i) for i in range(n_lines)])
+
+
+# ── the equivalence the design rests on ──────────────────────────────────────
+
+def test_simplifying_from_the_working_set_is_identical_at_every_zoom():
+    # The cache holds the working set instead of the decoded track, so this
+    # has to be an identity and not an approximation — otherwise a cached trip
+    # renders differently from a cold one.
+    poly = [[7.0 + i * 0.0001, 45.0 + (0.0002 if i % 2 else 0.0)]
+            for i in range(20000)]
+    work = working_set(poly)
+    assert len(work) == MAX_INPUT_POINTS
+    for zoom in (4, 8, 12, 15, 18, 22):
+        assert simplify_for_zoom(work, zoom) == simplify_for_zoom(poly, zoom), zoom
+
+
+def test_the_working_set_is_held_as_a_typed_array():
+    # 16 bytes per coordinate against 128 for a [lon, lat] list. This is what
+    # makes caching a decoded trip affordable at all, so it is asserted rather
+    # than left to the comment.
+    track = _track(n_lines=3, n_points=1000)
+    assert all(isinstance(line.points, array) for line in track.lines)
+    assert track.base_bytes < 3 * 1000 * _LIST_COORD_BYTES // 4
+
+
+def test_a_position_carrying_elevation_keeps_it():
+    # A GeoJSON position legally has a third element and simplification
+    # preserves it; packing to pairs would silently drop it.
+    poly = [[7.0 + i * 0.001, 45.0, 300.0 + i] for i in range(200)]
+    track = _prepare_track([_feature(poly)])
+    assert not isinstance(track.lines[0].points, array)
+    served, _ = _features_for(track, 18, None)
+    assert all(len(p) == 3 for p in served[0]["geometry"]["coordinates"])
+
+
+def test_the_floor_keeps_the_shape_and_both_ends():
+    poly = [[7.0 + i * 0.001, 45.0] for i in range(200)]
+    track = _prepare_track([_feature(poly)])
+    floor = track.lines[0].floor
+    assert len(floor) == 32
+    assert floor[0] == poly[0] and floor[-1] == poly[-1]
+
+
+def test_an_off_box_line_is_served_at_the_floor_and_never_dropped():
+    far = _feature([[30.0 + i * 0.001, 60.0] for i in range(2000)])
+    near = _feature([[7.0 + i * 0.001, 45.0] for i in range(2000)])
+    served, _ = _features_for(_prepare_track([far, near]), 17,
+                              (6.0, 44.0, 9.0, 46.0))
+    assert len(served) == 2
+    off = served[0]["geometry"]["coordinates"]
+    assert len(off) == 32
+    assert off[0] == far["geometry"]["coordinates"][0]
+    assert off[-1] == far["geometry"]["coordinates"][-1]
+
+
+# ── only the lines the box brought on screen are simplified ─────────────────
+
+def test_a_new_box_only_simplifies_what_it_newly_revealed(monkeypatch):
+    """The whole point of issue #338.
+
+    #331 built a level box-free, so every cold level ran the
+    Ramer-Douglas-Peucker pass over the entire trip — six zoom levels in one
+    session measured 37.6 s on device. Simplifying per line means a level
+    fills in incrementally: a box pays for what it brought on screen, and
+    nothing else, at any zoom.
+    """
+    import src.models.simplify as simplify_mod
+
+    calls = []
+    real = simplify_mod.simplify_lonlat
+    monkeypatch.setattr(simplify_mod, "simplify_lonlat",
+                        lambda poly, tol: calls.append(len(poly)) or real(poly, tol))
+    lines = [_feature([[lon + i * 0.0005, 45.0 + (0.0002 if i % 2 else 0.0)]
+                       for i in range(2000)])
+             for lon in (7.0, 20.0, 33.0)]
+    track = _prepare_track(lines)
+
+    _, fresh = _features_for(track, 15, (6.5, 44.0, 7.5, 46.0))
+    assert len(calls) == 1, "only the line on screen"
+    track.memoise(fresh, _TRACK_CACHE_MAX_SIMPLIFIED_BYTES)
+
+    _, again = _features_for(track, 15, (6.5, 44.0, 7.5, 46.0))
+    assert len(calls) == 1, "a repeat of the same box simplifies nothing"
+    assert again == {}
+
+    _features_for(track, 15, (19.5, 44.0, 20.5, 46.0))
+    assert len(calls) == 2, "the pan pays only for the line it revealed"
+
+
+def test_merging_into_a_track_the_cache_no_longer_holds_is_a_no_op():
+    # It may have been evicted, or busted, while the request was simplifying.
+    _track_cache.clear()
+    track = _track()
+    _track_cache_merge((1, "Gone"), track, {(12, 0): [[7.0, 45.0]]})
+    assert track.simplified == {}
+    assert (1, "Gone") not in _track_cache
+
+
+def test_a_zoom_sweep_decodes_the_trip_only_once(env, monkeypatch):
+    """The decode is a fixed 1.83 s floor for a 219-activity trip, paid on
+    every cold build before anything is simplified. #331 paid it once per zoom
+    level — six levels in one session measured 37.6 s on device. Holding the
+    working set means the sweep pays it once."""
+    import api.geo as geo_mod
+
+    calls = []
+    real = geo_mod.polyline_lib.decode
+    monkeypatch.setattr(geo_mod.polyline_lib, "decode",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    client, *_ = env
+    for zoom in (9, 11, 13, 15, 17):
+        resp = client.get(
+            f"/api/geo/project/simplified?name=Trip&zoom={zoom}&bbox=6,44,9,46")
+        assert resp.status_code == 200
+    assert len(calls) == 1, "one decode for the whole sweep, not one per level"
+
+
+# ── the cached objects are handed to every request, so nothing may mutate ────
+
+def test_serving_never_mutates_the_prepared_track():
+    track = _track(n_lines=2, n_points=400)
+    before = [list(line.working()) for line in track.lines]
+    floors = [list(line.floor) for line in track.lines]
+    _features_for(track, 17, None)
+    _features_for(track, 9, (20.0, 50.0, 21.0, 51.0))
+    assert [list(line.working()) for line in track.lines] == before
+    assert [list(line.floor) for line in track.lines] == floors
+
+
+def test_two_requests_at_the_same_level_get_the_same_geometry():
+    track = _track(n_lines=2, n_points=400)
+    a, fresh = _features_for(track, 14, None)
+    track.memoise(fresh, _TRACK_CACHE_MAX_SIMPLIFIED_BYTES)
+    b, _ = _features_for(track, 14, None)
+    assert [f["geometry"]["coordinates"] for f in a] == \
+           [f["geometry"]["coordinates"] for f in b]
+
+
+# ── bounds ───────────────────────────────────────────────────────────────────
+
+def test_a_trip_too_large_to_cache_is_not_stored():
+    _track_cache.clear()
+    per_line = MAX_INPUT_POINTS
+    n_lines = _TRACK_CACHE_MAX_ENTRY_BYTES // (per_line * 16) + 2
+    track = _track(n_lines=n_lines, n_points=per_line)
+    _track_cache_store((1, "Big"), track, 0)
+    assert _track_cache_get((1, "Big")) is None, (
         "storing it would let one entry evict everything else and still not fit"
     )
 
 
-def test_a_level_within_the_entry_cap_is_stored():
-    _level_cache.clear()
-    _level_cache_store((1, "Ok", 12), [_feat(100)], 0)
-    assert _level_cache_get((1, "Ok", 12)) is not None
+def test_a_trip_within_the_entry_cap_is_stored():
+    _track_cache.clear()
+    _track_cache_store((1, "Ok"), _track(), 0)
+    assert _track_cache_get((1, "Ok")) is not None
 
 
 def test_a_bust_drops_the_entry_rather_than_only_marking_it_stale():
@@ -621,28 +792,78 @@ def test_a_bust_drops_the_entry_rather_than_only_marking_it_stale():
     # generation guard alone. This pins the *direct* drop, which is what still
     # holds if the shared generation bump is lost.
     from api.geo import bust_geo_cache
-    _level_cache.clear()
-    _level_cache_store((7, "Trip", 12), [_feat(100)], 0)
-    assert (7, "Trip", 12) in _level_cache
+    _track_cache.clear()
+    _track_cache_store((7, "Trip"), _track(), 0)
+    assert (7, "Trip") in _track_cache
     bust_geo_cache(7, "Trip")
-    assert (7, "Trip", 12) not in _level_cache
+    assert (7, "Trip") not in _track_cache
 
 
-def test_reading_a_level_refreshes_its_deadline():
-    # Eviction picks the entry closest to expiry, and every level shares one
-    # TTL — so without this, "closest to expiry" means "stored first" and a hot
-    # level is evicted before a cold one.
-    _level_cache.clear()
-    _level_cache_store((1, "Old", 12), [_feat(100)], 0)
-    _level_cache_store((1, "New", 12), [_feat(100)], 0)
-    before = _level_cache[(1, "Old", 12)][1]
-    _level_cache_get((1, "Old", 12))
-    assert _level_cache[(1, "Old", 12)][1] > before
-    assert _level_cache[(1, "Old", 12)][1] > _level_cache[(1, "New", 12)][1]
+def test_reading_a_track_refreshes_its_deadline():
+    # Eviction picks the entry closest to expiry, and every entry shares one
+    # TTL — so without this, "closest to expiry" means "stored first" and the
+    # trip being looked at right now is evicted before a cold one.
+    _track_cache.clear()
+    _track_cache_store((1, "Old"), _track(), 0)
+    _track_cache_store((1, "New"), _track(), 0)
+    before = _track_cache[(1, "Old")][1]
+    _track_cache_get((1, "Old"))
+    assert _track_cache[(1, "Old")][1] > before
+    assert _track_cache[(1, "Old")][1] > _track_cache[(1, "New")][1]
 
 
-# ── restrict_to_bbox, which production now calls and the older bbox tests
-#    (which go through simplify_geo_features) no longer reach ────────────────
+def test_memoised_results_are_trimmed_back_inside_their_budget():
+    # They grow *after* the entry is stored, as a session visits levels, so
+    # the store-time bound cannot see them. Unbounded, a deep zoom over a long
+    # trip would hold the whole track at full working-set resolution per level.
+    _track_cache.clear()
+    track = _track()
+    _track_cache_store((1, "Trip"), track, 0)
+    per_entry = 12000
+    fresh = {(level, 0): [[7.0, 45.0]] * per_entry for level in range(20)}
+    _track_cache_merge((1, "Trip"), track, fresh)
+    assert track.simplified, "not everything is thrown away"
+    assert track.simplified_bytes <= _TRACK_CACHE_MAX_SIMPLIFIED_BYTES
+    assert len(track.simplified) < len(fresh)
+    # Oldest first: the levels visited most recently are the ones kept.
+    assert (19, 0) in track.simplified and (0, 0) not in track.simplified
+
+
+def test_the_cache_evicts_down_to_its_byte_budget():
+    _track_cache.clear()
+    for i in range(4):
+        _track_cache_store((1, f"Trip{i}"), _track(n_lines=2, n_points=500), 0)
+    with _geo_cache_lock:
+        held = _track_cache_bytes()
+        monkeypatched = held // 2
+        # Shrink the budget rather than build a 48 MB fixture.
+        import api.geo as geo_mod
+        original = geo_mod._TRACK_CACHE_MAX_BYTES
+        geo_mod._TRACK_CACHE_MAX_BYTES = monkeypatched
+        try:
+            _evict_tracks((1, "Trip3"))
+            assert _track_cache_bytes() <= monkeypatched
+            assert (1, "Trip3") in _track_cache, "the newest entry survives"
+        finally:
+            geo_mod._TRACK_CACHE_MAX_BYTES = original
+
+
+def test_the_accounting_counts_a_shared_floor_once():
+    # A line short enough that striding returns its argument holds the same
+    # list as both its working set and its floor. Counting it twice would make
+    # the budget claim wrong in the safe direction, but wrong.
+    track = _prepare_track([_feat(5)])
+    line = track.lines[0]
+    assert line.floor is line.points
+    assert track.base_bytes == 5 * _LIST_COORD_BYTES
+
+
+# ── restrict_to_bbox and floor_line ─────────────────────────────────────────
+#
+# restrict_to_bbox is no longer on the request path — the box is applied by
+# choosing which lines to simplify, not by reducing an already-simplified
+# level — but it is still the library statement of what flooring means, and
+# these pin the floor the prepared track precomputes.
 
 def test_a_visible_line_is_returned_unchanged_and_unaliased():
     poly = [[7.0 + i * 0.001, 45.0] for i in range(200)]
@@ -661,27 +882,15 @@ def test_a_line_already_at_the_floor_is_left_alone():
     assert restrict_to_bbox(poly, (20.0, 50.0, 21.0, 51.0)) is poly
 
 
-def test_flooring_a_simplified_line_matches_flooring_the_original():
-    # The equivalence the split rests on: applying the box *after* the level
-    # was simplified must give what simplifying with the box gave. Same count,
-    # same endpoints — the interior differs only for geometry that is off
-    # screen by definition.
+def test_the_precomputed_floor_matches_what_a_box_would_have_given():
+    # The prepared track floors the working set once, up front, instead of
+    # flooring a simplified level per box. Same count, same endpoints — the
+    # interior differs only for geometry that is off screen by definition.
     poly = [[7.0 + i * 0.0001, 45.0 + (0.0002 if i % 2 else 0.0)]
             for i in range(3000)]
     far = (20.0, 50.0, 21.0, 51.0)
     in_one_pass = simplify_for_zoom(poly, 14, bbox=far)
-    after_the_fact = restrict_to_bbox(simplify_for_zoom(poly, 14), far)
-    assert len(in_one_pass) == len(after_the_fact)
-    assert in_one_pass[0] == after_the_fact[0]
-    assert in_one_pass[-1] == after_the_fact[-1]
-
-
-def test_restricting_features_never_mutates_the_cached_level():
-    # The cache holds these objects and hands them to every later request, so
-    # a single in-place write would corrupt the map for everyone.
-    level = [_feat(200)]
-    original = [list(c) for c in level[0]["geometry"]["coordinates"]]
-    out = restrict_geo_features_to_bbox(level, (20.0, 50.0, 21.0, 51.0))
-    assert level[0]["geometry"]["coordinates"] == original
-    assert out[0] is not level[0]
-    assert out[0]["geometry"]["coordinates"] is not level[0]["geometry"]["coordinates"]
+    precomputed = floor_line(working_set(poly))
+    assert len(in_one_pass) == len(precomputed)
+    assert in_one_pass[0] == precomputed[0]
+    assert in_one_pass[-1] == precomputed[-1]
