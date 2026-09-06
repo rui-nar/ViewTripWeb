@@ -235,3 +235,73 @@ class TestPacing:
         """kumi.systems answered nothing within 50s from the production VPS, so
         every query that reached it paid the full socket timeout to find out."""
         assert not any("kumi" in url for url in ov._OVERPASS_ENDPOINTS)
+
+
+class TestResponseCaching:
+    """The demand-reduction half. A retry — by hand, or by the hourly degraded
+    sweep — re-asks a byte-identical question, and before this every one of them
+    went to the network. That repetition is what escalated a soft rate limit into
+    an outright IPv4 block on 2026-09-06.
+    """
+
+    @pytest.fixture
+    def cached(self, monkeypatch):
+        import fakeredis
+
+        from src.jobs import upstream_cache
+        client = fakeredis.FakeRedis()
+        monkeypatch.setattr(upstream_cache, "get_redis", lambda: client)
+        return client
+
+    def test_an_identical_query_is_not_re_requested(self, transport, cached):
+        transport.script[_PRIMARY] = [_Resp(200, payload={"elements": [1]},
+                                           text='{"elements": [1]}')]
+
+        first = _overpass(_QUERY)
+        second = _overpass(_QUERY)
+
+        assert first == second == {"elements": [1]}
+        assert transport.calls == [_PRIMARY], "the second call must be served from cache"
+
+    def test_a_cache_hit_costs_no_slot_and_no_wait(self, transport, cached,
+                                                   monkeypatch):
+        """A hit must short-circuit before pacing: queueing behind our own
+        concurrency limit to answer from memory would be absurd."""
+        transport.script[_PRIMARY] = [_Resp(200, payload={"elements": []},
+                                           text='{"elements": []}')]
+        _overpass(_QUERY)
+
+        def _must_not_acquire(*_a, **_kw):
+            raise AssertionError("a cache hit must not take a slot")
+
+        monkeypatch.setattr(ov, "slot", _must_not_acquire)
+        assert _overpass(_QUERY) == {"elements": []}
+
+    def test_a_different_query_still_goes_to_the_network(self, transport, cached):
+        transport.script[_PRIMARY] = [
+            _Resp(200, payload={"elements": ["a"]}, text='{"elements": ["a"]}'),
+            _Resp(200, payload={"elements": ["b"]}, text='{"elements": ["b"]}'),
+        ]
+
+        assert _overpass("query one") == {"elements": ["a"]}
+        assert _overpass("query two") == {"elements": ["b"]}
+        assert transport.calls == [_PRIMARY, _PRIMARY]
+
+    def test_failures_are_not_cached(self, transport, cached):
+        """Only a parsed success is stored. Caching a 429 or a timeout would
+        turn a transient upstream problem into a day-long one."""
+        transport.script[_PRIMARY] = [_Resp(504), _Resp(504)]
+        transport.script[_FALLBACK] = [TimeoutError("nope"), TimeoutError("nope")]
+
+        for _ in range(2):
+            with pytest.raises(OverpassError):
+                _overpass(_QUERY)
+        assert transport.calls.count(_PRIMARY) == 2, "a failure must be retried, not cached"
+
+
+class TestPolitenessBound:
+    def test_only_one_overpass_request_at_a_time(self):
+        """Matching the advertised cap of 2 exactly left no margin and 429'd
+        constantly — and a rejection costs 10-14s, because the dispatcher queues
+        you before refusing. One is deliberate, not a typo."""
+        assert ov._OVERPASS_CONCURRENCY == 1

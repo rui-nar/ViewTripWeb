@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from src.jobs.upstream_cache import get as cache_get, put as cache_put
 from src.jobs.upstream_slots import slot
 from src.utils.logging import get_logger
 
@@ -91,12 +92,27 @@ _MAX_TOTAL_WAIT_S = 45
 # processes (src.jobs.upstream_slots). This is the real Overpass politeness bound;
 # QUEUE_MAX_CONCURRENCY cannot express it, because one resolve makes several
 # queries and jobs on the other queues make none.
-_OVERPASS_CONCURRENCY = 2
-# Generous against how long a slot is actually held: the primary answers a full
-# query in ~8s, and with two resolve workers each running one query at a time we
-# sit at the cap rather than above it, so this should almost never be reached.
+#
+# ONE, not the advertised two. Matching the cap exactly left no margin: with two
+# resolve workers each holding a query, we sat permanently on the boundary and
+# 429'd constantly — and a rejection is not free, it costs 10-14s because the
+# dispatcher queues you before refusing. Measured on 2026-09-06, a resolve spent
+# ~48s of its ~130s in rejections alone. Overpass also does not free a slot the
+# instant our socket closes, so "exactly at the limit" is really "over it" for
+# part of every cycle. Serialising our own queries costs far less than that:
+# a healthy one answers in 1.5-2.6s.
+_OVERPASS_CONCURRENCY = 1
+# Generous against how long a slot is actually held — a healthy query answers in
+# a couple of seconds, so a wait this long means something is badly wrong and
+# another endpoint is the better bet.
 _SLOT_ACQUIRE_TIMEOUT_S = 15
 _SLOT_LEASE_TTL_S = _TIMEOUT_HTTP + 15   # outlive the request the lease covers
+
+# Every Overpass query is a pure function of the segment's coordinates, so a
+# retry re-asks an identical question. Caching them is what stops a person
+# tapping "retry", or the hourly degraded-route sweep, from spending our
+# whole quota re-fetching answers we already have (src.jobs.upstream_cache).
+_CACHE_NAMESPACE = "overpass"
 
 # A real rail leg between two endpoints is at most a few times the straight-line
 # distance through its stops. A resolved polyline far longer than that has
@@ -874,6 +890,11 @@ def _overpass(query: str) -> dict:
     claiming "all endpoints" — during the incident that hid the fact that the
     primary had been reached and had answered at all.
     """
+    cached = cache_get(_CACHE_NAMESPACE, query)
+    if cached is not None:
+        _log.info("overpass cache hit (%d bytes)", len(cached))
+        return json.loads(cached)
+
     attempts: list[str] = []
     waited = 0.0
     for url in _OVERPASS_ENDPOINTS:
@@ -937,6 +958,10 @@ def _overpass(query: str) -> dict:
                 break
             _log.info("overpass %s ok in %.1fs (%d bytes)",
                       url, elapsed, len(resp.content))
+            # Cache the body rather than the parsed dict: it is what we already
+            # hold, and re-serialising a multi-megabyte structure just to store
+            # it would cost more than the parse it saves.
+            cache_put(_CACHE_NAMESPACE, query, resp.content)
             return data
 
     raise OverpassError("Overpass query failed — " + "; ".join(attempts))
