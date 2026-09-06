@@ -756,12 +756,22 @@ class _ActivityPanelState extends State<ActivityPanel> {
     // reloadDetailsOnly(), leaving the SnackBar stuck on screen indefinitely.
     // The extra 500 ms lets the natural auto-dismiss animation finish first;
     // clearSnackBars() is a no-op when the bar is already gone.
-    Future.delayed(const Duration(milliseconds: 5500), () {
+    // The confirm's own failure has no other surface: `notifier.error` is only
+    // rendered where the item list is empty, so a delete that the server
+    // refused looked like it had worked until the next full reload brought the
+    // item back. Compare rather than clear so an unrelated pre-existing error
+    // isn't re-announced as this delete's.
+    final errorBefore = notifier.error;
+    Future.delayed(const Duration(milliseconds: 5500), () async {
       if (undone) return;
       try {
         messenger.clearSnackBars();
       } catch (_) {}
-      onConfirm();
+      await onConfirm();
+      final failure = notifier.error;
+      if (failure != null && failure != errorBefore && messenger.mounted) {
+        messenger.showSnackBar(SnackBar(content: Text(failure)));
+      }
     });
   }
 

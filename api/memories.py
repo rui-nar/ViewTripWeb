@@ -43,6 +43,7 @@ from api.project_access import (
     OwnerParam,
     assert_project_access,
     journal_visible_row_positions,
+    row_position_for_index,
     resolve_project,
     translate_insert_after,
 )
@@ -375,15 +376,19 @@ def create_memory(
         # (other users' journal items are hidden) — translate it (issue #106).
         visible = journal_visible_row_positions(sess, existing_items, user_info_id, owner_id)
         insert_at = translate_insert_after(visible, body.insert_after_index, len(existing_items))
+        # It lands a *list index*, and positions are not dense — a segment
+        # delete removes one row without renumbering — so translate it into a
+        # position value before comparing it against one.
+        insert_pos = row_position_for_index(existing_items, insert_at)
 
         for item in existing_items:
-            if item.position >= insert_at:
+            if item.position >= insert_pos:
                 item.position += 1
                 sess.add(item)
 
         db_item = DBProjectItem(
             project_id=project_id,
-            position=insert_at,
+            position=insert_pos,
             uid=uuid_lib.uuid4().hex,
             item_type="memory",
             memory_id=mem_row.id,

@@ -111,6 +111,41 @@ class ItemOrderingMixin:
         bump_lock_version(sess, project_id)
         return True
 
+    def delete_segment_row(self, sess: Session, project_id: int, seg_id: str) -> bool:
+        """Delete one segment's item row. Returns False if it was not there.
+
+        The delete counterpart of ``update_segment_fields`` — same reasoning,
+        same asymmetry. Deleting a segment used to load the whole project, drop
+        the item from the list and write it all back under the project-wide CAS,
+        so two deletes issued milliseconds apart read the same ``lock_version``
+        and whichever committed second lost: the client had already removed the
+        segment locally, took a 409 it never surfaced, and the segment quietly
+        came back on the next full reload. Addressing the row directly removes
+        the contention entirely — deleting two *different* segments touches two
+        different rows and neither can fail the other.
+
+        It still *advances* ``lock_version``, exactly as ``update_segment_fields``
+        does: ``save_project`` rewrites every item row from the caller's
+        in-memory snapshot, so a structural mutation that loaded before this
+        delete would otherwise re-insert the row we just removed. Advancing the
+        counter turns that into a ``StaleWriteError`` the caller retries against
+        reloaded state.
+
+        Positions are left alone, so the removed row's slot becomes a gap
+        (0,1,3,4). Reads only ever ``ORDER BY position``
+        (``repo_core._row_to_project``) and ``save_project`` renumbers densely on
+        the next structural write, so ordering is unaffected — but a caller that
+        inserts a row at a *list index* must translate that index into a
+        position value rather than assume the two coincide (see
+        ``api.project_access.row_position_for_index``).
+        """
+        row = self._segment_row(sess, project_id, seg_id)
+        if row is None:
+            return False
+        sess.execute(delete(DBProjectItem).where(DBProjectItem.id == row.id))
+        bump_lock_version(sess, project_id)
+        return True
+
     def _segment_row(self, sess: Session, project_id: int, seg_id: str):
         """The item row holding segment *seg_id*, via the indexed column.
 

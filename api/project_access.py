@@ -239,3 +239,21 @@ def translate_insert_after(
     if insert_after_index < 0:
         return 0
     return visible_positions[insert_after_index] + 1
+
+
+def row_position_for_index(item_rows: Sequence[DBProjectItem], index: int) -> int:
+    """The ``position`` value a new row needs to land at list *index*.
+
+    ``translate_insert_after`` returns an index into the position-ordered row
+    list, which is only the same number as a ``position`` while positions are
+    dense. They are not: ``ProjectRepo.delete_segment_row`` removes one row
+    without renumbering, leaving a gap (0,1,3,4) until the next structural save
+    renumbers. Reading the target row's own position instead keeps the two
+    apart — appending past the end takes one above the last row's position.
+
+    Callers shift every row at or after the returned value up by one to open
+    the slot, exactly as before.
+    """
+    if index >= len(item_rows):
+        return item_rows[-1].position + 1 if item_rows else 0
+    return item_rows[index].position
