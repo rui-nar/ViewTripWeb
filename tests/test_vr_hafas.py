@@ -488,20 +488,32 @@ class TestRailDegradedReporting:
 
 
 class TestOverpassMirrorFallback:
-    """_overpass retries and fails over to mirror endpoints on 429/5xx so a
-    rate-limited primary no longer sinks the whole resolve (the Helsinki→
-    Rovaniemi 429 that fell to a 2-point straight line)."""
+    """A rate-limited primary must not sink the whole resolve (the Helsinki→
+    Rovaniemi 429 that fell to a 2-point straight line).
+
+    How that is achieved changed on 2026-09-06: _overpass now *waits out* a 429
+    on the healthy primary and only moves to a mirror once it stays busy, rather
+    than failing over on the first one. Failing over immediately was measured to
+    cost ~90s per query against mirrors that answer in 36.9s at best — see
+    tests/test_overpass_failover.py for the full contract. These tests keep the
+    original end-to-end guarantee: a busy primary still yields a real result.
+    """
 
     class _Resp:
         def __init__(self, status, data=None):
             self.status_code = status
             self.ok = status < 400
             self._data = data
+            # Real requests.Response always carries these; _overpass reads them
+            # to find out how long a busy host wants us to wait.
+            self.headers = {}
+            self.text = ""
+            self.content = b""
 
         def json(self):
             return self._data
 
-    def test_fails_over_to_mirror_on_429(self):
+    def test_falls_back_to_a_mirror_once_the_primary_stays_busy(self):
         import src.services.overpass_service as ov
         calls = []
 
@@ -512,18 +524,20 @@ class TestOverpassMirrorFallback:
             return self._Resp(200, {"elements": [{"ok": 1}]})
 
         with patch("src.services.overpass_service.requests.post", side_effect=fake_post), \
-             patch("src.services.overpass_service.time.sleep", lambda *_: None):
+             patch("time.sleep", lambda *_: None):
             data = ov._overpass("[out:json];")
 
         assert data == {"elements": [{"ok": 1}]}
-        assert any("overpass-api.de" in u for u in calls)   # tried primary first
-        assert any("overpass-api.de" not in u for u in calls)  # then a mirror
+        # The primary is retried before being abandoned — failing over on the
+        # first 429 is the regression this ordering guards against.
+        assert calls[:1 + ov._SLOT_RETRIES] == [ov._OVERPASS_URL] * (1 + ov._SLOT_RETRIES)
+        assert any("overpass-api.de" not in u for u in calls)
 
     def test_all_endpoints_429_raises_overpass_error(self):
         import src.services.overpass_service as ov
 
         with patch("src.services.overpass_service.requests.post",
                    side_effect=lambda url, **k: self._Resp(429)), \
-             patch("src.services.overpass_service.time.sleep", lambda *_: None):
+             patch("time.sleep", lambda *_: None):
             with pytest.raises(OverpassError):
                 ov._overpass("[out:json];")
