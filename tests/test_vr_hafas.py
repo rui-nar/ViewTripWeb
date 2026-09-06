@@ -491,12 +491,12 @@ class TestOverpassMirrorFallback:
     """A rate-limited primary must not sink the whole resolve (the Helsinki→
     Rovaniemi 429 that fell to a 2-point straight line).
 
-    How that is achieved changed on 2026-09-06: _overpass now *waits out* a 429
-    on the healthy primary and only moves to a mirror once it stays busy, rather
-    than failing over on the first one. Failing over immediately was measured to
-    cost ~90s per query against mirrors that answer in 36.9s at best — see
-    tests/test_overpass_failover.py for the full contract. These tests keep the
-    original end-to-end guarantee: a busy primary still yields a real result.
+    How that is achieved changed twice on 2026-09-06. It briefly waited out a 429
+    and retried the same host, which is the documented ban trigger and got this
+    deployment blocked; it now marks the host as cooling and moves on without
+    retrying. See tests/test_overpass_failover.py for the full contract. These
+    tests keep the original end-to-end guarantee either way: a rate-limited
+    primary still yields a real result.
     """
 
     class _Resp:
@@ -513,7 +513,7 @@ class TestOverpassMirrorFallback:
         def json(self):
             return self._data
 
-    def test_falls_back_to_a_mirror_once_the_primary_stays_busy(self):
+    def test_falls_back_to_a_mirror_when_the_primary_is_rate_limited(self):
         import src.services.overpass_service as ov
         calls = []
 
@@ -528,9 +528,10 @@ class TestOverpassMirrorFallback:
             data = ov._overpass("[out:json];")
 
         assert data == {"elements": [{"ok": 1}]}
-        # The primary is retried before being abandoned — failing over on the
-        # first 429 is the regression this ordering guards against.
-        assert calls[:1 + ov._SLOT_RETRIES] == [ov._OVERPASS_URL] * (1 + ov._SLOT_RETRIES)
+        # Exactly one attempt on the primary: it is marked as cooling and this
+        # query moves on. Retrying it in band is the ban trigger — see
+        # tests/test_overpass_failover.py::TestBackOffRatherThanRetry.
+        assert calls.count(ov._OVERPASS_URL) == 1
         assert any("overpass-api.de" not in u for u in calls)
 
     def test_all_endpoints_429_raises_overpass_error(self):

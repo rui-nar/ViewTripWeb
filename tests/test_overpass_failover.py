@@ -69,91 +69,91 @@ def transport(monkeypatch):
     # a developer machine with REDIS_URL set doesn't change what these assert.
     monkeypatch.setattr(ov, "get_redis", lambda: None, raising=False)
     monkeypatch.setattr("src.jobs.upstream_slots.get_redis", lambda: None)
+    # Cooldowns are deliberately process-wide state, so one test marking a host
+    # would otherwise make every later test skip it.
+    monkeypatch.setattr("src.jobs.upstream_slots._local_cooldowns", {})
 
     return type("T", (), {
         "calls": calls, "sleeps": sleeps, "script": script,
     })()
 
 
-class TestBusyHostIsWaitedOutNotAbandoned:
-    """The core behaviour change. A 429 is a healthy host asking for a moment."""
+class TestBackOffRatherThanRetry:
+    """overpass-api.de asks for a 30s pause after a 429, and its operators ban
+    clients that repeatedly trigger one — a high 429 *rate* being a trigger by
+    itself. An earlier version of this module waited ~5s and retried the same
+    host three times; this deployment's IPv4 address was blocked within minutes
+    of shipping it. Nothing may retry in band.
+    """
 
-    def test_waits_and_retries_the_same_host(self, transport):
-        transport.script[_PRIMARY] = [
-            _Resp(429, text="Slot available after: ..., in 3 seconds."),
-            _Resp(200, payload={"elements": [1]}),
-        ]
-
-        assert _overpass(_QUERY) == {"elements": [1]}
-        assert transport.calls == [_PRIMARY, _PRIMARY]
-        assert transport.sleeps == [3.0]
-
-    def test_never_touches_the_fallback_while_the_primary_is_merely_busy(
-        self, transport,
-    ):
-        """The incident in one assertion: a busy primary must not send us to a
-        mirror that takes 36.9s for a trivial query."""
-        transport.script[_PRIMARY] = [
-            _Resp(429, text="in 2 seconds"),
-            _Resp(200, payload={"elements": []}),
-        ]
-        transport.script[_FALLBACK] = [AssertionError("must not fail over on 429")]
-
-        _overpass(_QUERY)
-        assert _FALLBACK not in transport.calls
-
-    def test_gives_up_on_a_host_that_stays_busy(self, transport):
-        """Bounded patience: after _SLOT_RETRIES waits we do move on."""
-        busy = [_Resp(429, text="in 1 seconds") for _ in range(1 + ov._SLOT_RETRIES)]
-        transport.script[_PRIMARY] = busy
+    def test_a_rate_limited_host_is_not_retried(self, transport):
+        transport.script[_PRIMARY] = [_Resp(429)]
         transport.script[_FALLBACK] = [_Resp(200, payload={"elements": ["fb"]})]
 
         assert _overpass(_QUERY) == {"elements": ["fb"]}
-        assert transport.calls.count(_PRIMARY) == 1 + ov._SLOT_RETRIES
-        assert transport.sleeps == [1.0, 1.0]
+        assert transport.calls.count(_PRIMARY) == 1, "one attempt per host, never more"
+        assert transport.sleeps == [], "waiting in-band is what got us banned"
 
-    def test_does_not_wait_longer_than_the_cap(self, transport):
-        """A slot an hour away is not worth holding a resolve open for."""
-        transport.script[_PRIMARY] = [_Resp(429, text="in 3600 seconds")]
-        transport.script[_FALLBACK] = [_Resp(200, payload={"elements": []})]
+    def test_a_rate_limited_host_is_skipped_by_later_queries(self, transport):
+        """The unit of back-off is the host, not the request. A resolve makes
+        several queries, so pausing one while the next hits the same host would
+        honour the letter and miss the point."""
+        transport.script[_PRIMARY] = [_Resp(429)]
+        transport.script[_FALLBACK] = [_Resp(200, payload={}), _Resp(200, payload={})]
 
-        _overpass(_QUERY)
-        assert transport.sleeps == []
-        assert _FALLBACK in transport.calls
+        _overpass("query one")
+        _overpass("query two")
+        assert transport.calls.count(_PRIMARY) == 1, "the second query must skip it"
 
-    def test_total_waiting_is_bounded_across_hosts(self, transport):
-        """Per-host patience alone would let a query 429'd everywhere sleep for
-        minutes — trading the old pathology for a new one."""
-        busy = _Resp(429, text=f"in {ov._MAX_SLOT_WAIT_S:d} seconds")
-        for url in ov._OVERPASS_ENDPOINTS:
-            transport.script[url] = [busy] * (1 + ov._SLOT_RETRIES)
+    def test_the_cooldown_meets_the_documented_minimum(self):
+        """The policy is 'pause for 30 seconds'; this is that with margin."""
+        assert ov._COOLDOWN_RATE_LIMITED_S >= 30
 
-        with pytest.raises(OverpassError):
-            _overpass(_QUERY)
-
-        assert sum(transport.sleeps) <= ov._MAX_TOTAL_WAIT_S
-
-
-class TestRetryAfterParsing:
-    def test_prefers_the_standard_header(self, transport):
-        transport.script[_PRIMARY] = [
-            _Resp(429, headers={"Retry-After": "7"}, text="in 99 seconds"),
-            _Resp(200, payload={}),
-        ]
-        _overpass(_QUERY)
-        assert transport.sleeps == [7.0]
-
-    def test_falls_back_to_a_short_default_when_unstated(self, transport):
-        transport.script[_PRIMARY] = [_Resp(429, text="too many requests"),
-                                      _Resp(200, payload={})]
-        _overpass(_QUERY)
-        assert transport.sleeps == [ov._DEFAULT_SLOT_WAIT_S]
-
-    def test_caps_an_over_long_header(self, transport):
-        transport.script[_PRIMARY] = [_Resp(429, headers={"Retry-After": "5000"})]
+    @pytest.mark.parametrize("status", sorted(ov._BACK_OFF_STATUSES))
+    def test_every_back_off_status_cools_the_host(self, transport, status):
+        """504 included: the server documents it as 'too busy to handle your
+        request' — resource admission refused, not a generic gateway error."""
+        transport.script[_PRIMARY] = [_Resp(status)]
         transport.script[_FALLBACK] = [_Resp(200, payload={})]
+
         _overpass(_QUERY)
-        assert transport.sleeps == []
+        assert ov.is_cooling(ov._slot_name(_PRIMARY))
+
+    def test_an_unreachable_host_backs_off_far_harder(self, transport):
+        """A refused connection is how a block presents. Reconnecting tells us
+        nothing it has not already said, and may prolong it."""
+        transport.script[_PRIMARY] = [OSError("connection refused")]
+        transport.script[_FALLBACK] = [_Resp(200, payload={})]
+
+        _overpass(_QUERY)
+        assert ov._COOLDOWN_UNREACHABLE_S >= 10 * ov._COOLDOWN_RATE_LIMITED_S
+
+    def test_no_dead_parsing_of_headers_overpass_never_sends(self):
+        """Overpass sends no Retry-After, and its 429 body carries no 'in N
+        seconds' — that phrasing exists only in /api/status. Both parse paths
+        were inert, and their 5s fallback was what actually ran, every time."""
+        assert not hasattr(ov, "_retry_after_seconds")
+        assert not hasattr(ov, "_SLOT_HINT_RE")
+
+
+class TestClientPatience:
+    def test_the_socket_timeout_outlasts_the_admission_window(self):
+        """The server enqueues for up to 15s deciding whether to admit a query,
+        then runs it for up to the declared timeout. Aborting inside that window
+        still burns the slot and its cooldown, and returns nothing."""
+        assert ov._TIMEOUT_HTTP > ov._TIMEOUT_QUERY + 15
+
+
+class TestUserAgent:
+    def test_identifies_the_real_repository(self):
+        """A user agent an operator cannot verify invites the manual kind of ban,
+        which does not expire on its own."""
+        ua = ov._HEADERS["User-Agent"]
+        assert "github.com/rui-nar/ViewTripWeb" in ua
+        assert "github.com/viewtrip;" not in ua
+
+    def test_carries_a_version(self):
+        assert ov._HEADERS["User-Agent"].startswith("ViewTripWeb/")
 
 
 class TestBrokenHostsFailOverImmediately:
@@ -166,8 +166,10 @@ class TestBrokenHostsFailOverImmediately:
         assert _overpass(_QUERY) == {"elements": ["fb"]}
         assert transport.sleeps == [], "a broken host must not be waited on"
 
-    @pytest.mark.parametrize("status", sorted(ov._OVERPASS_RETRYABLE))
-    def test_server_errors_move_on(self, transport, status):
+    @pytest.mark.parametrize("status", [400, 404])
+    def test_client_errors_move_on_without_cooling_the_host(self, transport, status):
+        """A malformed query is about the request, not the host — do not punish
+        an endpoint for our own mistake."""
         transport.script[_PRIMARY] = [_Resp(status)]
         transport.script[_FALLBACK] = [_Resp(200, payload={"elements": []})]
 
@@ -183,10 +185,6 @@ class TestBrokenHostsFailOverImmediately:
         _overpass(_QUERY)
         assert transport.calls == [_PRIMARY, _FALLBACK]
 
-    def test_429_is_not_classed_as_a_broken_host(self):
-        """Guards the semantic change directly: putting 429 back in here would
-        silently restore the stampede the tests above forbid."""
-        assert ov._RATE_LIMITED not in ov._OVERPASS_RETRYABLE
 
 
 class TestFailureReporting:
@@ -194,8 +192,7 @@ class TestFailureReporting:
         """Phase 1 of the fix. The old message kept only the last error, so it
         named one mirror while claiming "all endpoints" — which is why the
         incident logs never showed what the primary actually returned."""
-        transport.script[_PRIMARY] = [_Resp(429, text="in 1 seconds")] * (
-            1 + ov._SLOT_RETRIES)
+        transport.script[_PRIMARY] = [_Resp(429)]
         transport.script[_FALLBACK] = [TimeoutError("read timed out")]
 
         with pytest.raises(OverpassError) as err:
@@ -235,3 +232,74 @@ class TestPacing:
         """kumi.systems answered nothing within 50s from the production VPS, so
         every query that reached it paid the full socket timeout to find out."""
         assert not any("kumi" in url for url in ov._OVERPASS_ENDPOINTS)
+
+
+class TestResponseCaching:
+    """The demand-reduction half. A retry — by hand, or by the hourly degraded
+    sweep — re-asks a byte-identical question, and before this every one of them
+    went to the network. That repetition is what escalated a soft rate limit into
+    an outright IPv4 block on 2026-09-06.
+    """
+
+    @pytest.fixture
+    def cached(self, monkeypatch):
+        import fakeredis
+
+        from src.jobs import upstream_cache
+        client = fakeredis.FakeRedis()
+        monkeypatch.setattr(upstream_cache, "get_redis", lambda: client)
+        return client
+
+    def test_an_identical_query_is_not_re_requested(self, transport, cached):
+        transport.script[_PRIMARY] = [_Resp(200, payload={"elements": [1]},
+                                           text='{"elements": [1]}')]
+
+        first = _overpass(_QUERY)
+        second = _overpass(_QUERY)
+
+        assert first == second == {"elements": [1]}
+        assert transport.calls == [_PRIMARY], "the second call must be served from cache"
+
+    def test_a_cache_hit_costs_no_slot_and_no_wait(self, transport, cached,
+                                                   monkeypatch):
+        """A hit must short-circuit before pacing: queueing behind our own
+        concurrency limit to answer from memory would be absurd."""
+        transport.script[_PRIMARY] = [_Resp(200, payload={"elements": []},
+                                           text='{"elements": []}')]
+        _overpass(_QUERY)
+
+        def _must_not_acquire(*_a, **_kw):
+            raise AssertionError("a cache hit must not take a slot")
+
+        monkeypatch.setattr(ov, "slot", _must_not_acquire)
+        assert _overpass(_QUERY) == {"elements": []}
+
+    def test_a_different_query_still_goes_to_the_network(self, transport, cached):
+        transport.script[_PRIMARY] = [
+            _Resp(200, payload={"elements": ["a"]}, text='{"elements": ["a"]}'),
+            _Resp(200, payload={"elements": ["b"]}, text='{"elements": ["b"]}'),
+        ]
+
+        assert _overpass("query one") == {"elements": ["a"]}
+        assert _overpass("query two") == {"elements": ["b"]}
+        assert transport.calls == [_PRIMARY, _PRIMARY]
+
+    def test_failures_are_not_cached(self, transport, cached):
+        """Only a parsed success is stored. Caching a 429 or a timeout would
+        turn a transient upstream problem into a day-long one — and once the
+        hosts finish cooling, the next attempt must go back to the network."""
+        transport.script[_PRIMARY] = [_Resp(504)]
+        transport.script[_FALLBACK] = [TimeoutError("nope")]
+
+        with pytest.raises(OverpassError):
+            _overpass(_QUERY)
+
+        assert list(cached.scan_iter("cache:overpass:*")) == []
+
+
+class TestPolitenessBound:
+    def test_only_one_overpass_request_at_a_time(self):
+        """Matching the advertised cap of 2 exactly left no margin and 429'd
+        constantly — and a rejection costs 10-14s, because the dispatcher queues
+        you before refusing. One is deliberate, not a typo."""
+        assert ov._OVERPASS_CONCURRENCY == 1
