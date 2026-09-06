@@ -6,11 +6,12 @@ process. That has two problems the queue fixes:
 * **Durability.** A restart loses every in-flight job. For route resolution the
   segment stayed ``pending`` and recovery was implemented in the Flutter client,
   which only ran when someone reopened the project.
-* **Concurrency control.** Overpass rate-limits per IP, and unbounded parallel
-  resolves collided on it. An RQ worker runs one job at a time, so the bound is
-  the worker count for the ``resolve`` queue — a deployment parameter, enforced
-  regardless of how many API processes exist. A ``threading`` semaphore could
-  not do this: it only ever bounded one process.
+* **Concurrency control.** An RQ worker runs one job at a time, so the number of
+  workers on a queue bounds how many of that queue's jobs run at once — a
+  deployment parameter, enforced regardless of how many API processes exist.
+  (This was originally described as the bound on *Overpass* requests too. It is
+  not, and cannot be: one resolve makes several queries. That bound lives in
+  ``src.jobs.upstream_slots``, applied per request.)
 
 ``enqueue`` falls back to running in-process when no broker is configured, so a
 self-hosted instance and the test suite need no Redis. That fallback is also the
@@ -28,7 +29,7 @@ _log = get_logger(__name__)
 
 # Queue names. Split by workload profile rather than by feature: what matters is
 # how many may run at once and how long each holds a worker.
-QUEUE_RESOLVE = "resolve"   # HAFAS + Overpass; the count here is the OSM bound
+QUEUE_RESOLVE = "resolve"   # HAFAS + Overpass; long-running, a few at a time
 QUEUE_POSTER = "poster"     # A0 rendering — memory-heavy, keep it to one
 QUEUE_DEFAULT = "default"   # share tiles, stats: short and cheap
 
@@ -38,8 +39,14 @@ ALL_QUEUES = (QUEUE_RESOLVE, QUEUE_POSTER, QUEUE_DEFAULT)
 # time, so a queue's bound *is* the number of worker processes listening on it —
 # which makes this a property of the deployment topology, not of any code path
 # here. It lives in this module anyway because the numbers are properties of the
-# jobs, not of a host: 2 on `resolve` is the Overpass politeness bound, and 1 on
-# `poster` is the memory footprint of an A0 render.
+# jobs, not of a host: 2 on `resolve` bounds how many rail resolves are in
+# flight, and 1 on `poster` is the memory footprint of an A0 render.
+#
+# NOTE this is *not* the Overpass politeness bound, though it was once described
+# as one. A worker count cannot be: a single resolve makes four or five Overpass
+# queries and jobs on the other queues make none, so the two numbers are only
+# coincidentally related. That bound is enforced per request in
+# src.jobs.upstream_slots, against the host's own advertised per-IP limit.
 #
 # Nothing at runtime reads this — a worker cannot know how many siblings it has.
 # `tests/test_worker_topology.py` checks the shipped compose file against it, so

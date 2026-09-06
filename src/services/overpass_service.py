@@ -20,9 +20,11 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
+from src.jobs.upstream_slots import slot
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -48,17 +50,53 @@ class RailGeometry:
 _HAFAS_L_RE = re.compile(r'@L=(\d+)@')
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-# Mirror endpoints tried in order — the primary (overpass-api.de) rate-limits per
-# IP (429) under repeated use; the mirrors carry independent quotas so a transient
-# 429/5xx no longer sinks a whole resolve to a straight line.
+# Endpoints in preference order. Measured from the production VPS on
+# 2026-09-06, during the incident these constants were revised for:
+#
+#   overpass-api.de         200 in  8.4s for a full strategy-C query (5.2 MB),
+#                           both advertised slots free
+#   overpass.kumi.systems   no response at all within 50s
+#   overpass.private.coffee 200 in 36.9s for a *trivial* one-node query
+#
+# kumi is removed rather than demoted: it answered nothing, so every query that
+# reached it paid the full _TIMEOUT_HTTP to rediscover that. private.coffee is
+# kept only as a genuine last resort — at 36.9s for a trivial query, any real
+# one exceeds the socket timeout, so it is a fallback for "the primary is down",
+# not for "the primary is busy". See _overpass for why those are now different.
 _OVERPASS_ENDPOINTS = [
     _OVERPASS_URL,
-    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 ]
-_OVERPASS_RETRYABLE = {429, 502, 503, 504}
+# 429 is deliberately NOT in here — see _overpass. These are the codes that mean
+# the host itself is in trouble, where another host is the faster path.
+_OVERPASS_RETRYABLE = {502, 503, 504}
+_RATE_LIMITED = 429
 _TIMEOUT_QUERY = 30   # seconds for the Overpass QL timeout directive
 _TIMEOUT_HTTP  = 45   # HTTP socket timeout
+
+# Waiting out a busy host. The primary answers a full rail query in ~8s, so a
+# freed slot is usually seconds away; anything much longer than this is better
+# spent trying elsewhere.
+_MAX_SLOT_WAIT_S = 30
+_DEFAULT_SLOT_WAIT_S = 5    # when the host says "busy" without saying for how long
+_SLOT_RETRIES = 2           # waits per host before moving on
+_SLOT_HINT_RE = re.compile(r"in\s+(\d+)\s+seconds?")
+# Ceiling on time spent waiting across *all* hosts in one query. Per-host limits
+# alone would let a query that is 429'd everywhere spend several minutes asleep,
+# trading one pathology for another. One socket timeout's worth is the yardstick:
+# never spend longer waiting than the old code spent failing over to a dead host.
+_MAX_TOTAL_WAIT_S = 45
+
+# Our own pacing against the host's advertised per-IP concurrency, shared across
+# processes (src.jobs.upstream_slots). This is the real Overpass politeness bound;
+# QUEUE_MAX_CONCURRENCY cannot express it, because one resolve makes several
+# queries and jobs on the other queues make none.
+_OVERPASS_CONCURRENCY = 2
+# Generous against how long a slot is actually held: the primary answers a full
+# query in ~8s, and with two resolve workers each running one query at a time we
+# sit at the cap rather than above it, so this should almost never be reached.
+_SLOT_ACQUIRE_TIMEOUT_S = 15
+_SLOT_LEASE_TTL_S = _TIMEOUT_HTTP + 15   # outlive the request the lease covers
 
 # A real rail leg between two endpoints is at most a few times the straight-line
 # distance through its stops. A resolved polyline far longer than that has
@@ -785,32 +823,120 @@ def _sq(a: list[float], b: list[float]) -> float:
 _HEADERS = {"User-Agent": "ViewTripWeb/1.0 (https://github.com/viewtrip; route geometry resolver)"}
 
 
-def _overpass(query: str) -> dict:
-    """POST a query to Overpass, failing over across mirror endpoints.
+def _slot_name(url: str) -> str:
+    """Rate-limit key for *url* — per host, since the quota is."""
+    return "overpass:" + urlsplit(url).netloc
 
-    The public ``overpass-api.de`` rate-limits per IP and returns 429/504 under
-    load (which previously sank a whole resolve to a straight line). On any
-    failure we move straight to the next mirror — each has its own independent
-    quota. One attempt per endpoint keeps total latency bounded: a full resolve
-    makes several queries, so retry/backoff per query would balloon well past the
-    client's poll window; trying a fresh mirror is both faster and more likely to
-    succeed than waiting out a 429 on the same host.
+
+def _retry_after_seconds(resp) -> float:
+    """How long a busy host says to wait, as stated — deliberately not capped.
+
+    Overpass signals a busy dispatcher in more than one shape depending on
+    version and whatever proxy is in front of it, so prefer the standard
+    ``Retry-After`` header and fall back to the "in N seconds" phrasing its own
+    status and error text use. With neither, a short default beats giving up:
+    the primary answers a full query in ~8s, so slots free up fast.
+
+    The caller compares this against ``_MAX_SLOT_WAIT_S`` to decide whether
+    waiting is worth it. Clamping here instead would turn "come back in an
+    hour" into "wait 30s and ask again", which just buys another 429.
     """
-    last_err: Optional[str] = None
+    raw = (resp.headers.get("Retry-After") or "").strip()
+    if raw.isdigit():
+        return float(raw)
+    match = _SLOT_HINT_RE.search(resp.text or "")
+    if match:
+        return float(match.group(1))
+    return _DEFAULT_SLOT_WAIT_S
+
+
+def _overpass(query: str) -> dict:
+    """POST a query to Overpass, pacing ourselves and failing over only on breakage.
+
+    Two kinds of failure, two different right answers:
+
+    * **Busy** (429). The host is healthy and has told us to come back, often
+      within seconds. Waiting is dramatically cheaper than failing over — the
+      primary answers a full rail query in ~8s, while the surviving fallback
+      measured 36.9s for a *trivial* one. This used to fail over on 429, which
+      turned a few seconds of waiting into ~90s of timeouts per query and made
+      a healthy upstream look like an outage (every strategy degraded, a whole
+      resolve taking 213-316s against a client that gives up at 120s).
+    * **Broken** (connection error, timeout, 5xx, unparseable body). Another
+      host really is the faster path, so move on immediately without waiting.
+
+    Requests are additionally paced against the host's advertised per-IP
+    concurrency so our own workers stop competing for the same two slots and
+    generating those 429s in the first place.
+
+    Every attempt is recorded and surfaced on the final error. The previous
+    version kept only the last one, so the message named the last mirror while
+    claiming "all endpoints" — during the incident that hid the fact that the
+    primary had been reached and had answered at all.
+    """
+    attempts: list[str] = []
+    waited = 0.0
     for url in _OVERPASS_ENDPOINTS:
-        try:
-            resp = requests.post(
-                url, data={"data": query}, headers=_HEADERS, timeout=_TIMEOUT_HTTP,
-            )
-        except Exception as exc:  # noqa: BLE001 — network error → try next mirror
-            last_err = f"{url}: {exc}"
-            continue
-        if resp.status_code in _OVERPASS_RETRYABLE or not resp.ok:
-            last_err = f"{url}: {resp.status_code}"
-            continue  # rate-limited / server error → next mirror
-        try:
-            return resp.json()
-        except ValueError as exc:
-            last_err = f"{url}: bad JSON ({exc})"
-            continue
-    raise OverpassError(f"Overpass query failed (all endpoints): {last_err}")
+        for attempt in range(1 + _SLOT_RETRIES):
+            with slot(
+                _slot_name(url), _OVERPASS_CONCURRENCY,
+                timeout_s=_SLOT_ACQUIRE_TIMEOUT_S,
+                lease_ttl_s=_SLOT_LEASE_TTL_S,
+            ) as got_slot:
+                if not got_slot:
+                    # Our own traffic is saturating this host. Another endpoint
+                    # has its own quota; queueing behind ourselves does not.
+                    attempts.append(
+                        f"{url}: no free slot within {_SLOT_ACQUIRE_TIMEOUT_S:.0f}s")
+                    _log.info("overpass %s: no free slot, moving on", url)
+                    break
+                started = time.monotonic()
+                try:
+                    resp = requests.post(
+                        url, data={"data": query}, headers=_HEADERS,
+                        timeout=_TIMEOUT_HTTP,
+                    )
+                except Exception as exc:  # noqa: BLE001 — broken host → next one
+                    elapsed = time.monotonic() - started
+                    attempts.append(
+                        f"{url}: {type(exc).__name__} after {elapsed:.1f}s")
+                    _log.info("overpass %s failed after %.1fs: %s", url, elapsed, exc)
+                    break
+                elapsed = time.monotonic() - started
+            # The slot is released before any sleep below: holding one while
+            # waiting for this host to free one would be waiting on ourselves.
+
+            if resp.status_code == _RATE_LIMITED:
+                wait = _retry_after_seconds(resp)
+                retrying = (
+                    attempt < _SLOT_RETRIES
+                    and wait <= _MAX_SLOT_WAIT_S
+                    and waited + wait <= _MAX_TOTAL_WAIT_S
+                )
+                attempts.append(f"{url}: 429 after {elapsed:.1f}s")
+                _log.info(
+                    "overpass %s busy after %.1fs — %s", url, elapsed,
+                    f"waiting {wait:.0f}s" if retrying else "moving on")
+                if retrying:
+                    time.sleep(wait)
+                    waited += wait
+                    continue
+                break
+            if resp.status_code in _OVERPASS_RETRYABLE or not resp.ok:
+                attempts.append(f"{url}: HTTP {resp.status_code} after {elapsed:.1f}s")
+                _log.info("overpass %s returned %d after %.1fs",
+                          url, resp.status_code, elapsed)
+                break
+            try:
+                data = resp.json()
+            except ValueError:
+                body = (resp.text or "")[:120].replace("\n", " ")
+                attempts.append(f"{url}: unparseable body after {elapsed:.1f}s")
+                _log.info("overpass %s returned an unparseable body after %.1fs: %r",
+                          url, elapsed, body)
+                break
+            _log.info("overpass %s ok in %.1fs (%d bytes)",
+                      url, elapsed, len(resp.content))
+            return data
+
+    raise OverpassError("Overpass query failed — " + "; ".join(attempts))
