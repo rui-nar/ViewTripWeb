@@ -208,13 +208,29 @@ def _resolve_route_job(
                 # generic two-point OSM fallback instead — distinct from `degraded`,
                 # which means OSM itself found no usable track.
                 "route_hafas_failed": seg.route_hafas_failed,
-                # Any successful resolve — manual or a sweep_degraded_segments
-                # retry — starts the automatic-retry budget over (issue #207).
-                "route_degrade_retries": 0,
                 # A fresh auto-resolve is authoritative again — clears the
                 # guard a prior manual edit (issue #150) set.
                 "route_edited": False,
             }
+            if not degraded and not seg.route_hafas_failed:
+                # Only a resolve that produced a *real* route restarts the
+                # automatic-retry budget (issue #207).
+                #
+                # This used to be unconditional, on the reasoning that "any
+                # successful resolve" should reset it — but a degraded or
+                # HAFAS-fallback result is `route_status="resolved"` too, and it
+                # is precisely what sweep_degraded_segments is retrying. So the
+                # sweep incremented the counter, the retry it queued wrote it
+                # straight back to 0, and MAX_DEGRADE_RETRIES became unreachable:
+                # every provisionally-resolved segment was re-resolved every hour
+                # forever, each pass flipping a usable approximate route back to
+                # a spinner for the 2-5 minutes it took to come back degraded
+                # again, and consuming a resolve worker to do it.
+                #
+                # Omitted rather than carried forward on the degraded path: the
+                # payload write only touches the keys it is given, so leaving it
+                # out preserves whatever the sweep set.
+                fields["route_degrade_retries"] = 0
             if params.get("train_number"):
                 fields["train_number"] = params["train_number"]
             if params.get("hafas_provider"):
@@ -676,6 +692,14 @@ def resolve_segment_route(
             "route_degraded": False,
             "route_hafas_failed": False,
             "route_started_at": started_at,
+            # A person asking for this again re-arms the automatic retry budget
+            # (issue #207). The *job* only resets it on a genuinely good result,
+            # because resetting it on a degraded one is what stopped
+            # sweep_degraded_segments ever terminating — but that reasoning does
+            # not apply here: a deliberate tap is not a loop, and without this a
+            # segment whose budget the sweep had spent would never be picked up
+            # automatically again no matter how often the user retried it.
+            "route_degrade_retries": 0,
         }
         if body.train_number:
             fields["train_number"] = body.train_number

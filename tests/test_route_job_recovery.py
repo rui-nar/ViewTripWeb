@@ -358,3 +358,87 @@ class TestDegradedSegmentSweep:
 
         monkeypatch.setattr(route_jobs, "get_session", _boom)
         assert sweep_degraded_segments() == 0
+
+
+class TestTheDegradedRetryBudgetActuallyTerminates:
+    """The sweep and the resolve it queues must agree on the retry counter.
+
+    Every test above seeds ``route_degrade_retries`` directly, so all of them
+    passed while the two halves disagreed: the sweep incremented the counter,
+    and the resolve it queued reset it to 0 because a degraded result is still
+    ``route_status="resolved"``. MAX_DEGRADE_RETRIES was therefore unreachable
+    and every degraded segment was re-resolved hourly, forever — observed in
+    production on 2026-09-06, where each pass also flipped a usable approximate
+    route back to a spinner for the several minutes the retry took.
+
+    These drive the real round trip instead of seeding the counter.
+    """
+
+    @staticmethod
+    def _run_sweep_and_resolve(engine, monkeypatch, *, degraded, hafas_failed=False):
+        """One full cycle: sweep marks pending, the queued job writes a verdict."""
+        import api.segments as segments_mod
+        import src.jobs.queue as queue_mod
+
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append((f, a)) or True)
+        monkeypatch.setattr(segments_mod, "bust_geo_cache", lambda *a, **k: None)
+        monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+        monkeypatch.setattr(segments_mod, "warm_meta_cache", lambda *a, **k: None)
+
+        def _geometry(seg, _params):
+            seg.route_hafas_failed = hafas_failed
+            return [[0.0, 0.0], [1.0, 1.0]], 2, degraded, "straight"
+
+        monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _geometry)
+
+        swept = sweep_degraded_segments()
+        for func, args in enqueued:
+            func(*args)
+        return swept
+
+    def test_repeated_degraded_results_exhaust_the_budget(
+            self, degraded_env, monkeypatch):
+        engine, _user_id, _project_id = degraded_env(_degraded_segment())
+
+        cycles = 0
+        for _ in range(MAX_DEGRADE_RETRIES + 5):
+            if not self._run_sweep_and_resolve(engine, monkeypatch, degraded=True):
+                break
+            cycles += 1
+
+        assert cycles == MAX_DEGRADE_RETRIES, (
+            "the sweep must stop retrying a segment that keeps coming back "
+            "degraded — it ran %d times" % cycles)
+        seg = json.loads(_segment_row(engine).segment_json)
+        assert seg["route_degrade_retries"] == MAX_DEGRADE_RETRIES
+        assert seg["route_status"] == "resolved"
+
+    def test_a_hafas_fallback_result_also_exhausts_the_budget(
+            self, degraded_env, monkeypatch):
+        """The same trap via the other provisional outcome: OSM found a track,
+        but not for the train the user asked for."""
+        engine, _user_id, _project_id = degraded_env(
+            _degraded_segment(route_degraded=False, route_hafas_failed=True))
+
+        cycles = 0
+        for _ in range(MAX_DEGRADE_RETRIES + 5):
+            if not self._run_sweep_and_resolve(
+                    engine, monkeypatch, degraded=False, hafas_failed=True):
+                break
+            cycles += 1
+
+        assert cycles == MAX_DEGRADE_RETRIES
+
+    def test_a_real_route_restarts_the_budget(self, degraded_env, monkeypatch):
+        """The behaviour the reset was there for: once a retry finally produces
+        genuine track, the segment is a first-class citizen again and a later
+        degradation gets a fresh budget."""
+        engine, _user_id, _project_id = degraded_env(
+            _degraded_segment(route_degrade_retries=MAX_DEGRADE_RETRIES - 1))
+
+        assert self._run_sweep_and_resolve(engine, monkeypatch, degraded=False) == 1
+        seg = json.loads(_segment_row(engine).segment_json)
+        assert seg["route_degrade_retries"] == 0
+        assert seg["route_degraded"] is False

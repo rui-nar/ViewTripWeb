@@ -152,6 +152,30 @@ def test_trigger_returns_202_and_marks_pending(env, monkeypatch):
     assert calls and calls[0][:3] == (user_id, "My Trip", "seg-1")
 
 
+def test_trigger_rearms_the_automatic_retry_budget(env, monkeypatch):
+    """A person tapping "retry" re-arms sweep_degraded_segments (issue #207).
+
+    The *job* only resets this counter on a genuinely good result — resetting it
+    on a degraded one is what stopped the hourly sweep ever terminating. The
+    deliberate trigger is the other half of that rule: without it, a segment
+    whose budget the sweep had already spent could never be picked up
+    automatically again, however often the user retried by hand.
+    """
+    client, user_id, project_id, engine = env
+    seg = _train_segment()
+    seg.route_degrade_retries = 5
+    seg.route_degraded = True
+    _add_segment(engine, project_id, seg)
+    monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a: None)
+
+    resp = client.post(
+        "/api/projects/My Trip/segments/seg-1/resolve-route", json={})
+    assert resp.status_code == 202
+
+    stored = _load_segment(engine, user_id, "My Trip", "seg-1")
+    assert stored.route_degrade_retries == 0
+
+
 def test_trigger_404_for_missing_segment(env, monkeypatch):
     client, *_ = env
     monkeypatch.setattr(segments_mod, "_resolve_route_job", lambda *a: None)
