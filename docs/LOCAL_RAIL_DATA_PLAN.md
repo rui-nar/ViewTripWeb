@@ -27,29 +27,31 @@ their current tests; only where the elements come from changes.**
 
 ---
 
-## Phase 0 — Coverage decision *(blocking, no code)*
+## Phase 0 — Coverage *(DECIDED)*
 
-Everything downstream is sized by the answer to: **which regions do we hold?**
+**Europe, per-country files. Overpass remains the fallback outside Europe.**
+Coverage widens gradually once this is proven in production.
 
-Options, cheapest first:
+That choice is deliberately conservative in both directions. Europe is where the
+product's trips are, and per-country granularity is what keeps RAM bounded
+(Phase 2) — Germany alone is 319 MB resident, so a single Europe-wide graph is
+not an option. Keeping Overpass for the rest of the world means a user who
+travels outside coverage still gets a route rather than an apology, and it
+reduces the migration's blast radius to "the regions we hold".
 
-| | disk | covers | fails when |
-|---|---|---|---|
-| Countries we observe in use | ~10–30 MB | today's users | a user travels somewhere new |
-| Europe | ~50–90 MB | the realistic product | intercontinental rail |
-| Planet | unmeasured | everything | — |
+The fallback is safe *because* of the volume maths that motivated this work: once
+European segments resolve locally, Overpass sees a handful of requests a day
+instead of several per resolve. That is comfortably inside fair use, so the
+dependency stops being a structural ban risk even though it still exists.
 
-**Recommendation: Europe, per-country files.** It fits the current 40 GB tier with
-room to spare, matches the product, and per-country granularity is what keeps RAM
-bounded (Phase 3).
+**Consequences that bind later phases:**
 
-Also decide here: **what happens outside coverage.** A segment in a region we do
-not hold must degrade honestly rather than silently straight-line. Options: fall
-back to Overpass for that segment (keeps the dependency, bounded), or return a
-"not covered" state the UI can explain. Prefer the latter once coverage is broad.
-
-**Deliverable:** a decision recorded on #345, and a measured planet-rail size if
-"planet" is seriously on the table.
+- Region selection must be able to say "not covered" and hand off, so the source
+  interface in Phase 3 needs a third outcome besides success and failure.
+- Coverage is configuration, not code. Adding a country is a manifest change and
+  a rebuild, never a deploy of new logic.
+- The comparison in Phase 4 only applies within covered regions; outside them
+  both sources are the same source.
 
 ---
 
@@ -81,7 +83,50 @@ the mounted volume, so data and code move independently.
 - Manifest schema and checksum verification.
 - A guard that the workflow never writes a raw extract into the image or the repo.
 
+
 ---
+
+## The Phase 1 / Phase 2 contract
+
+Fixed here so the two phases can be built independently and in parallel.
+
+**Phase 1 produces**, per region, and publishes as a versioned artifact:
+
+- `<region>-rail.osm.pbf` — the filtered extract.
+- `manifest.json` — one entry per region:
+
+```json
+{
+  "schema": 1,
+  "generated_at": "2026-09-06T18:00:00Z",
+  "regions": [
+    {
+      "region": "europe/germany",
+      "file": "germany-rail.osm.pbf",
+      "source": "https://download.geofabrik.de/europe/germany-latest.osm.pbf",
+      "source_date": "2026-09-05",
+      "sha256": "...",
+      "bytes": 10000000,
+      "ways": 130713,
+      "relations": 2179,
+      "stations": 5483,
+      "bbox": [5.87, 47.27, 15.04, 55.06]
+    }
+  ]
+}
+```
+
+`bbox` is what Phase 3 uses to decide which region covers a coordinate, so it is
+required and must be the extract's true extent, not the country's nominal one.
+
+**Phase 2 consumes** a filtered `.pbf` and owns everything after it: the store
+format, the builder, and the reader. **Where the store is built — in CI as part of
+the artifact, or on the box at first use — is Phase 2's decision**, to be made on a
+measurement rather than in advance. If it turns out to belong in CI, Phase 1 gains
+one step that calls Phase 2's builder; nothing else moves.
+
+Neither phase may import from the other except through these two surfaces.
+
 
 ## Phase 2 — The local store
 
