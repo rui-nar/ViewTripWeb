@@ -23,3 +23,9 @@ scripts/
 
 # Secrets
 config/config.json
+
+# OSM extracts and the rail pipeline's output (issue #345). Built in CI,
+# fetched at boot, never baked into an image — a data refresh must not need a
+# code release.
+*.osm.pbf
+dist/

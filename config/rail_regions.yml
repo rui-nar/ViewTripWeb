@@ -1,0 +1,70 @@
+# Regions the rail extract pipeline builds (issue #345, phase 0 decision).
+#
+# Coverage is configuration, not code: adding a country is a line here plus a
+# rebuild of .github/workflows/rail-extract.yml, never a deploy of new logic.
+# Anywhere not listed keeps resolving through Overpass, which is safe once
+# European segments stop going there — a handful of requests a day is well
+# inside fair use.
+#
+# Each entry is a Geofabrik region path; the download URL is
+# https://download.geofabrik.de/<region>-latest.osm.pbf and the artifact is
+# named after the last path component (europe/germany -> germany-rail.osm.pbf),
+# so two regions sharing a last component would collide — the script rejects
+# that rather than let one overwrite the other.
+#
+# This is every country-level child of Geofabrik's europe/ except the four
+# aggregates, which would duplicate data that is already here country by
+# country: alps, dach, britain-and-ireland and united-kingdom. Per-country
+# granularity is what keeps RAM bounded in phase 2 — Germany alone is 319 MB
+# resident once its graph is built, so a single Europe-wide file is not an
+# option.
+regions:
+  - europe/albania
+  - europe/andorra
+  - europe/austria
+  - europe/azores
+  - europe/belarus
+  - europe/belgium
+  - europe/bosnia-herzegovina
+  - europe/bulgaria
+  - europe/croatia
+  - europe/cyprus
+  - europe/czech-republic
+  - europe/denmark
+  - europe/estonia
+  - europe/faroe-islands
+  - europe/finland
+  - europe/france
+  - europe/georgia
+  - europe/germany
+  - europe/great-britain
+  - europe/greece
+  - europe/guernsey-jersey
+  - europe/hungary
+  - europe/iceland
+  - europe/ireland-and-northern-ireland
+  - europe/isle-of-man
+  - europe/italy
+  - europe/kosovo
+  - europe/latvia
+  - europe/liechtenstein
+  - europe/lithuania
+  - europe/luxembourg
+  - europe/macedonia
+  - europe/malta
+  - europe/moldova
+  - europe/monaco
+  - europe/montenegro
+  - europe/netherlands
+  - europe/norway
+  - europe/poland
+  - europe/portugal
+  - europe/romania
+  - europe/serbia
+  - europe/slovakia
+  - europe/slovenia
+  - europe/spain
+  - europe/sweden
+  - europe/switzerland
+  - europe/turkey
+  - europe/ukraine

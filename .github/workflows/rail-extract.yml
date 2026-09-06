@@ -1,0 +1,175 @@
+name: Rail extract
+
+# Builds the rail-only OSM artifacts route resolution runs on (issue #345).
+#
+# This is on a runner and not on the VPS because of one number: the raw Europe
+# extract is 34.9 GB and the box has 40 GB in total, prod and val included.
+# A throwaway runner downloads a country, throws 99.9 % of it away, and
+# publishes the few megabytes that are left.
+#
+# Monthly. Rail alignments change over years, not weeks, and every artifact
+# carries the source extract's own date, so "how old is this data" is always
+# answerable from the manifest rather than from this schedule.
+on:
+  schedule:
+    - cron: "20 3 2 * *"
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Regions to rebuild, space or comma separated (default: all configured)"
+        required: false
+        default: ""
+
+# One build at a time: two concurrent runs would race on the same release tag.
+concurrency:
+  group: rail-extract
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Coverage lives in config/rail_regions.yml, so the matrix has to be read at
+  # run time — adding a country must never require editing this file.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      regions: ${{ steps.regions.outputs.regions }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - run: pip install PyYAML
+
+      - name: Resolve the region matrix
+        id: regions
+        # Via the environment, never interpolated into the shell: a dispatch
+        # input is attacker-controlled text as far as the runner is concerned.
+        env:
+          REQUESTED: ${{ inputs.regions }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            regions=$(python -c 'import json, os; print(json.dumps(os.environ["REQUESTED"].replace(",", " ").split()))')
+          else
+            regions=$(python scripts/build_rail_extract.py regions --json)
+          fi
+          echo "regions=$regions" >> "$GITHUB_OUTPUT"
+          echo "$regions"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      # One country failing (a renamed Geofabrik path, a mirror hiccup) must not
+      # cost the other 48 their build.
+      fail-fast: false
+      # Geofabrik is a free service run on donated bandwidth; six parallel
+      # downloads is neighbourly and still finishes the continent in under an
+      # hour.
+      max-parallel: 6
+      matrix:
+        region: ${{ fromJSON(needs.plan.outputs.regions) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install osmium
+        # The C++ CLI does the pass over the raw extract. The equivalent
+        # pyosmium loop measured 2,022 s for Germany in the spike.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends osmium-tool
+
+      - run: pip install osmium requests PyYAML
+
+      - name: Filter ${{ matrix.region }}
+        env:
+          REGION: ${{ matrix.region }}
+        run: |
+          python scripts/build_rail_extract.py build "$REGION" \
+            --out-dir dist/rail \
+            --work-dir "$RUNNER_TEMP/rail-work"
+
+      - name: Guard — nothing raw leaves this job
+        # The script deletes the source extract as soon as it has been filtered,
+        # so this is a tripwire on that promise rather than the mechanism: a
+        # filtered country is single-digit megabytes, and the biggest raw one is
+        # 4.83 GB. Anything over 100 MB in the published directory is a raw or
+        # half-filtered extract about to be uploaded.
+        run: |
+          if find dist/rail -size +100M | grep .; then
+            echo "::error::an unfiltered extract reached the publish directory"
+            exit 1
+          fi
+          if find "$RUNNER_TEMP/rail-work" -name '*-source.osm.pbf' | grep .; then
+            echo "::error::the raw extract was not deleted after filtering"
+            exit 1
+          fi
+
+      - name: Name the artifact
+        id: slug
+        env:
+          REGION: ${{ matrix.region }}
+        run: echo "slug=${REGION##*/}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rail-${{ steps.slug.outputs.slug }}
+          path: dist/rail/
+          # Transport between jobs in this run, not storage: the release is
+          # where the artifacts actually live.
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    # Publish whatever built. A country that failed keeps its previous release
+    # asset and the manifest simply omits it, which phase 3 reads as "not
+    # covered" and falls back to Overpass for.
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - run: pip install osmium requests PyYAML
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/rail
+          pattern: rail-*
+          merge-multiple: true
+
+      - name: Build and verify the manifest
+        # Re-checksums every file after the artifact round trip, so a truncated
+        # upload fails here rather than on the box at boot.
+        run: python scripts/build_rail_extract.py manifest --out-dir dist/rail
+
+      - name: Publish the release
+        # A release asset, not a Docker layer: baking the data into the image
+        # would couple a data refresh to a code release and inflate every image
+        # by the size of Europe's railways. Marked pre-release so it never
+        # displaces the app's own latest release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="rail-data-$(date -u +%Y-%m-%d)"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --prerelease \
+              --title "Rail extracts $tag" \
+              --notes "Rail-only OSM extracts built by .github/workflows/rail-extract.yml from Geofabrik country extracts. Coverage, checksums and per-region source dates are in manifest.json."
+          fi
+          gh release upload "$tag" \
+            dist/rail/*-rail.osm.pbf dist/rail/manifest.json --clobber

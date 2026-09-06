@@ -85,3 +85,9 @@ viewtrip.db.bak-preexisting
 viewtripweb.db.bak-preexisting
 .claude/scheduled_tasks.lock
 vps.txt
+
+# Raw and filtered OSM extracts (issue #345). The pipeline runs in CI and its
+# raw inputs are gigabytes — the Europe extract alone is 34.9 GB. Only the test
+# fixture belongs in the repo.
+*.osm.pbf
+!tests/fixtures/*.osm.pbf
