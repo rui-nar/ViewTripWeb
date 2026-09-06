@@ -1,4 +1,10 @@
-"""Cross-process cap on concurrent in-flight requests to one upstream host.
+"""Cross-process pacing state for a rate-limited upstream host.
+
+Two things live here: a cap on concurrent in-flight requests, and a cooldown
+marking a host as "do not talk to for N seconds" after it has told us to back
+off. Both are shared through Redis so every worker honours them, and both fall
+back to process-local state when there is no broker — a deployment without one
+runs a single process, so local state is the whole truth there.
 
 Distinct from ``src.utils.rate_limit.KeyedRateLimiter``, and deliberately so:
 that one bounds an *event rate* (N per sliding window) per key in a single
@@ -100,3 +106,45 @@ def slot(
                 client.zrem(key, token)
             except Exception:  # noqa: BLE001 — the lease ages out on its own
                 _log.warning("could not release rate-limit slot for %r", name)
+
+
+# ── Cooldowns ─────────────────────────────────────────────────────────────────
+#
+# overpass-api.de's policy is "if you receive an HTTP error code such as 429 or
+# 406, pause for 30 seconds before making a new request", and the operators have
+# said plainly that clients which repeatedly hit a 429 get banned faster — a high
+# 429 *rate* is itself a trigger, independently of how fast you retry.
+#
+# The unit that matters is therefore the host, not the request: waiting inside one
+# query while the next query in the same resolve immediately hits the same host
+# would honour the letter and miss the point. Marking the host instead makes one
+# back-off apply to every query from every worker.
+
+_local_cooldowns: dict[str, float] = {}
+
+
+def mark_cooling(name: str, seconds: float) -> None:
+    """Refuse *name* for *seconds*. Never raises."""
+    until = time.time() + seconds
+    _local_cooldowns[name] = until
+    client = get_redis()
+    if client is None:
+        return
+    try:
+        client.setex(f"cooldown:{name}", int(seconds) + 1, str(until))
+    except Exception:  # noqa: BLE001 — the local copy still covers this process
+        _log.warning("could not publish a cooldown for %r", name)
+
+
+def is_cooling(name: str) -> bool:
+    """Whether *name* is still backing off. False on any doubt, so a broken
+    broker cannot silently disable an upstream we are allowed to use."""
+    if _local_cooldowns.get(name, 0.0) > time.time():
+        return True
+    client = get_redis()
+    if client is None:
+        return False
+    try:
+        return client.exists(f"cooldown:{name}") == 1
+    except Exception:  # noqa: BLE001
+        return False
