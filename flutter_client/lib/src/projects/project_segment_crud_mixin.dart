@@ -431,11 +431,25 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
   int _polylineLength(Map<String, dynamic> segMeta) =>
       _decodePolyline(segMeta['route_polyline']).length;
 
+  /// Segments dropped from [items] whose DELETE has not come back yet, keyed by
+  /// segment id, with the list index and map feature they were removed from.
+  /// [deleteSegment] puts one back when the request fails: the server still has
+  /// the segment, so a short local list is a silent divergence that only shows
+  /// up as an unexplained reappearance at the next full reload.
+  final Map<String, _RemovedSegment> _removedSegments = {};
+
   /// Immediately remove a segment from the local list and map — no server call.
   /// Replaces `items` with a new list so the identity check in
   /// _rebuildDisplayList detects the change and removes the dismissed widget
   /// from the tree before the SnackBar fires.
   void removeSegmentLocally(String segId) {
+    final index = items.indexWhere((item) =>
+        item['item_type'] == 'segment' &&
+        item['segment']?['id']?.toString() == segId);
+    if (index >= 0) {
+      _removedSegments[segId] = _RemovedSegment(
+        index, items[index], _pendingSegmentPatches[segId] ?? _geoFeature(segId));
+    }
     items = items
         .where((item) =>
             !(item['item_type'] == 'segment' &&
@@ -453,10 +467,53 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
     // (still in the DB) and cause ghost reappearances while their toasts are active.
     try {
       await api.delete(ref.path('/segments/${Uri.encodeComponent(segId)}'));
+      _removedSegments.remove(segId);
     } on Exception catch (e) {
+      // 404 means it is already gone server-side, so the local removal stands.
+      if (e is ApiException && e.statusCode == 404) {
+        _removedSegments.remove(segId);
+        return;
+      }
+      // Anything else leaves the segment on the server. Roll the optimistic
+      // removal back like addSegment/updateSegment do rather than reloading:
+      // a reload here would resurrect the *other* segments whose undo windows
+      // are still open. Callers surface [error] once this returns.
+      _restoreRemovedSegment(segId);
       error = errorMessage(e);
       notifyListeners();
     }
+  }
+
+  /// Put a segment back where [removeSegmentLocally] took it from.
+  void _restoreRemovedSegment(String segId) {
+    final removed = _removedSegments.remove(segId);
+    if (removed == null) return;
+    final alreadyBack = items.any((item) =>
+        item['item_type'] == 'segment' &&
+        item['segment']?['id']?.toString() == segId);
+    if (!alreadyBack) {
+      final restored = List<Map<String, dynamic>>.from(items);
+      restored.insert(removed.index.clamp(0, restored.length), removed.item);
+      items = restored;
+    }
+    final feature = removed.feature;
+    if (feature != null) {
+      upsertSegmentInGeo(segId, feature);   // also lifts the tombstone
+    } else {
+      // Nothing to re-draw (geo had not loaded yet) — just stop suppressing it
+      // so the next geo rebuild brings the server's own feature back.
+      _segmentTombstones.remove(segId);
+    }
+  }
+
+  /// The [geo] feature for [segId], if geo is loaded and carries one.
+  Map<String, dynamic>? _geoFeature(String segId) {
+    for (final f in (geo?['features'] as List? ?? const [])) {
+      if (f is Map && f['properties']?['segment_id']?.toString() == segId) {
+        return Map<String, dynamic>.from(f);
+      }
+    }
+    return null;
   }
 
   // ── Geo patch helpers ─────────────────────────────────────────────────────
@@ -600,4 +657,14 @@ mixin ProjectSegmentCrudMixin on ChangeNotifier {
       },
     };
   }
+}
+
+/// A segment removed from the timeline while its DELETE is in flight — enough
+/// to put it back verbatim if the request fails. See
+/// [ProjectSegmentCrudMixin.removeSegmentLocally].
+class _RemovedSegment {
+  final int index;
+  final Map<String, dynamic> item;
+  final Map<String, dynamic>? feature;
+  const _RemovedSegment(this.index, this.item, this.feature);
 }

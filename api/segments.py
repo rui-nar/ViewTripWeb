@@ -581,24 +581,25 @@ def delete_segment(
     background_tasks: BackgroundTasks,
     owner: OwnerParam = None,
 ):
+    """Delete one transport segment.
+
+    A single-row delete, not a whole-project save (issue #173): deleting several
+    segments at once — which the client does routinely, one request per segment
+    as each undo window expires — used to have them all take the same
+    project-wide optimistic lock, so every request but one 409'd. The client had
+    already dropped those segments locally and never surfaced the error, so they
+    silently reappeared at the next full reload.
+
+    ``delete_segment_row`` returning False means no such segment row — the 404
+    the length comparison used to detect.
+    """
     user_info_id = int(current_user["sub"])
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        original_len = len(project.items)
-        project.items = [
-            i for i in project.items
-            if not (i.item_type == "segment" and i.segment and i.segment.id == seg_id)
-        ]
-        if len(project.items) == original_len:
+        if not _repo.delete_segment_row(sess, row.id, seg_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
-        _repo.save_project(sess, owner_id, project, check_version=True)
+        sess.commit()
     bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
     queue_share_tiles_refresh(background_tasks, owner_id, name)
