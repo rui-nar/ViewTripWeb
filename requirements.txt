@@ -45,9 +45,9 @@ fakeredis>=2.21.0
 # check the worker topology against the queue bounds in src/jobs/queue.py (#188).
 # Nothing at runtime imports it.
 PyYAML>=6.0
-# CI-only: scripts/build_rail_extract.py filters the Geofabrik extracts route
-# resolution will run on (#345), and tests/test_rail_extract.py pins its tag
-# selection against a fixture. The heavy pass over the raw extract is the
-# osmium C++ CLI, which CI installs separately; this is the bindings for the
-# exact pass over its output. Nothing at runtime imports it.
-osmium>=4.0.0
+# Rail extracts and store (issue #345): scripts/build_rail_extract.py filters
+# the Geofabrik extracts in CI (Phase 1) and src/rail/builder.py turns the
+# result into the per-region SQLite store (Phase 2). Build-time and test-only —
+# the server reads the built store with the stdlib's sqlite3 and never imports
+# this. Pinned to a major version because pyosmium's reader API changed in 4.x.
+osmium>=4.0.0,<5.0.0

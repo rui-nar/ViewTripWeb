@@ -502,6 +502,13 @@ rel(id:{ids_str});
 # Hamburg→Offenburg is rejected in ~0 s instead of after minutes. A degenerate
 # long-thin box stays bounded because the 0.25° buffer on each side puts a floor
 # of 0.5° under both dimensions.
+#
+# Issue #345 note: this cap outlives Overpass. The local store (src/rail/) reads
+# a bbox's worth of ways into memory, ~268 bytes per vertex and again as much
+# once _build_rail_graph runs, so an unbounded box is an OOM on a 1 GB worker
+# rather than a timeout. RailStore.ways_in_bbox refuses one from its side; this
+# is the same bound from the caller's. Do not retire it with the rest of the
+# Overpass scaffolding in Phase 6.
 _RAIL_BBOX_BUFFER = 0.25
 _RAIL_BBOX_MAX_AREA = 9.0
 
