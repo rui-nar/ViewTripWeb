@@ -23,7 +23,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "rail-extract.yml"
-FIXTURE = ROOT / "tests" / "fixtures" / "rail_aarhus.osm.pbf"
+FIXTURE = ROOT / "tests" / "fixtures" / "rail_mannheim.osm.pbf"
 
 _spec = importlib.util.spec_from_file_location(
     "build_rail_extract_workflow", ROOT / "scripts" / "build_rail_extract.py"
@@ -130,7 +130,7 @@ def test_no_raw_extract_is_tracked_in_the_repo():
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
     paths = sorted(p for p in tracked.split("\0") if p)
-    assert paths == ["tests/fixtures/rail_aarhus.osm.pbf"]
+    assert paths == ["tests/fixtures/rail_mannheim.osm.pbf"]
 
 
 def test_the_fixture_stays_small():

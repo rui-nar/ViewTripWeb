@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """Build a rail-only OSM extract for one region (issue #345, phase 1).
 
-Route resolution needs three things from OpenStreetMap: railway ways, train
-route relations, and stations carrying a UIC code. Overpass answers those over
-the network today, and the answers are large enough that fair use bans us. The
-same data, filtered out of a Geofabrik country extract, is three orders of
-magnitude smaller: Denmark 494 MB -> 0.6 MB, Germany 4.83 GB -> ~20 MB.
+Route resolution needs four things from OpenStreetMap: railway ways, route
+relations, the nodes a UIC code can be looked up on, and stations. Overpass
+answers those over the network today, and the answers are large enough that
+fair use bans us. The same data, filtered out of a Geofabrik country extract,
+is three orders of magnitude smaller: Denmark 494 MB -> 0.7 MB, Germany
+4.83 GB -> ~21 MB.
 
 **The raw extracts must never reach the server, the repo, or an image.** Europe
 raw is 34.9 GB and the VPS has 40 GB total. So this script runs in CI, on a
@@ -27,7 +28,9 @@ Two steps, in that order for a reason:
 The selection must match what src/services/overpass_service.py asks Overpass
 for today, element for element. Anything else changes route results for reasons
 unrelated to moving the data source, which is the one thing this migration must
-not do.
+not do. It is spelled out below against the queries themselves, because the
+plan's summary of them was wrong once already (#349) and a filter that is
+quietly too narrow looks exactly like one that works.
 
 Usage:
 
@@ -73,36 +76,40 @@ EXTRACT_SUFFIX = "-rail.osm.pbf"
 # The selection — must mirror src/services/overpass_service.py
 # ---------------------------------------------------------------------------
 #
+# Four rows, each one an Overpass query the resolver issues today. The queries
+# are the specification; docs/LOCAL_RAIL_DATA_PLAN.md restates them and was
+# wrong once already (#349), so check any change here against that source file
+# rather than against the plan.
+#
 #   ways       way["railway"~"^(rail|narrow_gauge|light_rail)$"]["service"!~"."]
 #              _via_coordinate_fallback's bounding-box query. The `service`
 #              exclusion keeps sidings and yard tracks out of the graph; the
 #              spike showed including them *breaks* routes that work today,
 #              because _nearest_node snaps to the closest node regardless of
 #              which connected component it lies in.
-#   relations  rel["route"="train"]
-#              _route_relation_segment / _via_train_relations_endpoints.
-#   nodes      node["railway"~"^(station|halt)$"]["uic_ref"]
-#              _find_station_near, which strategy A needs to get a UIC code.
+#   relations  rel["route"="train"], ["route"="railway"], ["route"="light_rail"]
+#              _route_relation_segment lists all three; strategy B's
+#              _ROUTE_TAGS is the same three written as one regex.
+#   nodes      node["uic_ref"] — *any* node carrying the key, with no railway
+#              filter at all. This is _route_relation_segment's
+#              `node["uic_ref"="{uic}"]->.a`, which is how a relation is found
+#              from a pair of UIC codes. Relations reference the *stop* node,
+#              and stop nodes are routinely untagged as stations — Luxembourg
+#              has 20 such members and not one is tagged station or halt — so
+#              filtering these by railway= leaves strategy A finding nothing
+#              where Overpass finds a relation (#349).
+#   stations   node|way|rel ["railway"~"^(station|halt)$"]["uic_ref"]
+#              _find_station_near, which queries all three element types with
+#              `out center body` because some countries map a station as a
+#              polygon rather than as a node.
 #
-# Two places where the live Overpass queries are *broader* than this, and this
-# file deliberately is not — the plan and the spike's reference counts both fix
-# the selection as written above, and widening it here would change route
-# results while the migration is meant to change only where the data comes
-# from. Phase 3 has to decide what to do about each, and phase 4's comparison
-# period is where the difference would show up:
-#
-#   - _route_relation_segment also accepts route=railway and route=light_rail,
-#     and _via_train_relations_endpoints matches
-#     rel["route"~"^(train|railway|light_rail)$"].
-#   - _find_station_near also queries ways and relations tagged
-#     railway=station|halt with a uic_ref (stations mapped as polygons), taking
-#     their centre.
-#
-# Adding either is a config-free code change here plus a rebuild; the fixture
-# test's counts are what would tell you it happened.
+# The station row is why some ways and relations are kept for reasons other
+# than their own tags: a station way is useless without its nodes and a station
+# relation without its member ways, since both only answer `out center` as a
+# geometry. `select` calls that the geometry closure.
 RAIL_WAY_TYPES = frozenset({"rail", "narrow_gauge", "light_rail"})
 STATION_RAILWAY_TYPES = frozenset({"station", "halt"})
-TRAIN_ROUTE = "train"
+ROUTE_TYPES = frozenset({"train", "railway", "light_rail"})
 
 
 def is_rail_way(tags: Mapping[str, str]) -> bool:
@@ -110,13 +117,18 @@ def is_rail_way(tags: Mapping[str, str]) -> bool:
     return tags.get("railway") in RAIL_WAY_TYPES and "service" not in tags
 
 
-def is_train_relation(tags: Mapping[str, str]) -> bool:
+def is_route_relation(tags: Mapping[str, str]) -> bool:
     """True for a route relation strategies A and B search."""
-    return tags.get("route") == TRAIN_ROUTE
+    return tags.get("route") in ROUTE_TYPES
 
 
-def is_uic_station(tags: Mapping[str, str]) -> bool:
-    """True for a station node that can answer a UIC lookup."""
+def is_uic_node(tags: Mapping[str, str]) -> bool:
+    """True for any node a UIC lookup can land on — station or bare stop."""
+    return bool(tags.get("uic_ref"))
+
+
+def is_station(tags: Mapping[str, str]) -> bool:
+    """True for a station _find_station_near can return, whatever its type."""
     return tags.get("railway") in STATION_RAILWAY_TYPES and bool(tags.get("uic_ref"))
 
 
@@ -126,7 +138,13 @@ class Selection:
 
     ways: int
     relations: int
+    # Stations of every element type, which is what _find_station_near can
+    # return. The manifest reports this one number rather than three.
     stations: int
+    # Not in the manifest — the contract fixes its keys — but counted because
+    # this is the row a wrong filter silently empties, and it belongs in the
+    # build log where a rebuild that lost it would be visible.
+    uic_nodes: int
     # [min_lon, min_lat, max_lon, max_lat] over every node written — the true
     # extent of the rail data, not the country's nominal box. Phase 3 uses it
     # to pick a region for a coordinate, so a nominal box would claim coverage
@@ -189,25 +207,33 @@ def prefilter(source: Path, dest: Path) -> Path:
     """Reduce a raw extract to a rail superset with the osmium CLI.
 
     Over-selects on purpose (see the module docstring): it keeps service ways
-    and station nodes without a UIC code, which ``select`` then drops. What it
-    buys is the two-orders-of-magnitude reduction that makes the exact pass
+    and stations without a UIC code, which ``select`` then drops. What it buys
+    is the two-orders-of-magnitude reduction that makes the exact pass
     affordable in Python.
 
+    ``n/uic_ref`` matches on the key alone, with no value — the selection's
+    node row has no railway filter, because the node a relation references for
+    a UIC code is a stop, not necessarily a station.
+
     Referenced objects are kept — the default — because a way without its nodes
-    has no geometry.
+    has no geometry, and neither has a station relation without its member
+    ways.
     """
     if shutil.which("osmium") is None:
         raise RuntimeError(
             "the osmium CLI is required (Debian/Ubuntu: apt-get install osmium-tool)"
         )
+    stations = ",".join(sorted(STATION_RAILWAY_TYPES))
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
             "osmium", "tags-filter", "--overwrite",
             "-o", str(dest), str(source),
-            f"n/railway={','.join(sorted(STATION_RAILWAY_TYPES))}",
+            "n/uic_ref",
             f"w/railway={','.join(sorted(RAIL_WAY_TYPES))}",
-            f"r/route={TRAIN_ROUTE}",
+            f"w/railway={stations}",
+            f"r/route={','.join(sorted(ROUTE_TYPES))}",
+            f"r/railway={stations}",
         ],
         check=True,
     )
@@ -217,20 +243,36 @@ def prefilter(source: Path, dest: Path) -> Path:
 def select(source: Path, dest: Path) -> Selection:
     """Write the exact selection, and report what it holds.
 
-    Two passes over ``source``. The first collects the nodes the kept ways
-    reference, because a way whose nodes were dropped is geometry we cannot
-    reconstruct; the second writes. Splitting them is what keeps the output at
-    the selection's own size instead of dragging in the nodes of every way the
-    prefilter over-selected.
+    Three passes over ``source``, because a PBF is ordered nodes, ways,
+    relations and two of the things kept are only known from further down that
+    order:
+
+    1. relations — which member ways a kept station relation needs, since a
+       station mapped as a polygon has no position of its own;
+    2. ways — which nodes the kept ways need, for the same reason one level
+       down. Only the kept ways: taking every node the prefilter over-selected
+       would drag the file back up to the prefilter's size.
+    3. write.
 
     Per-object OSM metadata (version, timestamp, changeset, user) is dropped:
     nothing downstream reads it and it is ~15 % of the file.
     """
-    wanted_nodes: set[int] = set()
-    ways = relations = stations = 0
+    ways = relations = stations = uic_nodes = 0
 
+    station_member_ways: set[int] = set()
+    station_member_nodes: set[int] = set()
+    for rel in osmium.FileProcessor(str(source), osmium.osm.RELATION):
+        if is_station(rel.tags):
+            for member in rel.members:
+                if member.type == "w":
+                    station_member_ways.add(member.ref)
+                elif member.type == "n":
+                    station_member_nodes.add(member.ref)
+
+    wanted_nodes = set(station_member_nodes)
     for way in osmium.FileProcessor(str(source), osmium.osm.WAY):
-        if is_rail_way(way.tags):
+        if is_rail_way(way.tags) or is_station(way.tags) \
+                or way.id in station_member_ways:
             wanted_nodes.update(node.ref for node in way.nodes)
 
     min_lon = min_lat = 180.0
@@ -241,21 +283,31 @@ def select(source: Path, dest: Path) -> Selection:
     try:
         for obj in osmium.FileProcessor(str(source)):
             if obj.is_node():
-                station = is_uic_station(obj.tags)
-                if not station and obj.id not in wanted_nodes:
+                uic = is_uic_node(obj.tags)
+                if not uic and obj.id not in wanted_nodes:
                     continue
-                if station:
-                    stations += 1
+                uic_nodes += uic
+                stations += is_station(obj.tags)
                 writer.add_node(obj)
                 lon, lat = obj.location.lon, obj.location.lat
                 min_lon, max_lon = min(min_lon, lon), max(max_lon, lon)
                 min_lat, max_lat = min(min_lat, lat), max(max_lat, lat)
             elif obj.is_way():
-                if is_rail_way(obj.tags):
-                    ways += 1
-                    writer.add_way(obj)
-            elif is_train_relation(obj.tags):
-                relations += 1
+                rail_way = is_rail_way(obj.tags)
+                if not rail_way and not is_station(obj.tags) \
+                        and obj.id not in station_member_ways:
+                    continue
+                # `ways` counts the rail graph, not the geometry closure: a
+                # station polygon is a station, and is counted as one.
+                ways += rail_way
+                stations += is_station(obj.tags)
+                writer.add_way(obj)
+            else:
+                route = is_route_relation(obj.tags)
+                if not route and not is_station(obj.tags):
+                    continue
+                relations += route
+                stations += is_station(obj.tags)
                 writer.add_relation(obj)
     finally:
         writer.close()
@@ -271,6 +323,7 @@ def select(source: Path, dest: Path) -> Selection:
         ways=ways,
         relations=relations,
         stations=stations,
+        uic_nodes=uic_nodes,
         bbox=[round(v, 5) for v in (min_lon, min_lat, max_lon, max_lat)],
     )
 
@@ -401,8 +454,8 @@ def build(
     print(
         f"[{slug}] {entry['bytes'] / 1e6:.2f} MB, ways={selection.ways} "
         f"relations={selection.relations} stations={selection.stations} "
-        f"bbox={selection.bbox} source_date={date} "
-        f"(+{time.monotonic() - started:.0f}s)",
+        f"uic_nodes={selection.uic_nodes} bbox={selection.bbox} "
+        f"source_date={date} (+{time.monotonic() - started:.0f}s)",
         flush=True,
     )
     return entry

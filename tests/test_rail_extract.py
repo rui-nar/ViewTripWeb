@@ -2,21 +2,35 @@
 
 The filter decides what route resolution can see. Widen it and unconnected
 sidings enter the graph, which the spike showed *breaks* routes that work
-today; narrow it and lines silently disappear from the map. Neither failure is
-visible in any other test — the artifact is built monthly in CI, and by the
-time a wrong selection shows up it is a wrong polyline on a user's trip.
+today; narrow it and strategies stop finding things Overpass finds. Neither
+failure is visible in any other test — the artifact is built monthly in CI, and
+by the time a wrong selection shows up it is a wrong polyline on a user's trip.
+The contract itself was wrong once (#349) and nothing caught it, which is what
+these assertions exist for.
 
-So the selection is pinned against a checked-in extract with known contents: a
-1.4 x 1.4 km box around Aarhus H, cut from Denmark's Geofabrik extract with
-``osmium extract -b 10.198,56.145,10.212,56.158`` (OpenStreetMap data,
-ODbL). It is small, and it contains one of everything the filter has to decide
-about — 54 rail ways and 41 service-tagged ones, one station with a UIC code
-and one without, eight ``route=train`` relations against 78 relations that are
-buses, cycle routes, ``route=railway`` and ``route=light_rail``, plus
-platform/disused/razed railway ways.
+So the selection is pinned against a checked-in extract with known contents:
+two 900 m boxes in Mannheim — one over the ARENA/Maimarkt halt, one over
+Neuostheim — cut from Germany's Geofabrik extract with ``osmium extract`` and
+joined with ``osmium merge`` (OpenStreetMap data, ODbL). Two boxes rather than
+one because the dense kilometre between them costs 600 KB and decides nothing;
+this way the fixture is 420 KB and still holds one of everything the filter has
+to rule on:
+
+- 12 ``railway=rail`` and 27 ``narrow_gauge`` ways to keep, against 152
+  service-tagged ones to drop and 49 trams, 12 platforms and a signal box
+  besides;
+- 11 nodes carrying ``uic_ref`` that are *not* tagged as stations — tram stops,
+  a bus stop, ``public_transport=stop_position`` — which is the row #349
+  corrected and the reason strategy A can find a relation at all;
+- a station mapped as a way (ARENA/Maimarkt) and one mapped as a relation
+  (Neuostheim), neither of which the old node-only contract could see;
+- ``route=train`` and ``route=railway`` relations to keep, against trams,
+  buses, cycle routes, a pipeline and a waterway to drop.
 
 The expected counts below are therefore not magic numbers: changing the
-selection changes them, which is the point.
+selection changes them, which is the point. The counts under "the fixture is
+worth testing against" are the other half — a widened filter can make an
+assertion pass vacuously, and those keep each row of the contract represented.
 """
 from __future__ import annotations
 
@@ -29,7 +43,7 @@ import osmium
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-FIXTURE = ROOT / "tests" / "fixtures" / "rail_aarhus.osm.pbf"
+FIXTURE = ROOT / "tests" / "fixtures" / "rail_mannheim.osm.pbf"
 
 _spec = importlib.util.spec_from_file_location(
     "build_rail_extract", ROOT / "scripts" / "build_rail_extract.py"
@@ -40,16 +54,17 @@ rail = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = rail
 _spec.loader.exec_module(rail)
 
-# What the fixture holds, counted by hand from the raw box (see the docstring).
-EXPECTED_WAYS = 54
-EXPECTED_RELATIONS = 8
-EXPECTED_STATIONS = 1
+# What the fixture holds, counted from the raw box (see the docstring).
+EXPECTED_WAYS = 39
+EXPECTED_RELATIONS = 59
+EXPECTED_STATIONS = 4
+EXPECTED_UIC_NODES = 13
 
 
 @pytest.fixture(scope="module")
 def filtered(tmp_path_factory):
     """The fixture box put through the exact selection."""
-    out = tmp_path_factory.mktemp("rail") / "aarhus-rail.osm.pbf"
+    out = tmp_path_factory.mktemp("rail") / "mannheim-rail.osm.pbf"
     selection = rail.select(FIXTURE, out)
     return out, selection
 
@@ -65,7 +80,8 @@ def contents(filtered):
         elif obj.is_way():
             ways[obj.id] = (dict(obj.tags), [n.ref for n in obj.nodes])
         else:
-            relations[obj.id] = dict(obj.tags)
+            relations[obj.id] = (dict(obj.tags),
+                                 [(m.type, m.ref) for m in obj.members])
     return nodes, ways, relations
 
 
@@ -93,26 +109,85 @@ def test_rail_way_predicate(tags, kept):
 
 @pytest.mark.parametrize("tags,kept", [
     ({"route": "train"}, True),
-    ({"route": "railway"}, False),
-    ({"route": "light_rail"}, False),
+    # Strategy A lists all three separately; strategy B matches the same three
+    # as one regex. Dropping either of these two was the #349 contract error.
+    ({"route": "railway"}, True),
+    ({"route": "light_rail"}, True),
     ({"route": "bus"}, False),
+    ({"route": "ferry"}, False),
+    ({"route": "tram"}, False),
     ({"type": "multipolygon"}, False),
 ])
-def test_train_relation_predicate(tags, kept):
-    assert rail.is_train_relation(tags) is kept
+def test_route_relation_predicate(tags, kept):
+    assert rail.is_route_relation(tags) is kept
 
 
 @pytest.mark.parametrize("tags,kept", [
-    ({"railway": "station", "uic_ref": "8600087"}, True),
-    ({"railway": "halt", "uic_ref": "8600766"}, True),
-    # No UIC code means _enrich_uic cannot use it, so it is dead weight.
+    # _route_relation_segment matches node["uic_ref"=X] with *no* railway
+    # filter, and relations reference the stop node, which is routinely
+    # untagged as a station (#349).
+    ({"uic_ref": "8000284"}, True),
+    ({"railway": "stop", "uic_ref": "8000284"}, True),
+    ({"public_transport": "stop_position", "uic_ref": "8000284"}, True),
+    ({"railway": "station", "uic_ref": "8000284"}, True),
+    ({"railway": "border", "uic_ref": "8000079"}, True),
+    ({"railway": "station"}, False),
+    ({"uic_ref": ""}, False),
+    ({"railway": "rail"}, False),
+])
+def test_uic_node_predicate(tags, kept):
+    assert rail.is_uic_node(tags) is kept
+
+
+@pytest.mark.parametrize("tags,kept", [
+    ({"railway": "station", "uic_ref": "8000284"}, True),
+    ({"railway": "halt", "uic_ref": "8000766"}, True),
+    # A station with no UIC code cannot answer the lookup it exists for.
     ({"railway": "station"}, False),
     ({"railway": "station", "uic_ref": ""}, False),
     ({"railway": "stop", "uic_ref": "1"}, False),
     ({"public_transport": "station", "uic_ref": "1"}, False),
 ])
-def test_uic_station_predicate(tags, kept):
-    assert rail.is_uic_station(tags) is kept
+def test_station_predicate(tags, kept):
+    """Mirrors node|way|rel ["railway"~"^(station|halt)$"]["uic_ref"]."""
+    assert rail.is_station(tags) is kept
+
+
+# ---------------------------------------------------------------------------
+# The fixture is worth testing against
+#
+# Each row of the contract has to be represented in the fixture, or the
+# assertions below it pass for the wrong reason. A filter that is too wide is
+# caught by pinned counts; a fixture that is too thin is caught here.
+# ---------------------------------------------------------------------------
+
+def test_fixture_holds_uic_nodes_that_are_not_stations(contents):
+    """The row #349 corrected: strategy A finds relations through these."""
+    nodes, _, _ = contents
+    bare = [tags for tags, _, _ in nodes.values()
+            if rail.is_uic_node(tags) and not rail.is_station(tags)]
+    assert bare, "fixture cannot detect a regression on the node row"
+
+
+def test_fixture_holds_a_station_mapped_as_a_way(contents):
+    """The other row #349 corrected: _find_station_near queries ways too."""
+    _, ways, _ = contents
+    assert [w for w, (tags, _) in ways.items() if rail.is_station(tags)]
+
+
+def test_fixture_holds_more_than_one_route_type(contents):
+    """route=railway and route=light_rail are as much strategy A's as train."""
+    _, _, relations = contents
+    assert len({tags["route"] for tags, _ in relations.values()
+                if rail.is_route_relation(tags)}) > 1
+
+
+def test_fixture_holds_service_ways_to_exclude():
+    """The one row that excludes rather than includes."""
+    excluded = [obj for obj in osmium.FileProcessor(str(FIXTURE), osmium.osm.WAY)
+                if obj.tags.get("railway") in rail.RAIL_WAY_TYPES
+                and "service" in obj.tags]
+    assert excluded
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +197,9 @@ def test_uic_station_predicate(tags, kept):
 def test_counts_are_pinned(filtered):
     """A change in what the filter selects has to fail here, loudly."""
     _, selection = filtered
-    assert (selection.ways, selection.relations, selection.stations) == (
-        EXPECTED_WAYS, EXPECTED_RELATIONS, EXPECTED_STATIONS
+    assert (selection.ways, selection.relations, selection.stations,
+            selection.uic_nodes) == (
+        EXPECTED_WAYS, EXPECTED_RELATIONS, EXPECTED_STATIONS, EXPECTED_UIC_NODES
     )
 
 
@@ -131,54 +207,92 @@ def test_counts_describe_the_file_that_was_written(contents, filtered):
     """The manifest's numbers must be of the artifact, not of some earlier pass."""
     nodes, ways, relations = contents
     _, selection = filtered
-    assert len(ways) == selection.ways
-    assert len(relations) == selection.relations
-    assert sum(1 for tags, _, _ in nodes.values() if rail.is_uic_station(tags)) \
-        == selection.stations
+    assert sum(1 for tags, _ in ways.values() if rail.is_rail_way(tags)) \
+        == selection.ways
+    assert sum(1 for tags, _ in relations.values() if rail.is_route_relation(tags)) \
+        == selection.relations
+    assert sum(1 for tags, _, _ in nodes.values() if rail.is_uic_node(tags)) \
+        == selection.uic_nodes
+    stations = (
+        sum(1 for tags, _, _ in nodes.values() if rail.is_station(tags))
+        + sum(1 for tags, _ in ways.values() if rail.is_station(tags))
+        + sum(1 for tags, _ in relations.values() if rail.is_station(tags))
+    )
+    assert stations == selection.stations
 
 
 def test_no_service_way_survives(contents):
     """Sidings beat the through line when _nearest_node snaps (spike finding)."""
     _, ways, _ = contents
-    assert not [way for way, (tags, _) in ways.items() if "service" in tags]
+    assert not [way for way, (tags, _) in ways.items()
+                if tags.get("railway") in rail.RAIL_WAY_TYPES and "service" in tags]
 
 
-def test_only_the_three_railway_types_survive(contents):
+def test_every_way_is_rail_a_station_or_a_station_member(contents):
+    """Nothing else has a reason to be in the file."""
+    nodes, ways, relations = contents
+    station_members = {ref for tags, members in relations.values()
+                       if rail.is_station(tags)
+                       for kind, ref in members if kind == "w"}
+    for way, (tags, _) in ways.items():
+        assert rail.is_rail_way(tags) or rail.is_station(tags) \
+            or way in station_members
+
+
+def test_narrow_gauge_is_kept(contents):
+    """The way query is a three-value regex, not railway=rail.
+
+    Mannheim's OEG line is narrow_gauge, and a filter that quietly became
+    railway=rail would take most of the fixture's kept ways with it.
+    """
     _, ways, _ = contents
-    assert {tags["railway"] for tags, _ in ways.values()} <= rail.RAIL_WAY_TYPES
+    assert any(tags.get("railway") == "narrow_gauge" for tags, _ in ways.values())
 
 
-def test_light_rail_is_kept(contents):
-    """Aarhus' letbane is light_rail, and the Overpass query includes it."""
+def test_trams_do_not_survive(contents):
+    """The sharpest neighbour: 49 tram ways run through this box and the
+    regex excludes every one of them."""
     _, ways, _ = contents
-    assert any(tags["railway"] == "light_rail" for tags, _ in ways.values())
+    assert not [tags for tags, _ in ways.values() if tags.get("railway") == "tram"]
 
 
-def test_only_train_relations_survive(contents):
-    """route=railway and route=light_rail are in the fixture and must be gone."""
+def test_only_route_and_station_relations_survive(contents):
     _, _, relations = contents
-    assert {tags.get("route") for tags in relations.values()} == {"train"}
+    for tags, _ in relations.values():
+        assert rail.is_route_relation(tags) or rail.is_station(tags)
 
 
-def test_every_station_node_carries_a_uic_ref(contents):
-    nodes, _, _ = contents
-    stations = [tags for tags, _, _ in nodes.values()
+def test_bus_relations_do_not_survive(contents):
+    """The fixture is full of them; a filter keyed on `route` alone would keep
+    them and quietly triple the file."""
+    _, _, relations = contents
+    assert not [tags for tags, _ in relations.values() if tags.get("route") == "bus"]
+
+
+def test_every_station_carries_a_uic_ref(contents):
+    nodes, ways, relations = contents
+    tagged = [tags for tags, _, _ in nodes.values()] \
+        + [tags for tags, _ in ways.values()] \
+        + [tags for tags, _ in relations.values()]
+    stations = [tags for tags in tagged
                 if tags.get("railway") in rail.STATION_RAILWAY_TYPES]
     assert stations, "the fixture must contain a station to be worth checking"
     assert all(tags.get("uic_ref") for tags in stations)
 
 
-def test_aarhus_h_is_the_station_that_survives(contents):
+def test_the_maimarkt_halt_is_among_the_stations(contents):
     """A named element, so a selection that keeps the right *number* by luck fails."""
-    nodes, _, _ = contents
+    nodes, ways, _ = contents
     uic = {tags["uic_ref"] for tags, _, _ in nodes.values() if tags.get("uic_ref")}
-    assert uic == {"8600087"}
+    uic |= {tags["uic_ref"] for tags, _ in ways.values() if tags.get("uic_ref")}
+    assert "8003841" in uic
 
 
 def test_kept_ways_keep_all_their_nodes(contents):
-    """Geometry is the whole point: a way missing a node cannot be routed on.
+    """Geometry is the whole point: a way missing a node cannot be routed on,
+    and a station polygon missing one has no centre.
 
-    This is what the two-pass selection buys — dropping the nodes of the ways
+    This is what the multi-pass selection buys — dropping the nodes of the ways
     the prefilter over-selected without dropping the nodes of the ways kept.
     """
     nodes, ways, _ = contents
@@ -187,20 +301,29 @@ def test_kept_ways_keep_all_their_nodes(contents):
         assert not missing, f"way {way} lost {len(missing)} nodes"
 
 
+def test_station_relations_keep_their_member_ways(contents):
+    """`out center` on a relation needs the geometry underneath it."""
+    nodes, ways, relations = contents
+    for rel, (tags, members) in relations.items():
+        if not rail.is_station(tags):
+            continue
+        for kind, ref in members:
+            if kind == "w":
+                assert ref in ways, f"station relation {rel} lost way {ref}"
+            elif kind == "n":
+                assert ref in nodes, f"station relation {rel} lost node {ref}"
+
+
 def test_untagged_nodes_are_only_there_to_carry_geometry(contents):
-    """No node survives that no kept way references and that is not a station."""
+    """No node survives that no kept way references and that has no UIC code."""
     nodes, ways, _ = contents
     referenced = {ref for _, refs in ways.values() for ref in refs}
     for node, (tags, _, _) in nodes.items():
-        assert node in referenced or rail.is_uic_station(tags)
+        assert node in referenced or rail.is_uic_node(tags)
 
 
 def test_bbox_is_the_true_extent_not_the_cut_box(filtered, contents):
-    """Phase 3 picks a region by this box, so it must not claim empty space.
-
-    The fixture was cut at 10.198,56.145 - 10.212,56.158; the rail inside it
-    reaches neither corner, and the extent reported has to be the data's.
-    """
+    """Phase 3 picks a region by this box, so it must not claim empty space."""
     nodes, _, _ = contents
     _, selection = filtered
     lons = [lon for _, lon, _ in nodes.values()]
@@ -208,9 +331,6 @@ def test_bbox_is_the_true_extent_not_the_cut_box(filtered, contents):
     min_lon, min_lat, max_lon, max_lat = selection.bbox
     assert (min_lon, min_lat) == pytest.approx((min(lons), min(lats)), abs=1e-5)
     assert (max_lon, max_lat) == pytest.approx((max(lons), max(lats)), abs=1e-5)
-    # Strictly inside the cut box on at least one side — a nominal box would
-    # have been the cut box itself.
-    assert max_lat < 56.158
 
 
 def test_an_extract_with_no_rail_is_an_error(tmp_path):
@@ -244,11 +364,12 @@ CONTRACT_KEYS = {
 @pytest.fixture(scope="module")
 def entry(filtered):
     path, selection = filtered
-    return rail.manifest_entry("europe/denmark", path, selection, "2026-09-05")
+    return rail.manifest_entry("europe/germany", path, selection, "2026-09-05")
 
 
 def test_entry_has_exactly_the_contract_keys(entry):
-    """Phase 2 reads this. Extra keys are a contract change, not a detail."""
+    """Phase 2 reads this. Extra keys are a contract change, not a detail —
+    including the uic_nodes count, which stays in the build log."""
     assert set(entry) == CONTRACT_KEYS
 
 
@@ -258,7 +379,7 @@ def test_entry_describes_the_file_on_disk(entry, filtered):
     assert entry["bytes"] == path.stat().st_size
     assert entry["sha256"] == rail.sha256_file(path)
     assert entry["source"] == \
-        "https://download.geofabrik.de/europe/denmark-latest.osm.pbf"
+        "https://download.geofabrik.de/europe/germany-latest.osm.pbf"
     assert entry["source_date"] == "2026-09-05"
 
 
@@ -290,7 +411,7 @@ def test_merge_orders_regions_and_stamps_the_schema(entry):
     assert manifest["schema"] == rail.MANIFEST_SCHEMA == 1
     assert manifest["generated_at"] == "2026-09-06T18:00:00Z"
     assert [r["region"] for r in manifest["regions"]] == [
-        "europe/austria", "europe/denmark"
+        "europe/austria", "europe/germany"
     ]
 
 
@@ -334,13 +455,13 @@ def test_collect_writes_and_verifies_the_published_manifest(filtered, entry, tmp
     """What the publish job runs: entry files in, verified manifest.json out."""
     path, _ = filtered
     (tmp_path / path.name).write_bytes(path.read_bytes())
-    (tmp_path / f"denmark{rail.ENTRY_SUFFIX}").write_text(json.dumps(entry))
+    (tmp_path / f"germany{rail.ENTRY_SUFFIX}").write_text(json.dumps(entry))
 
     manifest = rail.collect_manifest(tmp_path)
 
     written = json.loads((tmp_path / rail.MANIFEST_NAME).read_text())
     assert written == manifest
-    assert [r["region"] for r in written["regions"]] == ["europe/denmark"]
+    assert [r["region"] for r in written["regions"]] == ["europe/germany"]
 
 
 def test_collect_refuses_to_publish_nothing(tmp_path):
