@@ -119,11 +119,15 @@ def test_relation_geometry_feeds_extract_relation_geometry(store):
     assert len(rels) == 1
     rel = rels[0]
     assert rel["tags"]["route"] in {"train", "railway", "light_rail"}
-    assert all(m["type"] == "way" and len(m["geometry"]) >= 2 for m in rel["members"])
+    held = [m for m in rel["members"] if m["held"]]
+    assert len(held) >= 2
+    assert all(m["type"] == "way" and len(m["geometry"]) >= 2 for m in held)
+    assert all(m["geometry"] == [] for m in rel["members"] if not m["held"])
+    assert rel["missing_members"] == len(rel["members"]) - len(held)
 
     # Consumed by the existing strategy-A/B code path without adaptation. A
     # disconnected relation legitimately yields None; it must not raise.
-    geom = rel["members"][0]["geometry"]
+    geom = held[0]["geometry"]
     _extract_relation_geometry(
         rel, geom[0]["lat"], geom[0]["lon"], geom[-1]["lat"], geom[-1]["lon"])
 
@@ -240,9 +244,13 @@ def synthetic_store(tmp_path_factory):
     writer.add_node(mutable.Node(id=4, location=(6.20, 49.70)))
     writer.add_way(mutable.Way(id=10, nodes=[3, 4], tags={"railway": "rail"}))
     writer.add_way(mutable.Way(id=11, nodes=[3, 4], tags={"railway": "rail", "service": "yard"}))
+    # Member way 99 is deliberately absent: a route relation names platforms
+    # and service tracks that the way filter drops (Phase 1 measured 32% of
+    # Denmark's route=train member ways falling outside it), and the reader has
+    # to say so rather than quietly return a shorter relation.
     writer.add_relation(mutable.Relation(
         id=100,
-        members=[("w", 10, ""), ("n", 1, "stop"), ("n", 2, "stop")],
+        members=[("w", 10, ""), ("w", 99, ""), ("n", 1, "stop"), ("n", 2, "stop")],
         tags={"route": "train", "name": "Test line"}))
     writer.close()
 
@@ -262,7 +270,18 @@ def test_relations_for_uic_pair_matches_strategy_a(synthetic_store):
 
     rel = store.relation_geometry([100])[0]
     assert rel["tags"] == {"route": "train", "name": "Test line"}
-    assert [m["ref"] for m in rel["members"]] == [10]
+    assert [m["ref"] for m in rel["members"]] == [10, 99]
+
+
+def test_a_member_way_the_extract_does_not_hold_is_reported_not_hidden(synthetic_store):
+    rel = synthetic_store.relation_geometry([100])[0]
+    held, unheld = rel["members"]
+    assert held["ref"] == 10 and held["held"] is True and len(held["geometry"]) == 2
+    assert unheld["ref"] == 99 and unheld["held"] is False and unheld["geometry"] == []
+    assert rel["missing_members"] == 1
+    # The relation stays usable: the existing consumer needs two points per
+    # member and so ignores the gap.
+    assert _extract_relation_geometry(rel, 49.60, 6.10, 49.70, 6.20)
 
 
 def test_builder_applies_the_strategy_c_way_selection(synthetic_store):

@@ -224,6 +224,14 @@ class RailStore:
         ``_extract_relation_geometry`` reads ``members[].type`` and
         ``members[].geometry`` only; member nodes and roles are omitted because
         nothing consumes them.
+
+        A member way the extract does not hold — a platform or service track
+        dropped by the way filter — is still listed, with an empty geometry and
+        ``"held": False``. So "we could not reconstruct this member" is visible
+        and countable (``missing_members``), and distinct from a relation that
+        never had the member; the existing consumer skips such entries anyway,
+        since it requires two points. What to do about a partially
+        reconstructed relation is Phase 3's call, not the store's.
         """
         out = []
         for rel_id in rel_ids:
@@ -233,18 +241,31 @@ class RailStore:
             if not row:
                 continue
             route, name = row[0]
-            members = [
-                {"type": "way", "ref": way_id, "geometry": decode_geometry(geom)}
-                for way_id, geom in self._query(
-                    "SELECT w.id, w.geom FROM relation_way rw JOIN way w ON w.id = rw.way_id "
-                    "WHERE rw.rel_id = ? ORDER BY rw.seq",
-                    (rel_id,),
-                )
-            ]
+            members = []
+            missing = 0
+            for way_id, geom in self._query(
+                "SELECT rw.way_id, w.geom FROM relation_way rw "
+                "LEFT JOIN way w ON w.id = rw.way_id WHERE rw.rel_id = ? ORDER BY rw.seq",
+                (rel_id,),
+            ):
+                held = geom is not None
+                missing += not held
+                members.append({
+                    "type": "way",
+                    "ref": way_id,
+                    "held": held,
+                    "geometry": decode_geometry(geom) if held else [],
+                })
             tags = {"route": route}
             if name:
                 tags["name"] = name
-            out.append({"type": "relation", "id": rel_id, "tags": tags, "members": members})
+            out.append({
+                "type": "relation",
+                "id": rel_id,
+                "tags": tags,
+                "members": members,
+                "missing_members": missing,
+            })
         return out
 
     # ------------------------------------------------------------------

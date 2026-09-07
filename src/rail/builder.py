@@ -63,6 +63,9 @@ CREATE TABLE relation (
     route TEXT NOT NULL,
     name  TEXT
 );
+-- Every way member of the relation, in member order, whether or not the
+-- extract holds that way: the reader joins to `way` and reports the members it
+-- could not reconstruct rather than silently shortening the relation.
 CREATE TABLE relation_way (
     rel_id INTEGER NOT NULL,
     way_id INTEGER NOT NULL,
@@ -114,9 +117,12 @@ def build_store(
     relations: list[tuple] = []
     rel_ways: list[tuple] = []
     rel_uics: list[tuple] = []
-    # Which ways the file actually holds: a relation names members the extract
-    # does not carry, and a dangling row would make the store lie to anyone
-    # reading it by hand.
+    # Which ways the file actually holds. Relation membership is recorded in
+    # full even when a member is not held — a route relation's members include
+    # platforms and service tracks that the way filter drops (Phase 1 measured
+    # 32% of Denmark's route=train member ways falling outside it), and a
+    # reader that cannot tell "member we do not hold" from "not a member" has
+    # no way to report a partially reconstructed relation.
     way_ids: set[int] = set()
     # Every node carrying a uic_ref, not just the station/halt ones: strategy A
     # asks Overpass for `node["uic_ref"=X]` with no railway filter, and in
@@ -125,7 +131,8 @@ def build_store(
     # of them tagged station or halt). Whether those nodes survive Phase 1's
     # filter is Phase 1's call; the builder uses them when they are there.
     node_uic: dict[int, str] = {}
-    counts = {"ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0}
+    counts = {"ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0,
+              "relation_ways": 0, "relation_ways_held": 0}
     extent = [90.0, 180.0, -90.0, -180.0]  # min_lat, min_lon, max_lat, max_lon
 
     def flush() -> None:
@@ -175,8 +182,9 @@ def build_store(
             seq = 0
             seen_uic = set()
             for member in obj.members:
-                if member.type == "w" and member.ref in way_ids:
+                if member.type == "w":
                     rel_ways.append((obj.id, member.ref, seq))
+                    counts["relation_ways_held"] += member.ref in way_ids
                     seq += 1
                 elif member.type == "n":
                     uic = node_uic.get(member.ref)
@@ -189,6 +197,7 @@ def build_store(
     conn.executemany("INSERT INTO station_pos VALUES (?, ?, ?, ?, ?)", station_boxes)
     conn.executemany("INSERT INTO relation VALUES (?, ?, ?)", relations)
     conn.executemany("INSERT INTO relation_way VALUES (?, ?, ?)", rel_ways)
+    counts["relation_ways"] = len(rel_ways)
     conn.executemany("INSERT INTO relation_uic VALUES (?, ?)", rel_uics)
 
     stats = dict(counts)
