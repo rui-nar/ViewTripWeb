@@ -163,13 +163,30 @@ Requirements, in priority order:
 4. **Inspectable.** A format we can query by hand when a route looks wrong.
 
 SQLite with an R-tree index fits all four, matches the existing stack, and needs no
-new service. One file per region: ways with geometry, a node table, station/UIC
-lookup, and R-tree indices over way and station bounding boxes. An in-process LRU
-holds the built graph for the most recently used regions.
+new service. One file per region — `src/rail/store.py` reads what
+`src/rail/builder.py` writes: ways with packed geometry, station/UIC lookup,
+relation membership, and R-tree indices over rail-way and station bounding boxes.
+An in-process LRU bounds how many region files are open at once.
 
-**Open:** whether to persist the adjacency graph or rebuild it per region on load.
-Rebuild is simpler and measured at 8.41 s for Germany; persisting trades disk and
-complexity for latency. Decide with a measurement, not in advance.
+**Decided, on measurements (see the PR for issue #345 Phase 2):**
+
+- **No graph is held at all**, which answers the open question about persisting
+  the adjacency graph: neither. Strategy C already works on a bounding box, so a
+  bbox query returns only the ways the route needs — Hamburg→Flensburg is 4,422
+  of Germany's 130,713 ways and a 33.5k-node graph, not the country's 1,137,563.
+  Resolving it costs 62 MB resident against the 319 MB the whole-country graph
+  needs, and 0.13 s end to end. Requirement 3 (fast load) stops applying: there
+  is nothing to load, and opening a region is 0.8 ms.
+- **A spatial index replaces the linear snap.** `nearest_node` over Germany is
+  0.5–1.7 ms against 0.67 s for the same scan over the whole-country graph in
+  this process (1.43 s in the spike), and it returns the identical vertex.
+- **The store is built in CI**, as one more step in the Phase 1 pipeline calling
+  `python -m src.rail.builder`. Germany builds in 18.7 s at 194 MB peak — small
+  enough that first-use building on the box would work, and pointless: it would
+  put the `.pbf`, the builder and pyosmium on a VPS that otherwise needs none of
+  them, and pay that cost again after every container restart with an empty
+  volume. Cost of the choice is transfer size: the store is larger than the
+  extract it is built from (Germany 56 MB from 23 MB, 28 MB gzipped).
 
 ### Tests
 - Round-trip: filtered extract → store → the same element shapes
