@@ -165,28 +165,40 @@ Requirements, in priority order:
 SQLite with an R-tree index fits all four, matches the existing stack, and needs no
 new service. One file per region — `src/rail/store.py` reads what
 `src/rail/builder.py` writes: ways with packed geometry, station/UIC lookup,
-relation membership, and R-tree indices over rail-way and station bounding boxes.
+relation membership, and R-tree indices over way and station bounding boxes.
 An in-process LRU bounds how many region files are open at once.
 
 **Decided, on measurements (see the PR for issue #345 Phase 2):**
 
-- **No graph is held at all**, which answers the open question about persisting
+- **The store holds no graph**, which answers the open question about persisting
   the adjacency graph: neither. Strategy C already works on a bounding box, so a
   bbox query returns only the ways the route needs — Hamburg→Flensburg is 4,422
   of Germany's 130,713 ways and a 33.5k-node graph, not the country's 1,137,563.
   Resolving it costs 62 MB resident against the 319 MB the whole-country graph
-  needs, and 0.13 s end to end. Requirement 3 (fast load) stops applying: there
+  needs, and 0.15 s end to end. Requirement 3 (fast load) stops applying: there
   is nothing to load, and opening a region is 0.8 ms.
-- **A spatial index replaces the linear snap.** `nearest_node` over Germany is
-  0.5–1.7 ms against 0.67 s for the same scan over the whole-country graph in
-  this process (1.43 s in the spike), and it returns the identical vertex.
+- **The memory did not disappear, it moved to the caller's bounding box** — about
+  268 bytes per vertex, doubling once `_build_rail_graph` runs. Hamburg→Munich is
+  284,607 vertices (~150 MB, measured 204 MB resident for the whole resolve); the
+  whole-Germany box is 1,270,497 (~680 MB) on a 1 GB worker. `ways_in_bbox`
+  therefore enforces its own vertex ceiling and raises rather than allocate, and
+  `_RAIL_BBOX_MAX_AREA` in the resolver guards the same failure from the other
+  end: it is a memory bound now, not an Overpass workaround, and must survive
+  Phase 6.
+- **A spatial index replaces the linear snap, at parity.** `nearest_node` over
+  Germany is 0.4–1.5 ms against 0.67 s for the same scan over the whole-country
+  graph in this process (1.43 s in the spike), and it returns the *identical*
+  vertex — including `_nearest_node`'s squared-degree ordering, which is wrong as
+  geometry and kept anyway because this phase substitutes the source and nothing
+  else. Ranking by metres instead moved 0.53% of ±200 m snaps into a different
+  connected component. Snapping is Phase 4's to fix, against a stable baseline.
 - **The store is built in CI**, as one more step in the Phase 1 pipeline calling
-  `python -m src.rail.builder`. Germany builds in 18.7 s at 194 MB peak — small
+  `python -m src.rail.builder`. Germany builds in 23.9 s at 196 MB peak — small
   enough that first-use building on the box would work, and pointless: it would
-  put the `.pbf`, the builder and pyosmium on a VPS that otherwise needs none of
-  them, and pay that cost again after every container restart with an empty
-  volume. Cost of the choice is transfer size: the store is larger than the
-  extract it is built from (Germany 56 MB from 23 MB, 28 MB gzipped).
+  put the `.pbf` and the builder on a VPS that needs neither, and pay that cost
+  again after every container restart with an empty volume. Cost of the choice is
+  transfer size: the store is larger than the extract it is built from (Germany
+  58 MB from 23 MB, 28 MB gzipped).
 
 ### Tests
 - Round-trip: filtered extract → store → the same element shapes
