@@ -14,11 +14,15 @@ results unchanged. Phase 3 does that wiring; this module only serves lookups.
 Why SQLite with R-tree indices rather than a loaded graph: the resolver never
 needs a whole country at once — strategy C already works on a bounding box, and
 a bbox query returns only the ways inside it. So the 319 MB Germany graph the
-spike measured never has to exist. Resident memory is then the page cache of a
-couple of open connections (``_CACHE_KIB``), not the size of a region, and
-"which region is loaded" stops being a memory question. The file is also plain
-SQLite: when a route looks wrong, the data behind it is one ``sqlite3`` session
-away.
+spike measured never has to exist, and holding a region open costs a
+connection's page cache (``_CACHE_KIB``) rather than the size of the region.
+
+What that does *not* do is make a resolve free. A bbox result costs roughly
+268 bytes per vertex and about as much again once ``_build_rail_graph`` runs
+over it, so the memory is now proportional to the caller's box — which is why
+``ways_in_bbox`` enforces ``_MAX_BBOX_VERTICES`` itself instead of trusting
+every caller to pick a sane one. The file is also plain SQLite: when a route
+looks wrong, the data behind it is one ``sqlite3`` session away.
 
 Coordinates are stored as 1e-7 degree fixed-point int32 pairs — OSM's own
 precision, so the round trip is lossless — packed into one blob per way.
@@ -48,10 +52,28 @@ _M_PER_DEG_LAT = 111_320.0
 # regardless of how big those regions are — the ceiling the LRU test asserts.
 _CACHE_KIB = 2048
 
-# Radii tried in turn by nearest_node/nearest_station before giving up. Starting
-# small keeps the common case (a stop sitting on the track) to one tiny R-tree
-# hit; each step only runs when the previous one found nothing within itself.
+# Radii tried in turn before giving up. Starting small keeps the common case (a
+# stop sitting on the track) to one tiny R-tree hit; each step only runs when
+# the previous one found nothing within itself. nearest_station searches in
+# metres because it ranks in metres; nearest_node searches in degrees because it
+# ranks in degrees — see there for why the two must agree.
 _SEARCH_STEPS_M = (500.0, 2_000.0, 10_000.0)
+_SEARCH_STEPS_DEG = tuple(r / _M_PER_DEG_LAT for r in _SEARCH_STEPS_M)
+
+# Ceiling on one bbox query, in stored vertices. Measured on Germany, at ~268
+# bytes per vertex for the returned elements and about as much again once
+# _build_rail_graph turns them into a node graph:
+#
+#   Hamburg→Munich, about the longest leg the country offers   284,607  ~150 MB
+#   the whole-Germany box                                    1,270,497  ~680 MB
+#
+# The ceiling has to pass the first and refuse the second, on a worker with
+# 1 GB. 800k sits between them with margin either way (~430 MB, 2.8× the longest
+# real leg). Refusing is the point: silently allocating 680 MB is an OOM that
+# takes the worker with it, and _RAIL_BBOX_MAX_AREA in the resolver guards the
+# same failure from the other end — it is a memory bound, not an Overpass
+# artifact, and deleting it once Overpass is gone would remove a real guard.
+_MAX_BBOX_VERTICES = 800_000
 
 
 class RailStoreError(Exception):
@@ -191,6 +213,13 @@ class RailStore:
         """Relation ids whose member stations include both UIC codes.
 
         The local equivalent of strategy A's ``rel[route=train](bn.a)(bn.b)``.
+
+        Normalisation is one-sided, exactly as Overpass's is: the query asks for
+        ``node["uic_ref"="<our code, leading zeros stripped>"]`` and the OSM tag
+        has to equal that string. Stripping the stored tag too would match
+        relations Overpass does not — a behaviour change wearing a bug fix's
+        clothes. If leading zeros in OSM data cost us a route, that belongs in
+        the Phase 4 comparison, where it can be seen.
         """
         a, b = clean_uic(uic1), clean_uic(uic2)
         if not a or not b:
@@ -205,10 +234,16 @@ class RailStore:
     def relations_near(self, lat: float, lon: float, radius_m: float = 25_000) -> set[int]:
         """Ids of route relations with a member way inside *radius_m*.
 
-        Strategy B intersects this for the two endpoints. Overpass's
-        ``(around:)`` also matches on member *nodes*; a relation with a station
-        within 25 km but no track within 25 km does not occur in practice, and
-        the way test is the cheaper index.
+        Strategy B intersects this for the two endpoints, so whatever is missed
+        here is missed twice. The R-tree therefore indexes every way the extract
+        holds, not only track: a relation whose members near the point are all
+        platforms or service tracks is one Overpass's ``around:`` returns, and
+        filtering to ``rail = 1`` here lost 12.6% of the candidate set at
+        Luxembourg Gare — 83 relations found against 95 matched.
+
+        Overpass also matches on member *nodes*. A relation with a station
+        inside the radius but no member way at all inside it does not occur in
+        practice, so that case is left out rather than paid for.
         """
         min_lat, min_lon, max_lat, max_lon = _box(lat, lon, radius_m)
         rows = self._query(
@@ -272,21 +307,46 @@ class RailStore:
     # Lookup 3 — railway ways in a bounding box  (strategy C)
     # ------------------------------------------------------------------
 
+    # Track only: the R-tree indexes every way so relations_near can see
+    # platforms, so each rail query says so for itself.
+    _RAIL_IN_BOX = (
+        "FROM way_bbox b JOIN way w ON w.id = b.id WHERE w.rail = 1 "
+        "AND b.max_lon >= ? AND b.min_lon <= ? AND b.max_lat >= ? AND b.min_lat <= ?"
+    )
+
     def ways_in_bbox(
-        self, min_lat: float, min_lon: float, max_lat: float, max_lon: float
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+        max_vertices: int = _MAX_BBOX_VERTICES,
     ) -> list[dict]:
-        """Ways whose extent overlaps the box, in ``_build_rail_graph``'s shape.
+        """Track whose extent overlaps the box, in ``_build_rail_graph``'s shape.
 
         Selection is by bounding box overlap, so a way that merely *spans* the
         box is included where Overpass would need a node inside it. That is a
         superset, and a superset is the safe direction: the graph gains a way
         the route may use, never loses one it needs.
+
+        Raises ``RailStoreError`` when the box holds more than *max_vertices*
+        (see ``_MAX_BBOX_VERTICES``). The size is counted from the blob lengths
+        before anything is decoded, so an over-large box costs one index scan
+        instead of the several hundred megabytes it would otherwise allocate. A
+        caller that hits this wants a smaller box or an honest straight line,
+        not a bigger worker.
         """
-        rows = self._query(
-            "SELECT w.id, w.geom FROM way_bbox b JOIN way w ON w.id = b.id "
-            "WHERE b.max_lon >= ? AND b.min_lon <= ? AND b.max_lat >= ? AND b.min_lat <= ?",
-            (min_lon, max_lon, min_lat, max_lat),
-        )
+        params = (min_lon, max_lon, min_lat, max_lat)
+        # 8 bytes per vertex on disk — two int32s. Counted, not estimated.
+        vertices = self._query(
+            f"SELECT COALESCE(SUM(LENGTH(w.geom)), 0) / 8 {self._RAIL_IN_BOX}", params
+        )[0][0]
+        if vertices > max_vertices:
+            raise RailStoreError(
+                f"bbox ({min_lat}, {min_lon}, {max_lat}, {max_lon}) holds {vertices} "
+                f"vertices, over the {max_vertices} ceiling"
+            )
+        rows = self._query(f"SELECT w.id, w.geom {self._RAIL_IN_BOX}", params)
         return [
             {"type": "way", "id": way_id, "geometry": decode_geometry(geom)}
             for way_id, geom in rows
@@ -297,32 +357,49 @@ class RailStore:
     # ------------------------------------------------------------------
 
     def nearest_node(self, lat: float, lon: float, max_radius_m: float = 25_000) -> Optional[dict]:
-        """Nearest vertex of any railway way, as ``{"lat", "lon", "way"}``.
+        """Nearest track vertex, as ``{"lat", "lon", "way"}``, or None.
 
         ``_nearest_node`` scans every node of the built graph — 1.43 s over
         Germany, twice per resolve. Here the R-tree bounds the scan to the ways
-        near the point. The result is the *same* vertex: a vertex outside the
-        search box is further away than any vertex found inside it, so the first
-        radius that contains a candidate contains the winner.
+        near the point, and the winner is chosen by ``_nearest_node``'s own
+        ordering: **squared degrees**, latitude and longitude weighted alike.
+
+        That ordering is wrong as geometry — a degree of longitude is 0.65 of a
+        degree of latitude at Luxembourg — and it is kept anyway, because this
+        phase substitutes the source and changes nothing else. Ranking by metres
+        instead picks a different vertex for 16.7% of points jittered by ±50 m,
+        and 0.53% of ±200 m snaps land in a different connected component, where
+        Dijkstra finds no path and the leg degrades to a straight line. Phase 4
+        owns snapping and can change the metric against a stable baseline.
+
+        The search ladder is in degrees too, and has to be: a square box of
+        half-width *h* degrees excludes exactly the vertices whose squared-degree
+        distance exceeds h², so a candidate found within h² is the winner. A
+        metric circle does not — at Luxembourg it reaches 1.54× further east
+        than north, so it can hold a vertex that a nearer-in-degrees one outside
+        it beats. *max_radius_m* is therefore a limit on **latitude-equivalent**
+        distance: 25 km means 0.2246°, which is 25 km north-south and up to
+        38 km east-west. Mixing the two units is what makes the ordering wrong.
+
+        Two behaviour changes remain, both deliberate: this returns None beyond
+        that ceiling where ``_nearest_node`` always returns something, however
+        absurd; and it sees only track the region holds, where ``_nearest_node``
+        sees whatever graph it was handed.
 
         Coordinates come back at full precision, so a caller can form the
         ``"{lat:.6f},{lon:.6f}"`` id ``_build_rail_graph`` uses.
         """
-        radii = [r for r in _SEARCH_STEPS_M if r < max_radius_m] + [max_radius_m]
-        for radius in radii:
-            min_lat, min_lon, max_lat, max_lon = _box(lat, lon, radius)
-            rows = self._query(
-                "SELECT w.id, w.geom FROM way_bbox b JOIN way w ON w.id = b.id "
-                "WHERE b.max_lon >= ? AND b.min_lon <= ? AND b.max_lat >= ? AND b.min_lat <= ?",
-                (min_lon, max_lon, min_lat, max_lat),
-            )
+        cap = max_radius_m / _M_PER_DEG_LAT
+        for h in [d for d in _SEARCH_STEPS_DEG if d < cap] + [cap]:
+            rows = self._query(f"SELECT w.id, w.geom {self._RAIL_IN_BOX}",
+                               (lon - h, lon + h, lat - h, lat + h))
             best = None
-            best_d = radius
+            best_sq = h * h
             for way_id, geom in rows:
                 for pt in decode_geometry(geom):
-                    d = _dist_m(lat, lon, pt["lat"], pt["lon"])
-                    if d <= best_d:
-                        best, best_d = {"lat": pt["lat"], "lon": pt["lon"], "way": way_id}, d
+                    sq = (pt["lat"] - lat) ** 2 + (pt["lon"] - lon) ** 2
+                    if sq <= best_sq:
+                        best, best_sq = {"lat": pt["lat"], "lon": pt["lon"], "way": way_id}, sq
             if best is not None:
                 return best
         return None

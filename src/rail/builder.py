@@ -1,14 +1,13 @@
 """Build a per-region rail store from a filtered rail-only ``.osm.pbf``.
 
-The input is Phase 1's artifact — the extract already reduced to
-``railway in (rail, narrow_gauge, light_rail)`` without ``service``, route
-relations, and station/halt nodes with ``uic_ref``. This module makes no tag
-decisions of its own beyond recognising those, so changing coverage stays a
-Phase 1 concern.
+The input is Phase 1's artifact — the extract already reduced to the selection
+table in docs/LOCAL_RAIL_DATA_PLAN.md (railway ways without ``service``, route
+relations, every node carrying a ``uic_ref``, and station/halt nodes, ways and
+relations with one). This module makes no tag decisions of its own beyond
+recognising those, so changing coverage stays a Phase 1 concern.
 
-Run it from Phase 1's pipeline (see docs/LOCAL_RAIL_DATA_PLAN.md — building in
-CI, not on the box, is Phase 2's decision and this is the step that implements
-it)::
+Run it from Phase 1's pipeline (see the plan — building in CI, not on the box,
+is Phase 2's decision and this is the step that implements it)::
 
     python -m src.rail.builder germany-rail.osm.pbf europe-germany.rail.sqlite \\
         --region europe/germany --source-date 2026-09-05
@@ -25,12 +24,12 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from src.rail.store import SCHEMA_VERSION, clean_uic, encode_geometry
+from src.rail.store import SCHEMA_VERSION, encode_geometry
 
-# The strategy-C selection, repeated here only to tell a rail way from a way
-# that is in the file solely because a route relation references it. Those
-# member ways must keep their geometry (a relation's ``out geom`` includes
-# them) but must not appear in bbox or snapping results.
+# The strategy-C way selection, repeated here only to tell track from a way that
+# is in the file because something references it — a route relation's member, or
+# a station polygon. Those keep their geometry but are not track the resolver
+# may snap to or route over.
 _RAIL_VALUES = {"rail", "narrow_gauge", "light_rail"}
 _ROUTE_VALUES = {"train", "railway", "light_rail"}
 _STATION_VALUES = {"station", "halt"}
@@ -39,22 +38,30 @@ _SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- One row per way, geometry packed as int32 lat/lon pairs (see store.py).
--- rail=0 marks a way present only as a relation member: it has geometry a
--- relation needs, but it is not track the resolver may snap to or route over.
+-- rail=0 marks a way that is not track: a route relation's platform or service
+-- member, or a station polygon. It keeps its geometry because the relation's
+-- `out geom` includes it, but no rail query may return it.
 CREATE TABLE way (
     id   INTEGER PRIMARY KEY,
     rail INTEGER NOT NULL,
     geom BLOB NOT NULL
 );
 
--- Indexes rail ways only, so every spatial query is over track by construction.
+-- Indexes every way, not just track: `relations_near` has to see a relation
+-- whose nearby members are all platforms, exactly as Overpass's around: does.
+-- Rail-only queries join `way` and filter on rail = 1.
 CREATE VIRTUAL TABLE way_bbox USING rtree(id, min_lon, max_lon, min_lat, max_lat);
 
+-- Stations mapped as nodes, ways or relations alike (Overpass's `out center`
+-- returns a centre for all three, and polygon-mapped stations are common), so
+-- `id` is ours and `osm_type`/`osm_id` say what it came from.
 CREATE TABLE station (
-    id  INTEGER PRIMARY KEY,      -- OSM node id
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    uic TEXT NOT NULL             -- as tagged; match on the normalised form
+    id       INTEGER PRIMARY KEY,
+    osm_type TEXT NOT NULL,       -- node | way | relation
+    osm_id   INTEGER NOT NULL,
+    lat      REAL NOT NULL,
+    lon      REAL NOT NULL,
+    uic      TEXT NOT NULL        -- verbatim tag; Overpass matches it verbatim
 );
 CREATE VIRTUAL TABLE station_pos USING rtree(id, min_lon, max_lon, min_lat, max_lat);
 
@@ -74,8 +81,8 @@ CREATE TABLE relation_way (
 CREATE INDEX relation_way_rel ON relation_way(rel_id);
 CREATE INDEX relation_way_way ON relation_way(way_id);
 
--- Strategy A asks "which relation serves both these UIC codes"; this is the
--- relation's member stations, normalised, so that question is one join.
+-- Strategy A asks "which relation serves both these UIC codes". The uic is the
+-- tag verbatim, because that is what Overpass compares against.
 CREATE TABLE relation_uic (
     rel_id INTEGER NOT NULL,
     uic    TEXT NOT NULL
@@ -84,6 +91,10 @@ CREATE INDEX relation_uic_uic ON relation_uic(uic);
 """
 
 _BATCH = 10_000
+
+
+class RailBuildError(Exception):
+    pass
 
 
 def build_store(
@@ -117,22 +128,28 @@ def build_store(
     relations: list[tuple] = []
     rel_ways: list[tuple] = []
     rel_uics: list[tuple] = []
+    # Station relations resolve after the way pass: a multipolygon station's
+    # centre is the centre of its members, and those are in the database by then.
+    pending_rel_stations: list[tuple] = []
     # Which ways the file actually holds. Relation membership is recorded in
-    # full even when a member is not held — a route relation's members include
-    # platforms and service tracks that the way filter drops (Phase 1 measured
-    # 32% of Denmark's route=train member ways falling outside it), and a
-    # reader that cannot tell "member we do not hold" from "not a member" has
-    # no way to report a partially reconstructed relation.
+    # full even when a member is not held — a route relation names platforms and
+    # service tracks that the way filter drops (Phase 1 measured 32% of
+    # Denmark's route=train member ways falling outside it) — and a reader that
+    # cannot tell "member we do not hold" from "not a member" has no way to
+    # report a partially reconstructed relation.
     way_ids: set[int] = set()
-    # Every node carrying a uic_ref, not just the station/halt ones: strategy A
-    # asks Overpass for `node["uic_ref"=X]` with no railway filter, and in
-    # practice route relations reference the stop_position node rather than the
-    # station node (Luxembourg: 20 relation member nodes carry a uic_ref, none
-    # of them tagged station or halt). Whether those nodes survive Phase 1's
-    # filter is Phase 1's call; the builder uses them when they are there.
+    # Every node carrying a uic_ref, whatever else it is tagged: strategy A asks
+    # Overpass for `node["uic_ref"=X]` with no railway filter, and route
+    # relations reference the stop node rather than the station node.
     node_uic: dict[int, str] = {}
-    counts = {"ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0,
-              "relation_ways": 0, "relation_ways_held": 0}
+    counts = {
+        "ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0,
+        "relation_ways": 0, "relation_ways_held": 0,
+        # Nodes a way references that the extract does not locate. Dropping one
+        # welds its neighbours together, which silently moves the geometry, so
+        # the number is recorded rather than left to be guessed at.
+        "ways_missing_nodes": 0, "missing_nodes": 0,
+    }
     extent = [90.0, 180.0, -90.0, -180.0]  # min_lat, min_lon, max_lat, max_lon
 
     def flush() -> None:
@@ -141,22 +158,30 @@ def build_store(
         ways.clear()
         boxes.clear()
 
-    # Nodes, then ways, then relations — PBF order, so the station map is
-    # complete by the time relations need it and one pass is enough.
+    def add_station(osm_type: str, osm_id: int, lat: float, lon: float, uic: str) -> None:
+        sid = len(stations) + 1
+        stations.append((sid, osm_type, osm_id, lat, lon, uic))
+        station_boxes.append((sid, lon, lon, lat, lat))
+        counts["stations"] += 1
+
+    # Nodes, then ways, then relations — PBF order, so the uic map is complete
+    # by the time relations need it and one pass is enough.
     for obj in osmium.FileProcessor(str(pbf_path)).with_locations():
         tags = obj.tags
+        uic = tags.get("uic_ref")
+        is_station = bool(uic) and tags.get("railway") in _STATION_VALUES
         if obj.is_node():
-            uic = tags.get("uic_ref")
             if not uic:
                 continue
-            node_uic[obj.id] = clean_uic(uic)
-            if tags.get("railway") in _STATION_VALUES:
-                lat, lon = obj.location.lat, obj.location.lon
-                stations.append((obj.id, lat, lon, uic))
-                station_boxes.append((obj.id, lon, lon, lat, lat))
-                counts["stations"] += 1
+            node_uic[obj.id] = uic
+            if is_station:
+                add_station("node", obj.id, obj.location.lat, obj.location.lon, uic)
         elif obj.is_way():
             pts = [(n.lat, n.lon) for n in obj.nodes if n.location.valid()]
+            missing = len(obj.nodes) - len(pts)
+            if missing:
+                counts["ways_missing_nodes"] += 1
+                counts["missing_nodes"] += missing
             if len(pts) < 2:
                 continue
             is_rail = int(tags.get("railway") in _RAIL_VALUES and "service" not in tags)
@@ -166,15 +191,23 @@ def build_store(
             counts["ways" if is_rail else "member_ways"] += 1
             lats = [p[0] for p in pts]
             lons = [p[1] for p in pts]
+            box = (obj.id, min(lons), max(lons), min(lats), max(lats))
+            boxes.append(box)
             if is_rail:
-                boxes.append((obj.id, min(lons), max(lons), min(lats), max(lats)))
-                extent[0] = min(extent[0], min(lats))
-                extent[1] = min(extent[1], min(lons))
-                extent[2] = max(extent[2], max(lats))
-                extent[3] = max(extent[3], max(lons))
+                extent[0] = min(extent[0], box[3])
+                extent[1] = min(extent[1], box[1])
+                extent[2] = max(extent[2], box[4])
+                extent[3] = max(extent[3], box[2])
+            if is_station:
+                # Overpass's `out center` is the centre of the element's
+                # bounding box, so a polygon station lands where Overpass puts it.
+                add_station("way", obj.id, (box[3] + box[4]) / 2, (box[1] + box[2]) / 2, uic)
             if len(ways) >= _BATCH:
                 flush()
         else:
+            if is_station:
+                pending_rel_stations.append(
+                    (obj.id, uic, [m.ref for m in obj.members if m.type == "w"]))
             if tags.get("route") not in _ROUTE_VALUES:
                 continue
             relations.append((obj.id, tags["route"], tags.get("name")))
@@ -187,18 +220,35 @@ def build_store(
                     counts["relation_ways_held"] += member.ref in way_ids
                     seq += 1
                 elif member.type == "n":
-                    uic = node_uic.get(member.ref)
-                    if uic and uic not in seen_uic:
-                        seen_uic.add(uic)
-                        rel_uics.append((obj.id, uic))
+                    member_uic = node_uic.get(member.ref)
+                    if member_uic and member_uic not in seen_uic:
+                        seen_uic.add(member_uic)
+                        rel_uics.append((obj.id, member_uic))
 
     flush()
-    conn.executemany("INSERT INTO station VALUES (?, ?, ?, ?)", stations)
+
+    # Station relations: centre of the bounding box of the members we hold,
+    # which is what `out center` reports for a relation.
+    for rel_id, uic, member_ids in pending_rel_stations:
+        box = _members_bbox(conn, member_ids)
+        if box:
+            add_station("relation", rel_id, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, uic)
+
+    conn.executemany("INSERT INTO station VALUES (?, ?, ?, ?, ?, ?)", stations)
     conn.executemany("INSERT INTO station_pos VALUES (?, ?, ?, ?, ?)", station_boxes)
     conn.executemany("INSERT INTO relation VALUES (?, ?, ?)", relations)
     conn.executemany("INSERT INTO relation_way VALUES (?, ?, ?)", rel_ways)
     counts["relation_ways"] = len(rel_ways)
     conn.executemany("INSERT INTO relation_uic VALUES (?, ?)", rel_uics)
+
+    if not counts["ways"]:
+        # The region's extent comes from its track. With no track there is no
+        # extent, and Phase 3 picks regions by extent — an inverted default box
+        # would quietly claim to cover nothing, or everything, depending on the
+        # comparison. Refuse to write a store that cannot answer "where am I".
+        conn.close()
+        os.remove(out_path)
+        raise RailBuildError(f"{pbf_path}: no railway ways — not a rail extract")
 
     stats = dict(counts)
     stats["build_seconds"] = round(time.monotonic() - t0, 2)
@@ -222,6 +272,23 @@ def build_store(
 
     stats["bytes"] = os.path.getsize(out_path)
     return stats
+
+
+def _members_bbox(conn: sqlite3.Connection, member_ids: list[int]) -> tuple | None:
+    """(min_lat, min_lon, max_lat, max_lon) over the member ways we hold."""
+    if not member_ids:
+        return None
+    rows = conn.execute(
+        "SELECT min_lat, min_lon, max_lat, max_lon FROM way_bbox WHERE id IN "
+        f"({','.join('?' * len(member_ids))})",
+        member_ids,
+    ).fetchall()
+    if not rows:
+        return None
+    return (
+        min(r[0] for r in rows), min(r[1] for r in rows),
+        max(r[2] for r in rows), max(r[3] for r in rows),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,9 +1,10 @@
 """Local rail store — build, read, index correctness and resource bounds (#345).
 
-The fixture is a real rail-only extract of Luxembourg, cut with the tag
-selection Phase 1 publishes; see ``tests/fixtures/rail/README.md``. A synthetic
-two-station extract covers the relation lookups that depend on how a country's
-mappers wired their relations, which no real extract can be relied on to have.
+The fixture is a real rail-only extract of Luxembourg, cut with the selection
+table in docs/LOCAL_RAIL_DATA_PLAN.md; see ``tests/fixtures/rail/README.md``. A
+synthetic extract covers the shapes a single country's mappers may simply not
+have used — polygon stations, a relation whose only nearby member is a platform
+— which no real extract can be relied on to contain.
 """
 import os
 import random
@@ -14,7 +15,7 @@ import tracemalloc
 
 import pytest
 
-from src.rail.builder import build_store
+from src.rail.builder import RailBuildError, build_store
 from src.rail.store import (
     RailStore,
     RailStoreCache,
@@ -24,7 +25,11 @@ from src.rail.store import (
     encode_geometry,
     store_filename,
 )
-from src.services.overpass_service import _build_rail_graph, _extract_relation_geometry
+from src.services.overpass_service import (
+    _build_rail_graph,
+    _extract_relation_geometry,
+    _nearest_node,
+)
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__), "fixtures", "rail", "luxembourg-rail.osm.pbf")
@@ -44,18 +49,84 @@ def store(store_path):
         yield s
 
 
-def _all_rail_vertices(path):
-    """Every vertex of every rail way, read straight out of the tables.
+@pytest.fixture(scope="module")
+def region_graph(store):
+    """The whole fixture region as ``_build_rail_graph`` sees it.
 
-    The brute-force oracle the R-tree queries are checked against — deliberately
-    sharing no code with them.
+    This is the vertex set ``_nearest_node`` would scan today, so it is the
+    oracle for what the index must return.
     """
-    conn = sqlite3.connect(path)
-    pts = []
-    for (geom,) in conn.execute("SELECT geom FROM way WHERE rail = 1"):
-        pts.extend((p["lat"], p["lon"]) for p in decode_geometry(geom))
-    conn.close()
-    return pts
+    return _build_rail_graph(store.ways_in_bbox(*store.bbox))
+
+
+def _write_synthetic(path):
+    """An extract built to contain what Luxembourg happens not to.
+
+    Nodes first, then ways, then relations, in id order — PBF order, which is
+    what the builder's single pass assumes.
+    """
+    import osmium
+    from osmium.osm import mutable
+
+    w = osmium.SimpleWriter(str(path))
+    # A station node whose tag carries a leading zero, and a stop node that is
+    # not a station but does carry a uic_ref (strategy A matches those).
+    w.add_node(mutable.Node(id=1, location=(6.10, 49.60),
+                            tags={"railway": "station", "uic_ref": "8200100"}))
+    w.add_node(mutable.Node(id=2, location=(6.20, 49.70),
+                            tags={"railway": "stop", "uic_ref": "8200200"}))
+    w.add_node(mutable.Node(id=3, location=(6.10, 49.60)))
+    w.add_node(mutable.Node(id=4, location=(6.20, 49.70)))
+    # Corners of a station polygon, and of a multipolygon station's ring.
+    for nid, (lon, lat) in enumerate(
+            [(6.30, 49.80), (6.32, 49.80), (6.32, 49.82), (6.30, 49.82)], start=5):
+        w.add_node(mutable.Node(id=nid, location=(lon, lat)))
+    for nid, (lon, lat) in enumerate(
+            [(6.40, 49.90), (6.42, 49.90), (6.42, 49.92), (6.40, 49.92)], start=9):
+        w.add_node(mutable.Node(id=nid, location=(lon, lat)))
+    w.add_node(mutable.Node(id=13, location=(6.50, 50.00)))
+    w.add_node(mutable.Node(id=14, location=(6.51, 50.00)))
+    # A stop whose OSM tag carries a leading zero. Overpass cannot match it
+    # either, because it strips only our side of the comparison.
+    w.add_node(mutable.Node(id=15, location=(6.21, 49.71),
+                            tags={"railway": "stop", "uic_ref": "08200500"}))
+
+    w.add_way(mutable.Way(id=10, nodes=[3, 4], tags={"railway": "rail"}))
+    w.add_way(mutable.Way(id=11, nodes=[3, 4],
+                          tags={"railway": "rail", "service": "yard"}))
+    w.add_way(mutable.Way(id=12, nodes=[5, 6, 7, 8, 5],
+                          tags={"railway": "station", "uic_ref": "8200300"}))
+    w.add_way(mutable.Way(id=13, nodes=[9, 10, 11, 12, 9]))          # station ring
+    w.add_way(mutable.Way(id=14, nodes=[13, 14], tags={"railway": "platform"}))
+
+    # Member way 99 is deliberately absent: a route relation names platforms and
+    # service tracks the way filter drops, and members outside the country's
+    # extent entirely (the Luxembourg fixture holds 1,925 of 10,669 referenced
+    # member ways, most of the rest being across a border).
+    w.add_relation(mutable.Relation(
+        id=100,
+        members=[("w", 10, ""), ("w", 99, ""),
+                 ("n", 1, "stop"), ("n", 2, "stop"), ("n", 15, "stop")],
+        tags={"route": "train", "name": "Test line"}))
+    # A station mapped as a multipolygon, which _find_station_near matches and
+    # `out center` answers with the centre of its bounding box.
+    w.add_relation(mutable.Relation(
+        id=101, members=[("w", 13, "outer")],
+        tags={"railway": "halt", "uic_ref": "8200400", "type": "multipolygon"}))
+    # A route relation whose only member near the platform is that platform.
+    w.add_relation(mutable.Relation(
+        id=102, members=[("w", 14, "")], tags={"route": "train", "name": "Platform line"}))
+    w.close()
+
+
+@pytest.fixture(scope="module")
+def synthetic_store(tmp_path_factory):
+    pbf = tmp_path_factory.mktemp("synth") / "synth-rail.osm.pbf"
+    _write_synthetic(pbf)
+    out = tmp_path_factory.mktemp("synthstore") / store_filename("europe/synth")
+    build_store(pbf, out, region="europe/synth")
+    with RailStore(out) as s:
+        yield s
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +134,9 @@ def _all_rail_vertices(path):
 # ---------------------------------------------------------------------------
 
 def test_store_holds_the_three_kinds_of_data_the_resolver_asks_for(store):
-    assert int(store.meta["ways"]) == 1167
+    assert int(store.meta["ways"]) == 1167          # track
+    assert int(store.meta["member_ways"]) == 989    # geometry a relation needs
+    assert int(store.meta["nodes"]) == 23_986
     assert int(store.meta["stations"]) == 66
     assert int(store.meta["relations"]) == 109
     assert store.region == REGION
@@ -72,16 +145,15 @@ def test_store_holds_the_three_kinds_of_data_the_resolver_asks_for(store):
     assert 49 < min_lat < max_lat < 51 and 5 < min_lon < max_lon < 7
 
 
-def test_bbox_ways_build_the_same_graph_as_overpass_elements(store):
-    min_lat, min_lon, max_lat, max_lon = store.bbox
-    ways = store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
+def test_bbox_ways_build_the_same_graph_as_overpass_elements(store, region_graph):
+    nodes, adj = region_graph
+    ways = store.ways_in_bbox(*store.bbox)
     assert len(ways) == 1167
     for way in ways:
         assert len(way["geometry"]) >= 2
         assert set(way["geometry"][0]) == {"lat", "lon"}
 
     # The point of the shape contract: _build_rail_graph is unchanged by Phase 2.
-    nodes, adj = _build_rail_graph(ways)
     assert len(nodes) > 10_000
     # Every adjacency entry names a node that exists — a malformed geometry list
     # would surface here rather than deep inside a Dijkstra run.
@@ -95,7 +167,6 @@ def test_bbox_selection_is_bounded_by_the_box(store):
     whole = store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
     assert 0 < len(half) < len(whole)
     assert {w["id"] for w in half} <= {w["id"] for w in whole}
-    # Every way returned really does reach into the box.
     for way in half:
         assert any(min_lat <= p["lat"] <= mid_lat for p in way["geometry"])
 
@@ -125,55 +196,61 @@ def test_relation_geometry_feeds_extract_relation_geometry(store):
     assert all(m["geometry"] == [] for m in rel["members"] if not m["held"])
     assert rel["missing_members"] == len(rel["members"]) - len(held)
 
-    # Consumed by the existing strategy-A/B code path without adaptation. A
-    # disconnected relation legitimately yields None; it must not raise.
-    geom = held[0]["geometry"]
-    _extract_relation_geometry(
-        rel, geom[0]["lat"], geom[0]["lon"], geom[-1]["lat"], geom[-1]["lon"])
+    # Not merely "does not raise": the existing strategy-A/B code path must get
+    # a real polyline out of the store's relation, endpoints included.
+    first, last = held[0]["geometry"][0], held[-1]["geometry"][-1]
+    geom = _extract_relation_geometry(
+        rel, first["lat"], first["lon"], last["lat"], last["lon"])
+    assert geom is not None and len(geom) >= 2
+    assert all(len(pt) == 2 for pt in geom)      # [lon, lat] pairs
 
     assert store.relation_geometry([-1]) == []
 
 
-def test_ways_carried_only_for_a_relation_stay_out_of_spatial_results(store):
+def test_ways_carried_only_for_a_relation_stay_out_of_rail_results(store):
     """A way present because a relation references it has geometry but is not
-    track: it must never be snapped to, routed over, or returned by a bbox
-    query — while a relation's own geometry still includes it."""
+    track: it must never be snapped to or returned by a bbox query — while
+    still being visible to the relation lookups that need it."""
     conn = sqlite3.connect(store.path)
     member_only = conn.execute("SELECT COUNT(*) FROM way WHERE rail = 0").fetchone()[0]
     indexed = conn.execute("SELECT COUNT(*) FROM way_bbox").fetchone()[0]
     rail = conn.execute("SELECT COUNT(*) FROM way WHERE rail = 1").fetchone()[0]
     conn.close()
     assert member_only > 0
-    assert indexed == rail
+    assert indexed == rail + member_only        # the R-tree holds every way
+    assert len(store.ways_in_bbox(*store.bbox)) == rail
 
 
 # ---------------------------------------------------------------------------
-# Spatial index correctness — against brute force
+# Spatial index correctness — against the function it replaces
 # ---------------------------------------------------------------------------
 
-def test_nearest_node_matches_brute_force(store):
-    points = _all_rail_vertices(store.path)
+def test_nearest_node_returns_the_same_vertex_as_the_resolvers_scan(store, region_graph):
+    """Parity, not improvement: identical vertex to ``_nearest_node`` over the
+    same vertex set, including its squared-degree ordering."""
+    nodes, _ = region_graph
     min_lat, min_lon, max_lat, max_lon = store.bbox
     rng = random.Random(20260906)
     checked = 0
-    for _ in range(40):
+    for _ in range(60):
         lat = rng.uniform(min_lat, max_lat)
         lon = rng.uniform(min_lon, max_lon)
-        want = min(points, key=lambda p: _dist_m(lat, lon, p[0], p[1]))
-        want_d = _dist_m(lat, lon, want[0], want[1])
+        want = nodes[_nearest_node(nodes, lat, lon)]      # [lon, lat]
         got = store.nearest_node(lat, lon)
         if got is None:
-            assert want_d > 25_000   # only allowed beyond the search ceiling
+            # Allowed only past the search ceiling, which _nearest_node has not.
+            # The ceiling is in degrees, because the ordering is (see the store).
+            assert (want[1] - lat) ** 2 + (want[0] - lon) ** 2 > (25_000 / 111_320) ** 2
             continue
-        got_d = _dist_m(lat, lon, got["lat"], got["lon"])
-        assert got_d == pytest.approx(want_d, abs=1e-6)
+        assert (got["lat"], got["lon"]) == pytest.approx((want[1], want[0]), abs=1e-7)
         checked += 1
-    assert checked >= 35
+    assert checked >= 45
 
 
-def test_nearest_node_on_a_vertex_returns_that_vertex(store):
-    points = _all_rail_vertices(store.path)
-    for lat, lon in points[:: max(1, len(points) // 20)]:
+def test_nearest_node_on_a_vertex_returns_that_vertex(store, region_graph):
+    nodes, _ = region_graph
+    coords = list(nodes.values())
+    for lon, lat in coords[:: max(1, len(coords) // 20)]:
         got = store.nearest_node(lat, lon)
         assert got["lat"] == pytest.approx(lat, abs=1e-7)
         assert got["lon"] == pytest.approx(lon, abs=1e-7)
@@ -185,6 +262,8 @@ def test_nearest_node_gives_up_rather_than_snapping_across_a_continent(store):
 
 
 def test_nearest_station_matches_brute_force_and_honours_the_radius(store):
+    """Ranked in metres, unlike ``_find_station_near``'s squared degrees — a
+    disclosed divergence, and the only one that changes which station wins."""
     conn = sqlite3.connect(store.path)
     stations = conn.execute("SELECT lat, lon, uic FROM station").fetchall()
     conn.close()
@@ -218,59 +297,82 @@ def test_relations_near_finds_a_relation_from_its_own_track(store):
         48.85, 2.35, 1000)
 
 
+def test_relations_for_uic_pair_finds_real_relations_in_the_fixture(store):
+    """Strategy A on real data — which needs the #349 contract's *any* node
+    with a uic_ref, since route relations reference stop nodes, not stations."""
+    conn = sqlite3.connect(store.path)
+    pairs = conn.execute(
+        "SELECT a.uic, b.uic, a.rel_id FROM relation_uic a JOIN relation_uic b "
+        "ON a.rel_id = b.rel_id AND a.uic < b.uic").fetchall()
+    conn.close()
+    assert len(pairs) >= 8
+    for uic1, uic2, rel_id in pairs:
+        assert rel_id in store.relations_for_uic_pair(uic1, uic2)
+        assert rel_id in store.relations_for_uic_pair(uic2, uic1)
+
+
 # ---------------------------------------------------------------------------
-# Strategy A's lookup, on an extract built to have what it needs
+# What one country's mappers happen not to have done — on a built extract
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def synthetic_store(tmp_path_factory):
-    """Two stations on one line, both members of one route=train relation.
+def test_stations_mapped_as_ways_and_relations_are_found_too(synthetic_store):
+    """``_find_station_near`` queries node, way *and* relation. A polygon
+    station that the store dropped would leave _enrich_uic with nothing, so
+    strategy A could not fire and strategy C would start from the raw HAFAS
+    coordinate instead of the platform."""
+    store = synthetic_store
+    assert int(store.meta["stations"]) == 3
 
-    Real extracts cannot be relied on for this: in Luxembourg no route relation
-    references a node tagged station/halt at all — the members are
-    stop_position nodes — so the fixture's relation_uic table is empty and the
-    strategy-A lookup would go untested against real data.
-    """
-    import osmium
-    from osmium.osm import mutable
+    conn = sqlite3.connect(store.path)
+    kinds = dict(conn.execute("SELECT osm_type, COUNT(*) FROM station GROUP BY 1"))
+    conn.close()
+    assert kinds == {"node": 1, "way": 1, "relation": 1}
 
-    pbf = tmp_path_factory.mktemp("synth") / "synth-rail.osm.pbf"
-    writer = osmium.SimpleWriter(str(pbf))
-    writer.add_node(mutable.Node(
-        id=1, location=(6.10, 49.60), tags={"railway": "station", "uic_ref": "08200100"}))
-    writer.add_node(mutable.Node(
-        id=2, location=(6.20, 49.70), tags={"railway": "stop", "uic_ref": "8200200"}))
-    writer.add_node(mutable.Node(id=3, location=(6.10, 49.60)))
-    writer.add_node(mutable.Node(id=4, location=(6.20, 49.70)))
-    writer.add_way(mutable.Way(id=10, nodes=[3, 4], tags={"railway": "rail"}))
-    writer.add_way(mutable.Way(id=11, nodes=[3, 4], tags={"railway": "rail", "service": "yard"}))
-    # Member way 99 is deliberately absent: a route relation names platforms
-    # and service tracks that the way filter drops (Phase 1 measured 32% of
-    # Denmark's route=train member ways falling outside it), and the reader has
-    # to say so rather than quietly return a shorter relation.
-    writer.add_relation(mutable.Relation(
-        id=100,
-        members=[("w", 10, ""), ("w", 99, ""), ("n", 1, "stop"), ("n", 2, "stop")],
-        tags={"route": "train", "name": "Test line"}))
-    writer.close()
+    # Centres are the centre of the element's bounding box, as `out center` is.
+    polygon = store.nearest_station(49.81, 6.31, radius_m=500)
+    assert polygon == {"lat": pytest.approx(49.81), "lon": pytest.approx(6.31),
+                       "uic": "8200300"}
+    multipolygon = store.nearest_station(49.91, 6.41, radius_m=500)
+    assert multipolygon["uic"] == "8200400"
 
-    out = tmp_path_factory.mktemp("synthstore") / store_filename("europe/synth")
-    build_store(pbf, out, region="europe/synth")
-    with RailStore(out) as s:
-        yield s
+    # A stop_position node carries a uic_ref but is not a station.
+    assert store.nearest_station(49.70, 6.20, radius_m=100) is None
 
 
-def test_relations_for_uic_pair_matches_strategy_a(synthetic_store):
+def test_relations_near_sees_a_relation_whose_only_member_is_a_platform(synthetic_store):
+    """Overpass's ``around:`` matches any member. Indexing track alone lost
+    12.6% of the strategy-B candidate set at Luxembourg Gare, and strategy B
+    intersects two such sets."""
+    assert synthetic_store.relations_near(50.00, 6.505, radius_m=500) == {102}
+    # …while the platform is still not track.
+    assert synthetic_store.nearest_node(50.00, 6.505, max_radius_m=1000) is None
+
+
+def test_relations_for_uic_pair_normalises_exactly_as_overpass_does(synthetic_store):
+    """Overpass strips leading zeros from *our* code and then matches the OSM
+    tag verbatim. Stripping the stored tag as well would find relations Overpass
+    does not — parity, not politeness."""
     store = synthetic_store
     assert store.relations_for_uic_pair("8200100", "8200200") == [100]
-    # HAFAS and OSM disagree about leading zeros; both sides are normalised.
-    assert store.relations_for_uic_pair("008200100", "08200200") == [100]
+    # Leading zeros on *our* code are stripped, as Overpass strips them.
+    assert store.relations_for_uic_pair("008200100", "0008200200") == [100]
+    # Leading zeros in the *OSM tag* are not: node 15 is tagged "08200500", and
+    # neither spelling of our code equals that string, so Overpass finds nothing
+    # and neither do we. Widening this here would invent a match the comparison
+    # period could never see.
+    assert store.relations_for_uic_pair("8200100", "8200500") == []
+    assert store.relations_for_uic_pair("8200100", "08200500") == []
     assert store.relations_for_uic_pair("8200100", "9999999") == []
     assert store.relations_for_uic_pair("", "8200200") == []
 
-    rel = store.relation_geometry([100])[0]
-    assert rel["tags"] == {"route": "train", "name": "Test line"}
-    assert [m["ref"] for m in rel["members"]] == [10, 99]
+
+def test_builder_applies_the_strategy_c_way_selection(synthetic_store):
+    """A ``service`` way is track, but not track a route may use — the same
+    exclusion the Overpass bbox query makes. Nor is a station polygon."""
+    store = synthetic_store
+    assert int(store.meta["ways"]) == 1          # way 10 only
+    assert int(store.meta["member_ways"]) == 4   # service, station, ring, platform
+    assert [w["id"] for w in store.ways_in_bbox(49.5, 6.0, 50.1, 6.6)] == [10]
 
 
 def test_a_member_way_the_extract_does_not_hold_is_reported_not_hidden(synthetic_store):
@@ -284,52 +386,98 @@ def test_a_member_way_the_extract_does_not_hold_is_reported_not_hidden(synthetic
     assert _extract_relation_geometry(rel, 49.60, 6.10, 49.70, 6.20)
 
 
-def test_builder_applies_the_strategy_c_way_selection(synthetic_store):
-    """A ``service`` way is track, but not track a route may use — the same
-    exclusion the Overpass bbox query makes."""
-    store = synthetic_store
-    assert int(store.meta["ways"]) == 1        # way 10 only
-    assert int(store.meta["member_ways"]) == 1  # way 11, kept for its geometry
-    assert [w["id"] for w in store.ways_in_bbox(49.5, 6.0, 49.8, 6.3)] == [10]
-    # A stop_position node is not a station: it answers strategy A, never _enrich_uic.
-    assert int(store.meta["stations"]) == 1
-    assert store.nearest_station(49.70, 6.20, radius_m=1000) is None
-    assert store.nearest_station(49.60, 6.10, radius_m=1000)["uic"] == "08200100"
+def test_builder_refuses_an_extract_with_no_track(tmp_path):
+    """A store's bbox is its track's extent, and Phase 3 selects regions by
+    bbox. A trackless extract has no extent to report, so it is an error rather
+    than a store that claims to cover a degenerate box."""
+    import osmium
+    from osmium.osm import mutable
+
+    pbf = tmp_path / "empty-rail.osm.pbf"
+    w = osmium.SimpleWriter(str(pbf))
+    w.add_node(mutable.Node(id=1, location=(6.1, 49.6),
+                            tags={"railway": "station", "uic_ref": "8200100"}))
+    w.close()
+    out = tmp_path / store_filename("europe/empty")
+    with pytest.raises(RailBuildError):
+        build_store(pbf, out)
+    assert not os.path.exists(out)
+
+
+def test_builder_counts_nodes_it_could_not_locate(tmp_path):
+    """Dropping an unlocatable node welds its neighbours together, which moves
+    the line. The store cannot avoid that, but it does not hide it either."""
+    import osmium
+    from osmium.osm import mutable
+
+    pbf = tmp_path / "gappy-rail.osm.pbf"
+    w = osmium.SimpleWriter(str(pbf))
+    w.add_node(mutable.Node(id=1, location=(6.10, 49.60)))
+    w.add_node(mutable.Node(id=2, location=(6.20, 49.70)))
+    w.add_way(mutable.Way(id=10, nodes=[1, 999, 2], tags={"railway": "rail"}))
+    w.close()
+
+    out = tmp_path / store_filename("europe/gappy")
+    stats = build_store(pbf, out)
+    assert stats["ways_missing_nodes"] == 1
+    assert stats["missing_nodes"] == 1
+    with RailStore(out) as store:
+        assert len(store.ways_in_bbox(49.5, 6.0, 49.8, 6.3)[0]["geometry"]) == 2
 
 
 # ---------------------------------------------------------------------------
 # Resource bounds
 # ---------------------------------------------------------------------------
 
-def test_lru_evicts_and_never_holds_a_region_in_memory(tmp_path, store_path):
-    """Three regions through a two-slot cache: the oldest is closed, and the
-    Python heap never grows by anything like a region's worth of geometry.
+def test_a_bbox_too_large_to_answer_raises_instead_of_allocating(store):
+    """The whole-Germany box is 1,270,497 vertices, ~680 MB once built into a
+    graph, on a 1 GB worker. Refusing is the only outcome that leaves the worker
+    alive, and it has to be cheap — counted from blob lengths, not decoded."""
+    min_lat, min_lon, max_lat, max_lon = store.bbox
+    with pytest.raises(RailStoreError, match="ceiling"):
+        store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon, max_vertices=100)
+    # Cheap: refusing a box costs an index scan, not the geometry it declined.
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    with pytest.raises(RailStoreError):
+        store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon, max_vertices=100)
+    grew = tracemalloc.get_traced_memory()[1] - before
+    tracemalloc.stop()
+    assert grew < 1_000_000, f"refusing the box allocated {grew / 1e6:.1f} MB"
+    # And the same box under the ceiling still answers.
+    assert store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
 
-    The ceiling is the regression this test exists for — a change that starts
-    caching built graphs per region would blow through it, and Germany's graph
-    measured 319 MB resident in the spike.
-    """
+
+def test_a_bbox_result_costs_a_bounded_number_of_bytes_per_vertex(store):
+    """The ceiling in ``_MAX_BBOX_VERTICES`` is only as good as this ratio, so
+    it is measured rather than assumed: ~268 bytes per vertex today, and the
+    guard is sized on that."""
+    min_lat, min_lon, max_lat, max_lon = store.bbox
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    ways = store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
+    peak = tracemalloc.get_traced_memory()[1] - before
+    tracemalloc.stop()
+    vertices = sum(len(w["geometry"]) for w in ways)
+    assert vertices > 10_000
+    assert peak / vertices < 500, f"{peak / vertices:.0f} bytes per vertex"
+
+
+def test_lru_evicts_without_closing_a_store_someone_is_using(tmp_path, store_path):
     regions = ["europe/a", "europe/b", "europe/c"]
     for region in regions:
         shutil.copy(store_path, tmp_path / store_filename(region))
 
     cache = RailStoreCache(tmp_path, max_open=2)
-    tracemalloc.start()
     first = cache.get("europe/a")
-    before = tracemalloc.get_traced_memory()[0]
     for region in regions:
         s = cache.get(region)
         min_lat, min_lon, max_lat, max_lon = s.bbox
-        s.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
         s.nearest_node((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
-    peak = tracemalloc.get_traced_memory()[1] - before
-    tracemalloc.stop()
 
     assert len(cache._open) == 2
-    assert peak < 64 * 1024 * 1024, f"held {peak / 1e6:.1f} MB of Python objects"
-
     # The evicted region is gone from the cache, and asking for it again opens a
-    # new store — but the handle a caller is already holding keeps working, so a
+    # new store — but the handle a caller already holds keeps working, so a
     # resolve in flight when a third region arrives does not fail.
     assert "europe/a" not in cache._open
     assert cache.get("europe/a") is not first
@@ -343,9 +491,9 @@ def test_lru_evicts_and_never_holds_a_region_in_memory(tmp_path, store_path):
 def test_cold_open_and_lookups_are_fast(store_path):
     """Budget check, generously set: this is the per-resolve cost Phase 3 pays.
 
-    The spike's naive graph build cost 8.41 s for Germany and 1.43 s per
-    snap before answering anything. Opening a store touches no geometry at all,
-    so anything approaching a second here means something is scanning what the
+    The spike's naive graph build cost 8.41 s for Germany and 1.43 s per snap
+    before answering anything. Opening a store touches no geometry at all, so
+    anything approaching a second here means something is scanning what the
     index should have narrowed.
     """
     t0 = time.monotonic()
