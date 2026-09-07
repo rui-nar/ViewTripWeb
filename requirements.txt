@@ -45,3 +45,8 @@ fakeredis>=2.21.0
 # check the worker topology against the queue bounds in src/jobs/queue.py (#188).
 # Nothing at runtime imports it.
 PyYAML>=6.0
+# Rail store builder (issue #345, Phase 2): reads the filtered .osm.pbf Phase 1
+# publishes and writes the per-region SQLite store. Build-time and test-only —
+# the server reads the built store with the stdlib's sqlite3 and never imports
+# this. Pinned to a major version because pyosmium's reader API changed in 4.x.
+osmium>=4.0.0,<5.0.0
