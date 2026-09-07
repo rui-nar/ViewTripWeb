@@ -5,8 +5,8 @@ Route resolution needs four things from OpenStreetMap: railway ways, route
 relations, the nodes a UIC code can be looked up on, and stations. Overpass
 answers those over the network today, and the answers are large enough that
 fair use bans us. The same data, filtered out of a Geofabrik country extract,
-is three orders of magnitude smaller: Denmark 494 MB -> 0.7 MB, Germany
-4.83 GB -> ~21 MB.
+is three orders of magnitude smaller: Denmark 494 MB -> 0.8 MB, Germany
+4.83 GB -> ~25 MB.
 
 **The raw extracts must never reach the server, the repo, or an image.** Europe
 raw is 34.9 GB and the VPS has 40 GB total. So this script runs in CI, on a
@@ -145,6 +145,15 @@ class Selection:
     # this is the row a wrong filter silently empties, and it belongs in the
     # build log where a rebuild that lost it would be visible.
     uic_nodes: int
+    # Ways held only because a kept relation references them: geometry for
+    # `out geom` parity, never track to route over. Phase 2 tells them apart
+    # with the same is_rail_way predicate and flags them `rail=0`.
+    member_ways: int
+    # Members of kept relations that this extract does not contain at all —
+    # ways on the far side of a border, which live in the neighbouring
+    # country's file. No filter can close that; it is phase 3's cross-border
+    # case, and this is how big it is.
+    member_ways_missing: int
     # [min_lon, min_lat, max_lon, max_lat] over every node written — the true
     # extent of the rail data, not the country's nominal box. Phase 3 uses it
     # to pick a region for a coordinate, so a nominal box would claim coverage
@@ -257,22 +266,27 @@ def select(source: Path, dest: Path) -> Selection:
     Per-object OSM metadata (version, timestamp, changeset, user) is dropped:
     nothing downstream reads it and it is ~15 % of the file.
     """
-    ways = relations = stations = uic_nodes = 0
+    ways = relations = stations = uic_nodes = member_ways = 0
 
-    station_member_ways: set[int] = set()
+    member_way_ids: set[int] = set()
     station_member_nodes: set[int] = set()
     for rel in osmium.FileProcessor(str(source), osmium.osm.RELATION):
-        if is_station(rel.tags):
-            for member in rel.members:
-                if member.type == "w":
-                    station_member_ways.add(member.ref)
-                elif member.type == "n":
-                    station_member_nodes.add(member.ref)
+        station = is_station(rel.tags)
+        if not (station or is_route_relation(rel.tags)):
+            continue
+        for member in rel.members:
+            if member.type == "w":
+                member_way_ids.add(member.ref)
+            elif member.type == "n" and station:
+                station_member_nodes.add(member.ref)
 
     wanted_nodes = set(station_member_nodes)
+    held_members: set[int] = set()
     for way in osmium.FileProcessor(str(source), osmium.osm.WAY):
-        if is_rail_way(way.tags) or is_station(way.tags) \
-                or way.id in station_member_ways:
+        member = way.id in member_way_ids
+        if member:
+            held_members.add(way.id)
+        if member or is_rail_way(way.tags) or is_station(way.tags):
             wanted_nodes.update(node.ref for node in way.nodes)
 
     min_lon = min_lat = 180.0
@@ -294,13 +308,17 @@ def select(source: Path, dest: Path) -> Selection:
                 min_lat, max_lat = min(min_lat, lat), max(max_lat, lat)
             elif obj.is_way():
                 rail_way = is_rail_way(obj.tags)
-                if not rail_way and not is_station(obj.tags) \
-                        and obj.id not in station_member_ways:
+                station_way = is_station(obj.tags)
+                member = obj.id in member_way_ids
+                if not (rail_way or station_way or member):
                     continue
-                # `ways` counts the rail graph, not the geometry closure: a
-                # station polygon is a station, and is counted as one.
+                # `ways` counts the rail graph and nothing else: a station
+                # polygon is counted as a station, and a member way that is not
+                # track is counted apart, because phase 2 indexes and snaps to
+                # exactly the ways this number describes.
                 ways += rail_way
-                stations += is_station(obj.tags)
+                stations += station_way
+                member_ways += member and not rail_way
                 writer.add_way(obj)
             else:
                 route = is_route_relation(obj.tags)
@@ -324,6 +342,8 @@ def select(source: Path, dest: Path) -> Selection:
         relations=relations,
         stations=stations,
         uic_nodes=uic_nodes,
+        member_ways=member_ways,
+        member_ways_missing=len(member_way_ids) - len(held_members),
         bbox=[round(v, 5) for v in (min_lon, min_lat, max_lon, max_lat)],
     )
 
@@ -454,8 +474,10 @@ def build(
     print(
         f"[{slug}] {entry['bytes'] / 1e6:.2f} MB, ways={selection.ways} "
         f"relations={selection.relations} stations={selection.stations} "
-        f"uic_nodes={selection.uic_nodes} bbox={selection.bbox} "
-        f"source_date={date} (+{time.monotonic() - started:.0f}s)",
+        f"uic_nodes={selection.uic_nodes} member_ways={selection.member_ways} "
+        f"(+{selection.member_ways_missing} outside this extract) "
+        f"bbox={selection.bbox} source_date={date} "
+        f"(+{time.monotonic() - started:.0f}s)",
         flush=True,
     )
     return entry

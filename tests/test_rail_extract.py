@@ -25,12 +25,19 @@ to rule on:
 - a station mapped as a way (ARENA/Maimarkt) and one mapped as a relation
   (Neuostheim), neither of which the old node-only contract could see;
 - ``route=train`` and ``route=railway`` relations to keep, against trams,
-  buses, cycle routes, a pipeline and a waterway to drop.
+  buses, cycle routes, a pipeline and a waterway to drop;
+- relations whose members include four sidings and three platforms, so the
+  member-way closure — geometry Overpass's ``out geom`` returns and this
+  extract must too — is exercised rather than assumed.
 
 The expected counts below are therefore not magic numbers: changing the
 selection changes them, which is the point. The counts under "the fixture is
 worth testing against" are the other half — a widened filter can make an
 assertion pass vacuously, and those keep each row of the contract represented.
+
+``rail_mannheim_filtered.osm.pbf`` beside it is this box put through the
+filter, published for phase 2 to build its store from and asserted byte for
+byte here so the two phases cannot drift apart.
 """
 from __future__ import annotations
 
@@ -44,6 +51,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "rail_mannheim.osm.pbf"
+# The same box put through the filter — published for phase 2 to build its
+# store from, so the two phases cannot disagree about what the selection is.
+PUBLISHED = ROOT / "tests" / "fixtures" / "rail_mannheim_filtered.osm.pbf"
 
 _spec = importlib.util.spec_from_file_location(
     "build_rail_extract", ROOT / "scripts" / "build_rail_extract.py"
@@ -59,6 +69,13 @@ EXPECTED_WAYS = 39
 EXPECTED_RELATIONS = 59
 EXPECTED_STATIONS = 4
 EXPECTED_UIC_NODES = 13
+# Ways held only because a kept relation references them: four sidings and
+# three platforms, none of them track to route over.
+EXPECTED_MEMBER_WAYS = 7
+# Members of those relations that this box does not contain — the fixture is
+# two 900 m cuts out of a national network, so most of it is elsewhere. On a
+# country extract this number is the cross-border residue instead.
+EXPECTED_MEMBER_WAYS_MISSING = 25177
 
 
 @pytest.fixture(scope="module")
@@ -198,9 +215,35 @@ def test_counts_are_pinned(filtered):
     """A change in what the filter selects has to fail here, loudly."""
     _, selection = filtered
     assert (selection.ways, selection.relations, selection.stations,
-            selection.uic_nodes) == (
-        EXPECTED_WAYS, EXPECTED_RELATIONS, EXPECTED_STATIONS, EXPECTED_UIC_NODES
+            selection.uic_nodes, selection.member_ways,
+            selection.member_ways_missing) == (
+        EXPECTED_WAYS, EXPECTED_RELATIONS, EXPECTED_STATIONS, EXPECTED_UIC_NODES,
+        EXPECTED_MEMBER_WAYS, EXPECTED_MEMBER_WAYS_MISSING
     )
+
+
+def test_the_published_filtered_fixture_is_what_this_filter_produces():
+    """`rail_mannheim_filtered.osm.pbf` is phase 2's input, checked in so its
+    store tests can consume a .pbf without invoking this script.
+
+    Phase 2's first fixture was cut by hand with the pre-#349 filter, which
+    left its relation_uic table empty and strategy A untestable against real
+    data — drift nobody could see. Publishing the filter's own output and
+    asserting it byte for byte is what stops that happening twice: change the
+    selection without regenerating this file and the test says so.
+
+        python scripts/build_rail_extract.py build ... # or, for this file:
+        python -c "import ...; select(FIXTURE, PUBLISHED)"
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        regenerated = Path(tmp) / "check.osm.pbf"
+        rail.select(FIXTURE, regenerated)
+        assert regenerated.read_bytes() == PUBLISHED.read_bytes(), (
+            "tests/fixtures/rail_mannheim_filtered.osm.pbf is stale — "
+            "regenerate it from tests/fixtures/rail_mannheim.osm.pbf"
+        )
 
 
 def test_counts_describe_the_file_that_was_written(contents, filtered):
@@ -221,22 +264,62 @@ def test_counts_describe_the_file_that_was_written(contents, filtered):
     assert stations == selection.stations
 
 
-def test_no_service_way_survives(contents):
-    """Sidings beat the through line when _nearest_node snaps (spike finding)."""
-    _, ways, _ = contents
-    assert not [way for way, (tags, _) in ways.items()
-                if tags.get("railway") in rail.RAIL_WAY_TYPES and "service" in tags]
-
-
-def test_every_way_is_rail_a_station_or_a_station_member(contents):
-    """Nothing else has a reason to be in the file."""
-    nodes, ways, relations = contents
-    station_members = {ref for tags, members in relations.values()
-                       if rail.is_station(tags)
-                       for kind, ref in members if kind == "w"}
+def test_no_service_way_is_track(contents):
+    """Sidings beat the through line when _nearest_node snaps (spike finding),
+    so none may be routable — but a relation that references one still needs
+    its geometry. So: present only as members, never as rail.
+    """
+    _, ways, relations = contents
+    members = {ref for _, member_list in relations.values()
+               for kind, ref in member_list if kind == "w"}
     for way, (tags, _) in ways.items():
-        assert rail.is_rail_way(tags) or rail.is_station(tags) \
-            or way in station_members
+        if "service" not in tags:
+            continue
+        assert not rail.is_rail_way(tags), f"way {way} is service and rail"
+        assert way in members, f"service way {way} is in the file for no reason"
+
+
+def test_every_way_is_rail_a_station_or_a_relation_member(contents):
+    """Nothing else has a reason to be in the file."""
+    _, ways, relations = contents
+    members = {ref for _, member_list in relations.values()
+               for kind, ref in member_list if kind == "w"}
+    for way, (tags, _) in ways.items():
+        assert rail.is_rail_way(tags) or rail.is_station(tags) or way in members
+
+
+def test_relation_members_are_kept_whatever_their_own_tags(contents):
+    """Overpass answers a relation query with `out geom`, which returns every
+    member's geometry. Keeping only the members that pass the way row hands
+    phase 3 a shorter relation than Overpass gives — and silently, since
+    _extract_relation_geometry returns None on a disconnected member graph, so
+    strategies A and B fall through looking exactly like "no route found".
+
+    The fixture holds four `service=siding` tracks and three platforms that are
+    in the file for precisely this reason and no other.
+    """
+    _, ways, relations = contents
+    members = {ref for _, member_list in relations.values()
+               for kind, ref in member_list if kind == "w"}
+    held = [tags for way, (tags, _) in ways.items()
+            if way in members and not rail.is_rail_way(tags)]
+    assert [t for t in held if t.get("service")], "no service-tagged member kept"
+    assert [t for t in held if t.get("railway") == "platform"], "no platform kept"
+
+
+def test_member_only_ways_are_not_rail(contents):
+    """Phase 2 flags these `rail=0` using this same predicate, which is what
+    keeps them out of its bbox index and out of strategy C's snapping. A
+    platform the resolver can route over is worse than a missing one.
+    """
+    _, ways, relations = contents
+    members = {ref for _, member_list in relations.values()
+               for kind, ref in member_list if kind == "w"}
+    member_only = [tags for way, (tags, _) in ways.items()
+                   if way in members and not rail.is_rail_way(tags)
+                   and not rail.is_station(tags)]
+    assert member_only, "the closure is not represented in the fixture"
+    assert not [t for t in member_only if rail.is_rail_way(t)]
 
 
 def test_narrow_gauge_is_kept(contents):

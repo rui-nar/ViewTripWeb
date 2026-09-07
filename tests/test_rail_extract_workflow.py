@@ -130,7 +130,10 @@ def test_no_raw_extract_is_tracked_in_the_repo():
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
     paths = sorted(p for p in tracked.split("\0") if p)
-    assert paths == ["tests/fixtures/rail_mannheim.osm.pbf"]
+    assert paths == [
+        "tests/fixtures/rail_mannheim.osm.pbf",
+        "tests/fixtures/rail_mannheim_filtered.osm.pbf",
+    ]
 
 
 def test_the_fixture_stays_small():
