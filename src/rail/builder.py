@@ -92,6 +92,15 @@ CREATE INDEX relation_uic_uic ON relation_uic(uic);
 
 _BATCH = 10_000
 
+# Refuse an extract that has lost most of the node locations its ways refer to.
+# A filter run without reference completion still produces a valid .pbf: the
+# ways are there, their nodes are not. Building from one wrote a store labelled
+# europe/germany holding three ways, 1,270,405 unlocatable nodes and a bbox
+# covering Baden-Württemberg — which Phase 3 would then select for a Hamburg
+# trip and get None from. A sound extract loses nothing, so anything above a
+# rounding error is a broken upstream run, not a fact about the region.
+_MAX_MISSING_NODE_RATIO = 0.01
+
 
 class RailBuildError(Exception):
     pass
@@ -142,14 +151,24 @@ def build_store(
     # Overpass for `node["uic_ref"=X]` with no railway filter, and route
     # relations reference the stop node rather than the station node.
     node_uic: dict[int, str] = {}
+    # …and where they are, because a station mapped as a relation may have no
+    # way members at all: `type=public_transport` stop_areas gather stop nodes,
+    # and Overpass's rel[railway][uic_ref] + `out center` returns those.
+    node_loc: dict[int, tuple[float, float]] = {}
     counts = {
         "ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0,
         "relation_ways": 0, "relation_ways_held": 0,
         # Nodes a way references that the extract does not locate. Dropping one
         # welds its neighbours together, which silently moves the geometry, so
-        # the number is recorded rather than left to be guessed at.
-        "ways_missing_nodes": 0, "missing_nodes": 0,
+        # the number is recorded rather than left to be guessed at — and, above
+        # _MAX_MISSING_NODE_RATIO, refused outright.
+        "ways_missing_nodes": 0, "missing_nodes": 0, "ways_dropped": 0,
+        # Station relations we could not place, and ones placed from only part
+        # of their members — where the centre is the centre of what we hold,
+        # which is not what `out center` would have said.
+        "stations_unlocatable": 0, "stations_partial": 0,
     }
+    referenced_nodes = 0   # node slots across every way, located or not
     extent = [90.0, 180.0, -90.0, -180.0]  # min_lat, min_lon, max_lat, max_lon
 
     def flush() -> None:
@@ -174,15 +193,18 @@ def build_store(
             if not uic:
                 continue
             node_uic[obj.id] = uic
+            node_loc[obj.id] = (obj.location.lat, obj.location.lon)
             if is_station:
                 add_station("node", obj.id, obj.location.lat, obj.location.lon, uic)
         elif obj.is_way():
             pts = [(n.lat, n.lon) for n in obj.nodes if n.location.valid()]
             missing = len(obj.nodes) - len(pts)
+            referenced_nodes += len(obj.nodes)
             if missing:
                 counts["ways_missing_nodes"] += 1
                 counts["missing_nodes"] += missing
             if len(pts) < 2:
+                counts["ways_dropped"] += 1
                 continue
             is_rail = int(tags.get("railway") in _RAIL_VALUES and "service" not in tags)
             ways.append((obj.id, is_rail, encode_geometry(pts)))
@@ -206,8 +228,12 @@ def build_store(
                 flush()
         else:
             if is_station:
-                pending_rel_stations.append(
-                    (obj.id, uic, [m.ref for m in obj.members if m.type == "w"]))
+                pending_rel_stations.append((
+                    obj.id, uic,
+                    [m.ref for m in obj.members if m.type == "w"],
+                    [m.ref for m in obj.members if m.type == "n"],
+                    sum(1 for m in obj.members if m.type == "r"),
+                ))
             if tags.get("route") not in _ROUTE_VALUES:
                 continue
             relations.append((obj.id, tags["route"], tags.get("name")))
@@ -228,11 +254,19 @@ def build_store(
     flush()
 
     # Station relations: centre of the bounding box of the members we hold,
-    # which is what `out center` reports for a relation.
-    for rel_id, uic, member_ids in pending_rel_stations:
-        box = _members_bbox(conn, member_ids)
-        if box:
-            add_station("relation", rel_id, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, uic)
+    # which is what `out center` reports for a relation whose members we hold in
+    # full. A relation we cannot place at all is counted, not dropped quietly —
+    # these are the polygon-mapped stations the store exists to recover, and a
+    # silent zero here looks exactly like a country that has none.
+    for rel_id, uic, way_ids_m, node_ids_m, sub_relations in pending_rel_stations:
+        box, held, total = _members_extent(conn, way_ids_m, node_ids_m, node_loc)
+        total += sub_relations
+        if box is None:
+            counts["stations_unlocatable"] += 1
+            continue
+        if held < total:
+            counts["stations_partial"] += 1
+        add_station("relation", rel_id, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, uic)
 
     conn.executemany("INSERT INTO station VALUES (?, ?, ?, ?, ?, ?)", stations)
     conn.executemany("INSERT INTO station_pos VALUES (?, ?, ?, ?, ?)", station_boxes)
@@ -241,14 +275,24 @@ def build_store(
     counts["relation_ways"] = len(rel_ways)
     conn.executemany("INSERT INTO relation_uic VALUES (?, ?)", rel_uics)
 
-    if not counts["ways"]:
-        # The region's extent comes from its track. With no track there is no
-        # extent, and Phase 3 picks regions by extent — an inverted default box
-        # would quietly claim to cover nothing, or everything, depending on the
-        # comparison. Refuse to write a store that cannot answer "where am I".
+    def refuse(why: str) -> None:
         conn.close()
         os.remove(out_path)
-        raise RailBuildError(f"{pbf_path}: no railway ways — not a rail extract")
+        raise RailBuildError(f"{pbf_path}: {why}")
+
+    # The region's extent comes from its track, and Phase 3 picks regions by
+    # extent. A store built from a damaged extract does not fail on the way in;
+    # it answers None for most of the country it claims, which is indistinguish-
+    # able from "no route exists". Both checks exist to make that loud.
+    if not counts["ways"]:
+        refuse("no railway ways — not a rail extract")
+    missing_ratio = counts["missing_nodes"] / referenced_nodes if referenced_nodes else 0.0
+    if missing_ratio > _MAX_MISSING_NODE_RATIO:
+        refuse(
+            f"{counts['missing_nodes']} of {referenced_nodes} way nodes have no "
+            f"location ({missing_ratio:.1%}) — the extract was filtered without "
+            f"reference completion, so its geometry is gone"
+        )
 
     stats = dict(counts)
     stats["build_seconds"] = round(time.monotonic() - t0, 2)
@@ -274,21 +318,34 @@ def build_store(
     return stats
 
 
-def _members_bbox(conn: sqlite3.Connection, member_ids: list[int]) -> tuple | None:
-    """(min_lat, min_lon, max_lat, max_lon) over the member ways we hold."""
-    if not member_ids:
-        return None
-    rows = conn.execute(
-        "SELECT min_lat, min_lon, max_lat, max_lon FROM way_bbox WHERE id IN "
-        f"({','.join('?' * len(member_ids))})",
-        member_ids,
-    ).fetchall()
-    if not rows:
-        return None
-    return (
-        min(r[0] for r in rows), min(r[1] for r in rows),
-        max(r[2] for r in rows), max(r[3] for r in rows),
-    )
+def _members_extent(
+    conn: sqlite3.Connection,
+    way_ids: list[int],
+    node_ids: list[int],
+    node_loc: dict[int, tuple[float, float]],
+) -> tuple[tuple | None, int, int]:
+    """((min_lat, min_lon, max_lat, max_lon) or None, members held, members named).
+
+    Both kinds of member place a station relation: a multipolygon's rings, and a
+    stop_area's stop nodes. Only the nodes carrying a ``uic_ref`` have known
+    locations — those are the ones the extract keeps — so a stop_area of plain
+    nodes reports nothing held, and says so rather than vanishing.
+    """
+    boxes = []
+    if way_ids:
+        boxes = conn.execute(
+            "SELECT min_lat, min_lon, max_lat, max_lon FROM way_bbox WHERE id IN "
+            f"({','.join('?' * len(way_ids))})",
+            way_ids,
+        ).fetchall()
+    points = [node_loc[n] for n in node_ids if n in node_loc]
+    held = len(boxes) + len(points)
+    total = len(way_ids) + len(node_ids)
+    if not held:
+        return None, 0, total
+    lats = [b[0] for b in boxes] + [b[2] for b in boxes] + [p[0] for p in points]
+    lons = [b[1] for b in boxes] + [b[3] for b in boxes] + [p[1] for p in points]
+    return (min(lats), min(lons), max(lats), max(lons)), held, total
 
 
 def main(argv: list[str] | None = None) -> int:

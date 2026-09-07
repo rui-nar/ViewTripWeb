@@ -46,6 +46,14 @@ SCHEMA_VERSION = 1
 # precision, so encode/decode loses nothing, and 180e7 still fits in an int32.
 _COORD_SCALE = 1e7
 
+# The blob format is 4-byte signed integers. `array` guarantees only that 'i' is
+# at least 2 bytes, so pick the typecode that is exactly 4 rather than trust it —
+# on a build where 'i' were 2 bytes, silently writing 16-bit coordinates would
+# corrupt every geometry in the store.
+_I32 = next((c for c in "il" if array(c).itemsize == 4), None)
+if _I32 is None:  # pragma: no cover — no such platform is supported
+    raise ImportError("no 4-byte integer typecode available for the store format")
+
 _M_PER_DEG_LAT = 111_320.0
 
 # Page cache per open connection. Two open regions then cost ~4 MB of cache
@@ -90,7 +98,7 @@ def store_filename(region: str) -> str:
 
 def encode_geometry(points: Iterable[tuple[float, float]]) -> bytes:
     """Pack (lat, lon) pairs into the stored blob format."""
-    vals = array("i")
+    vals = array(_I32)
     for lat, lon in points:
         vals.append(int(round(lat * _COORD_SCALE)))
         vals.append(int(round(lon * _COORD_SCALE)))
@@ -101,7 +109,7 @@ def encode_geometry(points: Iterable[tuple[float, float]]) -> bytes:
 
 def decode_geometry(blob: bytes) -> list[dict]:
     """Unpack a stored blob into Overpass ``out geom`` vertices."""
-    vals = array("i")
+    vals = array(_I32)
     vals.frombytes(blob)
     if sys.byteorder != "little":
         vals.byteswap()
@@ -112,12 +120,15 @@ def decode_geometry(blob: bytes) -> list[dict]:
 
 
 def clean_uic(uic: str) -> str:
-    """Normalise a UIC code for matching.
+    """Normalise *our* UIC code for matching, exactly as the resolver does.
 
-    Mirrors ``overpass_service._clean_uic``: OSM and HAFAS disagree about
-    leading zeros, so both sides of a comparison are stripped of them.
+    ``overpass_service._clean_uic`` strips leading zeros from the code we hold
+    and then asks Overpass for that string; the OSM tag is matched verbatim. So
+    this is applied to one side of the comparison only — see
+    ``RailStore.relations_for_uic_pair`` — and does nothing else to the value,
+    whitespace included, because ``_clean_uic`` does nothing else either.
     """
-    uic = (uic or "").strip()
+    uic = uic or ""
     return uic.lstrip("0") or uic
 
 
@@ -186,10 +197,18 @@ class RailStore:
     def nearest_station(self, lat: float, lon: float, radius_m: float = 5000) -> Optional[dict]:
         """Nearest station/halt with a ``uic_ref`` within *radius_m*, or None.
 
-        Returns ``{"lat", "lon", "uic"}`` — what ``_enrich_uic`` consumes. Unlike
-        the Overpass version this ranks by metres rather than by squared degrees,
-        which only differs from it away from the equator, and only in favour of
-        the geometrically nearer station.
+        Returns ``{"lat", "lon", "uic"}`` — what ``_enrich_uic`` consumes — and
+        picks the same one ``_find_station_near`` picks, both halves of which
+        matter: candidates come from a **metric** circle, because Overpass's
+        ``around:`` is metres, and the winner among them is the smallest
+        **squared-degree** distance, because that is what the resolver minimises.
+
+        Ranking in metres instead moved 12.1% of jittered points onto a different
+        station across Germany's 5,483 — and a different station is a different
+        ``uic_ref``, so strategy A looks for a different relation, and
+        ``_enrich_uic`` snaps the stop's coordinates to it, moving where Dijkstra
+        starts. Same reasoning as ``nearest_node``: parity now, metric sanity in
+        Phase 4.
         """
         min_lat, min_lon, max_lat, max_lon = _box(lat, lon, radius_m)
         rows = self._query(
@@ -198,11 +217,13 @@ class RailStore:
             (min_lon, max_lon, min_lat, max_lat),
         )
         best = None
-        best_d = radius_m
+        best_sq = math.inf
         for slat, slon, uic in rows:
-            d = _dist_m(lat, lon, slat, slon)
-            if d <= best_d:
-                best, best_d = {"lat": slat, "lon": slon, "uic": uic}, d
+            if _dist_m(lat, lon, slat, slon) > radius_m:
+                continue                      # outside around:, as Overpass sees it
+            sq = (slat - lat) ** 2 + (slon - lon) ** 2
+            if sq < best_sq:
+                best, best_sq = {"lat": slat, "lon": slon, "uic": uic}, sq
         return best
 
     # ------------------------------------------------------------------
@@ -372,14 +393,20 @@ class RailStore:
         Dijkstra finds no path and the leg degrades to a straight line. Phase 4
         owns snapping and can change the metric against a stable baseline.
 
-        The search ladder is in degrees too, and has to be: a square box of
-        half-width *h* degrees excludes exactly the vertices whose squared-degree
-        distance exceeds h², so a candidate found within h² is the winner. A
-        metric circle does not — at Luxembourg it reaches 1.54× further east
-        than north, so it can hold a vertex that a nearer-in-degrees one outside
-        it beats. *max_radius_m* is therefore a limit on **latitude-equivalent**
-        distance: 25 km means 0.2246°, which is 25 km north-south and up to
-        38 km east-west. Mixing the two units is what makes the ordering wrong.
+        What makes the search correct is the ``best_sq = h * h`` threshold below,
+        not the shape of the box: a candidate is accepted only if its
+        squared-degree distance is within h², the radius whose disc the box is
+        guaranteed to contain, and otherwise the ladder widens. Drop that
+        threshold — "the query already filtered these" — and 5.3% of points come
+        back with the wrong vertex, because the box is a superset of the disc,
+        not the disc. A metric circle of the equivalent radius is a valid
+        superset too; the degree box is simply the tighter one (in degree space
+        it is a square of side 2h against an ellipse 1.54× wider than tall), so
+        it decodes fewer candidates for the same answer.
+
+        *max_radius_m* is therefore a limit on **latitude-equivalent** distance:
+        25 km means 0.2246°, which at Luxembourg's 49.6°N reaches 25 km
+        north-south but only 16.2 km east-west (cos 49.6° = 0.65).
 
         Two behaviour changes remain, both deliberate: this returns None beyond
         that ceiling where ``_nearest_node`` always returns something, however

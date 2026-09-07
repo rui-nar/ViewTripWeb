@@ -261,23 +261,41 @@ def test_nearest_node_gives_up_rather_than_snapping_across_a_continent(store):
     assert store.nearest_node(48.85, 2.35, max_radius_m=400_000) is not None
 
 
-def test_nearest_station_matches_brute_force_and_honours_the_radius(store):
-    """Ranked in metres, unlike ``_find_station_near``'s squared degrees — a
-    disclosed divergence, and the only one that changes which station wins."""
+def test_nearest_station_picks_what_find_station_near_picks(store):
+    """Parity with ``_find_station_near``, which is two rules, not one: the
+    candidates are those inside a metric ``around:`` circle, and the winner
+    among them is the smallest squared-degree distance.
+
+    Ranking in metres instead moved 12.1% of jittered points onto a different
+    station across Germany's 5,483 — and a different station is a different
+    uic_ref, so strategy A hunts a different relation and _enrich_uic moves the
+    stop's coordinates to it.
+    """
     conn = sqlite3.connect(store.path)
     stations = conn.execute("SELECT lat, lon, uic FROM station").fetchall()
     conn.close()
 
+    def oracle(lat, lon, radius_m):
+        near = [s for s in stations if _dist_m(lat, lon, s[0], s[1]) <= radius_m]
+        if not near:
+            return None
+        # _find_station_near: min over squared degrees, lat and lon alike.
+        return min(near, key=lambda s: (s[0] - lat) ** 2 + (s[1] - lon) ** 2)
+
     rng = random.Random(7)
-    for _ in range(25):
+    checked = 0
+    for _ in range(200):
         base = rng.choice(stations)
-        lat = base[0] + rng.uniform(-0.02, 0.02)
-        lon = base[1] + rng.uniform(-0.02, 0.02)
-        want = min(stations, key=lambda s: _dist_m(lat, lon, s[0], s[1]))
+        lat = base[0] + rng.uniform(-0.05, 0.05)
+        lon = base[1] + rng.uniform(-0.05, 0.05)
+        want = oracle(lat, lon, 5000)
         got = store.nearest_station(lat, lon)
-        assert got is not None
-        assert got["uic"] == want[2]
-        assert set(got) == {"lat", "lon", "uic"}   # _enrich_uic's shape
+        if want is None:
+            assert got is None
+            continue
+        assert got == {"lat": want[0], "lon": want[1], "uic": want[2]}
+        checked += 1
+    assert checked >= 100
 
     far_lat, far_lon = 48.85, 2.35
     assert store.nearest_station(far_lat, far_lon) is None
@@ -412,17 +430,117 @@ def test_builder_counts_nodes_it_could_not_locate(tmp_path):
 
     pbf = tmp_path / "gappy-rail.osm.pbf"
     w = osmium.SimpleWriter(str(pbf))
-    w.add_node(mutable.Node(id=1, location=(6.10, 49.60)))
-    w.add_node(mutable.Node(id=2, location=(6.20, 49.70)))
-    w.add_way(mutable.Way(id=10, nodes=[1, 999, 2], tags={"railway": "rail"}))
+    for nid in range(1, 201):
+        w.add_node(mutable.Node(id=nid, location=(6.10 + nid / 1000, 49.60)))
+    # One unlocatable node among 201 references — under the ratio that means a
+    # broken extract, so it is counted and built rather than refused.
+    w.add_way(mutable.Way(id=10, nodes=[*range(1, 201), 999],
+                          tags={"railway": "rail"}))
     w.close()
 
     out = tmp_path / store_filename("europe/gappy")
     stats = build_store(pbf, out)
     assert stats["ways_missing_nodes"] == 1
     assert stats["missing_nodes"] == 1
+    assert stats["ways_dropped"] == 0
     with RailStore(out) as store:
-        assert len(store.ways_in_bbox(49.5, 6.0, 49.8, 6.3)[0]["geometry"]) == 2
+        assert len(store.ways_in_bbox(49.5, 6.0, 49.8, 6.3)[0]["geometry"]) == 200
+
+
+def test_builder_refuses_an_extract_whose_nodes_were_filtered_away(tmp_path):
+    """A filter run without reference completion yields a valid .pbf whose ways
+    have no locations. Building from one wrote a store labelled europe/germany
+    holding three ways and a bbox over Baden-Württemberg — which Phase 3 would
+    select for a Hamburg trip and get None from. Fail on the way in instead."""
+    import osmium
+    from osmium.osm import mutable
+
+    pbf = tmp_path / "nodeless-rail.osm.pbf"
+    w = osmium.SimpleWriter(str(pbf))
+    # Three ways whose nodes are locatable, then a hundred whose nodes are not:
+    # geometry mostly gone, but not entirely, which the zero-ways guard misses.
+    for nid in range(1, 7):
+        w.add_node(mutable.Node(id=nid, location=(6.10 + nid / 100, 49.60)))
+    for wid, nodes in enumerate([[1, 2], [3, 4], [5, 6]], start=10):
+        w.add_way(mutable.Way(id=wid, nodes=nodes, tags={"railway": "rail"}))
+    for wid in range(100, 200):
+        w.add_way(mutable.Way(id=wid, nodes=[900 + wid, 901 + wid],
+                              tags={"railway": "rail"}))
+    w.close()
+
+    out = tmp_path / store_filename("europe/nodeless")
+    with pytest.raises(RailBuildError, match="reference completion"):
+        build_store(pbf, out, region="europe/nodeless")
+    assert not os.path.exists(out)
+
+
+def test_station_relations_the_extract_cannot_place_are_counted(tmp_path):
+    """The stations B2 exists to recover are exactly the ones a silent drop
+    would hide: a zero here is indistinguishable from a country that maps no
+    station as a relation."""
+    import osmium
+    from osmium.osm import mutable
+
+    pbf = tmp_path / "relstations-rail.osm.pbf"
+    w = osmium.SimpleWriter(str(pbf))
+    w.add_node(mutable.Node(id=1, location=(6.10, 49.60)))
+    w.add_node(mutable.Node(id=2, location=(6.20, 49.70)))
+    # Stop nodes of a stop_area: kept by the #349 contract because of the uic_ref.
+    w.add_node(mutable.Node(id=3, location=(6.30, 49.80),
+                            tags={"railway": "stop", "uic_ref": "8200600"}))
+    w.add_node(mutable.Node(id=4, location=(6.32, 49.82),
+                            tags={"railway": "stop", "uic_ref": "8200601"}))
+    w.add_way(mutable.Way(id=10, nodes=[1, 2], tags={"railway": "rail"}))
+    # Located from node members alone — no way members at all.
+    w.add_relation(mutable.Relation(
+        id=200, members=[("n", 3, "stop"), ("n", 4, "stop")],
+        tags={"type": "public_transport", "railway": "station",
+              "uic_ref": "8200600"}))
+    # Nothing locatable: a member way the extract does not hold…
+    w.add_relation(mutable.Relation(
+        id=201, members=[("w", 999, "outer")],
+        tags={"railway": "station", "uic_ref": "8200700"}))
+    # …and a member that is another relation.
+    w.add_relation(mutable.Relation(
+        id=202, members=[("r", 200, "")],
+        tags={"railway": "halt", "uic_ref": "8200800"}))
+    w.close()
+
+    out = tmp_path / store_filename("europe/relstations")
+    stats = build_store(pbf, out, region="europe/relstations")
+    assert stats["stations"] == 1
+    assert stats["stations_unlocatable"] == 2
+
+    with RailStore(out) as store:
+        # Centre of the stop nodes' bounding box, as `out center` reports.
+        found = store.nearest_station(49.81, 6.31, radius_m=2000)
+        assert found["uic"] == "8200600"
+        assert found["lat"] == pytest.approx(49.81)
+        assert found["lon"] == pytest.approx(6.31)
+
+
+def test_a_station_relation_placed_from_part_of_its_members_says_so(tmp_path):
+    """Where only some members are held the centre is the centre of what we
+    hold, which is not what `out center` would have said."""
+    import osmium
+    from osmium.osm import mutable
+
+    pbf = tmp_path / "partial-rail.osm.pbf"
+    w = osmium.SimpleWriter(str(pbf))
+    w.add_node(mutable.Node(id=1, location=(6.10, 49.60)))
+    w.add_node(mutable.Node(id=2, location=(6.20, 49.70)))
+    w.add_node(mutable.Node(id=3, location=(6.30, 49.80),
+                            tags={"railway": "stop", "uic_ref": "8200900"}))
+    w.add_way(mutable.Way(id=10, nodes=[1, 2], tags={"railway": "rail"}))
+    w.add_relation(mutable.Relation(
+        id=300, members=[("n", 3, "stop"), ("w", 999, "outer")],
+        tags={"railway": "station", "uic_ref": "8200900"}))
+    w.close()
+
+    stats = build_store(pbf, tmp_path / store_filename("europe/partial"))
+    assert stats["stations"] == 1
+    assert stats["stations_partial"] == 1
+    assert stats["stations_unlocatable"] == 0
 
 
 # ---------------------------------------------------------------------------
