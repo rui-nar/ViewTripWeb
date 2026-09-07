@@ -66,8 +66,26 @@ alongside prod and val on 40 GB. Build the artifact in CI and ship only the resu
   and publishes the filtered artifacts.
 - Filter selection **must match the current Overpass queries exactly**, or results
   change for reasons unrelated to this work:
-  `railway in (rail, narrow_gauge, light_rail)` without `service`,
-  `route=train` relations, station/halt nodes with `uic_ref`.
+
+  | | selection | serves |
+  |---|---|---|
+  | ways | `railway` in `(rail, narrow_gauge, light_rail)` **without** `service` | `_via_coordinate_fallback` |
+  | relations | `route` in `(train, railway, light_rail)` | `_route_relation_segment`, `_via_train_relations_endpoints` |
+  | nodes | **any** node carrying `uic_ref` | `_route_relation_segment` |
+  | stations | node, **way or relation** with `railway` in `(station, halt)` and `uic_ref` | `_find_station_near` |
+
+  The last two rows are wider than they look and the width is load-bearing. An
+  earlier version of this contract specified "station/halt nodes with `uic_ref`"
+  for both, derived from `_find_station_near` alone — but `_route_relation_segment`
+  matches `node["uic_ref"=X]` with **no** railway filter, and relations reference
+  the *stop* node rather than the station node. Stop nodes are routinely untagged
+  as stations: in Luxembourg, 20 relation members carry a `uic_ref` and none is
+  tagged `station` or `halt`, so the narrow filter made strategy A find nothing
+  where Overpass finds relations today. `_find_station_near` likewise matches ways
+  and relations, not just nodes, so polygon-mapped stations were being dropped.
+
+  Verify any change to this table against `src/services/overpass_service.py`
+  directly — the queries there are the specification, not this document.
 - Publish per-region, versioned by the source extract's date, with a manifest
   recording region, source date, checksum and size.
 
