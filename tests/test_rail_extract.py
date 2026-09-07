@@ -19,6 +19,15 @@ to rule on:
 - 12 ``railway=rail`` and 27 ``narrow_gauge`` ways to keep, against 152
   service-tagged ones to drop and 49 trams, 12 platforms and a signal box
   besides;
+- one ``railway=light_rail`` way and one ``route=light_rail`` relation, which
+  are **synthetic** (ids 9000000000001-9000000000004, a 200 m line inside the
+  box): Mannheim maps its Stadtbahn as tram and narrow_gauge, so the box held
+  no ``light_rail`` at all and the only thing asserting that value was a
+  hand-written table restating the constant it was meant to guard. Dropping
+  ``light_rail`` from either constant passed 83 tests. It now fails on the
+  filter's own output. The way is in no relation and the relation's member is a
+  real ``railway=rail`` way, so neither is kept by the other's row — drop
+  either value and its element leaves the file;
 - 11 nodes carrying ``uic_ref`` that are *not* tagged as stations — tram stops,
   a bus stop, ``public_transport=stop_position`` — which is the row #349
   corrected and the reason strategy A can find a relation at all;
@@ -36,8 +45,8 @@ worth testing against" are the other half — a widened filter can make an
 assertion pass vacuously, and those keep each row of the contract represented.
 
 ``rail_mannheim_filtered.osm.pbf`` beside it is this box put through the
-filter, published for phase 2 to build its store from and asserted byte for
-byte here so the two phases cannot drift apart.
+filter: the selection's expected output, checked in so that a change to what is
+selected has to be shown in a diff rather than only in a count.
 """
 from __future__ import annotations
 
@@ -51,8 +60,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "rail_mannheim.osm.pbf"
-# The same box put through the filter — published for phase 2 to build its
-# store from, so the two phases cannot disagree about what the selection is.
+# The same box put through the filter: the expected output of the selection.
 PUBLISHED = ROOT / "tests" / "fixtures" / "rail_mannheim_filtered.osm.pbf"
 
 _spec = importlib.util.spec_from_file_location(
@@ -65,8 +73,8 @@ sys.modules[_spec.name] = rail
 _spec.loader.exec_module(rail)
 
 # What the fixture holds, counted from the raw box (see the docstring).
-EXPECTED_WAYS = 39
-EXPECTED_RELATIONS = 59
+EXPECTED_WAYS = 40
+EXPECTED_RELATIONS = 60
 EXPECTED_STATIONS = 4
 EXPECTED_UIC_NODES = 13
 # Ways held only because a kept relation references them: four sidings and
@@ -75,7 +83,14 @@ EXPECTED_MEMBER_WAYS = 7
 # Members of those relations that this box does not contain — the fixture is
 # two 900 m cuts out of a national network, so most of it is elsewhere. On a
 # country extract this number is the cross-border residue instead.
+#
+# Two counts of the same fact and they differ by 2.6x here: distinct way ids
+# nothing holds, and membership slots pointing at one. The build log reports
+# both by name because the residue phase 3 has to size is the first number and
+# the percentage it is tempting to quote is the second.
 EXPECTED_MEMBER_WAYS_MISSING = 25177
+EXPECTED_MEMBER_SLOTS_MISSING = 64562
+EXPECTED_MEMBER_SLOTS = 64632
 
 
 @pytest.fixture(scope="module")
@@ -222,17 +237,54 @@ def test_counts_are_pinned(filtered):
     )
 
 
+def test_the_two_residual_counts_are_reported_apart(filtered):
+    """Distinct member ways missing, and membership slots missing, are
+    different numbers — 25,177 against 64,562 on this box, and on Luxembourg
+    82 % against 16-19 %.
+
+    Phase 3 sizes the cross-border case from these. Reporting one under a name
+    that could mean either is how a 2.6x error gets quoted with confidence, so
+    both are on the Selection and both are in the build log.
+    """
+    _, selection = filtered
+    assert selection.member_slots_missing == EXPECTED_MEMBER_SLOTS_MISSING
+    assert selection.member_slots == EXPECTED_MEMBER_SLOTS
+    assert selection.member_ways_missing != selection.member_slots_missing
+
+
+def _elements(path: Path) -> dict:
+    """Every element in *path* by (kind, id): its tags and what it points at."""
+    out = {}
+    for obj in osmium.FileProcessor(str(path)):
+        if obj.is_node():
+            out[("n", obj.id)] = (dict(obj.tags),
+                                  (obj.location.x, obj.location.y))
+        elif obj.is_way():
+            out[("w", obj.id)] = (dict(obj.tags), [n.ref for n in obj.nodes])
+        else:
+            out[("r", obj.id)] = (dict(obj.tags),
+                                  [(m.type, m.ref) for m in obj.members])
+    return out
+
+
 def test_the_published_filtered_fixture_is_what_this_filter_produces():
-    """`rail_mannheim_filtered.osm.pbf` is phase 2's input, checked in so its
-    store tests can consume a .pbf without invoking this script.
+    """`rail_mannheim_filtered.osm.pbf` is the selection's expected output,
+    checked in so a change to what is selected shows up as a diff.
 
     Phase 2's first fixture was cut by hand with the pre-#349 filter, which
     left its relation_uic table empty and strategy A untestable against real
-    data — drift nobody could see. Publishing the filter's own output and
-    asserting it byte for byte is what stops that happening twice: change the
-    selection without regenerating this file and the test says so.
+    data — drift nobody could see. Checking in the filter's own output is what
+    stops that happening twice: change the selection without regenerating this
+    file and the test says so.
 
-        python scripts/build_rail_extract.py build ... # or, for this file:
+    Compared element by element rather than byte for byte. The bytes are stable
+    for one pyosmium and not across versions — four bytes at offsets 68-75 hold
+    the zlib-compressed `generator: libosmium/x.y.z` string, so 4.0.2, 4.1.0 and
+    4.3.1 each write a different file for identical contents, and
+    requirements.txt permits all three. A byte assertion there fails with
+    "regenerate the fixture", which is the wrong diagnosis and pins the file to
+    whoever last regenerated it.
+
         python -c "import ...; select(FIXTURE, PUBLISHED)"
     """
     import tempfile
@@ -240,7 +292,7 @@ def test_the_published_filtered_fixture_is_what_this_filter_produces():
     with tempfile.TemporaryDirectory() as tmp:
         regenerated = Path(tmp) / "check.osm.pbf"
         rail.select(FIXTURE, regenerated)
-        assert regenerated.read_bytes() == PUBLISHED.read_bytes(), (
+        assert _elements(regenerated) == _elements(PUBLISHED), (
             "tests/fixtures/rail_mannheim_filtered.osm.pbf is stale — "
             "regenerate it from tests/fixtures/rail_mannheim.osm.pbf"
         )
@@ -332,6 +384,24 @@ def test_narrow_gauge_is_kept(contents):
     assert any(tags.get("railway") == "narrow_gauge" for tags, _ in ways.values())
 
 
+def test_light_rail_survives_as_a_way_and_as_a_route(contents):
+    """Both rows of the contract that name ``light_rail``, asserted on the
+    filter's output rather than on a table that restates the constants.
+
+    The predicate tests above are a hand-written copy of ``RAIL_WAY_TYPES`` and
+    ``ROUTE_TYPES``, so the natural edit — narrow the constant, update the table
+    — used to pass everything. `light_rail` is the value that matters most for
+    that: it is one of the three in `_via_coordinate_fallback`'s regex and one
+    of the three in `_ROUTE_TAGS`, and dropping it silently is exactly the
+    class of error #349 was.
+    """
+    _, ways, relations = contents
+    assert [w for w, (tags, _) in ways.items()
+            if tags.get("railway") == "light_rail"]
+    assert [r for r, (tags, _) in relations.items()
+            if tags.get("route") == "light_rail"]
+
+
 def test_trams_do_not_survive(contents):
     """The sharpest neighbour: 49 tram ways run through this box and the
     regex excludes every one of them."""
@@ -405,25 +475,87 @@ def test_untagged_nodes_are_only_there_to_carry_geometry(contents):
         assert node in referenced or rail.is_uic_node(tags)
 
 
-def test_bbox_is_the_true_extent_not_the_cut_box(filtered, contents):
-    """Phase 3 picks a region by this box, so it must not claim empty space."""
-    nodes, _, _ = contents
+def test_bbox_is_the_extent_of_the_rail_ways(filtered, contents):
+    """Phase 3 picks a region by this box, so it must not claim empty space —
+    and it must mean the same thing as phase 2's, which is over rail ways only.
+    """
+    nodes, ways, _ = contents
     _, selection = filtered
-    lons = [lon for _, lon, _ in nodes.values()]
-    lats = [lat for _, _, lat in nodes.values()]
+    rail_nodes = {ref for tags, refs in ways.values() if rail.is_rail_way(tags)
+                  for ref in refs}
+    lons = [lon for node, (_, lon, _) in nodes.items() if node in rail_nodes]
+    lats = [lat for node, (_, _, lat) in nodes.items() if node in rail_nodes]
     min_lon, min_lat, max_lon, max_lat = selection.bbox
     assert (min_lon, min_lat) == pytest.approx((min(lons), min(lats)), abs=1e-5)
     assert (max_lon, max_lat) == pytest.approx((max(lons), max(lats)), abs=1e-5)
 
 
-def test_an_extract_with_no_rail_is_an_error(tmp_path):
-    """Publishing an empty region would degrade every route in it to a straight
-    line, silently. Better to fail the build."""
-    empty = tmp_path / "empty.osm.pbf"
-    writer = osmium.SimpleWriter(str(empty))
+def test_bbox_ignores_nodes_that_are_not_on_track(tmp_path):
+    """The two definitions coincide on the fixture and would not on a country:
+    a bare ``uic_ref`` node is kept wherever it is, and a bus stop 3 degrees
+    away would otherwise stretch the box over land the extract holds no rail
+    for — which phase 3 then selects this region for and finds nothing in.
+    """
+    source = tmp_path / "src.osm.pbf"
+    writer = osmium.SimpleWriter(str(source))
+    writer.add_node(osmium.osm.mutable.Node(id=1, location=(8.0, 49.0)))
+    writer.add_node(osmium.osm.mutable.Node(id=2, location=(8.1, 49.1)))
+    # Far from the track, and in the file because strategy A looks it up.
+    writer.add_node(osmium.osm.mutable.Node(
+        id=3, location=(11.0, 52.0), tags={"uic_ref": "8000284"}))
+    writer.add_way(osmium.osm.mutable.Way(
+        id=10, nodes=[1, 2], tags={"railway": "rail"}))
     writer.close()
-    with pytest.raises(RuntimeError, match="no rail data"):
-        rail.select(empty, tmp_path / "out.osm.pbf")
+
+    selection = rail.select(source, tmp_path / "out.osm.pbf")
+
+    assert selection.bbox == [8.0, 49.0, 8.1, 49.1]
+
+
+def test_bbox_agrees_with_the_store_phase_2_builds_from_it(filtered, tmp_path):
+    """The same box, computed independently by both phases.
+
+    `docs/LOCAL_RAIL_DATA_PLAN.md` promises phase 3 one region extent; phase 1
+    writes it into the manifest and phase 2 writes it into the store's meta from
+    the same file. Two definitions of "where this region reaches" is a bug
+    waiting for the first country where they differ.
+    """
+    from src.rail.builder import build_store
+    from src.rail.store import RailStore
+
+    path, selection = filtered
+    store_path = tmp_path / "region.sqlite"
+    build_store(path, store_path, region="europe/germany")
+
+    with RailStore(store_path) as store:
+        min_lat, min_lon, max_lat, max_lon = store.bbox
+    assert selection.bbox == pytest.approx(
+        [min_lon, min_lat, max_lon, max_lat], abs=1e-5)
+
+
+def test_an_extract_with_no_rail_ways_is_empty_not_an_error(tmp_path):
+    """The third outcome (plan, phase 0 / the phase 1-2 contract).
+
+    Liechtenstein has 10 relations, 2 stations and 823 uic nodes and not one
+    railway way — its only line is tagged `railway=construction`. Under the old
+    guard (`not stations and not ways`) it published a 0.06 MB artifact that
+    `src/rail/builder.py` then refused with "no railway ways", and Andorra,
+    Malta and the Azores failed the job outright. Three red matrix jobs by
+    design every month is how a real failure stops being visible.
+    """
+    source = tmp_path / "src.osm.pbf"
+    writer = osmium.SimpleWriter(str(source))
+    writer.add_node(osmium.osm.mutable.Node(
+        id=1, location=(9.5, 47.1),
+        tags={"railway": "station", "uic_ref": "8509000"}))
+    writer.close()
+
+    selection = rail.select(source, tmp_path / "out.osm.pbf")
+
+    assert selection.ways == 0
+    assert selection.stations == 1
+    # Nothing to cover, so nothing claimed.
+    assert selection.bbox == []
 
 
 def test_metadata_is_dropped(filtered):
@@ -439,9 +571,11 @@ def test_metadata_is_dropped(filtered):
 # ---------------------------------------------------------------------------
 
 CONTRACT_KEYS = {
-    "region", "file", "source", "source_date", "sha256", "bytes",
+    "region", "status", "file", "source", "source_date", "sha256", "bytes",
     "ways", "relations", "stations", "bbox",
 }
+# An `empty` region has no file, so no checksum, size or extent either.
+EMPTY_CONTRACT_KEYS = {"region", "status", "source", "source_date"}
 
 
 @pytest.fixture(scope="module")
@@ -491,7 +625,7 @@ def test_an_undated_source_is_an_error(tmp_path):
 def test_merge_orders_regions_and_stamps_the_schema(entry):
     other = {**entry, "region": "europe/austria"}
     manifest = rail.merge_manifest([entry, other], generated_at="2026-09-06T18:00:00Z")
-    assert manifest["schema"] == rail.MANIFEST_SCHEMA == 1
+    assert manifest["schema"] == rail.MANIFEST_SCHEMA == 2
     assert manifest["generated_at"] == "2026-09-06T18:00:00Z"
     assert [r["region"] for r in manifest["regions"]] == [
         "europe/austria", "europe/germany"
@@ -528,8 +662,10 @@ def test_verify_rejects_a_missing_file(entry, tmp_path):
 
 
 def test_verify_rejects_an_unknown_schema(entry, filtered):
+    """Schema 1 had no `status`, so its entries cannot say "this region holds
+    no rail" — reading one as if it could is the mistake the number prevents."""
     path, _ = filtered
-    manifest = {**rail.merge_manifest([entry]), "schema": 2}
+    manifest = {**rail.merge_manifest([entry]), "schema": 1}
     with pytest.raises(ValueError, match="schema"):
         rail.verify_manifest(manifest, path.parent)
 
@@ -552,3 +688,295 @@ def test_collect_refuses_to_publish_nothing(tmp_path):
     phase 3 reads as "Europe is not covered"."""
     with pytest.raises(RuntimeError, match="no .* files"):
         rail.collect_manifest(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The three outcomes, and what the publish job does with them
+# ---------------------------------------------------------------------------
+
+def _entry_file(directory: Path, slug: str, entry: dict) -> None:
+    (directory / f"{slug}{rail.ENTRY_SUFFIX}").write_text(json.dumps(entry))
+
+
+def test_an_empty_region_is_recorded_without_a_file(entry, tmp_path):
+    """It is in the manifest so phase 3 can tell "no rail here" from "we never
+    built it", and so the completeness check counts it as accounted for."""
+    empty = rail.empty_entry("europe/andorra", "2026-09-05")
+    assert set(empty) == EMPTY_CONTRACT_KEYS
+    assert empty["status"] == rail.STATUS_EMPTY
+
+    manifest = rail.merge_manifest([empty])
+    # No file to check, and no exception for the absence of one.
+    rail.verify_manifest(manifest, tmp_path)
+    assert rail.missing_regions(manifest, ["europe/andorra"]) == []
+
+
+def test_an_unknown_status_is_refused(entry, filtered):
+    """A newer producer's outcome must not be read as an artifact we can trust."""
+    path, _ = filtered
+    manifest = rail.merge_manifest([{**entry, "status": "partial"}])
+    with pytest.raises(ValueError, match="unknown status"):
+        rail.verify_manifest(manifest, path.parent)
+
+
+def test_a_subset_rebuild_keeps_the_regions_it_did_not_touch(entry, filtered, tmp_path):
+    """The documented recovery path is a dispatch with `regions: europe/denmark`.
+
+    That rebuilds one region; the other 48 are still assets of the release being
+    patched. A manifest holding only Denmark disowns them, and phase 3 reads a
+    missing entry as "not covered" and falls back to Overpass — the service that
+    banned us.
+    """
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+    base = rail.merge_manifest([
+        {**entry, "region": "europe/denmark", "file": "denmark-rail.osm.pbf"},
+        {**entry, "region": "europe/germany", "source_date": "2026-01-01"},
+        rail.empty_entry("europe/andorra", "2026-01-01"),
+    ])
+
+    manifest = rail.collect_manifest(tmp_path, base=base)
+
+    regions = {r["region"]: r for r in manifest["regions"]}
+    assert set(regions) == {"europe/denmark", "europe/germany", "europe/andorra"}
+    # The rebuilt one is this run's, the untouched ones are carried verbatim —
+    # including the one whose .pbf is not even in this directory.
+    assert regions["europe/germany"]["source_date"] == entry["source_date"]
+    assert regions["europe/denmark"]["file"] == "denmark-rail.osm.pbf"
+
+
+def test_a_run_that_lost_a_region_is_not_a_publishable_manifest(entry, filtered, tmp_path):
+    """Transient Geofabrik failures must not quietly become the current release."""
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+
+    manifest = rail.collect_manifest(tmp_path)
+
+    assert rail.missing_regions(
+        manifest, ["europe/germany", "europe/france", "europe/austria"]
+    ) == ["europe/austria", "europe/france"]
+
+
+def test_the_manifest_command_refuses_an_incomplete_run(entry, filtered, tmp_path, capsys):
+    """What the publish job actually runs: a non-zero exit, naming the regions."""
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+    argv = ["build_rail_extract.py", "manifest", "--out-dir", str(tmp_path),
+            "--expect", json.dumps(["europe/germany", "europe/france"])]
+
+    assert rail.main(argv) == 1
+    assert "europe/france" in capsys.readouterr().out
+
+    # …and publishes anyway when a human says so.
+    assert rail.main(argv + ["--force"]) == 0
+
+
+def test_the_manifest_command_merges_the_released_manifest(entry, filtered, tmp_path):
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+    base = tmp_path / "released.json"
+    base.write_text(json.dumps(rail.merge_manifest(
+        [{**entry, "region": "europe/denmark", "file": "denmark-rail.osm.pbf"}]
+    )))
+
+    assert rail.main([
+        "build_rail_extract.py", "manifest", "--out-dir", str(tmp_path),
+        "--base", str(base),
+        "--expect", json.dumps(["europe/germany"]),
+    ]) == 0
+
+    written = json.loads((tmp_path / rail.MANIFEST_NAME).read_text())
+    assert [r["region"] for r in written["regions"]] == [
+        "europe/denmark", "europe/germany"
+    ]
+
+
+def test_a_missing_base_manifest_is_not_an_error(entry, filtered, tmp_path):
+    """The first run has no release to merge into."""
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+
+    assert rail.main([
+        "build_rail_extract.py", "manifest", "--out-dir", str(tmp_path),
+        "--base", str(tmp_path / "nothing-here.json"),
+        "--expect", json.dumps(["europe/germany"]),
+    ]) == 0
+
+
+# ---------------------------------------------------------------------------
+# One region, end to end — the orchestration the workflow runs
+# ---------------------------------------------------------------------------
+
+def _fake_download(fixture: Path):
+    """Stand in for the network: copy *fixture* where the real download would."""
+    def download(url: str, dest: Path) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(fixture.read_bytes())
+        return dest
+    return download
+
+
+def _fake_prefilter(source: Path, dest: Path) -> Path:
+    """The osmium CLI's job, without the osmium CLI: over-select everything.
+
+    `select` does the exact pass and is what these tests are about; the CLI is
+    an optimisation over the raw extract and is not installed here.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(source.read_bytes())
+    return dest
+
+
+def test_build_publishes_the_extract_and_deletes_the_raw_source(monkeypatch, tmp_path):
+    """The invariant the whole pipeline rests on: the raw extract exists only on
+    the runner, and only until it has been filtered. Europe raw is 34.9 GB and
+    the VPS has 40 GB, so a source left behind is not untidiness.
+    """
+    monkeypatch.setattr(rail, "download", _fake_download(FIXTURE))
+    monkeypatch.setattr(rail, "prefilter", _fake_prefilter)
+    monkeypatch.setattr(rail, "source_date", lambda pbf: "2026-09-05")
+    out_dir, work_dir = tmp_path / "out", tmp_path / "work"
+
+    entry = rail.build("europe/germany", out_dir, work_dir)
+
+    assert entry["status"] == rail.STATUS_OK
+    assert list(work_dir.iterdir()) == []
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "germany-rail.entry.json", "germany-rail.osm.pbf",
+    ]
+    assert entry["bytes"] < FIXTURE.stat().st_size
+
+
+@pytest.mark.parametrize("tags", [
+    # Andorra, Malta, the Azores: no railway at all. The old guard failed the
+    # matrix job — three red jobs by design, every month.
+    {"uic_ref": "1"},
+    # Liechtenstein: 2 stations and 823 uic nodes, and its only line is tagged
+    # `railway=construction`, so no rail ways. The old guard published a 0.06 MB
+    # artifact, and src/rail/builder.py then refused it with "no railway ways".
+    {"railway": "station", "uic_ref": "8509000"},
+])
+def test_build_of_a_region_with_no_rail_publishes_nothing_and_succeeds(
+    monkeypatch, tmp_path, tags
+):
+    """Both shapes of "this region has no rail" end the same way: the job is
+    green, the region is accounted for in the manifest, and there is no
+    artifact for phase 2 to reject."""
+    source = tmp_path / "no-rail.osm.pbf"
+    writer = osmium.SimpleWriter(str(source))
+    writer.add_node(osmium.osm.mutable.Node(id=1, location=(1.5, 42.5), tags=tags))
+    writer.close()
+    monkeypatch.setattr(rail, "download", _fake_download(source))
+    monkeypatch.setattr(rail, "prefilter", _fake_prefilter)
+    monkeypatch.setattr(rail, "source_date", lambda pbf: "2026-09-05")
+    out_dir, work_dir = tmp_path / "out", tmp_path / "work"
+
+    entry = rail.build("europe/andorra", out_dir, work_dir)
+
+    assert entry["status"] == rail.STATUS_EMPTY
+    assert set(entry) == EMPTY_CONTRACT_KEYS
+    assert [p.name for p in out_dir.iterdir()] == ["andorra-rail.entry.json"]
+
+
+# ---------------------------------------------------------------------------
+# The download — the one step nothing downstream can check
+# ---------------------------------------------------------------------------
+
+class _Response:
+    def __init__(self, body: bytes = b"", text: str = "", status: int = 200):
+        self.body, self.text, self.status = body, text, status
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"HTTP {self.status}")
+
+    def iter_content(self, chunk_size=None):
+        yield self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _transport(pairs):
+    """A fake requests.get over {url: [response, response, ...]} — one per call."""
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        queue = pairs[url]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+    return get, calls
+
+
+PAYLOAD = b"a raw extract, in miniature"
+PAYLOAD_MD5 = "c2b9f0d5b1b1c6e6c3e7f9e0e5d3f4a1"
+
+
+def test_the_download_is_checked_against_geofabriks_md5(tmp_path):
+    import hashlib
+    digest = hashlib.md5(PAYLOAD).hexdigest()
+    url = "https://download.geofabrik.de/europe/denmark-latest.osm.pbf"
+    get, calls = _transport({
+        url: [_Response(body=PAYLOAD)],
+        f"{url}.md5": [_Response(text=f"{digest}  denmark-latest.osm.pbf")],
+    })
+    dest = tmp_path / "denmark.osm.pbf"
+
+    rail.download(url, dest, get=get, sleep=lambda s: None)
+
+    assert dest.read_bytes() == PAYLOAD
+    assert f"{url}.md5" in calls
+
+
+def test_a_truncated_download_is_refused(tmp_path):
+    """Everything downstream is checksummed twice and the input was checked
+    once by nobody. A half-file filters cleanly into half a country."""
+    url = "https://download.geofabrik.de/europe/denmark-latest.osm.pbf"
+    get, _ = _transport({
+        url: [_Response(body=PAYLOAD[:10])],
+        f"{url}.md5": [_Response(text=f"{PAYLOAD_MD5}  denmark-latest.osm.pbf")],
+    })
+
+    with pytest.raises(RuntimeError, match="md5 mismatch"):
+        rail.download(url, tmp_path / "denmark.osm.pbf", get=get,
+                      attempts=2, sleep=lambda s: None)
+
+
+def test_a_transient_failure_is_retried(tmp_path):
+    """49 monthly jobs, six at a time, against a mirror running on donated
+    bandwidth: one failure is a retry, not a missing region in the release."""
+    import hashlib
+    digest = hashlib.md5(PAYLOAD).hexdigest()
+    url = "https://download.geofabrik.de/europe/denmark-latest.osm.pbf"
+    get, calls = _transport({
+        url: [_Response(status=503), _Response(body=PAYLOAD)],
+        f"{url}.md5": [_Response(text=f"{digest}  denmark-latest.osm.pbf")],
+    })
+    slept = []
+
+    dest = rail.download(url, tmp_path / "denmark.osm.pbf", get=get,
+                         sleep=slept.append)
+
+    assert dest.read_bytes() == PAYLOAD
+    assert slept, "a retry with no backoff is a retry into the same failure"
+
+
+def test_the_download_gives_up_eventually(tmp_path):
+    url = "https://download.geofabrik.de/europe/denmark-latest.osm.pbf"
+    get, calls = _transport({
+        url: [_Response(status=503)],
+        f"{url}.md5": [_Response(text=f"{PAYLOAD_MD5}  denmark-latest.osm.pbf")],
+    })
+
+    with pytest.raises(RuntimeError, match="503"):
+        rail.download(url, tmp_path / "denmark.osm.pbf", get=get,
+                      attempts=3, sleep=lambda s: None)
+    assert calls.count(url) == 3

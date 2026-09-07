@@ -14,6 +14,8 @@ change plus a rebuild, never a code change, so the matrix has to be read from
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -94,23 +96,51 @@ def test_the_matrix_is_read_from_the_config_not_the_workflow(jobs):
     assert "build_rail_extract.py regions --json" in _steps_text(jobs["plan"])
 
 
+def test_the_plan_job_runs_with_only_what_it_installs(tmp_path):
+    """The matrix command must work in the plan job's environment, which is
+    PyYAML and nothing else.
+
+    It did not. `osmium` and `requests` were imported at module scope, so the
+    step that prints the matrix died with ModuleNotFoundError before printing
+    anything — the plan job failed on every scheduled run and `build` never
+    started. Nothing caught it, because every test here imports the module in a
+    developer's environment where both are installed and asserts on the text of
+    the workflow file rather than on the command working.
+
+    So: run it for real, with the heavy pair made unimportable. PYTHONPATH takes
+    precedence over site-packages, so a stub module that raises stands in for
+    "not installed" without touching the environment the suite runs in.
+    """
+    for module in ("osmium", "requests"):
+        (tmp_path / f"{module}.py").write_text(
+            f'raise ImportError("No module named {module!r}")\n', encoding="utf-8"
+        )
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+
+    result = subprocess.run(
+        [sys.executable, "scripts/build_rail_extract.py", "regions", "--json"],
+        cwd=ROOT, env=env, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == rail.load_regions()
+
+
 # ---------------------------------------------------------------------------
 # Nothing raw leaves the runner
 # ---------------------------------------------------------------------------
 
 def test_the_raw_extract_is_downloaded_outside_the_checkout(jobs):
     """A work dir inside the workspace would put a 4.83 GB file where
-    upload-artifact, docker build and git all look."""
+    upload-artifact, docker build and git all look.
+
+    Only the workflow can say where the runner puts it, so this one is on the
+    file. That the script then *deletes* it is asserted on the script's own
+    behaviour, in test_rail_extract.py.
+    """
     build = _steps_text(jobs["build"])
     assert "--work-dir \"$RUNNER_TEMP" in build
     assert "--out-dir dist/rail" in build
-
-
-def test_the_build_job_refuses_to_publish_anything_oversized(jobs):
-    """A tripwire on the script's own cleanup, in the job that would upload."""
-    build = _steps_text(jobs["build"])
-    assert "find dist/rail -size +100M" in build
-    assert "-name '*-source.osm.pbf'" in build
 
 
 def test_only_filtered_artifacts_are_uploaded(jobs):
@@ -120,20 +150,23 @@ def test_only_filtered_artifacts_are_uploaded(jobs):
     assert [step["with"]["path"] for step in upload] == ["dist/rail/"]
 
     publish = _steps_text(jobs["publish"])
-    assert "dist/rail/*-rail.osm.pbf dist/rail/manifest.json" in publish
+    assert "dist/rail/*-rail.osm.pbf" in publish
+    assert "dist/rail/manifest.json" in publish
 
 
 def test_no_raw_extract_is_tracked_in_the_repo():
-    """The image is built with `COPY . .`, so tracked is shipped."""
+    """The image is built with `COPY . .`, so tracked is shipped. A raw country
+    extract is 0.5-4.8 GB; every fixture the suite needs is a filtered cut of
+    one and fits in a few hundred KB."""
     tracked = subprocess.run(
         ["git", "ls-files", "-z", "*.pbf", "*.osm.bz2", "*.osm"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
     paths = sorted(p for p in tracked.split("\0") if p)
-    assert paths == [
-        "tests/fixtures/rail_mannheim.osm.pbf",
-        "tests/fixtures/rail_mannheim_filtered.osm.pbf",
-    ]
+    assert paths, "the fixtures are gone, not the guard"
+    for path in paths:
+        assert path.startswith("tests/fixtures/"), f"{path} is not a fixture"
+        assert (ROOT / path).stat().st_size < 1_000_000, f"{path} is not filtered"
 
 
 def test_the_fixture_stays_small():
@@ -178,7 +211,36 @@ def test_one_build_at_a_time(workflow):
 def test_the_manifest_is_verified_before_it_is_published(jobs):
     """The artifacts cross a job boundary; a truncated one must fail here."""
     publish = _steps_text(jobs["publish"])
-    assert publish.index("build_rail_extract.py manifest") < publish.index("gh release")
+    assert publish.index("build_rail_extract.py manifest") < \
+        publish.index("gh release upload")
+
+
+def test_the_publish_job_checks_coverage_against_the_planned_matrix(jobs, workflow):
+    """The script refuses an incomplete manifest (test_rail_extract.py); this is
+    the wiring that makes the publish job actually ask it to.
+
+    Both arguments matter and neither is decoration: without `--base` a
+    one-region dispatch republishes a manifest that disowns the other 48, and
+    without `--expect` a batch of transient Geofabrik failures publishes a
+    partial manifest as the current release. `force_publish` is the way past it
+    on purpose rather than by accident.
+    """
+    manifest_step = _steps_text(jobs["publish"])
+    assert "--base released/manifest.json" in manifest_step
+    assert "--expect \"$EXPECTED\"" in manifest_step
+    assert jobs["publish"]["needs"] == ["plan", "build"], \
+        "the expected coverage is the plan job's matrix"
+    assert "force_publish" in workflow[True]["workflow_dispatch"]["inputs"]
+    assert "--force" in manifest_step
+
+
+def test_a_subset_rebuild_updates_the_release_it_patches(jobs):
+    """A dispatch of one region must not open a new dated release: the other 48
+    regions exist only as the previous release's assets, so a new tag would hold
+    Denmark alone and "latest rail-data-*" would resolve to it."""
+    publish = _steps_text(jobs["publish"])
+    assert "gh release list" in publish
+    assert "startswith(\"rail-data-\")" in publish
 
 
 def test_only_the_publish_job_can_write(workflow, jobs):

@@ -36,7 +36,10 @@ Usage:
 
     python scripts/build_rail_extract.py regions --json
     python scripts/build_rail_extract.py build europe/denmark --out-dir dist
-    python scripts/build_rail_extract.py manifest --out-dir dist
+    python scripts/build_rail_extract.py manifest --out-dir dist \
+        --base released/manifest.json --expect '["europe/denmark"]'
+
+``regions`` needs PyYAML alone — the workflow's plan job installs nothing else.
 
 Requires the ``osmium`` CLI (Debian/Ubuntu: ``apt-get install osmium-tool``).
 """
@@ -50,14 +53,18 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
-import osmium
-import requests
 import yaml
+
+# ``osmium`` and ``requests`` are imported inside the functions that need them.
+# ``regions`` is the whole of the workflow's plan job and it runs on a runner
+# that installs PyYAML and nothing else — importing the heavy pair at module
+# scope made that job fail before it printed the matrix, so the build never ran.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 REGIONS_CONFIG = _REPO_ROOT / "config" / "rail_regions.yml"
@@ -65,8 +72,18 @@ REGIONS_CONFIG = _REPO_ROOT / "config" / "rail_regions.yml"
 GEOFABRIK_BASE = "https://download.geofabrik.de"
 
 # Bumped only when the manifest's shape changes; phase 2 reads it to decide
-# whether it understands the file at all.
-MANIFEST_SCHEMA = 1
+# whether it understands the file at all. 2 added `status`, and with it entries
+# that describe a region holding no rail rather than a published file.
+MANIFEST_SCHEMA = 2
+
+# A region's outcome. `empty` is not a failure: a few configured regions have no
+# railway at all (Andorra, Malta, the Azores) and one has only a line currently
+# tagged `railway=construction` (Liechtenstein). Without a third outcome those
+# are red matrix jobs every month, which buries a real failure — a renamed
+# Geofabrik path, a mirror outage — in expected noise, and leaves the publish
+# job unable to tell "no rail here" from "we did not build it".
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
 
 MANIFEST_NAME = "manifest.json"
 ENTRY_SUFFIX = "-rail.entry.json"
@@ -153,11 +170,22 @@ class Selection:
     # ways on the far side of a border, which live in the neighbouring
     # country's file. No filter can close that; it is phase 3's cross-border
     # case, and this is how big it is.
+    #
+    # Two ways of counting it, because they differ by 2.6x on the fixture and
+    # by more on a country, and phase 3 needs to know which it is reading:
+    # `member_ways_missing` counts *distinct way ids* nothing holds (Luxembourg
+    # 82 % of the ids its relations name), `member_slots_missing` counts
+    # *membership slots* — the same way named by six relations counts six times.
     member_ways_missing: int
-    # [min_lon, min_lat, max_lon, max_lat] over every node written — the true
-    # extent of the rail data, not the country's nominal box. Phase 3 uses it
-    # to pick a region for a coordinate, so a nominal box would claim coverage
-    # the file does not have.
+    member_slots_missing: int
+    member_slots: int
+    # [min_lon, min_lat, max_lon, max_lat] over the nodes of the *rail ways* —
+    # the same extent src/rail/builder.py records for the store it builds from
+    # this file (its `extent`, over rail=1 ways only). Phase 3 picks a region
+    # for a coordinate by this box, so the two phases must not disagree about
+    # what the region covers: a bare uic_ref node or a platform hundreds of
+    # kilometres from any track would otherwise claim coverage here that the
+    # store does not report. Empty when the region has no rail ways.
     bbox: list[float]
 
 
@@ -198,18 +226,70 @@ def source_url(region: str) -> str:
 # Steps
 # ---------------------------------------------------------------------------
 
-def download(url: str, dest: Path) -> Path:
-    """Stream a Geofabrik extract to disk.
+DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_BACKOFF_SECONDS = 5.0
 
-    Streamed, never held in memory: these are gigabytes.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=60) as response:
+
+def _fetch_md5(get: Callable, url: str) -> str:
+    """Geofabrik's ``<file>.md5``: the digest, then the file name."""
+    response = get(url, timeout=60)
+    response.raise_for_status()
+    return response.text.split()[0].lower()
+
+
+def _stream_to_file(get: Callable, url: str, dest: Path) -> str:
+    """Write *url* to *dest*, returning the md5 of what was written."""
+    digest = hashlib.md5()
+    with get(url, stream=True, timeout=60) as response:
         response.raise_for_status()
         with dest.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=1 << 20):
+                digest.update(chunk)
                 handle.write(chunk)
-    return dest
+    return digest.hexdigest()
+
+
+def download(
+    url: str,
+    dest: Path,
+    get: Callable | None = None,
+    attempts: int = DOWNLOAD_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Path:
+    """Stream a Geofabrik extract to disk and check it against its md5.
+
+    Streamed, never held in memory: these are gigabytes.
+
+    Everything downstream of this is checksummed twice — the manifest carries a
+    sha256 of the artifact and the publish job re-checks it after the artifact
+    round trip — while the input was the one step nobody verified. Geofabrik
+    publishes ``<file>.md5`` beside every extract, so a truncated or corrupted
+    download is detectable rather than something that shows up as a filter that
+    quietly selected half a country.
+
+    Geofabrik runs on donated bandwidth and this workflow asks it for 49 files
+    an hour, six at a time, so a transient failure is expected rather than
+    exceptional: retry with a linear backoff, and only give up after that.
+    """
+    if get is None:
+        import requests  # noqa: PLC0415 — CI-only, see the note beside the imports
+
+        get = requests.get
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, attempts + 1):
+        try:
+            expected = _fetch_md5(get, f"{url}.md5")
+            digest = _stream_to_file(get, url, dest)
+            if digest != expected:
+                raise RuntimeError(
+                    f"{url}: md5 mismatch — got {digest}, {url}.md5 says {expected}"
+                )
+            return dest
+        except Exception as exc:  # noqa: BLE001 — every failure here is retryable
+            if attempt == attempts:
+                raise
+            print(f"[{url}] attempt {attempt}/{attempts} failed: {exc}", flush=True)
+            sleep(DOWNLOAD_BACKOFF_SECONDS * attempt)
 
 
 def prefilter(source: Path, dest: Path) -> Path:
@@ -265,10 +345,18 @@ def select(source: Path, dest: Path) -> Selection:
 
     Per-object OSM metadata (version, timestamp, changeset, user) is dropped:
     nothing downstream reads it and it is ~15 % of the file.
+
+    A region with no rail ways is not an error here — see ``STATUS_EMPTY``. The
+    caller decides; ``ways`` is the discriminator, matching the refusal in
+    src/rail/builder.py so that what phase 1 publishes is what phase 2 accepts.
     """
+    import osmium  # noqa: PLC0415 — CI-only, see the note beside the imports
+
     ways = relations = stations = uic_nodes = member_ways = 0
 
-    member_way_ids: set[int] = set()
+    # Membership slots, not distinct ways: the same way named by six relations
+    # is six slots. Both numbers are reported (see Selection).
+    member_slot_counts: Counter[int] = Counter()
     station_member_nodes: set[int] = set()
     for rel in osmium.FileProcessor(str(source), osmium.osm.RELATION):
         station = is_station(rel.tags)
@@ -276,18 +364,25 @@ def select(source: Path, dest: Path) -> Selection:
             continue
         for member in rel.members:
             if member.type == "w":
-                member_way_ids.add(member.ref)
+                member_slot_counts[member.ref] += 1
             elif member.type == "n" and station:
                 station_member_nodes.add(member.ref)
+    member_way_ids = set(member_slot_counts)
 
     wanted_nodes = set(station_member_nodes)
+    # The nodes the bbox is measured over: the rail ways' own, and no others.
+    rail_nodes: set[int] = set()
     held_members: set[int] = set()
     for way in osmium.FileProcessor(str(source), osmium.osm.WAY):
         member = way.id in member_way_ids
         if member:
             held_members.add(way.id)
-        if member or is_rail_way(way.tags) or is_station(way.tags):
-            wanted_nodes.update(node.ref for node in way.nodes)
+        rail = is_rail_way(way.tags)
+        if member or rail or is_station(way.tags):
+            refs = [node.ref for node in way.nodes]
+            wanted_nodes.update(refs)
+            if rail:
+                rail_nodes.update(refs)
 
     min_lon = min_lat = 180.0
     max_lon = max_lat = -180.0
@@ -303,9 +398,10 @@ def select(source: Path, dest: Path) -> Selection:
                 uic_nodes += uic
                 stations += is_station(obj.tags)
                 writer.add_node(obj)
-                lon, lat = obj.location.lon, obj.location.lat
-                min_lon, max_lon = min(min_lon, lon), max(max_lon, lon)
-                min_lat, max_lat = min(min_lat, lat), max(max_lat, lat)
+                if obj.id in rail_nodes:
+                    lon, lat = obj.location.lon, obj.location.lat
+                    min_lon, max_lon = min(min_lon, lon), max(max_lon, lon)
+                    min_lat, max_lat = min(min_lat, lat), max(max_lat, lat)
             elif obj.is_way():
                 rail_way = is_rail_way(obj.tags)
                 station_way = is_station(obj.tags)
@@ -330,13 +426,6 @@ def select(source: Path, dest: Path) -> Selection:
     finally:
         writer.close()
 
-    if not stations and not ways:
-        # An empty result means the filter matched nothing at all, which for a
-        # European country means the selection or the source is wrong. Failing
-        # here beats publishing a file that resolves every route to a straight
-        # line.
-        raise RuntimeError(f"{source} yielded no rail data")
-
     return Selection(
         ways=ways,
         relations=relations,
@@ -344,7 +433,15 @@ def select(source: Path, dest: Path) -> Selection:
         uic_nodes=uic_nodes,
         member_ways=member_ways,
         member_ways_missing=len(member_way_ids) - len(held_members),
-        bbox=[round(v, 5) for v in (min_lon, min_lat, max_lon, max_lat)],
+        member_slots_missing=sum(
+            count for way_id, count in member_slot_counts.items()
+            if way_id not in held_members
+        ),
+        member_slots=sum(member_slot_counts.values()),
+        bbox=(
+            [round(v, 5) for v in (min_lon, min_lat, max_lon, max_lat)]
+            if ways else []
+        ),
     )
 
 
@@ -355,6 +452,8 @@ def source_date(pbf: Path) -> str:
     at. Using it rather than the build date means a rebuild of an unchanged
     extract is recognisably the same data.
     """
+    import osmium  # noqa: PLC0415 — CI-only, see the note beside the imports
+
     reader = osmium.io.Reader(str(pbf), osmium.osm.osm_entity_bits.NOTHING)
     try:
         stamp = reader.header().get("osmosis_replication_timestamp")
@@ -379,6 +478,7 @@ def manifest_entry(
     """One region's manifest record (the phase 1 / phase 2 contract)."""
     return {
         "region": region,
+        "status": STATUS_OK,
         "file": extract.name,
         "source": source_url(region),
         "source_date": date,
@@ -388,6 +488,22 @@ def manifest_entry(
         "relations": selection.relations,
         "stations": selection.stations,
         "bbox": selection.bbox,
+    }
+
+
+def empty_entry(region: str, date: str) -> dict:
+    """A region the pipeline built correctly and that holds no rail ways.
+
+    No file, so no checksum, size or bbox: there is nothing to download and
+    nothing to cover. It is in the manifest so that phase 3 can tell "we know
+    this region has no rail, use Overpass" from "we never built it", and so
+    that the publish job's completeness check counts it as accounted for.
+    """
+    return {
+        "region": region,
+        "status": STATUS_EMPTY,
+        "source": source_url(region),
+        "source_date": date,
     }
 
 
@@ -412,6 +528,11 @@ def verify_manifest(manifest: dict, directory: Path) -> None:
     if manifest.get("schema") != MANIFEST_SCHEMA:
         raise ValueError(f"unknown manifest schema: {manifest.get('schema')!r}")
     for entry in manifest["regions"]:
+        if entry["status"] == STATUS_EMPTY:
+            # Nothing was published for it, so there is nothing to verify.
+            continue
+        if entry["status"] != STATUS_OK:
+            raise ValueError(f"{entry['region']}: unknown status {entry['status']!r}")
         path = directory / entry["file"]
         if not path.is_file():
             raise ValueError(f"{entry['region']}: missing {entry['file']}")
@@ -467,36 +588,78 @@ def build(
     selection = select(intermediate, extract)
     intermediate.unlink()
 
-    entry = manifest_entry(region, extract, selection, date)
+    if selection.ways:
+        entry = manifest_entry(region, extract, selection, date)
+        size = f"{entry['bytes'] / 1e6:.2f} MB"
+    else:
+        # No rail ways: the region is `empty`, not failed. Phase 2 refuses a
+        # store with no rail ways, so publishing this file would hand the next
+        # phase something it is right to reject. Delete it and say so.
+        extract.unlink()
+        entry = empty_entry(region, date)
+        size = "no rail ways — nothing published"
+
     (out_dir / f"{slug}{ENTRY_SUFFIX}").write_text(
         json.dumps(entry, indent=2) + "\n", encoding="utf-8"
     )
     print(
-        f"[{slug}] {entry['bytes'] / 1e6:.2f} MB, ways={selection.ways} "
+        f"[{slug}] {size}, status={entry['status']} ways={selection.ways} "
         f"relations={selection.relations} stations={selection.stations} "
         f"uic_nodes={selection.uic_nodes} member_ways={selection.member_ways} "
-        f"(+{selection.member_ways_missing} outside this extract) "
-        f"bbox={selection.bbox} source_date={date} "
+        f"member_ways_missing={selection.member_ways_missing} distinct ids "
+        f"({selection.member_slots_missing} of {selection.member_slots} "
+        f"membership slots) bbox={selection.bbox} source_date={date} "
         f"(+{time.monotonic() - started:.0f}s)",
         flush=True,
     )
     return entry
 
 
-def collect_manifest(out_dir: Path) -> dict:
-    """Merge the entry files in ``out_dir`` into a verified manifest."""
+def collect_manifest(out_dir: Path, base: dict | None = None) -> dict:
+    """Merge the entry files in ``out_dir`` into a verified manifest.
+
+    *base* is the manifest of the release this run is updating, if it already
+    has one. A rebuild of one region — the documented recovery path is
+    ``workflow_dispatch`` with ``regions: europe/denmark`` — must not publish a
+    manifest that disowns the 48 regions it did not touch: their assets are
+    still attached to that release and phase 3 reads a missing entry as "not
+    covered", so a one-region manifest silently sends most of Europe back to
+    Overpass. So a region rebuilt in this run replaces its entry, and every
+    other entry is carried through untouched.
+
+    Only the rebuilt entries are verified against ``out_dir``: the carried ones
+    describe files that are already release assets and were never downloaded.
+    """
     entries = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in sorted(out_dir.glob(f"*{ENTRY_SUFFIX}"))
     ]
     if not entries:
         raise RuntimeError(f"no {ENTRY_SUFFIX} files in {out_dir}")
-    manifest = merge_manifest(entries)
-    verify_manifest(manifest, out_dir)
+    verify_manifest(merge_manifest(entries), out_dir)
+
+    rebuilt = {entry["region"] for entry in entries}
+    carried = [
+        entry for entry in (base or {}).get("regions", [])
+        if entry["region"] not in rebuilt
+    ]
+    manifest = merge_manifest(entries + carried)
     (out_dir / MANIFEST_NAME).write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     return manifest
+
+
+def missing_regions(manifest: dict, expected: Iterable[str]) -> list[str]:
+    """Expected regions the manifest does not account for.
+
+    A region is accounted for whether it holds rail or not — an ``empty`` entry
+    is an answer. What is missing is a region that was supposed to be in this
+    manifest and is not, which is a build that failed, and phase 3 reads it as
+    "not covered" and falls back to Overpass: the service that banned us.
+    """
+    covered = {entry["region"] for entry in manifest["regions"]}
+    return sorted(set(expected) - covered)
 
 
 def main(argv: list[str]) -> int:
@@ -518,6 +681,18 @@ def main(argv: list[str]) -> int:
 
     p_manifest = sub.add_parser("manifest", help="merge entry files into manifest.json")
     p_manifest.add_argument("--out-dir", type=Path, default=Path("dist/rail"))
+    p_manifest.add_argument(
+        "--base", type=Path,
+        help="manifest.json of the release being updated; regions not rebuilt "
+             "in this run are carried through from it (missing file: ignored)")
+    p_manifest.add_argument(
+        "--expect", default=None,
+        help="JSON array of the regions this run was supposed to cover "
+             "(default: every region in the config). Publishing a manifest that "
+             "covers fewer is refused")
+    p_manifest.add_argument(
+        "--force", action="store_true",
+        help="publish even though regions are missing (deliberate override)")
 
     args = parser.parse_args(argv[1:])
 
@@ -531,8 +706,25 @@ def main(argv: list[str]) -> int:
               source=args.source, keep_source=args.keep_source)
         return 0
 
-    manifest = collect_manifest(args.out_dir)
+    base = None
+    if args.base and args.base.is_file():
+        base = json.loads(args.base.read_text(encoding="utf-8"))
+        print(f"merging into {len(base['regions'])} regions from {args.base}")
+
+    manifest = collect_manifest(args.out_dir, base=base)
+    expected = json.loads(args.expect) if args.expect else load_regions()
+    missing = missing_regions(manifest, expected)
     print(f"{len(manifest['regions'])} regions verified in {args.out_dir}")
+    if missing:
+        print(
+            f"::error::{len(missing)} region(s) missing from the manifest — "
+            f"publishing it would send them back to Overpass: "
+            f"{', '.join(missing)}",
+            flush=True,
+        )
+        if not args.force:
+            return 1
+        print("force requested: publishing an incomplete manifest anyway")
     return 0
 
 

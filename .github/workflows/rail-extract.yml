@@ -19,6 +19,11 @@ on:
         description: "Regions to rebuild, space or comma separated (default: all configured)"
         required: false
         default: ""
+      force_publish:
+        description: "Publish even if regions are missing from the manifest"
+        required: false
+        type: boolean
+        default: false
 
 # One build at a time: two concurrent runs would race on the same release tag.
 concurrency:
@@ -128,10 +133,13 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
-    # Publish whatever built. A country that failed keeps its previous release
-    # asset and the manifest simply omits it, which phase 3 reads as "not
-    # covered" and falls back to Overpass for.
+    needs: [plan, build]
+    # Runs even when some of the matrix failed — not to publish whatever built,
+    # but so the manifest step can name what is missing and fail loudly. A
+    # country that failed has no release asset of its own here: a rebuild that
+    # creates a new dated release starts empty, so an omitted region is one
+    # phase 3 reads as "not covered" and sends back to Overpass, which is the
+    # service that banned us. Hence the completeness check below.
     if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
@@ -151,10 +159,61 @@ jobs:
           pattern: rail-*
           merge-multiple: true
 
+      - name: Resolve the release this run updates
+        id: release
+        # A full run publishes a new dated release. A subset rebuild patches the
+        # release it is fixing instead of opening a new one, because the regions
+        # it did not rebuild exist only as that release's assets: a new tag would
+        # hold Denmark and nothing else, and "latest rail-data-*" would resolve
+        # to it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.regions }}
+        run: |
+          tag=""
+          if [ -n "$REQUESTED" ]; then
+            tag=$(gh release list --limit 100 --json tagName \
+              --jq '[.[] | select(.tagName | startswith("rail-data-"))]
+                    | max_by(.tagName) | .tagName // empty')
+          fi
+          if [ -z "$tag" ]; then
+            tag="rail-data-$(date -u +%Y-%m-%d)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "updating $tag"
+
+      - name: Fetch the manifest being updated
+        # The base of the merge, and it must come from the very release we are
+        # about to upload into — carrying an entry forward into a release that
+        # does not hold its .pbf would publish a manifest pointing at nothing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p released
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release download "$TAG" --pattern manifest.json --dir released \
+              || echo "no manifest.json on $TAG yet"
+          fi
+
       - name: Build and verify the manifest
         # Re-checksums every file after the artifact round trip, so a truncated
-        # upload fails here rather than on the box at boot.
-        run: python scripts/build_rail_extract.py manifest --out-dir dist/rail
+        # upload fails here rather than on the box at boot; merges the regions
+        # this run did not rebuild in from the release's own manifest; and
+        # refuses to publish one that covers fewer regions than the run was
+        # supposed to produce.
+        env:
+          EXPECTED: ${{ needs.plan.outputs.regions }}
+          FORCE: ${{ inputs.force_publish }}
+        run: |
+          force=""
+          if [ "$FORCE" = "true" ]; then
+            force="--force"
+          fi
+          python scripts/build_rail_extract.py manifest \
+            --out-dir dist/rail \
+            --base released/manifest.json \
+            --expect "$EXPECTED" $force
 
       - name: Publish the release
         # A release asset, not a Docker layer: baking the data into the image
@@ -163,13 +222,16 @@ jobs:
         # displaces the app's own latest release.
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          tag="rail-data-$(date -u +%Y-%m-%d)"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" \
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
               --prerelease \
-              --title "Rail extracts $tag" \
+              --title "Rail extracts $TAG" \
               --notes "Rail-only OSM extracts built by .github/workflows/rail-extract.yml from Geofabrik country extracts. Coverage, checksums and per-region source dates are in manifest.json."
           fi
-          gh release upload "$tag" \
-            dist/rail/*-rail.osm.pbf dist/rail/manifest.json --clobber
+          # A region with no rail publishes no .pbf, so the glob can be empty.
+          shopt -s nullglob
+          extracts=(dist/rail/*-rail.osm.pbf)
+          gh release upload "$TAG" \
+            "${extracts[@]}" dist/rail/manifest.json --clobber
