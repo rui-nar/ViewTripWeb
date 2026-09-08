@@ -373,6 +373,33 @@ class RailStore:
             for way_id, geom in rows
         ]
 
+    def vertex_counts_in_bbox(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+    ) -> dict[int, int]:
+        """``{way id: vertex count}`` for exactly what ``ways_in_bbox`` returns.
+
+        The per-way form of the total ``ways_in_bbox`` counts before it decodes,
+        and it exists for one caller: ``LocalRailSource.ways_in_bbox`` answers a
+        box from several overlapping regions at once, so it has to know the
+        *deduplicated* size of the merged result before it decodes any of it.
+        Ids are what make that possible — a border way is in both extracts, and
+        summing the regions' own totals would charge it twice, which is the
+        failure that degrades the effective ceiling towards ``ceiling / N``
+        exactly where merging is the point.
+
+        Same predicate and same parameters as ``ways_in_bbox``, so the ids and
+        the counts describe that call's result and not an approximation of it.
+        Counted from the blob lengths: 8 bytes per vertex, two int32s.
+        """
+        return dict(self._query(
+            f"SELECT w.id, LENGTH(w.geom) / 8 {self._RAIL_IN_BOX}",
+            (min_lon, max_lon, min_lat, max_lat),
+        ))
+
     # ------------------------------------------------------------------
     # Snapping — the index that replaces the linear _nearest_node scan
     # ------------------------------------------------------------------
