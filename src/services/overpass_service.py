@@ -30,7 +30,6 @@ from src.jobs.upstream_slots import is_cooling, mark_cooling, slot
 from src.services.rail_source import (
     LocalRailSource,
     RailSource,
-    RailSourceError,
     RailSourceOverload,
 )
 from src.utils.logging import get_logger
@@ -282,6 +281,13 @@ def _local_rail_source() -> Optional[LocalRailSource]:
     a directory whose manifest we refuse to read. The last one is logged loudly —
     it is a deployment fault, and its symptom is a quiet return to the traffic
     volume this whole issue exists to stop.
+
+    "We refuse to read it" is deliberately every exception rather than
+    ``RailSourceError`` alone. A manifest is a file someone else wrote, so it
+    can be wrong in shapes ``load_coverage`` never enumerated — an entry with no
+    ``region`` key, a bbox holding a string, a top-level list — each of which
+    raises a plain builtin. There is one safe answer to all of them, and the
+    alternative is a traceback out of a rail resolve.
     """
     global _local_source
     if os.environ.get(_RAIL_SOURCE_ENV, "").strip().lower() != "local":
@@ -294,7 +300,7 @@ def _local_rail_source() -> Optional[LocalRailSource]:
     if _local_source is None or _local_source[0] != directory:
         try:
             _local_source = (directory, LocalRailSource(directory))
-        except RailSourceError as exc:
+        except Exception as exc:  # noqa: BLE001 — see docstring
             _log.warning("local rail data at %s is unusable (%s) — "
                          "resolving rail via Overpass", directory, exc)
             _local_source = (directory, None)

@@ -143,8 +143,12 @@ def load_coverage(directory: str) -> list[tuple[str, tuple[float, float, float, 
     Empty means "covered nowhere", which is a legitimate answer and not an
     error: a deployment that has not fetched the data yet, or a manifest whose
     regions are all ``empty``. Anything actively wrong — unparseable JSON, a
-    schema we do not know — raises instead, because reading it wrongly would
-    claim coverage we do not have.
+    schema we do not know, an entry that is not shaped like an entry — raises
+    instead, because reading it wrongly would claim coverage we do not have. The
+    exception type is not part of the contract: only the two cases named here
+    raise ``RailSourceError``, and a malformed entry raises whatever reading it
+    raises, so the caller treats every exception as "no local coverage" (see
+    ``overpass_service._local_rail_source``).
 
     The manifest's bbox is ``[min_lon, min_lat, max_lon, max_lat]``; the store
     speaks (lat, lon) pairs, so it is transposed once, here.
@@ -230,15 +234,30 @@ class LocalRailSource(RailSource):
         return sorted(region for region, bbox in self.coverage if _overlaps(bbox, box))
 
     def _stores_for(self, box: tuple[float, float, float, float]) -> Iterable[RailStore]:
-        """Open stores for those regions, skipping the ones we do not hold.
+        """Open stores for those regions, skipping the ones we cannot read.
 
         A manifest entry whose file is absent — a partial download, a release
         asset that failed to attach — is coverage on paper only, so it is
         skipped here and the query is answered from whatever else overlaps. The
         resolver's Overpass fallback covers the case where that is nothing.
+
+        A file that is *present* and unreadable is the same situation and is
+        skipped the same way, whatever it raises: a partial download leaves a
+        truncated file (``sqlite3.DatabaseError``), a zero-byte or
+        wrong-version file leaves a ``RailStoreError``, and a directory we
+        cannot read leaves an ``OSError``. Narrowing this to one exception type
+        would let the others out into ``_resolve_route_job``'s retry, which
+        re-reads the same broken file — so every train resolve in the
+        deployment would fail for as long as it sat there.
         """
         for region in self.regions_for(box):
-            store = self._cache.get(region)
+            try:
+                store = self._cache.get(region)
+            except Exception as exc:  # noqa: BLE001 — see docstring
+                _log.warning("rail region %s in %s cannot be opened (%s) — "
+                             "skipped, this query falls back to Overpass",
+                             region, self.directory, exc)
+                continue
             if store is None:
                 _log.warning("rail region %s is in the manifest but not in %s",
                              region, self.directory)

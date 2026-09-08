@@ -549,3 +549,111 @@ class TestOverpassFallback:
         monkeypatch.setattr("src.services.rail_source._MAX_BBOX_VERTICES", 5)
         with pytest.raises(RailSourceOverload):
             source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
+
+
+# ---------------------------------------------------------------------------
+# Broken local data — every shape of it defers to Overpass
+# ---------------------------------------------------------------------------
+
+def _corrupt_store(path, state):
+    """Write a store file that exists and cannot be read, in *state*."""
+    if state == "garbage":
+        # A partial download: the bytes that arrived are not a database.
+        path.write_bytes(b"\x1f\x8b\x08\x00 not a sqlite file at all")
+    elif state == "zero_byte":
+        # `touch`, or a download that got the file created and nothing else.
+        path.write_bytes(b"")
+    elif state == "wrong_schema":
+        # A store built by a future (or past) builder.
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA user_version = 99")
+        conn.close()
+    else:  # pragma: no cover - test wiring
+        raise AssertionError(state)
+
+
+class TestUnreadableStoreFile:
+    """A file the manifest names, that is present and cannot be opened.
+
+    ``store.py`` already answers "the manifest names a file the directory does
+    not hold" with None. A file that is *there* and broken raises instead, and
+    every raise on this path escapes into the resolve job's retry — where the
+    file is still broken, so the segment never resolves at all. A local problem
+    must defer to Overpass, whatever shape it takes.
+    """
+
+    @pytest.fixture(params=["garbage", "zero_byte", "wrong_schema"])
+    def broken_dir(self, request, tmp_path):
+        _corrupt_store(tmp_path / store_filename(REGION), request.param)
+        write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
+        return str(tmp_path)
+
+    def test_every_query_reads_as_not_covered(self, broken_dir):
+        source = LocalRailSource(broken_dir)
+        # The region is still coverage on paper — the manifest says so.
+        assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
+        # …and every question about it answers "nothing here", not an exception.
+        assert source.nearest_station(49.5999681, 6.1342493) is None
+        assert source.relations_near(49.5999681, 6.1342493) == set()
+        assert source.relations_for_uic_pair(
+            "8200100", "8200710", [(49.60, 6.13), (49.64, 5.98)]) == []
+        assert source.relation_geometry([1], [(49.60, 6.13), (49.64, 5.98)]) == []
+        assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+
+    def test_the_resolve_falls_back_to_overpass_instead_of_failing(
+            self, broken_dir, monkeypatch, oracle):
+        """The whole point: a broken file costs Overpass traffic, not the route.
+
+        Without this, the exception escapes ``get_rail_geometry`` into
+        ``_resolve_route_job``'s retry, and the file is still broken on retry —
+        so every train resolve in the deployment fails while it exists.
+        """
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", broken_dir)
+        stops = [dict(LUX_GARE), dict(KLEINBETTINGEN)]
+        with patch.object(ov, "_overpass", side_effect=oracle):
+            result = ov.get_rail_geometry(stops)
+        assert not result.degraded
+        assert oracle.queries, "a broken store must send the resolve to Overpass"
+
+
+class TestMalformedManifest:
+    """Every way the manifest can be wrong ends on Overpass, not in a traceback.
+
+    ``_local_rail_source`` is the only caller, and "we cannot read the local
+    data" has exactly one safe answer regardless of which builtin the reading
+    happened to raise.
+    """
+
+    SHAPES = {
+        "invalid_json": "{not json",
+        "wrong_schema": '{"schema": 99, "regions": []}',
+        "entry_without_region":
+            '{"schema": 2, "regions": [{"status": "ok", "bbox": [5, 49, 7, 51]}]}',
+        "non_numeric_bbox":
+            '{"schema": 2, "regions": [{"region": "a", "status": "ok",'
+            ' "bbox": ["west", 49, 7, 51]}]}',
+        "regions_not_dicts": '{"schema": 2, "regions": ["europe/luxembourg"]}',
+        "top_level_list": '[{"region": "europe/luxembourg"}]',
+        "top_level_number": '42',
+    }
+
+    @pytest.fixture(params=sorted(SHAPES))
+    def bad_dir(self, request, tmp_path):
+        (tmp_path / MANIFEST_NAME).write_text(
+            self.SHAPES[request.param], encoding="utf-8")
+        return str(tmp_path)
+
+    def test_stays_on_overpass(self, bad_dir, monkeypatch):
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", bad_dir)
+        assert ov._local_rail_source() is None
+
+    def test_the_resolve_still_produces_a_route(self, bad_dir, monkeypatch, oracle):
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", bad_dir)
+        stops = [dict(LUX_GARE), dict(KLEINBETTINGEN)]
+        with patch.object(ov, "_overpass", side_effect=oracle):
+            result = ov.get_rail_geometry(stops)
+        assert not result.degraded
+        assert oracle.queries
