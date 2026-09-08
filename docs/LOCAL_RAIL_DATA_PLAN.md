@@ -388,19 +388,34 @@ prebuilt stores**, because the release holds extracts and only extracts. Phase
 2 chose to build in CI and the pipeline does not yet do it; that decision is
 not reversed, and if the workflow gains the step this script gets simpler
 rather than obsolete. Building on the box is affordable in the meantime —
-Germany is ~12 s and ~200 MB peak — and the extract is a third the size of the
-store it produces (10 MB against 58 MB), so it moves less over the network, not
-more. It needs `pyosmium`, which is in `requirements.txt` and therefore already
-in the image. The image was missing `libexpat1`, without which `import osmium`
-fails on `python:*-slim`; the Dockerfile now installs it.
+Germany is ~12 s and ~200 MB peak — and the extract is a fraction of the size
+of the store it produces (Germany 10 MB against 58 MB, a sixth; Luxembourg,
+measured on the published asset, 0.33 MB against 1.36 MB, a quarter), so it
+moves less over the network, not more. It needs `pyosmium`, which is in
+`requirements.txt` and therefore already in the image. The image was missing
+`libexpat1`, without which `import osmium` fails on `python:*-slim`; the
+Dockerfile now installs it, and `.dockerignore` un-excludes the one script in
+`scripts/` that has to be *in* the image rather than in CI.
 
 **The contract, which Phases 4 and 5 may rely on:**
 
 - **`RAIL_DATA_DIR` holds `manifest.json` (schema 2, entries verbatim from the
   release) and one `<region>.rail.sqlite` per `ok` region installed**, plus a
   `.sha256` sidecar per store recording the asset it was built from, and a
-  `.incoming/` working directory that is empty between runs.
-- **Every file appears by atomic rename, never by being written in place.**
+  `.incoming/` working directory holding nothing but its `.lock` between runs.
+  Each run stages in its own subdirectory of it and removes it when it ends; a
+  run killed outright (an OOM kill is the realistic case) leaves that
+  subdirectory behind, and the next run clears it while holding the lock.
+- **One refresh at a time.** A refresh takes an exclusive `flock` on
+  `.incoming/.lock`; a second one does nothing and exits 0 rather than waiting.
+  This is not tidiness: without it two runs share a staged path, `build_store`
+  removes and rebuilds that path, and one run publishes the other's
+  half-written file — with the *correct* digest recorded beside it, so every
+  later run skips the region as up to date and the corruption is permanent.
+  Whatever Phase 5 schedules must not assume a run has finished before the
+  next one starts; it does not have to, because this holds.
+- **Every file appears by atomic rename, never by being written in place** —
+  the stores, the manifest and the `.sha256` sidecars alike.
   The work directory is inside `RAIL_DATA_DIR` so the rename cannot cross a
   filesystem. **This closes the known gap Phase 3 left open above** — "either
   widen the guard to the query calls or make the refresh contract
@@ -410,7 +425,13 @@ fails on `python:*-slim`; the Dockerfile now installs it.
   and `tests/test_rail_data_fetch.py` holds a `RailStore` open across a real
   refresh to prove it. Replacing the rename with an in-place copy makes that
   test fail by returning *zero* ways rather than by raising — the silent shape
-  of the failure.
+  of the failure. That test alone does not catch *building* straight into
+  `RAIL_DATA_DIR`, because `build_store` unlinks its output first and the
+  held-open reader survives that too; a second test covers the two failures
+  that would reintroduce — a reader *opening* the store part-way through a
+  ~12 s build, and a build that raises leaving the region with no store at
+  all — by asserting the destination is byte-identical to what it held before
+  and never partial while the build runs.
 - **The installed manifest describes what is on disk, never what was
   intended.** A region that fails keeps the entry it had, because the store it
   describes is still there; a region installed this run gets the new entry.
@@ -423,7 +444,9 @@ fails on `python:*-slim`; the Dockerfile now installs it.
 - **Nothing is trusted unverified.** An asset whose size or sha256 disagrees
   with the manifest is refused, the region keeps its existing store, and the
   run exits non-zero naming what was refused. A manifest of an unknown schema
-  is refused whole, before anything is fetched.
+  is refused whole, before anything is fetched, and so is an entry whose
+  `status` this version does not know or that carries no `sha256` at all —
+  there is nothing to verify against, so nothing may be installed.
 - **A refresh needs no restart.** `_local_rail_source` rebuilds the source, and
   with it the store cache, every `_LOCAL_SOURCE_TTL_S`, so new data is live
   within five minutes — which is why the atomic rename has to hold for those

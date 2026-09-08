@@ -571,7 +571,9 @@ deployment step, run here, against the `rail-data-<date>` prereleases the
 
 Everything below is `docker compose run --rm` in the **prod** stack
 (`/opt/viewtrip`); val is the same with `-f` pointed at `/opt/viewtrip-val`.
-One refresh at a time — the step is not locked against a second copy of itself.
+Starting a second refresh of the same directory is harmless: it takes an
+exclusive lock on `.incoming/.lock`, so the second run prints that one is
+already going, does nothing and exits 0.
 
 ### First install
 
@@ -645,7 +647,7 @@ python3 -c "import json;m=json.load(open('/opt/viewtrip/data/rail/manifest.json'
 print(sorted({e.get('source_date') for e in m['regions']}))"
 
 # 3. Nothing left mid-flight.
-ls -A /opt/viewtrip/data/rail/.incoming   # must be empty
+ls -A /opt/viewtrip/data/rail/.incoming   # must hold nothing but .lock
 
 # 4. Resolves are actually using it: no Overpass traffic for European
 #    segments, and no "local rail data ... is unusable" in the logs.
@@ -655,6 +657,15 @@ docker compose logs --since 10m viewtripweb worker | grep -i "rail"
 A count of ok regions that is lower than the manifest's is the failure that
 looks like success: those countries silently fall back to Overpass. Re-run the
 step; it retries only them.
+
+`docker compose run` inherits the API service's memory limit (768 MB), and
+`build_store` peaks around 32 MB on Luxembourg — extrapolating to ~230 MB for
+Germany, so the headroom is real but not enormous. An **OOM kill is the one
+failure the step cannot clean up after itself**: everything else deletes its
+own extract and part-built store on the way out. It costs nothing —
+`RAIL_DATA_DIR` still holds only whole files, and the next run clears
+`.incoming/` before it starts — but if check 3 shows a `run-*` directory,
+that is what happened, and `--memory` on the `run` is the fix.
 
 ### Rollback
 
@@ -668,7 +679,9 @@ docker compose run --rm --entrypoint python viewtripweb \
 It rebuilds every region whose checksum differs from what is installed and
 leaves the rest alone, so this converges on the old data without a manual
 cleanup. `gh release list --repo rui-nar/ViewTripWeb | grep rail-data-` lists
-the tags to choose from.
+the tags to choose from; any of them works however old it is, because a tag
+given here is fetched from GitHub by name rather than looked for among the
+most recent hundred releases.
 
 The other rollback, when the data itself is suspect rather than one region's:
 
@@ -679,8 +692,12 @@ docker compose up -d
 ```
 
 Note that a region dropped from a newer manifest keeps its old store file on
-disk, unreferenced and unread. Deleting `*.rail.sqlite` files the manifest does
-not name is safe housekeeping; leaving them is harmless.
+disk, unreferenced and unread — and so does a region that goes from `ok` to
+`empty` (upstream stopped publishing rail for it), whose entry stays in the
+manifest while its store is no longer read. Coverage drops correctly in both
+cases; only the file lingers. Deleting a `*.rail.sqlite` the manifest does not
+name as `ok`, together with its `.sha256`, is safe housekeeping; leaving them
+is harmless.
 
 ## Open items
 
