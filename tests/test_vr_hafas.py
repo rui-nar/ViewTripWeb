@@ -367,7 +367,7 @@ class TestRailGeometryPlausibilityGate:
         assert _rail_length_ok(self._GARBAGE, self._STOPS) is False
 
     def test_strategy_b_garbage_is_rejected_and_falls_through_to_c(self):
-        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s, *_: s), \
              patch("src.services.overpass_service._via_train_relations_endpoints",
                    return_value=self._GARBAGE), \
              patch("src.services.overpass_service._via_coordinate_fallback",
@@ -378,7 +378,7 @@ class TestRailGeometryPlausibilityGate:
         assert result.degraded is False
 
     def test_plausible_strategy_b_is_accepted(self):
-        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s, *_: s), \
              patch("src.services.overpass_service._via_train_relations_endpoints",
                    return_value=self._CLEAN):
             result = get_rail_geometry(self._STOPS)
@@ -386,7 +386,7 @@ class TestRailGeometryPlausibilityGate:
         assert result.degraded is False
 
     def test_garbage_strategy_c_is_straight_lined_and_flagged_degraded(self):
-        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s, *_: s), \
              patch("src.services.overpass_service._via_train_relations_endpoints",
                    side_effect=OverpassError("no relation")), \
              patch("src.services.overpass_service._via_coordinate_fallback",
@@ -477,7 +477,7 @@ class TestRailDegradedReporting:
         """
         # Chord whose coords differ from the original stops (i.e. "snapped").
         snapped_chord = [[_LON1 + 0.02, _LAT1 + 0.02], [_LON2 + 0.02, _LAT2 + 0.02]]
-        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s: s), \
+        with patch("src.services.overpass_service._enrich_uic", side_effect=lambda s, *_: s), \
              patch("src.services.overpass_service._via_train_relations_endpoints",
                    side_effect=OverpassError("429")), \
              patch("src.services.overpass_service._via_coordinate_fallback",
