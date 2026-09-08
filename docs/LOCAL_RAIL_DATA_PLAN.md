@@ -182,12 +182,14 @@ the store's `meta` and `RailStore.bbox` reports. Bare `uic_ref` nodes and
 platform or siding geometry are excluded from it deliberately: they are in the
 file for other reasons and would claim coverage the routable data does not have.
 
-**Region boxes overlap, and the tiebreak is Phase 3's to decide.** These are
-country extracts, so their true extents interleave: Luxembourg City falls inside
-four configured regions' boxes, Bratislava three, Zurich three. Nothing in
-Phase 1 or Phase 2 ranks them — "which region for this coordinate" has no
-defined answer yet, and picking the first match in manifest order would be an
-accident rather than a decision. Phase 3 owns it (see *Region selection* below).
+**Region boxes overlap, and Phase 3 decided not to break the tie at all.**
+These are country extracts, so their true extents interleave: Luxembourg City
+falls inside four configured regions' boxes, Bratislava three, Zurich three.
+Nothing in Phase 1 or Phase 2 ranks them, and picking the first match in
+manifest order would be an accident rather than a decision. Phase 3's answer is
+to query *every* candidate and merge the results (see *Region selection* below),
+so no ranking is needed and a coordinate near a border is not forced to choose
+the wrong side.
 
 **Phase 2 consumes** a filtered `.pbf` and owns everything after it: the store
 format, the builder, and the reader. **Where the store is built — in CI as part of
@@ -233,7 +235,9 @@ An in-process LRU bounds how many region files are open at once.
   268 bytes per vertex, doubling once `_build_rail_graph` runs. Hamburg→Munich is
   284,607 vertices (~150 MB, measured 204 MB resident for the whole resolve); the
   whole-Germany box is 1,270,497 (~680 MB) on a 1 GB worker. `ways_in_bbox`
-  therefore enforces its own vertex ceiling and raises rather than allocate, and
+  therefore enforces its own vertex ceiling and raises rather than allocate
+  (Phase 3's merge across overlapping regions weakens this to ~2× the ceiling
+  transiently — see *Region selection* below), and
   `_RAIL_BBOX_MAX_AREA` in the resolver guards the same failure from the other
   end: it is a memory bound now, not an Overpass workaround, and must survive
   Phase 6.
@@ -277,17 +281,97 @@ That is what makes the comparison period in Phase 4 possible at all.
 - **Region selection** from the segment's endpoints, including the case where a
   route crosses a border — the plan's first genuinely new logic. Two adjacent
   regions must be loadable and joinable, or cross-border rail silently degrades.
-  Region boxes overlap (see the contract above), so selection needs a stated
-  tiebreak, and an `empty` region means "no rail here, use Overpass" rather than
-  "not built yet".
 
-### Tests
-- Every existing rail test in `tests/test_vr_hafas.py`,
-  `tests/test_overpass_fallback.py` and the resolve tests passes against the local
-  source, with the Overpass source still passing too.
-- Cross-border resolution over a fixture spanning two regions.
-- Outside-coverage behaviour matches the Phase 0 decision.
-- No network access: a test that fails if the local source opens a socket.
+**Decided in Phase 3 (PR #351), on the user's call:**
+
+- **Query every candidate region and merge; do not rank them.** Candidates are
+  every region whose manifest bbox intersects the query area, computed *per
+  query* rather than per resolve. Point lookups take each region's minimum and
+  then the global minimum, which is the answer a single merged store would give.
+  `relations_near` unions. `ways_in_bbox` merges and deduplicates by way id.
+  Relation members are merged too: each extract holds only its own side of a
+  border while Overpass returns the whole relation, so merging moves toward
+  parity rather than away from it. This is why no tiebreak is needed.
+- **A local failure defers to Overpass, with one deliberate exception.** One
+  mechanism at the top of `get_rail_geometry`: if the local attempt degrades,
+  the whole segment is retried against Overpass. That covers near-zero regions
+  (Cyprus publishes 2 rail ways, Iceland 1), an `empty` entry, a missing
+  directory or manifest, a manifest that is malformed in any way, a store file
+  that is absent, or present and unreadable **when it is opened**, and a
+  coordinate outside every region. The exception is the vertex ceiling, which
+  straight-lines on purpose — see the next bullet. The guard is deliberately
+  wide: a narrow `except` here took down every train resolve in review, because
+  the file is still corrupt on each of RQ's three retries
+  (`src/jobs/queue.py`: `Retry(max=3, interval=[10, 30, 60])`) and the job then
+  fails for good. Per-operation fallback was rejected — it would fire an
+  Overpass query whenever a covered region legitimately has no relation for a
+  pair, which is common, and would have preserved essentially all of today's
+  traffic.
+
+  **Known gap, to close before Phase 4 turns the flag on:** the guard wraps
+  opening a store, not querying one. A `sqlite3.DatabaseError` from an
+  already-open connection escapes into the job. Reachable only if a store file
+  is replaced *in place* while a connection holds it, so either widen the guard
+  to the query calls or make the refresh contract atomic-rename-only — but
+  `.env.example` promises a refresh needs no restart, so this is a commitment,
+  not a hypothetical.
+- **A bbox query over the vertex ceiling straight-lines and does not fall
+  back.** The ceiling bounds *our* memory, not Overpass's patience: if Overpass
+  answered, `_build_rail_graph` would rebuild the allocation just refused, on
+  the same worker, after the most expensive query we know how to ask. Note this
+  is **not** the pre-Phase-3 behaviour: `OverpassRailSource.ways_in_bbox` has no
+  vertex ceiling, and the only size guard before Phase 3 was
+  `_RAIL_BBOX_MAX_AREA`, so a 9 sq° box holding 1.2 M vertices used to be
+  answered and the ~680 MB graph built. The local path is deliberately more
+  conservative, and Phase 4's comparison must expect that difference rather than
+  read it as a regression. The budget is charged for *deduplicated* vertices, so
+  overlapping candidates do not each spend it — charging raw totals degraded the
+  effective ceiling toward `_MAX_BBOX_VERTICES / N` exactly at borders, where
+  overlap is greatest.
+
+  **Known gap, to close before Phase 4 turns the flag on:** each candidate
+  region is decoded under the *full* ceiling and the merged total checked after,
+  so two overlapping regions transiently hold ~2× the ceiling — measured 392 MB
+  against the pre-fix 199 MB on a synthetic worst case. It does not scale with
+  candidate count (4 regions measure the same 392 MB) and the returned result is
+  still bounded, but it weakens the invariant stated for Phase 2 above. A
+  count-and-id pre-pass across candidates, deduplicated before decoding, would
+  restore an exact bound.
+- **`RailStore.nearest_node` is deliberately not in the interface.** The
+  resolver builds its own graph and snaps with `_nearest_node` over it;
+  exposing the store's spatial index would change snapping, which is Phase 4's
+  to change against a stable baseline.
+- **Config is `RAIL_SOURCE` (default `overpass`) and `RAIL_DATA_DIR`**, so
+  merging Phase 3 is a production no-op until Phase 4 flips it deliberately.
+  Coverage is re-read periodically rather than cached for the life of the
+  worker: a refresh is picked up without a restart, and a manifest read that
+  loses a race with a rebuild does not pin that worker to Overpass forever.
+
+### Tests — what was actually built
+
+- **Parity per strategy**, in `tests/test_rail_source.py`: each of A, B, C and
+  the station lookup returns a byte-identical polyline from the local store and
+  from an Overpass response carrying the same data. The oracle is independent
+  SQL, not a call into `RailStore`. Note its limit honestly: both sides read the
+  same file, so this proves the local source returns what the *store holds*, not
+  what *Overpass* returns — a builder defect would be invisible to it. That is
+  the right thing for a phase whose contract is "substitute the source"; closing
+  the remaining gap is Phase 4's comparison, against live Overpass.
+- **Cross-border resolution** over a synthetic two-region fixture whose
+  endpoints are far enough apart that a single-endpoint scope reaches only one
+  region — the earlier fixture's endpoints were 0.10° apart and could not tell
+  the two apart.
+- **Outside coverage**, and every way the local source can fail: no directory,
+  no manifest, a malformed manifest of each shape, an unknown schema, a missing
+  store file, a store file present but truncated or of the wrong schema, and an
+  `empty` entry.
+- **No network access**, at two levels: the transport asserted uncalled, and
+  `socket.socket` refused outright on a local hit.
+
+The existing rail tests in `tests/test_vr_hafas.py` and the resolve tests keep
+running against the Overpass source, which the default leaves in place; running
+the whole of them against the local source needs fixtures for every route they
+cover and is deferred to Phase 4, where the comparison harness builds them.
 
 ---
 

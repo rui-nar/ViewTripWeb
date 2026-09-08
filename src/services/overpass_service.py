@@ -20,13 +20,18 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 from urllib.parse import urlsplit
 
 import requests
 
 from src.jobs.upstream_cache import get as cache_get, put as cache_put
 from src.jobs.upstream_slots import is_cooling, mark_cooling, slot
+from src.services.rail_source import (
+    LocalRailSource,
+    RailSource,
+    RailSourceOverload,
+)
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -142,6 +147,182 @@ class OverpassError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# The rail data source  (issue #345, Phase 3)
+# ---------------------------------------------------------------------------
+
+# Strategy B's relation filter, and the one Overpass matches on: the same three
+# route values _route_relation_segment lists, written as one regex.
+_ROUTE_TAGS = '"route"~"^(train|railway|light_rail)$"'
+
+
+class OverpassRailSource(RailSource):
+    """The rail strategies' five questions, asked over the network as before.
+
+    The queries below are byte-identical to the ones the strategies issued
+    inline until this phase; they moved here rather than changed, so that
+    ``LocalRailSource`` can answer the same questions from disk. Anything
+    strategy-shaped — how many relation candidates to fetch, how a bounding box
+    is buffered, how a relation's geometry is turned into a polyline — stayed
+    with the strategy, because it is not a property of the source.
+
+    ``near`` is ignored: Overpass has no regions to select between.
+    """
+
+    def nearest_station(
+        self, lat: float, lon: float, radius_m: float = 5000
+    ) -> Optional[dict]:
+        query = f"""
+[out:json][timeout:15];
+(
+  node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+  way["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+  rel["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
+);
+out center body;
+"""
+        elements = _overpass(query).get("elements", [])
+        if not elements:
+            return None
+
+        def _coords(e: dict) -> tuple[float, float]:
+            if e.get("type") == "node":
+                return e.get("lat", 0.0), e.get("lon", 0.0)
+            c = e.get("center", {})
+            return c.get("lat", 0.0), c.get("lon", 0.0)
+
+        nearest = min(
+            elements,
+            key=lambda e: (_coords(e)[0] - lat) ** 2 + (_coords(e)[1] - lon) ** 2,
+        )
+        uic = nearest.get("tags", {}).get("uic_ref")
+        if not uic:
+            return None
+        elat, elon = _coords(nearest)
+        return {"lat": elat, "lon": elon, "uic": uic}
+
+    def relations_for_uic_pair(
+        self, uic1: str, uic2: str, near: Sequence[tuple[float, float]]
+    ) -> list[dict]:
+        query = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+node["uic_ref"="{uic1}"]->.a;
+node["uic_ref"="{uic2}"]->.b;
+(
+  rel["route"="train"](bn.a)(bn.b);
+  rel["route"="railway"](bn.a)(bn.b);
+  rel["route"="light_rail"](bn.a)(bn.b);
+)->.r;
+.r out geom;
+"""
+        return _overpass(query).get("elements", [])
+
+    def relations_near(
+        self, lat: float, lon: float, radius_m: float = 25_000
+    ) -> set[int]:
+        query = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel[{_ROUTE_TAGS}](around:{radius_m},{lat},{lon});
+out ids;
+"""
+        return {e["id"] for e in _overpass(query).get("elements", [])}
+
+    def relation_geometry(
+        self, rel_ids: Sequence[int], near: Sequence[tuple[float, float]]
+    ) -> list[dict]:
+        ids_str = ",".join(str(i) for i in rel_ids)
+        query = f"""
+[out:json][timeout:{_TIMEOUT_QUERY}];
+rel(id:{ids_str});
+._ out geom;
+"""
+        return _overpass(query).get("elements", [])
+
+    def ways_in_bbox(
+        self, min_lat: float, min_lon: float, max_lat: float, max_lon: float
+    ) -> list[dict]:
+        # No usage filter — OSM tagging conventions vary by country (Germany uses
+        # usage=main/branch; France often uses usage=main_line or omits it entirely).
+        # The railway type filter is restrictive enough to avoid excessive data.
+        query = (
+            f"[out:json][timeout:{_TIMEOUT_QUERY}];"
+            f'way["railway"~"^(rail|narrow_gauge|light_rail)$"]'
+            f'["service"!~"."]'
+            f"({min_lat},{min_lon},{max_lat},{max_lon});"
+            "out geom;"
+        )
+        return _overpass(query).get("elements", [])
+
+
+# One instance, because it holds nothing: the pacing, caching and cooldowns all
+# live in _overpass and are shared process-wide already.
+_OVERPASS_SOURCE = OverpassRailSource()
+
+# Which source the resolver reads rail from. Overpass unless a deployment says
+# otherwise, so shipping the local source changes nothing until it is switched
+# on deliberately — Phase 4 compares the two before that becomes the default.
+#
+# Runtime environment, not build args: the data directory is a mounted volume
+# whose contents change on a refresh schedule that has nothing to do with
+# releases (see .env.example).
+_RAIL_SOURCE_ENV = "RAIL_SOURCE"
+_RAIL_DATA_DIR_ENV = "RAIL_DATA_DIR"
+
+# Built once per directory and held for a while: re-reading the manifest and
+# reopening the region files on every resolve would make RailStoreCache's LRU
+# pointless. Held for a *bounded* time rather than forever, for two reasons.
+#
+# The data directory is a mounted volume refreshed on its own schedule, so a
+# worker that started before a refresh would otherwise serve the old coverage
+# until someone restarted it — and a release is exactly what the refresh is not
+# supposed to need. And a manifest read while it is being rewritten fails, which
+# would otherwise pin that one worker to Overpass permanently, after a single
+# log line: the traffic this whole issue exists to stop, restored quietly.
+#
+# Five minutes is far below any refresh interval (monthly is ample) and far
+# above any resolve, so it costs one manifest read per five minutes per worker.
+_LOCAL_SOURCE_TTL_S = 300.0
+_local_source: Optional[tuple[str, Optional[LocalRailSource], float]] = None
+
+
+def _local_rail_source() -> Optional[LocalRailSource]:
+    """The local source when this deployment is configured for it, else None.
+
+    None means "resolve against Overpass exactly as before" and covers every way
+    the configuration can be incomplete: the flag unset, no directory given, or
+    a directory whose manifest we refuse to read. The last one is logged loudly
+    and retried on the next expiry (see ``_LOCAL_SOURCE_TTL_S``) — it is a
+    deployment fault, and its symptom is a quiet return to the traffic volume
+    this whole issue exists to stop.
+
+    "We refuse to read it" is deliberately every exception rather than
+    ``RailSourceError`` alone. A manifest is a file someone else wrote, so it
+    can be wrong in shapes ``load_coverage`` never enumerated — an entry with no
+    ``region`` key, a bbox holding a string, a top-level list — each of which
+    raises a plain builtin. There is one safe answer to all of them, and the
+    alternative is a traceback out of a rail resolve.
+    """
+    global _local_source
+    if os.environ.get(_RAIL_SOURCE_ENV, "").strip().lower() != "local":
+        return None
+    directory = os.environ.get(_RAIL_DATA_DIR_ENV, "").strip()
+    if not directory:
+        _log.warning("%s=local but %s is unset — resolving rail via Overpass",
+                     _RAIL_SOURCE_ENV, _RAIL_DATA_DIR_ENV)
+        return None
+    now = time.monotonic()
+    if (_local_source is None or _local_source[0] != directory
+            or now - _local_source[2] >= _LOCAL_SOURCE_TTL_S):
+        try:
+            _local_source = (directory, LocalRailSource(directory), now)
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            _log.warning("local rail data at %s is unusable (%s) — resolving "
+                         "rail via Overpass, retrying in %.0fs",
+                         directory, exc, _LOCAL_SOURCE_TTL_S)
+            _local_source = (directory, None, now)
+    return _local_source[1]
+
+
 def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     """
     Resolve [[lon, lat], …] rail geometry from stops[0] to stops[-1].
@@ -158,6 +339,12 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     returns a straight endpoint chord. The return value records which strategy
     won and whether the result is that degraded straight line, and every outcome
     is logged — so a silent straight line in production is now observable.
+
+    Where the elements come from is configuration (issue #345, Phase 3). With
+    the local source configured, the whole chain is tried against it first and
+    Overpass answers only when that produced no route — a store can hold a
+    region legitimately and hold almost nothing (Cyprus: two rail ways), so a
+    local miss must not become a straight line while a real answer exists.
     """
     t0 = time.monotonic()
     if len(stops) < 2:
@@ -166,13 +353,46 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
     lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
 
+    result = None
+    local = _local_rail_source()
+    if local is not None:
+        try:
+            result = _resolve_rail(stops, local)
+            if result.degraded:
+                _log.info("local rail source found no route — retrying via Overpass")
+                result = None
+        except RailSourceOverload as exc:
+            # The box is too big to hold in memory. Overpass cannot help: it
+            # would answer the same question with the same volume, and building
+            # the graph from its answer is the allocation that was just refused.
+            # So this is the one local failure that does not fall back.
+            _log.warning("rail bounding box refused locally (%s) — straight-lining", exc)
+            result = RailGeometry(_straight(lat1, lon1, lat2, lon2), "straight", True)
+    if result is None:
+        result = _resolve_rail(stops, _OVERPASS_SOURCE)
+
+    log = _log.warning if result.degraded else _log.info
+    log("rail geometry resolved: strategy=%s points=%d degraded=%s elapsed=%.1fs",
+        result.strategy, len(result.polyline), result.degraded, time.monotonic() - t0)
+    return result
+
+
+def _resolve_rail(stops: list[dict], source: RailSource) -> RailGeometry:
+    """The three strategies, in order, against one source.
+
+    Unchanged from what ``get_rail_geometry`` did inline before Phase 3, other
+    than reading its elements from *source*.
+    """
+    lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
+    lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
+
     # Only enrich the first and last stop to avoid O(N) Overpass calls on long
     # routes (e.g. VR Helsinki→Rovaniemi has ~8 stops and returns uic="" for
     # all of them, which previously triggered a _find_station_near HTTP call per
     # stop plus N-1 pairwise route-relation queries = ~15 calls = nginx 504).
     enriched = list(stops)
-    enriched[0]  = _enrich_uic(stops[0])
-    enriched[-1] = _enrich_uic(stops[-1])
+    enriched[0]  = _enrich_uic(stops[0], source)
+    enriched[-1] = _enrich_uic(stops[-1], source)
 
     result: Optional[RailGeometry] = None
 
@@ -192,7 +412,7 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     if enriched[0].get("uic") and enriched[-1].get("uic"):
         try:
             result = _accept(
-                _via_route_relations([enriched[0], enriched[-1]]), "relation_uic")
+                _via_route_relations([enriched[0], enriched[-1]], source), "relation_uic")
         except Exception as exc:  # noqa: BLE001 — fall through to the next strategy
             _log.info("rail strategy A (uic relations) failed: %s", exc)
 
@@ -200,7 +420,7 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     if result is None:
         try:
             result = _accept(
-                _via_train_relations_endpoints(enriched), "relation_endpoints")
+                _via_train_relations_endpoints(enriched, source), "relation_endpoints")
         except Exception as exc:  # noqa: BLE001 — fall through to the last resort
             _log.info("rail strategy B (endpoint relations) failed: %s", exc)
 
@@ -208,7 +428,7 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
     # (degraded). A self-overlapping C result is worse than an honest straight
     # line, so straight-line it (flagged degraded) rather than ship garbage.
     if result is None:
-        poly = _via_coordinate_fallback(enriched)
+        poly = _via_coordinate_fallback(enriched, source)
         # A 2-point result is the straight endpoint chord (no real track found) —
         # detect it by length, not by comparing coords: _enrich_uic may have
         # snapped the endpoints to nearby stations, so the chord won't equal a
@@ -222,13 +442,10 @@ def get_rail_geometry(stops: list[dict]) -> RailGeometry:
         result = RailGeometry(
             poly, "straight" if degraded else "coordinate_dijkstra", degraded)
 
-    log = _log.warning if result.degraded else _log.info
-    log("rail geometry resolved: strategy=%s points=%d degraded=%s elapsed=%.1fs",
-        result.strategy, len(result.polyline), result.degraded, time.monotonic() - t0)
     return result
 
 
-def _enrich_uic(stop: dict) -> dict:
+def _enrich_uic(stop: dict, source: Optional[RailSource] = None) -> dict:
     """Return stop with a valid numeric uic_ref, snapping lat/lon to the OSM station if needed."""
     raw = stop.get("uic", "")
 
@@ -244,48 +461,23 @@ def _enrich_uic(stop: dict) -> dict:
 
     # Missing or unrecognised format — look up the nearest OSM station and also
     # snap lat/lon to that station so the Dijkstra starts on the actual mainline.
-    station = _find_station_near(stop["lat"], stop["lon"])
+    station = _find_station_near(stop["lat"], stop["lon"], source=source)
     if station:
         return {**stop, "uic": station["uic"], "lat": station["lat"], "lon": station["lon"]}
     return {**stop, "uic": ""}
 
 
-def _find_station_near(lat: float, lon: float, radius_m: int = 5000) -> Optional[dict]:
+def _find_station_near(
+    lat: float, lon: float, radius_m: int = 5000,
+    source: Optional[RailSource] = None,
+) -> Optional[dict]:
     """
     Nearest OSM railway station with a uic_ref within radius_m metres.
     Queries nodes, ways, and relations so that stations mapped as polygons
     (common in some countries) are also found.  Returns {lat, lon, uic} or None.
     """
-    query = f"""
-[out:json][timeout:15];
-(
-  node["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
-  way["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
-  rel["railway"~"^(station|halt)$"]["uic_ref"](around:{radius_m},{lat},{lon});
-);
-out center body;
-"""
     try:
-        data = _overpass(query)
-        elements = data.get("elements", [])
-        if not elements:
-            return None
-
-        def _coords(e: dict) -> tuple[float, float]:
-            if e.get("type") == "node":
-                return e.get("lat", 0.0), e.get("lon", 0.0)
-            c = e.get("center", {})
-            return c.get("lat", 0.0), c.get("lon", 0.0)
-
-        nearest = min(
-            elements,
-            key=lambda e: (_coords(e)[0] - lat) ** 2 + (_coords(e)[1] - lon) ** 2,
-        )
-        uic = nearest.get("tags", {}).get("uic_ref")
-        if not uic:
-            return None
-        elat, elon = _coords(nearest)
-        return {"lat": elat, "lon": elon, "uic": uic}
+        return (source or _OVERPASS_SOURCE).nearest_station(lat, lon, radius_m)
     except OverpassError as exc:
         # Sub-step of _enrich_uic — the umbrella get_rail_geometry() already logs
         # a WARNING for the overall resolve once every strategy has been tried, so
@@ -305,10 +497,12 @@ def _find_uic_near(lat: float, lon: float, radius_m: int = 5000) -> Optional[str
 # Strategy 3a — route relations
 # ---------------------------------------------------------------------------
 
-def _via_route_relations(stops: list[dict]) -> list[list[float]]:
+def _via_route_relations(
+    stops: list[dict], source: Optional[RailSource] = None
+) -> list[list[float]]:
     full: list[list[float]] = []
     for i in range(len(stops) - 1):
-        seg = _route_relation_segment(stops[i], stops[i + 1])
+        seg = _route_relation_segment(stops[i], stops[i + 1], source)
         if seg is None:
             raise OverpassError("No route relation covers a stop pair")
         full = full + (seg[1:] if full else seg)
@@ -317,23 +511,14 @@ def _via_route_relations(stops: list[dict]) -> list[list[float]]:
     return full
 
 
-def _route_relation_segment(s1: dict, s2: dict) -> Optional[list[list[float]]]:
+def _route_relation_segment(
+    s1: dict, s2: dict, source: Optional[RailSource] = None
+) -> Optional[list[list[float]]]:
     uic1 = _clean_uic(s1["uic"])
     uic2 = _clean_uic(s2["uic"])
 
-    query = f"""
-[out:json][timeout:{_TIMEOUT_QUERY}];
-node["uic_ref"="{uic1}"]->.a;
-node["uic_ref"="{uic2}"]->.b;
-(
-  rel["route"="train"](bn.a)(bn.b);
-  rel["route"="railway"](bn.a)(bn.b);
-  rel["route"="light_rail"](bn.a)(bn.b);
-)->.r;
-.r out geom;
-"""
-    data = _overpass(query)
-    elements = data.get("elements", [])
+    elements = (source or _OVERPASS_SOURCE).relations_for_uic_pair(
+        uic1, uic2, [(s1["lat"], s1["lon"]), (s2["lat"], s2["lon"])])
     if not elements:
         return None
     return _extract_relation_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
@@ -388,7 +573,9 @@ def _extract_relation_geometry(
 # Strategy 3b — two-endpoint route-relation intersection
 # ---------------------------------------------------------------------------
 
-def _via_train_relations_endpoints(stops: list[dict]) -> list[list[float]]:
+def _via_train_relations_endpoints(
+    stops: list[dict], source: Optional[RailSource] = None
+) -> list[list[float]]:
     """
     Find OSM route=train/railway relations that pass through *both* endpoint
     areas (25 km radius each), then fetch and score their geometry.
@@ -400,29 +587,17 @@ def _via_train_relations_endpoints(stops: list[dict]) -> list[list[float]]:
     """
     lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
     lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
+    src = source or _OVERPASS_SOURCE
 
     _RADIUS = 25_000  # metres
-    _ROUTE_TAGS = '"route"~"^(train|railway|light_rail)$"'
 
     # Step 1: IDs of train relations near the start point.
-    q_start = f"""
-[out:json][timeout:{_TIMEOUT_QUERY}];
-rel[{_ROUTE_TAGS}](around:{_RADIUS},{lat1},{lon1});
-out ids;
-"""
-    d_start = _overpass(q_start)
-    start_ids = {e["id"] for e in d_start.get("elements", [])}
+    start_ids = src.relations_near(lat1, lon1, _RADIUS)
     if not start_ids:
         raise OverpassError("No train route relations near start point")
 
     # Step 2: IDs near the end point.
-    q_end = f"""
-[out:json][timeout:{_TIMEOUT_QUERY}];
-rel[{_ROUTE_TAGS}](around:{_RADIUS},{lat2},{lon2});
-out ids;
-"""
-    d_end = _overpass(q_end)
-    end_ids = {e["id"] for e in d_end.get("elements", [])}
+    end_ids = src.relations_near(lat2, lon2, _RADIUS)
     if not end_ids:
         raise OverpassError("No train route relations near end point")
 
@@ -433,14 +608,8 @@ out ids;
 
     # Fetch geometry for at most 10 candidates (lowest IDs first to be
     # deterministic; we score them all and pick the best).
-    ids_str = ",".join(str(i) for i in sorted(common)[:10])
-    q_geom = f"""
-[out:json][timeout:{_TIMEOUT_QUERY}];
-rel(id:{ids_str});
-._ out geom;
-"""
-    d_geom = _overpass(q_geom)
-    relations = d_geom.get("elements", [])
+    relations = src.relation_geometry(
+        sorted(common)[:10], [(lat1, lon1), (lat2, lon2)])
     if not relations:
         raise OverpassError("Could not fetch geometry for candidate relations")
 
@@ -513,7 +682,9 @@ _RAIL_BBOX_BUFFER = 0.25
 _RAIL_BBOX_MAX_AREA = 9.0
 
 
-def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
+def _via_coordinate_fallback(
+    stops: list[dict], source: Optional[RailSource] = None
+) -> list[list[float]]:
     """Single whole-route Overpass query, then sequential Dijkstra between
     consecutive stops on the shared railway graph.
 
@@ -535,22 +706,12 @@ def _via_coordinate_fallback(stops: list[dict]) -> list[list[float]]:
     bbox = (min(lats) - buf, min(lons) - buf, max(lats) + buf, max(lons) + buf)
     if (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) > _RAIL_BBOX_MAX_AREA:
         return _straight(lat1, lon1, lat2, lon2)
-    # No usage filter — OSM tagging conventions vary by country (Germany uses
-    # usage=main/branch; France often uses usage=main_line or omits it entirely).
-    # The railway type filter is restrictive enough to avoid excessive data.
-    query = (
-        f"[out:json][timeout:{_TIMEOUT_QUERY}];"
-        f'way["railway"~"^(rail|narrow_gauge|light_rail)$"]'
-        f'["service"!~"."]'
-        f"({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]});"
-        "out geom;"
-    )
     try:
-        data = _overpass(query)
+        elements = (source or _OVERPASS_SOURCE).ways_in_bbox(*bbox)
     except OverpassError:
         return _straight(lat1, lon1, lat2, lon2)
 
-    nodes, adj = _build_rail_graph(data.get("elements", []))
+    nodes, adj = _build_rail_graph(elements)
     if not nodes:
         return _straight(lat1, lon1, lat2, lon2)
 
