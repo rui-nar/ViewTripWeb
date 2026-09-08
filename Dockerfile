@@ -7,6 +7,16 @@ ENV APP_VERSION=$APP_VERSION
 
 WORKDIR /app
 
+# pyosmium's extension module links libexpat at runtime, and python:*-slim ships
+# none of it: CPython statically links its own copy for `pyexpat`, so nothing
+# provides libexpat.so.1 and `import osmium` fails with an ImportError. Only
+# scripts/fetch_rail_data.py needs it — it builds the rail stores on the box
+# from the published extracts (issue #345) — and it is the whole reason that
+# step can run in this image at all, so do not drop this layer as unused.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libexpat1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
