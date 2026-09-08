@@ -230,8 +230,35 @@ class TestPacing:
 
     def test_dead_mirror_is_not_in_the_rotation(self):
         """kumi.systems answered nothing within 50s from the production VPS, so
-        every query that reached it paid the full socket timeout to find out."""
-        assert not any("kumi" in url for url in ov._OVERPASS_ENDPOINTS)
+        every query that reached it paid the full socket timeout to find out.
+
+        private.coffee joined it on 2026-09-08: no answer to `out count;`
+        within 90s, which is beyond _TIMEOUT_HTTP, so every attempt spent the
+        whole timeout to learn what the previous one had already learned."""
+        for dead in ("kumi", "private.coffee"):
+            assert not any(dead in url for url in ov._OVERPASS_ENDPOINTS), dead
+
+    def test_no_region_limited_instance_is_in_the_rotation(self):
+        """The failure mode this guards is quieter than a dead host.
+
+        A country-scoped instance answers 200 in 0.1s with an empty `elements`
+        array — which is exactly what a correct query over a region with no
+        rail returns. All three strategies read it as "no route found" and
+        degrade to a straight line, and nothing in the logs says the data was
+        never there. Measured from the VPS on 2026-09-08: overpass.osm.ch
+        returns 0 stations for a Flensburg bbox where overpass.openstreetmap.fr
+        returns 2. Liveness is not coverage; check both before adding one.
+        """
+        for host in ov._REGION_LIMITED_INSTANCES:
+            assert not any(host in url for url in ov._OVERPASS_ENDPOINTS), host
+
+    def test_at_least_one_endpoint_answers_planet_wide(self):
+        """The list must never be emptied down to region-limited hosts alone."""
+        assert ov._OVERPASS_ENDPOINTS
+        assert not all(
+            any(bad in url for bad in ov._REGION_LIMITED_INSTANCES)
+            for url in ov._OVERPASS_ENDPOINTS
+        )
 
 
 class TestResponseCaching:

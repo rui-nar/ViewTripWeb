@@ -57,24 +57,50 @@ class RailGeometry:
 _HAFAS_L_RE = re.compile(r'@L=(\d+)@')
 
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-# Endpoints in preference order. Measured from the production VPS on
-# 2026-09-06, during the incident these constants were revised for:
+# Endpoints in preference order. Measured from the production VPS, from inside
+# a container so it is the IPv4 path the app actually uses:
 #
-#   overpass-api.de         200 in  8.4s for a full strategy-C query (5.2 MB),
-#                           both advertised slots free
-#   overpass.kumi.systems   no response at all within 50s
-#   overpass.private.coffee 200 in 36.9s for a *trivial* one-node query
+#   2026-09-06  overpass-api.de          200 in  8.4s for a full strategy-C
+#                                        query (5.2 MB), both slots free
+#               overpass.kumi.systems    no response at all within 50s
+#               overpass.private.coffee  200 in 36.9s for a *trivial* query
 #
-# kumi is removed because it IS private.coffee: the OSM wiki records the former
+#   2026-09-08  overpass-api.de          65.109.112.52 drops us, 162.55.144.139
+#                                        sends RST. The block is still in force.
+#               overpass.private.coffee  no answer to `out count;` within 90s
+#               overpass.openstreetmap.fr  200 in 0.2s, timestamp_osm_base
+#                                        current, 2 stations near Flensburg
+#
+# kumi was removed because it IS private.coffee: the OSM wiki records the former
 # as the old name of the latter, so listing both was one operator counted twice
-# and a retired hostname costing a full _TIMEOUT_HTTP to rediscover. That leaves
-# exactly one fallback, which is worth knowing when reasoning about failover.
+# and a retired hostname costing a full _TIMEOUT_HTTP to rediscover.
+#
+# private.coffee is removed now for the same reason in a different form: it has
+# not answered a trivial query since the incident, so every attempt spends
+# _TIMEOUT_HTTP to learn what the last one learned. Put it back if it recovers.
+#
+# openstreetmap.fr leads while overpass-api.de blocks this address. Order is by
+# measured health, not by preference: with the canonical instance first, one
+# resolve an hour pays a full timeout before reaching a host that works, and
+# _COOLDOWN_UNREACHABLE_S is what keeps that to one. overpass-api.de stays in
+# the list so it is used again if the block lifts.
+#
 # Sequential failover between public instances is sanctioned; running them in
 # parallel to raise throughput is explicitly not.
 _OVERPASS_ENDPOINTS = [
+    "https://overpass.openstreetmap.fr/api/interpreter",
     _OVERPASS_URL,
-    "https://overpass.private.coffee/api/interpreter",
 ]
+
+# Instances that answer 200 quickly and hold only their own country. These are
+# more dangerous than a dead host: an empty `elements` array is what a *correct*
+# query over a region with no rail looks like, so all three strategies read it
+# as "no route found" and degrade to a straight line, with nothing in the logs
+# to say the data was never there. Verified 2026-09-08 from the VPS:
+# overpass.osm.ch answers a Flensburg station query 200 in 0.1s with 0 elements,
+# while overpass.openstreetmap.fr returns 2. Check coverage, not liveness,
+# before adding any instance here.
+_REGION_LIMITED_INSTANCES = ("overpass.osm.ch",)
 # 429 is deliberately NOT in here — see _overpass. These are the codes that mean
 # the host itself is in trouble, where another host is the faster path.
 _OVERPASS_RETRYABLE = {502, 503, 504}
