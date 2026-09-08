@@ -72,6 +72,14 @@ _STATUS_OK = "ok"
 # its quietest form: the relation is found by id and comes back with no geometry.
 _RELATION_SCOPE_M = 25_000
 
+# How many region stores to hold open. The store cache's own default is 2, which
+# is below the number of regions a single coordinate can land in — Luxembourg
+# City is in four — so at that bound it evicts on every open and caches nothing
+# in the case this source calls common. An open store costs its connection's
+# page cache (2 MiB) and nothing else, so this is megabytes against re-opening
+# every region for each of the five questions a resolve asks.
+_MAX_OPEN_STORES = 8
+
 
 class RailSourceError(Exception):
     """The local source cannot be used at all — bad manifest, bad directory."""
@@ -216,16 +224,17 @@ class LocalRailSource(RailSource):
     nothing and every query returns nothing, which the resolver reads as "ask
     Overpass".
 
-    The store cache keeps its default bound on open files. A query spanning four
-    regions therefore reopens some of them — 0.8 ms each, measured — which is the
-    right trade against holding 49 files open to save it.
+    The store cache is bounded at ``_MAX_OPEN_STORES`` open files — enough for
+    every region a coordinate can land in, and nowhere near the 49 the manifest
+    can list.
     """
 
     def __init__(self, directory: str | os.PathLike,
                  cache: Optional[RailStoreCache] = None) -> None:
         self.directory = str(directory)
         self.coverage = load_coverage(self.directory)
-        self._cache = cache if cache is not None else RailStoreCache(self.directory)
+        self._cache = cache if cache is not None else RailStoreCache(
+            self.directory, max_open=_MAX_OPEN_STORES)
 
     # -- region selection ------------------------------------------------
 

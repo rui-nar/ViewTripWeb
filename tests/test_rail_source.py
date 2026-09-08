@@ -346,6 +346,32 @@ def two_regions(tmp_path_factory):
 
 
 class TestOverlappingRegions:
+    def test_the_store_cache_holds_every_candidate_region(self, tmp_path_factory):
+        """A resolve asks the same regions five times; they open once.
+
+        Luxembourg City falls inside four configured regions' boxes, and a
+        resolve puts several questions to each of them — two relation lookups,
+        a relation-geometry fetch, a bbox query. A cache bound below the
+        candidate count evicts on every open, so it caches nothing at all in
+        exactly the case this source calls common.
+        """
+        directory = str(tmp_path_factory.mktemp("threeregions"))
+        entries = []
+        for i, region in enumerate(["test/a", "test/b", "test/c"]):
+            pbf = tmp_path_factory.mktemp(f"src{i}") / "r-rail.osm.pbf"
+            write_extract(pbf, {200 + i: [(49.60, 6.00), (49.60, 6.30)]})
+            entries.append(ok_entry(region, build_region(directory, region, pbf)))
+        write_manifest(directory, entries)
+        source = LocalRailSource(directory)
+
+        box = (49.60, 6.10, 49.60, 6.10)
+        assert len(source.regions_for(box)) == 3
+        # References are kept, so a store that was evicted and reopened is a
+        # different object rather than a recycled address.
+        first = list(source._stores_for(box))
+        second = list(source._stores_for(box))
+        assert [a is b for a, b in zip(first, second)] == [True, True, True]
+
     def test_both_regions_are_candidates(self, two_regions):
         source = LocalRailSource(two_regions)
         assert source.regions_for((49.60, 6.02, 49.60, 6.02)) == [
