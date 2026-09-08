@@ -314,6 +314,25 @@ class TestSameGeometryAsOverpass:
             over.polyline, over.strategy, over.degraded)
         assert transport.call_count == 0, "a local hit must not touch the network"
 
+    def test_a_local_hit_opens_no_socket(self, lux_dir, monkeypatch):
+        """The same claim, one level below the transport mock.
+
+        `_overpass` is ours to mock, so mocking it proves only that we did not
+        call the function we know about. Refusing `socket.socket` outright is the
+        claim the issue actually rests on: with the local source configured, a
+        resolve inside a European region makes no network call by any route.
+        """
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", lux_dir)
+        stops = [dict(LUX_GARE), dict(KLEINBETTINGEN)]
+
+        def _no_sockets(*args, **kwargs):
+            raise AssertionError("the local source opened a socket")
+
+        with patch("socket.socket", _no_sockets):
+            result = ov.get_rail_geometry(stops)
+        assert not result.degraded
+
 
 # ---------------------------------------------------------------------------
 # Overlapping regions — the data picks the region, not the geometry
