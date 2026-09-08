@@ -115,11 +115,12 @@ Fixed here so the two phases can be built independently and in parallel.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "generated_at": "2026-09-06T18:00:00Z",
   "regions": [
     {
       "region": "europe/germany",
+      "status": "ok",
       "file": "germany-rail.osm.pbf",
       "source": "https://download.geofabrik.de/europe/germany-latest.osm.pbf",
       "source_date": "2026-09-05",
@@ -129,13 +130,64 @@ Fixed here so the two phases can be built independently and in parallel.
       "relations": 2179,
       "stations": 5483,
       "bbox": [5.87, 47.27, 15.04, 55.06]
+    },
+    {
+      "region": "europe/andorra",
+      "status": "empty",
+      "source": "https://download.geofabrik.de/europe/andorra-latest.osm.pbf",
+      "source_date": "2026-09-05"
     }
   ]
 }
 ```
 
+### Three outcomes, not two
+
+A region's build ends as `ok`, `empty` or `failed`, and the manifest records the
+first two. **`empty` is the Phase 0 "third outcome" made concrete on the data
+side**: the pipeline ran correctly and the region holds **no rail ways**.
+
+- `ok` — rail ways exist. The `.pbf` is published and the entry is the full
+  record above.
+- `empty` — no rail ways. The matrix job exits **0**, **no artifact is
+  published**, and the entry carries `status: "empty"` with no `file`, `sha256`,
+  `bytes` or `bbox` — there is nothing to download and nothing it covers.
+  **Phase 3 must read an `empty` region as "we know there is no rail here":**
+  fall back to Overpass exactly as for an unlisted region, and never treat it as
+  a build that has yet to happen.
+- `failed` — anything else. The job exits non-zero and the region is simply
+  absent from the manifest.
+
+The discriminator is rail ways and nothing else, which is the same predicate
+`src/rail/builder.py` refuses a store on (`no railway ways — not a rail
+extract`). The two must agree or Phase 1 publishes files Phase 2 rejects: four
+configured regions sit in that gap today — Andorra, Malta and the Azores have no
+railway at all, and Liechtenstein's only line is currently tagged
+`railway=construction`, which gives it stations and UIC nodes but no ways.
+
+Absence therefore means failure, and the publish job treats it that way: a run
+whose manifest covers fewer regions than the run was supposed to build refuses
+to publish and names them, because an uncovered region falls back to Overpass —
+the service this whole plan exists to stop depending on. A subset rebuild
+(`workflow_dispatch` with `regions: europe/denmark`) merges into the manifest of
+the release it patches rather than replacing it.
+
+### `bbox`
+
 `bbox` is what Phase 3 uses to decide which region covers a coordinate, so it is
-required and must be the extract's true extent, not the country's nominal one.
+required for an `ok` region and must be the extract's true extent, not the
+country's nominal one. It is `[min_lon, min_lat, max_lon, max_lat]` **over the
+nodes of the rail ways only** — the same extent `src/rail/builder.py` writes to
+the store's `meta` and `RailStore.bbox` reports. Bare `uic_ref` nodes and
+platform or siding geometry are excluded from it deliberately: they are in the
+file for other reasons and would claim coverage the routable data does not have.
+
+**Region boxes overlap, and the tiebreak is Phase 3's to decide.** These are
+country extracts, so their true extents interleave: Luxembourg City falls inside
+four configured regions' boxes, Bratislava three, Zurich three. Nothing in
+Phase 1 or Phase 2 ranks them — "which region for this coordinate" has no
+defined answer yet, and picking the first match in manifest order would be an
+accident rather than a decision. Phase 3 owns it (see *Region selection* below).
 
 **Phase 2 consumes** a filtered `.pbf` and owns everything after it: the store
 format, the builder, and the reader. **Where the store is built — in CI as part of
@@ -225,6 +277,9 @@ That is what makes the comparison period in Phase 4 possible at all.
 - **Region selection** from the segment's endpoints, including the case where a
   route crosses a border — the plan's first genuinely new logic. Two adjacent
   regions must be loadable and joinable, or cross-border rail silently degrades.
+  Region boxes overlap (see the contract above), so selection needs a stated
+  tiebreak, and an `empty` region means "no rail here, use Overpass" rather than
+  "not built yet".
 
 ### Tests
 - Every existing rail test in `tests/test_vr_hafas.py`,

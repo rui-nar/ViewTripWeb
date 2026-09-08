@@ -14,3 +14,6 @@ flutter_client/**/GeneratedPluginRegistrant.swift  text eol=lf
 # container then dies with the very misleading
 # "exec /worker-entrypoint.sh: no such file or directory".
 *.sh                                               text eol=lf
+
+# OSM extracts are binary; tests/fixtures holds a real PBF (issue #345).
+*.osm.pbf                                          binary
