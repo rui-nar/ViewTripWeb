@@ -561,6 +561,127 @@ a UTC timestamp, and is `flock`-guarded so a retried GitHub delivery for
 the same build can't run a second `pull`/`up -d` concurrently against the
 same compose project.
 
+## 9. Rail data (issue #345)
+
+Train route geometry is read either from Overpass (`RAIL_SOURCE` unset or
+`overpass`) or from per-region SQLite stores on this box (`RAIL_SOURCE=local`).
+The stores are not in the image and nothing fetches them at boot: they are a
+deployment step, run here, against the `rail-data-<date>` prereleases the
+`Rail extract` workflow publishes on GitHub.
+
+Everything below is `docker compose run --rm` in the **prod** stack
+(`/opt/viewtrip`); val is the same with `-f` pointed at `/opt/viewtrip-val`.
+One refresh at a time — the step is not locked against a second copy of itself.
+
+### First install
+
+```bash
+cd /opt/viewtrip
+docker compose run --rm --entrypoint python viewtripweb \
+    scripts/fetch_rail_data.py --dest /app/data/rail
+```
+
+`./data` is already a bind mount shared by the API and both workers, so
+`/app/data/rail` is the same directory for all of them and survives
+`up -d`, image pulls and reboots.
+
+That takes a while the first time — 49 European countries, each one downloaded
+(single-digit MB) and built into a store (Germany, the largest, ~12 s). Expect
+a few hundred MB and up to ~1 GB in `./data/rail` when it finishes; check
+`df -h` first, the host has 40 GB for both stacks. Only one country's extract
+and its store exist at a time, and the extract is deleted the moment the store
+is built, so the peak is bounded whatever the coverage grows to.
+
+Then, and only then, turn it on:
+
+```bash
+echo 'RAIL_SOURCE=local'            >> .env
+echo 'RAIL_DATA_DIR=/app/data/rail' >> .env
+docker compose up -d        # `restart` does NOT pick up .env changes
+```
+
+Setting the flag with no data is not an outage but it is pointless: every
+resolve falls back to Overpass, which is the traffic this exists to avoid.
+
+**This one time it needs the image to have been rebuilt since issue #345's
+delivery step landed.** The builder needs `libexpat1`, which the Dockerfile now
+installs and older images do not have — `docker compose pull` first if
+`import osmium` fails. Data refreshes after that need no image at all.
+
+### Refresh
+
+The same command. It re-reads the newest release, skips every region whose
+store it already holds at that release's checksum, and fetches only what
+changed:
+
+```bash
+docker compose run --rm --entrypoint python viewtripweb \
+    scripts/fetch_rail_data.py --dest /app/data/rail
+```
+
+Monthly is ample — rail alignments change over years, and the workflow rebuilds
+on the 2nd of each month. There is deliberately no timer installed: scheduling
+and data-age alerting are Phase 5 of `docs/LOCAL_RAIL_DATA_PLAN.md`.
+
+**No restart is needed and none is wanted.** Every file is built elsewhere and
+moved into place with an atomic rename, so a worker mid-resolve keeps reading
+the file it opened, whole, while the new one takes its name. Each process
+rebuilds its view of the directory at most every five minutes
+(`_LOCAL_SOURCE_TTL_S`), so new data is live within that window.
+
+### What to check
+
+The step exits non-zero if any region was refused, and names them. Otherwise:
+
+```bash
+# 1. Every ok region in the manifest has a store beside it.
+ls /opt/viewtrip/data/rail/*.rail.sqlite | wc -l
+python3 -c "import json;m=json.load(open('/opt/viewtrip/data/rail/manifest.json'));\
+print(sum(1 for e in m['regions'] if e['status']=='ok'), 'ok', \
+      sum(1 for e in m['regions'] if e['status']=='empty'), 'empty')"
+
+# 2. How old the data is — per region, which is the number that matters.
+python3 -c "import json;m=json.load(open('/opt/viewtrip/data/rail/manifest.json'));\
+print(sorted({e.get('source_date') for e in m['regions']}))"
+
+# 3. Nothing left mid-flight.
+ls -A /opt/viewtrip/data/rail/.incoming   # must be empty
+
+# 4. Resolves are actually using it: no Overpass traffic for European
+#    segments, and no "local rail data ... is unusable" in the logs.
+docker compose logs --since 10m viewtripweb worker | grep -i "rail"
+```
+
+A count of ok regions that is lower than the manifest's is the failure that
+looks like success: those countries silently fall back to Overpass. Re-run the
+step; it retries only them.
+
+### Rollback
+
+The previous month's release is still there, and installing it is the rollback:
+
+```bash
+docker compose run --rm --entrypoint python viewtripweb \
+    scripts/fetch_rail_data.py --dest /app/data/rail --tag rail-data-2026-09-06
+```
+
+It rebuilds every region whose checksum differs from what is installed and
+leaves the rest alone, so this converges on the old data without a manual
+cleanup. `gh release list --repo rui-nar/ViewTripWeb | grep rail-data-` lists
+the tags to choose from.
+
+The other rollback, when the data itself is suspect rather than one region's:
+
+```bash
+# back to Overpass — no image, no data change, effective within 5 minutes
+sed -i 's/^RAIL_SOURCE=local/RAIL_SOURCE=overpass/' /opt/viewtrip/.env
+docker compose up -d
+```
+
+Note that a region dropped from a newer manifest keeps its old store file on
+disk, unreferenced and unread. Deleting `*.rail.sqlite` files the manifest does
+not name is safe housekeeping; leaving them is harmless.
+
 ## Open items
 
 - [ ] Off-site backups independent of OVH (the VPS's datacenter, Strasbourg,

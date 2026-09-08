@@ -375,6 +375,72 @@ cover and is deferred to Phase 4, where the comparison harness builds them.
 
 ---
 
+## Delivery — getting the data onto the box *(BUILT)*
+
+Phase 1 publishes extracts, Phase 2 reads stores and Phase 3 chooses between
+them by config. Nothing populated `RAIL_DATA_DIR`: that step fell between
+phases and belonged to nobody. It is `scripts/fetch_rail_data.py`, run on the
+box, and it is what Phase 5 schedules and monitors rather than something Phase
+5 still has to invent.
+
+**It fetches extracts and builds the stores here, rather than downloading
+prebuilt stores**, because the release holds extracts and only extracts. Phase
+2 chose to build in CI and the pipeline does not yet do it; that decision is
+not reversed, and if the workflow gains the step this script gets simpler
+rather than obsolete. Building on the box is affordable in the meantime —
+Germany is ~12 s and ~200 MB peak — and the extract is a third the size of the
+store it produces (10 MB against 58 MB), so it moves less over the network, not
+more. It needs `pyosmium`, which is in `requirements.txt` and therefore already
+in the image. The image was missing `libexpat1`, without which `import osmium`
+fails on `python:*-slim`; the Dockerfile now installs it.
+
+**The contract, which Phases 4 and 5 may rely on:**
+
+- **`RAIL_DATA_DIR` holds `manifest.json` (schema 2, entries verbatim from the
+  release) and one `<region>.rail.sqlite` per `ok` region installed**, plus a
+  `.sha256` sidecar per store recording the asset it was built from, and a
+  `.incoming/` working directory that is empty between runs.
+- **Every file appears by atomic rename, never by being written in place.**
+  The work directory is inside `RAIL_DATA_DIR` so the rename cannot cross a
+  filesystem. **This closes the known gap Phase 3 left open above** — "either
+  widen the guard to the query calls or make the refresh contract
+  atomic-rename-only" (#352, finding 2) — by taking the second option: a
+  worker holding a store open keeps the old inode and its query finishes
+  against whole, valid data. It is a contract, not an implementation detail,
+  and `tests/test_rail_data_fetch.py` holds a `RailStore` open across a real
+  refresh to prove it. Replacing the rename with an in-place copy makes that
+  test fail by returning *zero* ways rather than by raising — the silent shape
+  of the failure.
+- **The installed manifest describes what is on disk, never what was
+  intended.** A region that fails keeps the entry it had, because the store it
+  describes is still there; a region installed this run gets the new entry.
+  `generated_at` advances only when every region converged, so a partial
+  refresh cannot report a freshness it does not have — Phase 5 alerts on data
+  age, and an optimistic timestamp is the failure that looks like success.
+  Per-region age is each entry's `source_date`.
+- **Re-running converges and costs only what changed.** A region whose sidecar
+  matches the manifest's `sha256` is skipped without a download.
+- **Nothing is trusted unverified.** An asset whose size or sha256 disagrees
+  with the manifest is refused, the region keeps its existing store, and the
+  run exits non-zero naming what was refused. A manifest of an unknown schema
+  is refused whole, before anything is fetched.
+- **A refresh needs no restart.** `_local_rail_source` rebuilds the source, and
+  with it the store cache, every `_LOCAL_SOURCE_TTL_S`, so new data is live
+  within five minutes — which is why the atomic rename has to hold for those
+  five minutes rather than merely for an instant.
+- **Bounded**: one region's extract plus its store, and the extract is deleted
+  as soon as the store exists.
+- **Unauthenticated.** The repository is public, so the releases API and the
+  asset URLs answer with no token (verified, not assumed). The step takes no
+  credentials.
+
+Deliberately *not* built here: any schedule. Running it at container boot was
+rejected — it would block startup or race the workers on a first install, and
+the data is on a volume that outlives the container, so boot is not when the
+question arises. The operational procedure is in `docs/DEPLOYMENT_VPS.md`, §9.
+
+---
+
 ## Phase 4 — Comparison and cutover
 
 Do not switch on faith. For a period, resolve through both sources and record where

@@ -1,0 +1,381 @@
+#!/usr/bin/env python
+"""Install the published rail extracts into RAIL_DATA_DIR (issue #345, delivery).
+
+Phase 1 builds rail-only country extracts in CI and publishes them as assets on
+a prerelease tagged ``rail-data-<YYYY-MM-DD>``. Phase 2 turns one of those into
+the per-region SQLite store ``src/rail/store.py`` reads. Phase 3 reads the
+stores when ``RAIL_SOURCE=local``. Nothing put the data on the box: this does.
+
+Run it on the box, by hand or from whatever schedules it, never at container
+boot — see docs/DEPLOYMENT_VPS.md, "Rail data".
+
+    python scripts/fetch_rail_data.py --dest /app/data/rail
+
+**It fetches the extract and builds the store here rather than downloading a
+prebuilt store**, because the release holds extracts and only extracts. The
+build is affordable — Germany, the largest region, is ~12 s and ~200 MB peak —
+and the extract is a third the size of the store it produces (Germany 10 MB
+against 58 MB), so building locally moves *less* over the network, not more.
+``osmium`` is already in requirements.txt and therefore already in the image.
+
+Four properties, in the order they matter:
+
+1. **A store is moved into place with :func:`os.replace` and never written
+   where a reader can see it half-written.** ``src/services/rail_source.py``
+   guards *opening* a store, not querying one, so a ``sqlite3.DatabaseError``
+   raised on a connection a worker already holds escapes into the RQ job
+   (issue #352, finding 2). Overwriting a file in place while a worker has it
+   open is the one way to cause that. A rename leaves the old inode alive for
+   every open handle, so the failure cannot happen — which is why the work
+   directory lives *inside* the destination, on the same filesystem: a rename
+   across filesystems is a copy, and a copy is not atomic.
+2. **Every asset is checked against the manifest's sha256 and byte count
+   before it is built from**, and a region that fails leaves whatever is
+   already installed exactly where it is.
+3. **Re-running converges.** A region whose store was installed from this
+   manifest's checksum is skipped, so a run interrupted after 30 of 49 regions
+   costs 19 regions the second time, not 49.
+4. **Bounded.** One region's extract plus the store built from it, and the
+   extract is deleted the moment the store exists. Nothing accumulates: the
+   VPS has 40 GB for two whole stacks.
+
+The record of what is installed is a sidecar ``<store>.sha256`` beside each
+store, written *after* the rename. The store itself cannot carry it — the
+builder's ``meta`` records the source file's name and date but not its digest,
+and the builder is not this step's to change.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Callable, Optional
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.rail.builder import build_store  # noqa: E402 — after the sys.path fix
+from src.rail.store import store_filename  # noqa: E402
+
+# The repository the extracts are published from. Public, so the releases API
+# answers unauthenticated (verified: GET /repos/<repo>/releases returns 200 with
+# no Authorization header) and asset URLs need no token either. This step
+# therefore takes no credentials at all — one fewer secret on the box, and one
+# fewer reason a data refresh can fail.
+DEFAULT_REPO = "rui-nar/ViewTripWeb"
+RELEASES_URL = "https://api.github.com/repos/{repo}/releases?per_page=100"
+TAG_PREFIX = "rail-data-"
+
+MANIFEST_NAME = "manifest.json"
+# Refuse anything else outright. A manifest read with the wrong shape would
+# install stores under a coverage claim nobody has checked, which is the failure
+# that looks exactly like success.
+MANIFEST_SCHEMA = 2
+STATUS_OK = "ok"
+STATUS_EMPTY = "empty"
+
+# Inside the destination on purpose: os.replace is only atomic within one
+# filesystem, and this is what guarantees it is one filesystem.
+WORK_DIRNAME = ".incoming"
+SHA_SUFFIX = ".sha256"
+
+_CHUNK = 1 << 20
+
+
+class RailDataError(Exception):
+    """The refresh cannot proceed at all — no release, no manifest, bad schema."""
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
+# ---------------------------------------------------------------------------
+# The release
+# ---------------------------------------------------------------------------
+
+def _requests_get() -> Callable:
+    import requests  # noqa: PLC0415 — only this step talks to the network
+
+    return requests.get
+
+
+def pick_release(releases: list[dict], tag: Optional[str] = None) -> dict:
+    """The rail-data release to install from: *tag*, or the newest one.
+
+    Tags are ``rail-data-<YYYY-MM-DD>``, so newest is the lexical maximum. Only
+    those are considered — the repository's own app releases share the list.
+    """
+    candidates = [r for r in releases
+                  if str(r.get("tag_name", "")).startswith(TAG_PREFIX)
+                  and not r.get("draft")]
+    if tag is not None:
+        for release in candidates:
+            if release["tag_name"] == tag:
+                return release
+        raise RailDataError(f"no rail data release tagged {tag}")
+    if not candidates:
+        raise RailDataError(
+            f"no {TAG_PREFIX}* release published yet — run the rail-extract "
+            f"workflow first (.github/workflows/rail-extract.yml)")
+    return max(candidates, key=lambda r: r["tag_name"])
+
+
+def asset_urls(release: dict) -> dict[str, str]:
+    return {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+
+
+def read_manifest(get: Callable, url: str) -> dict:
+    """Download and validate the release's manifest.json."""
+    response = get(url, timeout=60)
+    response.raise_for_status()
+    try:
+        manifest = json.loads(response.content)
+    except ValueError as exc:
+        raise RailDataError(f"{url}: manifest is not JSON ({exc})") from exc
+    schema = manifest.get("schema")
+    if schema != MANIFEST_SCHEMA:
+        raise RailDataError(
+            f"{url}: manifest schema {schema!r}, expected {MANIFEST_SCHEMA} — "
+            f"refusing to install from a manifest this version does not know")
+    if not isinstance(manifest.get("regions"), list):
+        raise RailDataError(f"{url}: manifest has no regions list")
+    return manifest
+
+
+# ---------------------------------------------------------------------------
+# What is already installed
+# ---------------------------------------------------------------------------
+
+def _sidecar(dest: Path, region: str) -> Path:
+    return dest / (store_filename(region) + SHA_SUFFIX)
+
+
+def installed_digest(dest: Path, region: str) -> Optional[str]:
+    """The asset digest the installed store was built from, or None.
+
+    None whenever anything is missing or unreadable, so the region is simply
+    rebuilt — this record exists to save work, never to authorise skipping it.
+    """
+    if not (dest / store_filename(region)).is_file():
+        return None
+    try:
+        return _sidecar(dest, region).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _record_digest(dest: Path, region: str, digest: str) -> None:
+    _sidecar(dest, region).write_text(digest + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# One region
+# ---------------------------------------------------------------------------
+
+def _download(get: Callable, url: str, dest: Path) -> tuple[str, int]:
+    """Stream *url* to *dest*, returning its (sha256, bytes).
+
+    Streamed and digested as it lands: the caller compares both against the
+    manifest before anything is built from the file.
+    """
+    digest = hashlib.sha256()
+    size = 0
+    with get(url, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        with dest.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=_CHUNK):
+                if not chunk:
+                    continue
+                digest.update(chunk)
+                size += len(chunk)
+                handle.write(chunk)
+    return digest.hexdigest(), size
+
+
+def install_region(get: Callable, entry: dict, url: str, dest: Path, work: Path) -> None:
+    """Fetch one region's extract, build its store and move it into place.
+
+    Raises on any failure, having left the previously installed store — if any
+    — untouched. Nothing is written into *dest* before the checksum matches and
+    the store is fully built.
+    """
+    region = entry["region"]
+    pbf = work / entry["file"]
+    staged = work / (store_filename(region) + ".part")
+    try:
+        digest, size = _download(get, url, pbf)
+        if size != entry["bytes"] or digest != entry["sha256"]:
+            raise RailDataError(
+                f"{entry['file']}: downloaded {size} bytes sha256 {digest}, "
+                f"manifest says {entry['bytes']} bytes sha256 {entry['sha256']}")
+        build_store(pbf, staged, region=region, source_date=entry.get("source_date", ""))
+        pbf.unlink()
+        # The whole design in one line: the reader's open handle keeps the old
+        # inode, so a refresh cannot corrupt a query already in flight.
+        os.replace(staged, dest / store_filename(region))
+        _record_digest(dest, region, digest)
+    finally:
+        for leftover in (pbf, staged):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# The refresh
+# ---------------------------------------------------------------------------
+
+def _existing_manifest(dest: Path) -> dict:
+    try:
+        with (dest / MANIFEST_NAME).open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _installed_manifest(dest: Path, release_manifest: dict, complete: bool) -> dict:
+    """The manifest describing what *dest* actually holds.
+
+    Entries are the release's, verbatim, for every region whose store is
+    installed at that entry's checksum. A region that failed this run keeps the
+    entry it had, because the store on disk is still the one that entry
+    describes — dropping it would send a country that is sitting right there
+    back to Overpass. ``empty`` entries are carried through as they are: there
+    is no file to install and Phase 3 reads them as "we know there is no rail
+    here".
+
+    ``generated_at`` is the release's only when every region was installed.
+    A partial run keeps the old value rather than claiming a freshness the
+    directory does not have — Phase 5 alerts on data age, and an optimistic
+    timestamp is the one failure mode that looks like success.
+    """
+    previous = _existing_manifest(dest)
+    carried = {e.get("region"): e for e in previous.get("regions", [])
+               if isinstance(e, dict)}
+    regions = []
+    for entry in release_manifest["regions"]:
+        region = entry.get("region")
+        if entry.get("status", STATUS_OK) == STATUS_EMPTY:
+            regions.append(entry)
+        elif installed_digest(dest, region) == entry.get("sha256"):
+            regions.append(entry)
+        elif region in carried:
+            regions.append(carried[region])
+    generated_at = release_manifest.get("generated_at", "")
+    if not complete:
+        generated_at = previous.get("generated_at", generated_at)
+    return {
+        "schema": MANIFEST_SCHEMA,
+        "generated_at": generated_at,
+        "regions": sorted(regions, key=lambda e: e.get("region", "")),
+    }
+
+
+def _write_manifest(dest: Path, work: Path, manifest: dict) -> None:
+    staged = work / (MANIFEST_NAME + ".part")
+    staged.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    # Same reason as the stores: a worker re-reads this file every five minutes
+    # and must never see it half-written.
+    os.replace(staged, dest / MANIFEST_NAME)
+
+
+def refresh(
+    dest: str | os.PathLike,
+    get: Callable | None = None,
+    repo: str = DEFAULT_REPO,
+    tag: Optional[str] = None,
+) -> int:
+    """Bring *dest* up to date with the published rail data.
+
+    Returns the number of regions that failed; 0 means the directory now holds
+    every region the release publishes. Raises :class:`RailDataError` when the
+    release or its manifest cannot be used at all, in which case *dest* is
+    untouched.
+    """
+    if get is None:
+        get = _requests_get()
+    dest = Path(dest)
+    work = dest / WORK_DIRNAME
+    work.mkdir(parents=True, exist_ok=True)
+
+    response = get(RELEASES_URL.format(repo=repo), timeout=60)
+    response.raise_for_status()
+    release = pick_release(json.loads(response.content), tag)
+    urls = asset_urls(release)
+    if MANIFEST_NAME not in urls:
+        raise RailDataError(f"{release['tag_name']} has no {MANIFEST_NAME} asset")
+    manifest = read_manifest(get, urls[MANIFEST_NAME])
+    _log(f"{release['tag_name']}: {len(manifest['regions'])} regions, "
+         f"generated {manifest.get('generated_at', '?')}")
+
+    installed = skipped = empty = 0
+    failed: list[str] = []
+    for entry in manifest["regions"]:
+        region = entry.get("region", "?")
+        status = entry.get("status", STATUS_OK)
+        if status == STATUS_EMPTY:
+            empty += 1
+            _log(f"[{region}] empty — no rail in this region, nothing to fetch")
+            continue
+        if status != STATUS_OK:
+            failed.append(region)
+            _log(f"[{region}] REFUSED: unknown status {status!r}")
+            continue
+        if installed_digest(dest, region) == entry.get("sha256"):
+            skipped += 1
+            _log(f"[{region}] up to date ({entry.get('source_date', '?')})")
+            continue
+        url = urls.get(entry.get("file"))
+        if url is None:
+            failed.append(region)
+            _log(f"[{region}] REFUSED: {release['tag_name']} has no asset "
+                 f"{entry.get('file')!r}")
+            continue
+        try:
+            install_region(get, entry, url, dest, work)
+        except Exception as exc:  # noqa: BLE001 — one region must not stop the rest
+            failed.append(region)
+            _log(f"[{region}] REFUSED: {exc} — the installed store is unchanged")
+            continue
+        installed += 1
+        _log(f"[{region}] installed {entry['file']} "
+             f"({entry['bytes']} bytes, source {entry.get('source_date', '?')})")
+
+    _write_manifest(dest, work, _installed_manifest(dest, manifest, not failed))
+    _log(f"{dest}: {installed} installed, {skipped} up to date, {empty} empty, "
+         f"{len(failed)} refused")
+    if failed:
+        _log("refused: " + ", ".join(failed) + " — re-run to retry only these")
+    return len(failed)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Install the published rail extracts into RAIL_DATA_DIR")
+    ap.add_argument(
+        "--dest", default=os.getenv("RAIL_DATA_DIR"),
+        help="directory RAIL_SOURCE=local reads (default: $RAIL_DATA_DIR)")
+    ap.add_argument("--repo", default=DEFAULT_REPO, help=argparse.SUPPRESS)
+    ap.add_argument(
+        "--tag", default=None,
+        help=f"install a specific {TAG_PREFIX}* release instead of the newest "
+             f"— this is the rollback path")
+    args = ap.parse_args(argv)
+    if not args.dest:
+        ap.error("--dest is required when RAIL_DATA_DIR is not set")
+    try:
+        return 1 if refresh(args.dest, repo=args.repo, tag=args.tag) else 0
+    except RailDataError as exc:
+        _log(f"error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
