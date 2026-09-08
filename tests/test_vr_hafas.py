@@ -514,12 +514,20 @@ class TestOverpassMirrorFallback:
             return self._data
 
     def test_falls_back_to_a_mirror_when_the_primary_is_rate_limited(self):
+        """"Primary" means first in the list, not a particular hostname.
+
+        This asserted on overpass-api.de by name, so demoting it below a
+        working mirror broke a test about failover for a reason that had
+        nothing to do with failover. The order is measured health and
+        changes when the measurements do; the behaviour under test does not.
+        """
         import src.services.overpass_service as ov
+        primary = ov._OVERPASS_ENDPOINTS[0]
         calls = []
 
         def fake_post(url, **kwargs):
             calls.append(url)
-            if "overpass-api.de" in url:
+            if url == primary:
                 return self._Resp(429)
             return self._Resp(200, {"elements": [{"ok": 1}]})
 
@@ -531,8 +539,8 @@ class TestOverpassMirrorFallback:
         # Exactly one attempt on the primary: it is marked as cooling and this
         # query moves on. Retrying it in band is the ban trigger — see
         # tests/test_overpass_failover.py::TestBackOffRatherThanRetry.
-        assert calls.count(ov._OVERPASS_URL) == 1
-        assert any("overpass-api.de" not in u for u in calls)
+        assert calls.count(primary) == 1
+        assert any(u != primary for u in calls)
 
     def test_all_endpoints_429_raises_overpass_error(self):
         import src.services.overpass_service as ov
