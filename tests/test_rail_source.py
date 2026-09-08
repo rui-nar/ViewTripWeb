@@ -398,6 +398,46 @@ class TestOverlappingRegions:
         assert [m["ref"] for m in relations[0]["members"]] == [10, 11]
         assert all(len(m["geometry"]) == 2 for m in relations[0]["members"])
 
+    def test_the_far_endpoint_is_what_brings_its_region_into_scope(
+            self, tmp_path_factory):
+        """Every endpoint widens the region scope, not just the first.
+
+        The regions here are 1.1 degrees apart — a real cross-border segment,
+        and further than one endpoint's 25 km relation scope reaches. Scoping on
+        the first endpoint alone would ask only the region it sits in, and that
+        region holds half of the relation: the answer comes back looking
+        complete, one member short of the route. That is the cross-border
+        failure in its quietest form, so it is asserted from both directions.
+        """
+        directory = str(tmp_path_factory.mktemp("farapart"))
+        west = tmp_path_factory.mktemp("faw") / "west-rail.osm.pbf"
+        east = tmp_path_factory.mktemp("fae") / "east-rail.osm.pbf"
+        # Relation 500 runs from one region to the other; each file holds only
+        # the member way that runs through it, and records the other as absent.
+        write_extract(west, {10: [(49.60, 6.00), (49.60, 6.05)]},
+                      relations=[(500, [10, 11])])
+        write_extract(east, {11: [(49.60, 7.10), (49.60, 7.15)]},
+                      relations=[(500, [10, 11])])
+        entries = [ok_entry("test/west", build_region(directory, "test/west", west)),
+                   ok_entry("test/east", build_region(directory, "test/east", east))]
+        write_manifest(directory, entries)
+        source = LocalRailSource(directory)
+
+        # Each endpoint alone reaches only its own region — so each alone
+        # returns the relation with the far half missing.
+        for endpoint, held in [((49.60, 6.00), 10), ((49.60, 7.15), 11)]:
+            one_ended = source.relation_geometry([500], [endpoint])
+            assert [m["ref"] for m in one_ended[0]["members"]] == [10, 11]
+            assert one_ended[0]["missing_members"] == 1
+            assert [m["ref"] for m in one_ended[0]["members"] if m["held"]] == [held]
+
+        # Both endpoints reach both regions, and the relation is whole.
+        both = source.relation_geometry([500], [(49.60, 6.00), (49.60, 7.15)])
+        assert len(both) == 1
+        assert both[0]["missing_members"] == 0
+        assert [m["ref"] for m in both[0]["members"]] == [10, 11]
+        assert all(len(m["geometry"]) == 2 for m in both[0]["members"])
+
 
 # ---------------------------------------------------------------------------
 # Coverage — every way of not covering a point ends in the same place
@@ -429,6 +469,23 @@ class TestCoverage:
         write_manifest(str(tmp_path), [
             {"region": "europe/andorra", "status": "empty",
              "source": "https://example.invalid", "source_date": "2026-09-05"},
+            ok_entry(REGION, (49.0, 5.0, 51.0, 7.0)),
+        ])
+        assert [r for r, _ in load_coverage(str(tmp_path))] == [REGION]
+
+    def test_a_non_ok_entry_is_dropped_even_when_it_carries_a_bbox(self, tmp_path):
+        """The status filter, not the bbox guard, is what drops it.
+
+        Today's builder writes no bbox on a non-`ok` entry, so the bbox guard
+        happens to catch them and the status check is never exercised — deleting
+        it changes no test. A future entry that is both non-`ok` and boxed (a
+        `stale` or `failed` status, say) would then claim coverage backed by no
+        file, which is coverage on paper reading as coverage in fact.
+        """
+        boxed_empty = ok_entry("europe/andorra", (42.4, 1.4, 42.7, 1.8))
+        boxed_empty["status"] = "empty"
+        write_manifest(str(tmp_path), [
+            boxed_empty,
             ok_entry(REGION, (49.0, 5.0, 51.0, 7.0)),
         ])
         assert [r for r, _ in load_coverage(str(tmp_path))] == [REGION]
