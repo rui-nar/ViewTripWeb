@@ -235,7 +235,9 @@ An in-process LRU bounds how many region files are open at once.
   268 bytes per vertex, doubling once `_build_rail_graph` runs. Hamburg→Munich is
   284,607 vertices (~150 MB, measured 204 MB resident for the whole resolve); the
   whole-Germany box is 1,270,497 (~680 MB) on a 1 GB worker. `ways_in_bbox`
-  therefore enforces its own vertex ceiling and raises rather than allocate, and
+  therefore enforces its own vertex ceiling and raises rather than allocate
+  (Phase 3's merge across overlapping regions weakens this to ~2× the ceiling
+  transiently — see *Region selection* below), and
   `_RAIL_BBOX_MAX_AREA` in the resolver guards the same failure from the other
   end: it is a memory bound now, not an Overpass workaround, and must survive
   Phase 6.
@@ -290,26 +292,51 @@ That is what makes the comparison period in Phase 4 possible at all.
   Relation members are merged too: each extract holds only its own side of a
   border while Overpass returns the whole relation, so merging moves toward
   parity rather than away from it. This is why no tiebreak is needed.
-- **Any local failure defers to Overpass — never a straight line.** One
+- **A local failure defers to Overpass, with one deliberate exception.** One
   mechanism at the top of `get_rail_geometry`: if the local attempt degrades,
   the whole segment is retried against Overpass. That covers near-zero regions
   (Cyprus publishes 2 rail ways, Iceland 1), an `empty` entry, a missing
   directory or manifest, a manifest that is malformed in any way, a store file
-  that is absent *or* present and unreadable, and a coordinate outside every
-  region. The guard is deliberately wide: a narrow `except` here took down
-  every train resolve in review, because RQ retries a corrupt file forever.
-  Per-operation fallback was rejected — it would fire an Overpass query
-  whenever a covered region legitimately has no relation for a pair, which is
-  common, and would have preserved essentially all of today's traffic.
+  that is absent, or present and unreadable **when it is opened**, and a
+  coordinate outside every region. The exception is the vertex ceiling, which
+  straight-lines on purpose — see the next bullet. The guard is deliberately
+  wide: a narrow `except` here took down every train resolve in review, because
+  the file is still corrupt on each of RQ's three retries
+  (`src/jobs/queue.py`: `Retry(max=3, interval=[10, 30, 60])`) and the job then
+  fails for good. Per-operation fallback was rejected — it would fire an
+  Overpass query whenever a covered region legitimately has no relation for a
+  pair, which is common, and would have preserved essentially all of today's
+  traffic.
+
+  **Known gap, to close before Phase 4 turns the flag on:** the guard wraps
+  opening a store, not querying one. A `sqlite3.DatabaseError` from an
+  already-open connection escapes into the job. Reachable only if a store file
+  is replaced *in place* while a connection holds it, so either widen the guard
+  to the query calls or make the refresh contract atomic-rename-only — but
+  `.env.example` promises a refresh needs no restart, so this is a commitment,
+  not a hypothetical.
 - **A bbox query over the vertex ceiling straight-lines and does not fall
   back.** The ceiling bounds *our* memory, not Overpass's patience: if Overpass
   answered, `_build_rail_graph` would rebuild the allocation just refused, on
-  the same worker, after the most expensive query we know how to ask. This also
-  preserves pre-Phase-3 behaviour, where an oversized box made `_overpass` raise
-  and `_via_coordinate_fallback` caught it and straight-lined. The budget is
-  charged for *deduplicated* vertices, so overlapping candidates do not each
-  spend it — charging raw totals degraded the effective ceiling toward
-  `_MAX_BBOX_VERTICES / N` exactly at borders, where overlap is greatest.
+  the same worker, after the most expensive query we know how to ask. Note this
+  is **not** the pre-Phase-3 behaviour: `OverpassRailSource.ways_in_bbox` has no
+  vertex ceiling, and the only size guard before Phase 3 was
+  `_RAIL_BBOX_MAX_AREA`, so a 9 sq° box holding 1.2 M vertices used to be
+  answered and the ~680 MB graph built. The local path is deliberately more
+  conservative, and Phase 4's comparison must expect that difference rather than
+  read it as a regression. The budget is charged for *deduplicated* vertices, so
+  overlapping candidates do not each spend it — charging raw totals degraded the
+  effective ceiling toward `_MAX_BBOX_VERTICES / N` exactly at borders, where
+  overlap is greatest.
+
+  **Known gap, to close before Phase 4 turns the flag on:** each candidate
+  region is decoded under the *full* ceiling and the merged total checked after,
+  so two overlapping regions transiently hold ~2× the ceiling — measured 392 MB
+  against the pre-fix 199 MB on a synthetic worst case. It does not scale with
+  candidate count (4 regions measure the same 392 MB) and the returned result is
+  still bounded, but it weakens the invariant stated for Phase 2 above. A
+  count-and-id pre-pass across candidates, deduplicated before decoding, would
+  restore an exact bound.
 - **`RailStore.nearest_node` is deliberately not in the interface.** The
   resolver builds its own graph and snaps with `_nearest_node` over it;
   exposing the store's spatial index would change snapping, which is Phase 4's
