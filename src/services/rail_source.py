@@ -79,11 +79,26 @@ _RELATION_SCOPE_M = 25_000
 # in the case this source calls common. An open store costs its connection's
 # page cache (2 MiB) and nothing else, so this is megabytes against re-opening
 # every region for each of the five questions a resolve asks.
+#
+# A box overlapping more than this many regions — a 9 sq° box in the western
+# Balkans plausibly reaches nine of the 49 — evicts and re-opens within a
+# resolve, and it is left that way on measurement: opening Germany's 57 MB
+# store, the largest published, is 0.33 ms, so the whole degradation is a few
+# milliseconds against a bbox read of hundreds. Raising the bound to cover
+# every case would hold page cache for regions no query is asking about.
 _MAX_OPEN_STORES = 8
 
 
 class RailSourceError(Exception):
-    """The local source cannot be used at all — bad manifest, bad directory."""
+    """The local source cannot be used at all — bad manifest, bad directory.
+
+    Nothing in production catches it, and nothing should: ``load_coverage``
+    cannot enumerate the shapes a hand-written manifest can be wrong in, so
+    ``_local_rail_source`` treats *every* exception as "no local coverage" and
+    this class would buy no distinction there (see ``load_coverage``). It is
+    kept because raising it says which failures this module recognised rather
+    than stumbled into, and the tests read it that way.
+    """
 
 
 class RailSourceOverload(Exception):

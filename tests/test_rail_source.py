@@ -538,11 +538,19 @@ class TestCoverage:
         assert [r for r, _ in load_coverage(str(tmp_path))] == [REGION]
 
     def test_region_whose_store_file_is_absent_is_skipped(self, tmp_path, caplog):
+        """…loudly. The manifest claims coverage the directory does not hold —
+        a partial download, a release asset that failed to attach — and the
+        query is answered from whatever else overlaps, which may be nothing.
+        The warning is the only signal that the local source quietly stopped
+        covering a country."""
         write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
         source = LocalRailSource(str(tmp_path))
         assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
-        assert source.nearest_station(49.60, 6.13) is None
-        assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+        with caplog.at_level(logging.WARNING, logger="src.services.rail_source"):
+            assert source.nearest_station(49.60, 6.13) is None
+            assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+        assert REGION in caplog.text
+        assert "in the manifest but not in" in caplog.text
 
     def test_coordinate_outside_every_region(self, local):
         # Helsinki: covered by no European region this directory holds.
@@ -573,13 +581,33 @@ class TestConfiguration:
     def test_local_without_a_directory_stays_on_overpass(self, monkeypatch, caplog):
         monkeypatch.setenv("RAIL_SOURCE", "local")
         monkeypatch.delenv("RAIL_DATA_DIR", raising=False)
-        assert ov._local_rail_source() is None
+        with caplog.at_level(logging.WARNING, logger="src.services.overpass_service"):
+            assert ov._local_rail_source() is None
+        # A deployment that meant to switch over and did not gets one line
+        # saying so; without it the symptom is only the Overpass bill.
+        assert "RAIL_DATA_DIR is unset" in caplog.text
 
-    def test_unusable_manifest_stays_on_overpass(self, tmp_path, monkeypatch):
+    def test_unusable_manifest_stays_on_overpass(self, tmp_path, monkeypatch, caplog):
         (tmp_path / MANIFEST_NAME).write_text("{not json", encoding="utf-8")
         monkeypatch.setenv("RAIL_SOURCE", "local")
         monkeypatch.setenv("RAIL_DATA_DIR", str(tmp_path))
-        assert ov._local_rail_source() is None
+        with caplog.at_level(logging.WARNING, logger="src.services.overpass_service"):
+            assert ov._local_rail_source() is None
+        assert "is unusable" in caplog.text
+
+    def test_the_coverage_window_is_short_enough_to_be_a_refresh_window(self):
+        """The two refresh tests below monkeypatch the TTL to 0, so they prove
+        the re-read mechanism exists and say nothing about the window being
+        short enough to matter: set it to 1e12 and every one of them stays
+        green while a worker caches its coverage for the rest of its life.
+
+        Bound rather than pinned, because the exact number is a judgement call
+        and 300 s is one point in a usable range: long enough that the manifest
+        read is negligible per resolve, short enough that a data refresh and a
+        manifest read that lost a race with one are picked up without a
+        restart, which is what .env.example promises.
+        """
+        assert 0 < ov._LOCAL_SOURCE_TTL_S <= 900
 
     def test_local_is_selected_when_configured(self, lux_dir, monkeypatch):
         monkeypatch.setenv("RAIL_SOURCE", "local")
@@ -772,12 +800,16 @@ class TestUnreadableStoreFile:
         write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
         return str(tmp_path)
 
-    def test_every_query_reads_as_not_covered(self, broken_dir):
+    def test_every_query_reads_as_not_covered(self, broken_dir, caplog):
         source = LocalRailSource(broken_dir)
         # The region is still coverage on paper — the manifest says so.
         assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
         # …and every question about it answers "nothing here", not an exception.
-        assert source.nearest_station(49.5999681, 6.1342493) is None
+        with caplog.at_level(logging.WARNING, logger="src.services.rail_source"):
+            assert source.nearest_station(49.5999681, 6.1342493) is None
+        # Silently falling back to Overpass is the traffic this issue exists to
+        # stop, so the fallback has to say why it happened.
+        assert "cannot be opened" in caplog.text
         assert source.relations_near(49.5999681, 6.1342493) == set()
         assert source.relations_for_uic_pair(
             "8200100", "8200710", [(49.60, 6.13), (49.64, 5.98)]) == []
