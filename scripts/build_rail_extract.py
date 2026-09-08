@@ -709,6 +709,16 @@ def main(argv: list[str]) -> int:
     base = None
     if args.base and args.base.is_file():
         base = json.loads(args.base.read_text(encoding="utf-8"))
+        # Carried entries are written out unverified — collect_manifest only
+        # re-checksums what this run built — so a base we do not understand
+        # would publish a manifest of a shape nobody has validated. Refuse it
+        # rather than merge two schemas into one file.
+        if base.get("schema") != MANIFEST_SCHEMA:
+            raise SystemExit(
+                f"::error::{args.base} is manifest schema "
+                f"{base.get('schema')!r}, not {MANIFEST_SCHEMA} — refusing to "
+                f"merge into it"
+            )
         print(f"merging into {len(base['regions'])} regions from {args.base}")
 
     manifest = collect_manifest(args.out_dir, base=base)

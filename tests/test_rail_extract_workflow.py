@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -247,3 +248,77 @@ def test_only_the_publish_job_can_write(workflow, jobs):
     assert workflow["permissions"]["contents"] == "read"
     assert jobs["publish"]["permissions"]["contents"] == "write"
     assert "permissions" not in jobs["build"]
+
+
+# ---------------------------------------------------------------------------
+# A subset rebuild must never publish a manifest holding only what it built
+# ---------------------------------------------------------------------------
+
+def _working_bash() -> str | None:
+    """A POSIX shell that actually runs.
+
+    `shutil.which("bash")` is not enough on Windows: WSL installs a `bash` shim
+    that fails with `execvpe(/bin/bash) failed` when no distribution is
+    installed, which would have let this test "pass" on the wrong exit code.
+    """
+    for candidate in ("bash", "C:/Program Files/Git/bin/bash.exe"):
+        if shutil.which(candidate) is None and not Path(candidate).exists():
+            continue
+        try:
+            if subprocess.run([candidate, "-c", "exit 7"],
+                              capture_output=True).returncode == 7:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+BASH = _working_bash()
+
+
+def _step(job: dict, name: str) -> dict:
+    for step in job["steps"]:
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"no step named {name!r}")
+
+
+@pytest.mark.skipif(BASH is None, reason="needs a working POSIX shell")
+@pytest.mark.parametrize(
+    "requested, expected_exit",
+    [("europe/denmark", 1), ("", 0)],
+    ids=["subset rebuild refuses", "full run proceeds"],
+)
+def test_a_subset_rebuild_stops_when_it_cannot_fetch_the_base_manifest(
+    jobs, tmp_path, requested, expected_exit
+):
+    """The merge that fixes the one-region-manifest bug fails *open*.
+
+    `--base` ignores a file that is not there, which is right for the genuine
+    first run and wrong for a subset patch: a transient `gh` error, a
+    rate-limited token or a release whose manifest asset is missing leaves the
+    merge with nothing to merge into, and the run then clobbers a 49-region
+    manifest with the one region it built — on a release that still holds all
+    49 .pbf assets. `--expect` cannot catch it, because on a dispatch it *is*
+    the subset that was requested. So the guard has to be here, and it has to
+    distinguish a full run (no base by design) from a subset one.
+
+    Run for real against a `gh` that fails, because this is shell inside YAML
+    and asserting on its text is how the bug it fixes got shipped.
+    """
+    script = _step(jobs["publish"], "Fetch the manifest being updated")["run"]
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "gh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (fake_bin / "gh").chmod(0o755)
+
+    result = subprocess.run(
+        [BASH, "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+             "TAG": "rail-data-2026-08-02", "REQUESTED": requested},
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == expected_exit, result.stdout + result.stderr

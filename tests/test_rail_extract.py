@@ -263,7 +263,7 @@ def _elements(path: Path) -> dict:
             out[("w", obj.id)] = (dict(obj.tags), [n.ref for n in obj.nodes])
         else:
             out[("r", obj.id)] = (dict(obj.tags),
-                                  [(m.type, m.ref) for m in obj.members])
+                                  [(m.type, m.ref, m.role) for m in obj.members])
     return out
 
 
@@ -793,6 +793,35 @@ def test_the_manifest_command_merges_the_released_manifest(entry, filtered, tmp_
     assert [r["region"] for r in written["regions"]] == [
         "europe/denmark", "europe/germany"
     ]
+
+
+def test_a_base_manifest_of_another_schema_is_refused(entry, filtered, tmp_path):
+    """Carried entries are never re-verified — ``collect_manifest`` re-checksums
+    only what this run built — so merging a base of an unknown shape writes out
+    entries nothing has validated. Schema 1 had no ``status``, and merging one
+    in produces a file whose own verifier raises ``KeyError`` rather than the
+    ``ValueError`` it is written to raise. Refuse the base instead: this is the
+    path a future schema 3 walks, and it must not fail open.
+    """
+    path, _ = filtered
+    (tmp_path / path.name).write_bytes(path.read_bytes())
+    _entry_file(tmp_path, "germany", entry)
+    base = tmp_path / "released.json"
+    old = rail.merge_manifest(
+        [{**entry, "region": "europe/denmark", "file": "denmark-rail.osm.pbf"}]
+    )
+    old["schema"] = rail.MANIFEST_SCHEMA - 1
+    base.write_text(json.dumps(old))
+
+    with pytest.raises(SystemExit) as excinfo:
+        rail.main([
+            "build_rail_extract.py", "manifest", "--out-dir", str(tmp_path),
+            "--base", str(base),
+            "--expect", json.dumps(["europe/germany"]),
+        ])
+
+    assert str(rail.MANIFEST_SCHEMA - 1) in str(excinfo.value)
+    assert not (tmp_path / rail.MANIFEST_NAME).exists()
 
 
 def test_a_missing_base_manifest_is_not_an_error(entry, filtered, tmp_path):

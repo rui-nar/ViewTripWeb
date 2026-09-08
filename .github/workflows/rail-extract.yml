@@ -189,11 +189,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
+          REQUESTED: ${{ inputs.regions }}
         run: |
           mkdir -p released
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release download "$TAG" --pattern manifest.json --dir released \
               || echo "no manifest.json on $TAG yet"
+          fi
+          # A subset rebuild carries the regions it did not build from this
+          # manifest. Without it the merge has nothing to merge into and the
+          # step below publishes a manifest holding only what this run built
+          # — the exact regression the merge was added to prevent,
+          # which `--expect` cannot see because it equals the subset asked
+          # for. A full run has no base by design, so this guards the subset.
+          if [ -n "$REQUESTED" ] && [ ! -f released/manifest.json ]; then
+            echo "::error::subset rebuild of $TAG but its manifest could not be fetched — publishing now would drop every region this run did not build"
+            exit 1
           fi
 
       - name: Build and verify the manifest
