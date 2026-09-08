@@ -21,6 +21,7 @@ to prove it.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -448,6 +449,48 @@ def test_the_image_can_import_osmium():
     """
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "libexpat1" in dockerfile
+
+
+def _dockerignore_excludes(patterns: list[str], path: str) -> bool:
+    """Whether ``docker build`` would drop *path* from the build context.
+
+    Docker's rule (moby ``fileutils.PatternMatcher``): a path is excluded when
+    the **last** pattern matching it — or matching any of its parent
+    directories — is not a ``!`` exception. That last-match-wins ordering is
+    the whole reason ``!scripts/fetch_rail_data.py`` has to sit *after*
+    ``scripts/``, and it is what a string search for the filename would not
+    catch. The patterns here are literal paths and simple globs, so
+    ``fnmatch`` stands in for Go's ``filepath.Match`` exactly.
+    """
+    parts = path.split("/")
+    candidates = ["/".join(parts[:i + 1]) for i in range(len(parts))]
+    excluded = False
+    for raw in patterns:
+        pattern = raw.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        negated = pattern.startswith("!")
+        pattern = pattern.lstrip("!").rstrip("/")
+        if any(fnmatch.fnmatchcase(c, pattern) for c in candidates):
+            excluded = not negated
+    return excluded
+
+
+def test_the_delivery_step_is_in_the_image():
+    """Every documented way to run this runs it *from inside the image*.
+
+    ``.dockerignore`` drops ``scripts/`` from the build context, and the image
+    is built with ``context: .`` — so without an explicit exception the file
+    the deployment docs, ``.env.example`` and this script's own usage line all
+    name simply is not there, and every documented invocation dies with
+    ``can't open file '/app/scripts/fetch_rail_data.py'``.
+
+    The exception is deliberately one file: the rest of ``scripts/`` is CI's,
+    not the image's.
+    """
+    patterns = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert not _dockerignore_excludes(patterns, "scripts/fetch_rail_data.py")
+    assert _dockerignore_excludes(patterns, "scripts/build_rail_extract.py")
 
 
 # ---------------------------------------------------------------------------
