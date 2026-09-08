@@ -192,7 +192,9 @@ jobs:
           REQUESTED: ${{ inputs.regions }}
         run: |
           mkdir -p released
+          release_exists=no
           if gh release view "$TAG" >/dev/null 2>&1; then
+            release_exists=yes
             gh release download "$TAG" --pattern manifest.json --dir released \
               || echo "no manifest.json on $TAG yet"
           fi
@@ -202,7 +204,14 @@ jobs:
           # — the exact regression the merge was added to prevent,
           # which `--expect` cannot see because it equals the subset asked
           # for. A full run has no base by design, so this guards the subset.
-          if [ -n "$REQUESTED" ] && [ ! -f released/manifest.json ]; then
+          #
+          # But only when there is something to disown. If the release does
+          # not exist yet this is the bootstrap case: the first ever run, or
+          # the first of a new month, and a one-region manifest is then the
+          # honest description of a release that holds one region. Refusing
+          # it made it impossible to seed coverage a country at a time,
+          # which is how the first real run of this pipeline was meant to go.
+          if [ -n "$REQUESTED" ] && [ "$release_exists" = yes ] && [ ! -f released/manifest.json ]; then
             echo "::error::subset rebuild of $TAG but its manifest could not be fetched — publishing now would drop every region this run did not build"
             exit 1
           fi

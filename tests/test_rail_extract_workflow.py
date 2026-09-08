@@ -285,12 +285,18 @@ def _step(job: dict, name: str) -> dict:
 
 @pytest.mark.skipif(BASH is None, reason="needs a working POSIX shell")
 @pytest.mark.parametrize(
-    "requested, expected_exit",
-    [("europe/denmark", 1), ("", 0)],
-    ids=["subset rebuild refuses", "full run proceeds"],
+    "requested, release_exists, expected_exit",
+    [
+        ("europe/denmark", True, 1),
+        ("europe/denmark", False, 0),
+        ("", True, 0),
+    ],
+    ids=["subset of an existing release refuses",
+         "subset with no release yet bootstraps",
+         "full run proceeds"],
 )
-def test_a_subset_rebuild_stops_when_it_cannot_fetch_the_base_manifest(
-    jobs, tmp_path, requested, expected_exit
+def test_a_subset_rebuild_stops_only_when_it_would_disown_regions(
+    jobs, tmp_path, requested, release_exists, expected_exit
 ):
     """The merge that fixes the one-region-manifest bug fails *open*.
 
@@ -300,17 +306,33 @@ def test_a_subset_rebuild_stops_when_it_cannot_fetch_the_base_manifest(
     merge with nothing to merge into, and the run then clobbers a 49-region
     manifest with the one region it built — on a release that still holds all
     49 .pbf assets. `--expect` cannot catch it, because on a dispatch it *is*
-    the subset that was requested. So the guard has to be here, and it has to
-    distinguish a full run (no base by design) from a subset one.
+    the subset that was requested.
 
-    Run for real against a `gh` that fails, because this is shell inside YAML
-    and asserting on its text is how the bug it fixes got shipped.
+    But refusing on a *missing base* alone also refused the bootstrap, which
+    the first real run of this pipeline hit: dispatching one country when no
+    `rail-data-*` release exists is not clobbering anything, it is seeding
+    coverage a country at a time. So the guard turns on whether there is a
+    release to disown regions from, and these three cases are the whole of it.
+
+    Run for real against a fake `gh`, because this is shell inside YAML and
+    asserting on its text is how the bug it fixes got shipped.
     """
     script = _step(jobs["publish"], "Fetch the manifest being updated")["run"]
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    (fake_bin / "gh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    # `release view` decides whether the release exists; `release download`
+    # always fails, which is the "base could not be fetched" half.
+    verdict = 0 if release_exists else 1
+    (fake_bin / "gh").write_text(
+        chr(10).join([
+            "#!/bin/sh",
+            f'if [ "$1 $2" = "release view" ]; then exit {verdict}; fi',
+            "exit 1",
+            "",
+        ]),
+        encoding="utf-8",
+    )
     (fake_bin / "gh").chmod(0o755)
 
     result = subprocess.run(
