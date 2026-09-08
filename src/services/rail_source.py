@@ -336,14 +336,24 @@ class LocalRailSource(RailSource):
         vertices in memory.
 
         The vertex ceiling applies to the merged result, not to each region's
-        share of it, so four regions cannot together allocate what one is refused.
+        share of it, so four regions cannot together allocate what one is
+        refused — and, equally, so a way both regions hold is charged once. A
+        raw per-region total charged against a shared budget double-counts the
+        border ways, which is precisely where regions overlap and where merging
+        is the point: the effective ceiling would fall towards
+        ``_MAX_BBOX_VERTICES / N`` for N candidate regions, and an overload
+        straight-lines with no fallback.
+
+        Each region is still read under the full ceiling, so a single read
+        cannot allocate more than the ceiling allows and peak memory stays at
+        the merged result plus the region in hand.
         """
         box = (min_lat, min_lon, max_lat, max_lon)
         ways: dict[int, dict] = {}
-        budget = _MAX_BBOX_VERTICES
+        kept = 0
         for store in self._stores_for(box):
             try:
-                found = store.ways_in_bbox(*box, max_vertices=budget)
+                found = store.ways_in_bbox(*box, max_vertices=_MAX_BBOX_VERTICES)
             except RailStoreError as exc:
                 # ways_in_bbox raises for one reason: the box is too big. The
                 # store was opened successfully, so this is not a broken file.
@@ -351,7 +361,12 @@ class LocalRailSource(RailSource):
             for way in found:
                 if way["id"] not in ways:
                     ways[way["id"]] = way
-                    budget -= len(way["geometry"])
+                    kept += len(way["geometry"])
+            if kept > _MAX_BBOX_VERTICES:
+                raise RailSourceOverload(
+                    f"bbox {box} holds {kept} vertices across "
+                    f"{len(self.regions_for(box))} regions, over the "
+                    f"{_MAX_BBOX_VERTICES} ceiling")
         # By id, so the graph is built in one order whatever order the regions
         # were read in — the same order Overpass returns elements in.
         return [ways[way_id] for way_id in sorted(ways)]

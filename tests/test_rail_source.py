@@ -550,6 +550,22 @@ class TestOverpassFallback:
         with pytest.raises(RailSourceOverload):
             source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
 
+    def test_the_ceiling_counts_a_shared_way_once(self, two_regions, monkeypatch):
+        """…and counts what is *kept*, not what each region offered.
+
+        Overlapping regions hold the same border ways, so summing their raw
+        totals double-counts exactly where D-A's merging is the point. The
+        merged result here is 6 vertices and the raw totals sum to 8; at a
+        ceiling of 6 the query fits and must be answered. Charging the raw
+        totals degrades the effective ceiling towards _MAX_BBOX_VERTICES / N,
+        and an overload straight-lines with no fallback — so the symptom is a
+        silent straight line on a cross-border route.
+        """
+        source = LocalRailSource(two_regions)
+        monkeypatch.setattr("src.services.rail_source._MAX_BBOX_VERTICES", 6)
+        ways = source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
+        assert [w["id"] for w in ways] == [100, 101, 102]
+
 
 # ---------------------------------------------------------------------------
 # Broken local data — every shape of it defers to Overpass
