@@ -239,15 +239,19 @@ def _ask(store: RailStore, question, *args, default):
     retry, where the same page is still corrupt — so every train resolve in the
     deployment fails until someone notices.
 
-    Narrow on purpose: ``sqlite3.DatabaseError`` is the file saying it is
-    unreadable and nothing else. A blanket ``except`` here would answer a bug in
-    this module's own merging or scoping with "region not covered", which is
-    indistinguishable from success. Distinct from ``_stores_for``, which is wide
-    for the opposite reason: what an unopenable file raises is not ours to
-    enumerate.
+    Narrow on purpose, and narrower than ``sqlite3.DatabaseError`` alone.
+    ``ProgrammingError`` and ``NotSupportedError`` are subclasses of it and are
+    *ours*: a query built with the wrong number of bindings is a defect in this
+    module, and answering it with "region not covered" is the one answer that
+    looks exactly like success. They are re-raised. What is left — corruption,
+    an I/O error, an operational failure — is the file saying it is unreadable.
+    Distinct from ``_stores_for``, which is wide for the opposite reason: what
+    an unopenable file raises is not ours to enumerate.
     """
     try:
         return question(*args)
+    except (sqlite3.ProgrammingError, sqlite3.NotSupportedError):
+        raise
     except sqlite3.DatabaseError as exc:
         _log.warning("rail region %s failed mid-query (%s) — skipped, this "
                      "query falls back to Overpass", store.region, exc)
@@ -422,7 +426,16 @@ class LocalRailSource(RailSource):
             found = _ask(store, store.vertex_counts_in_bbox, *box, default=None)
             if found is None:   # the file went bad under us — see _ask
                 continue
-            counts.update(found)
+            # setdefault, not update: the decode below keeps the *first*
+            # region's copy of a shared way id, so the count must charge for
+            # that same copy. update() charges the last region's instead, and
+            # when two extracts hold the same id at different lengths — an OSM
+            # edit between two regions' refresh dates, or a node builder.py
+            # dropped in one extract and not the other — the two passes stop
+            # describing the same set of bytes and the merged ceiling can be
+            # breached by the difference.
+            for way_id, vertices in found.items():
+                counts.setdefault(way_id, vertices)
             stores.append(store)
         total = sum(counts.values())
         if total > _MAX_BBOX_VERTICES:
@@ -444,6 +457,12 @@ class LocalRailSource(RailSource):
                 raise RailSourceOverload(str(exc)) from exc
             for way in found:
                 ways.setdefault(way["id"], way)
+            # Drop this region's decoded rows before opening the next one.
+            # Without it the loop variables stay bound across the outer
+            # iteration and a third region's worth of geometry is alive while
+            # the fourth is read: 4 fully-overlapping regions peaked at 590 MB
+            # instead of 398 MB (issue #352).
+            found = way = None
         # By id, so the graph is built in one order whatever order the regions
         # were read in — the same order Overpass returns elements in.
         return [ways[way_id] for way_id in sorted(ways)]

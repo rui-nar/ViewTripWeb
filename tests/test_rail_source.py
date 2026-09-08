@@ -738,6 +738,44 @@ class TestOverpassFallback:
         ways = source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
         assert [w["id"] for w in ways] == [100, 101, 102]
 
+    def test_a_shared_way_of_two_lengths_cannot_breach_the_ceiling(
+            self, tmp_path_factory, monkeypatch):
+        """The count pass and the decode pass must mean the *same* copy.
+
+        A way id in two extracts is normally byte-identical, because both came
+        from one build. It stops being identical as soon as the regions are
+        refreshed on different dates and an OSM edit adds or removes a node from
+        a border way — or when builder.py drops a node with an invalid location
+        in one extract and not the other.
+
+        Then the two passes disagree about which copy they describe: the decode
+        keeps the first region's, so a count that charges the last region's
+        authorises a decode it never measured. Here the long copy is 4 vertices
+        and the stub is 2, so charging the stub passes a ceiling of 5 and then
+        returns 6.
+        """
+        directory = str(tmp_path_factory.mktemp("twolengths"))
+        long_copy = {100: [(49.60, 5.90), (49.60, 6.00),
+                           (49.60, 6.10), (49.60, 6.30)]}
+        stub_copy = {100: [(49.60, 5.90), (49.60, 6.30)]}
+
+        first = tmp_path_factory.mktemp("first") / "first-rail.osm.pbf"
+        last = tmp_path_factory.mktemp("last") / "last-rail.osm.pbf"
+        write_extract(first, long_copy, stations=[(49.600, 6.010, "1000")])
+        write_extract(last, {**stub_copy, 102: [(49.61, 6.09), (49.61, 6.11)]},
+                      stations=[(49.600, 6.050, "2000")])
+        # Read in name order, so the long copy is the one the decode keeps.
+        entries = [
+            ok_entry("test/aaa", build_region(directory, "test/aaa", first)),
+            ok_entry("test/zzz", build_region(directory, "test/zzz", last)),
+        ]
+        write_manifest(directory, entries)
+
+        source = LocalRailSource(directory)
+        monkeypatch.setattr("src.services.rail_source._MAX_BBOX_VERTICES", 5)
+        with pytest.raises(RailSourceOverload):
+            source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
+
     def test_a_refused_merge_decodes_no_geometry_at_all(
             self, two_regions, monkeypatch):
         """The ceiling bounds memory, so it has to fire before the allocation.
@@ -889,6 +927,25 @@ class TestStoreThatGoesBadAfterOpening:
         monkeypatch.setattr(RailStore, "ways_in_bbox",
                             Mock(side_effect=TypeError("merge is broken")))
         with pytest.raises(TypeError, match="merge is broken"):
+            LocalRailSource(lux_dir).ways_in_bbox(49.5, 6.0, 49.7, 6.2)
+
+    @pytest.mark.parametrize("ours", [
+        sqlite3.ProgrammingError("Incorrect number of bindings supplied."),
+        sqlite3.NotSupportedError("no such feature"),
+    ], ids=["wrong bindings", "unsupported"])
+    def test_our_own_sql_mistakes_are_not_mistaken_for_a_bad_file(
+            self, lux_dir, monkeypatch, ours):
+        """`sqlite3.DatabaseError` is not as narrow as it reads.
+
+        ``ProgrammingError`` and ``NotSupportedError`` are subclasses of it, and
+        both mean *we* built the query wrong — the wrong number of bindings, a
+        feature this SQLite does not have. Catching them would answer a defect
+        in this module with "region not covered", which is exactly the
+        looks-like-success failure the guard exists to avoid; the TypeError case
+        above cannot show it, because TypeError was never in the family.
+        """
+        monkeypatch.setattr(RailStore, "ways_in_bbox", Mock(side_effect=ours))
+        with pytest.raises(type(ours)):
             LocalRailSource(lux_dir).ways_in_bbox(49.5, 6.0, 49.7, 6.2)
 
 
