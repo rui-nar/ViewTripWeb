@@ -486,6 +486,46 @@ class TestConfiguration:
         # would make the store cache pointless.
         assert ov._local_rail_source() is source
 
+    def test_a_failed_coverage_load_is_retried_rather_than_cached_forever(
+            self, tmp_path, monkeypatch):
+        """A worker that reads the manifest mid-rewrite must not be pinned to
+        Overpass for the rest of its life.
+
+        The data directory is a mounted volume rewritten on a refresh schedule,
+        so reading a half-written manifest is a real, transient event. Caching
+        that failure permanently returns exactly one worker to full Overpass
+        traffic — the outcome this issue exists to prevent — after one log line
+        and with no way back short of a restart.
+        """
+        (tmp_path / MANIFEST_NAME).write_text('{"schema": 2, "regi',
+                                              encoding="utf-8")
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", str(tmp_path))
+        assert ov._local_rail_source() is None
+
+        # The refresh finishes writing.
+        write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
+        assert ov._local_rail_source() is None, "still inside the cache window"
+
+        monkeypatch.setattr(ov, "_LOCAL_SOURCE_TTL_S", 0.0)
+        assert isinstance(ov._local_rail_source(), LocalRailSource)
+
+    def test_a_data_refresh_is_picked_up_without_a_restart(
+            self, tmp_path, monkeypatch):
+        """.env.example promises the data needs no release to update. A worker
+        that caches its coverage forever needs a *restart* instead, which is the
+        same promise broken more quietly."""
+        write_manifest(str(tmp_path), [])
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", str(tmp_path))
+        assert ov._local_rail_source().coverage == []
+
+        write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
+        assert ov._local_rail_source().coverage == [], "still inside the window"
+
+        monkeypatch.setattr(ov, "_LOCAL_SOURCE_TTL_S", 0.0)
+        assert [r for r, _ in ov._local_rail_source().coverage] == [REGION]
+
 
 # ---------------------------------------------------------------------------
 # Falling back

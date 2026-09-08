@@ -268,9 +268,21 @@ _OVERPASS_SOURCE = OverpassRailSource()
 _RAIL_SOURCE_ENV = "RAIL_SOURCE"
 _RAIL_DATA_DIR_ENV = "RAIL_DATA_DIR"
 
-# Built once per directory: the manifest is re-read and the region files are
-# reopened otherwise, which would make RailStoreCache's LRU pointless.
-_local_source: Optional[tuple[str, Optional[LocalRailSource]]] = None
+# Built once per directory and held for a while: re-reading the manifest and
+# reopening the region files on every resolve would make RailStoreCache's LRU
+# pointless. Held for a *bounded* time rather than forever, for two reasons.
+#
+# The data directory is a mounted volume refreshed on its own schedule, so a
+# worker that started before a refresh would otherwise serve the old coverage
+# until someone restarted it — and a release is exactly what the refresh is not
+# supposed to need. And a manifest read while it is being rewritten fails, which
+# would otherwise pin that one worker to Overpass permanently, after a single
+# log line: the traffic this whole issue exists to stop, restored quietly.
+#
+# Five minutes is far below any refresh interval (monthly is ample) and far
+# above any resolve, so it costs one manifest read per five minutes per worker.
+_LOCAL_SOURCE_TTL_S = 300.0
+_local_source: Optional[tuple[str, Optional[LocalRailSource], float]] = None
 
 
 def _local_rail_source() -> Optional[LocalRailSource]:
@@ -278,9 +290,10 @@ def _local_rail_source() -> Optional[LocalRailSource]:
 
     None means "resolve against Overpass exactly as before" and covers every way
     the configuration can be incomplete: the flag unset, no directory given, or
-    a directory whose manifest we refuse to read. The last one is logged loudly —
-    it is a deployment fault, and its symptom is a quiet return to the traffic
-    volume this whole issue exists to stop.
+    a directory whose manifest we refuse to read. The last one is logged loudly
+    and retried on the next expiry (see ``_LOCAL_SOURCE_TTL_S``) — it is a
+    deployment fault, and its symptom is a quiet return to the traffic volume
+    this whole issue exists to stop.
 
     "We refuse to read it" is deliberately every exception rather than
     ``RailSourceError`` alone. A manifest is a file someone else wrote, so it
@@ -297,13 +310,16 @@ def _local_rail_source() -> Optional[LocalRailSource]:
         _log.warning("%s=local but %s is unset — resolving rail via Overpass",
                      _RAIL_SOURCE_ENV, _RAIL_DATA_DIR_ENV)
         return None
-    if _local_source is None or _local_source[0] != directory:
+    now = time.monotonic()
+    if (_local_source is None or _local_source[0] != directory
+            or now - _local_source[2] >= _LOCAL_SOURCE_TTL_S):
         try:
-            _local_source = (directory, LocalRailSource(directory))
+            _local_source = (directory, LocalRailSource(directory), now)
         except Exception as exc:  # noqa: BLE001 — see docstring
-            _log.warning("local rail data at %s is unusable (%s) — "
-                         "resolving rail via Overpass", directory, exc)
-            _local_source = (directory, None)
+            _log.warning("local rail data at %s is unusable (%s) — resolving "
+                         "rail via Overpass, retrying in %.0fs",
+                         directory, exc, _LOCAL_SOURCE_TTL_S)
+            _local_source = (directory, None, now)
     return _local_source[1]
 
 
