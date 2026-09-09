@@ -566,6 +566,32 @@ def test_a_bbox_too_large_to_answer_raises_instead_of_allocating(store):
     assert store.ways_in_bbox(min_lat, min_lon, max_lat, max_lon)
 
 
+def test_vertex_counts_describe_the_bbox_result_without_decoding_it(store):
+    """The count pass ``LocalRailSource.ways_in_bbox`` sizes the merge with.
+
+    It has to describe *that call's* result exactly — same ways, same vertex
+    counts — or the merged bound is computed over a different set than the one
+    that gets allocated. And it has to be cheap, because the whole point is to
+    learn the size before paying for the geometry.
+    """
+    min_lat, min_lon, max_lat, max_lon = store.bbox
+    box = (min_lat, min_lon, (min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
+    ways = store.ways_in_bbox(*box)
+    assert ways, "the half-region box has to hold something to compare"
+
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    counts = store.vertex_counts_in_bbox(*box)
+    grew = tracemalloc.get_traced_memory()[1] - before
+    tracemalloc.stop()
+
+    assert counts == {w["id"]: len(w["geometry"]) for w in ways}
+    decoded = sum(counts.values()) * 268
+    assert grew < decoded / 10, (
+        f"counting allocated {grew / 1e6:.1f} MB for a result that would "
+        f"decode to about {decoded / 1e6:.1f} MB")
+
+
 def test_a_bbox_result_costs_a_bounded_number_of_bytes_per_vertex(store):
     """The ceiling in ``_MAX_BBOX_VERTICES`` is only as good as this ratio, so
     it is measured rather than assumed: ~268 bytes per vertex today, and the

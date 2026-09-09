@@ -13,6 +13,7 @@ Only the network is mocked, because the network is the only thing this phase is
 allowed to stop using.
 """
 import json
+import logging
 import math
 import os
 import re
@@ -21,8 +22,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import src.rail.store as rail_store
 from src.rail.builder import build_store
-from src.rail.store import decode_geometry, store_filename
+from src.rail.store import RailStore, decode_geometry, store_filename
 from src.services import overpass_service as ov
 from src.services.rail_source import (
     LocalRailSource,
@@ -536,11 +538,19 @@ class TestCoverage:
         assert [r for r, _ in load_coverage(str(tmp_path))] == [REGION]
 
     def test_region_whose_store_file_is_absent_is_skipped(self, tmp_path, caplog):
+        """…loudly. The manifest claims coverage the directory does not hold —
+        a partial download, a release asset that failed to attach — and the
+        query is answered from whatever else overlaps, which may be nothing.
+        The warning is the only signal that the local source quietly stopped
+        covering a country."""
         write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
         source = LocalRailSource(str(tmp_path))
         assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
-        assert source.nearest_station(49.60, 6.13) is None
-        assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+        with caplog.at_level(logging.WARNING, logger="src.services.rail_source"):
+            assert source.nearest_station(49.60, 6.13) is None
+            assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+        assert REGION in caplog.text
+        assert "in the manifest but not in" in caplog.text
 
     def test_coordinate_outside_every_region(self, local):
         # Helsinki: covered by no European region this directory holds.
@@ -571,13 +581,33 @@ class TestConfiguration:
     def test_local_without_a_directory_stays_on_overpass(self, monkeypatch, caplog):
         monkeypatch.setenv("RAIL_SOURCE", "local")
         monkeypatch.delenv("RAIL_DATA_DIR", raising=False)
-        assert ov._local_rail_source() is None
+        with caplog.at_level(logging.WARNING, logger="src.services.overpass_service"):
+            assert ov._local_rail_source() is None
+        # A deployment that meant to switch over and did not gets one line
+        # saying so; without it the symptom is only the Overpass bill.
+        assert "RAIL_DATA_DIR is unset" in caplog.text
 
-    def test_unusable_manifest_stays_on_overpass(self, tmp_path, monkeypatch):
+    def test_unusable_manifest_stays_on_overpass(self, tmp_path, monkeypatch, caplog):
         (tmp_path / MANIFEST_NAME).write_text("{not json", encoding="utf-8")
         monkeypatch.setenv("RAIL_SOURCE", "local")
         monkeypatch.setenv("RAIL_DATA_DIR", str(tmp_path))
-        assert ov._local_rail_source() is None
+        with caplog.at_level(logging.WARNING, logger="src.services.overpass_service"):
+            assert ov._local_rail_source() is None
+        assert "is unusable" in caplog.text
+
+    def test_the_coverage_window_is_short_enough_to_be_a_refresh_window(self):
+        """The two refresh tests below monkeypatch the TTL to 0, so they prove
+        the re-read mechanism exists and say nothing about the window being
+        short enough to matter: set it to 1e12 and every one of them stays
+        green while a worker caches its coverage for the rest of its life.
+
+        Bound rather than pinned, because the exact number is a judgement call
+        and 300 s is one point in a usable range: long enough that the manifest
+        read is negligible per resolve, short enough that a data refresh and a
+        manifest read that lost a race with one are picked up without a
+        restart, which is what .env.example promises.
+        """
+        assert 0 < ov._LOCAL_SOURCE_TTL_S <= 900
 
     def test_local_is_selected_when_configured(self, lux_dir, monkeypatch):
         monkeypatch.setenv("RAIL_SOURCE", "local")
@@ -708,6 +738,68 @@ class TestOverpassFallback:
         ways = source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
         assert [w["id"] for w in ways] == [100, 101, 102]
 
+    def test_a_shared_way_of_two_lengths_cannot_breach_the_ceiling(
+            self, tmp_path_factory, monkeypatch):
+        """The count pass and the decode pass must mean the *same* copy.
+
+        A way id in two extracts is normally byte-identical, because both came
+        from one build. It stops being identical as soon as the regions are
+        refreshed on different dates and an OSM edit adds or removes a node from
+        a border way — or when builder.py drops a node with an invalid location
+        in one extract and not the other.
+
+        Then the two passes disagree about which copy they describe: the decode
+        keeps the first region's, so a count that charges the last region's
+        authorises a decode it never measured. Here the long copy is 4 vertices
+        and the stub is 2, so charging the stub passes a ceiling of 5 and then
+        returns 6.
+        """
+        directory = str(tmp_path_factory.mktemp("twolengths"))
+        long_copy = {100: [(49.60, 5.90), (49.60, 6.00),
+                           (49.60, 6.10), (49.60, 6.30)]}
+        stub_copy = {100: [(49.60, 5.90), (49.60, 6.30)]}
+
+        first = tmp_path_factory.mktemp("first") / "first-rail.osm.pbf"
+        last = tmp_path_factory.mktemp("last") / "last-rail.osm.pbf"
+        write_extract(first, long_copy, stations=[(49.600, 6.010, "1000")])
+        write_extract(last, {**stub_copy, 102: [(49.61, 6.09), (49.61, 6.11)]},
+                      stations=[(49.600, 6.050, "2000")])
+        # Read in name order, so the long copy is the one the decode keeps.
+        entries = [
+            ok_entry("test/aaa", build_region(directory, "test/aaa", first)),
+            ok_entry("test/zzz", build_region(directory, "test/zzz", last)),
+        ]
+        write_manifest(directory, entries)
+
+        source = LocalRailSource(directory)
+        monkeypatch.setattr("src.services.rail_source._MAX_BBOX_VERTICES", 5)
+        with pytest.raises(RailSourceOverload):
+            source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
+
+    def test_a_refused_merge_decodes_no_geometry_at_all(
+            self, two_regions, monkeypatch):
+        """The ceiling bounds memory, so it has to fire before the allocation.
+
+        Checking the merged total *after* decoding each region is correct in
+        what it returns and wrong in what it costs: the regions already merged
+        and the region in hand coexist, so two regions near the ceiling
+        transiently hold twice it — 392 MB measured against the 196 MB the
+        answer itself costs (issue #352), on a worker sized for one ceiling.
+        Counting first makes the peak the answer alone, and "no blob was
+        decoded" is what says the count came first.
+        """
+        decoded = []
+        real = rail_store.decode_geometry
+        monkeypatch.setattr(rail_store, "decode_geometry",
+                            lambda blob: decoded.append(blob) or real(blob))
+
+        source = LocalRailSource(two_regions)
+        monkeypatch.setattr("src.services.rail_source._MAX_BBOX_VERTICES", 5)
+        with pytest.raises(RailSourceOverload):
+            source.ways_in_bbox(49.5, 5.8, 49.7, 6.4)
+        assert decoded == [], (
+            f"{len(decoded)} geometries were decoded before the refusal")
+
 
 # ---------------------------------------------------------------------------
 # Broken local data — every shape of it defers to Overpass
@@ -746,12 +838,16 @@ class TestUnreadableStoreFile:
         write_manifest(str(tmp_path), [ok_entry(REGION, (49.0, 5.0, 51.0, 7.0))])
         return str(tmp_path)
 
-    def test_every_query_reads_as_not_covered(self, broken_dir):
+    def test_every_query_reads_as_not_covered(self, broken_dir, caplog):
         source = LocalRailSource(broken_dir)
         # The region is still coverage on paper — the manifest says so.
         assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
         # …and every question about it answers "nothing here", not an exception.
-        assert source.nearest_station(49.5999681, 6.1342493) is None
+        with caplog.at_level(logging.WARNING, logger="src.services.rail_source"):
+            assert source.nearest_station(49.5999681, 6.1342493) is None
+        # Silently falling back to Overpass is the traffic this issue exists to
+        # stop, so the fallback has to say why it happened.
+        assert "cannot be opened" in caplog.text
         assert source.relations_near(49.5999681, 6.1342493) == set()
         assert source.relations_for_uic_pair(
             "8200100", "8200710", [(49.60, 6.13), (49.64, 5.98)]) == []
@@ -773,6 +869,84 @@ class TestUnreadableStoreFile:
             result = ov.get_rail_geometry(stops)
         assert not result.degraded
         assert oracle.queries, "a broken store must send the resolve to Overpass"
+
+
+class TestStoreThatGoesBadAfterOpening:
+    """A file that opens cleanly and fails on a query.
+
+    ``TestUnreadableStoreFile`` covers the file that cannot be opened at all.
+    SQLite reads pages lazily, so a store whose header and ``meta`` are intact
+    can still meet a corrupt page on the first query that touches it, and that
+    raises from an already-open connection — past the guard around ``open``,
+    out of ``get_rail_geometry``, into ``_resolve_route_job``'s retry, where the
+    page is still corrupt. Same outcome as any other local fault: Overpass.
+    """
+
+    QUERIES = ("nearest_station", "relations_near", "relations_for_uic_pair",
+               "relation_geometry", "ways_in_bbox", "vertex_counts_in_bbox")
+
+    @pytest.fixture
+    def bad_after_open(self, lux_dir, monkeypatch):
+        def malformed(self, *args, **kwargs):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        for name in self.QUERIES:
+            monkeypatch.setattr(RailStore, name, malformed)
+        return lux_dir
+
+    def test_every_query_reads_as_not_covered(self, bad_after_open, caplog):
+        source = LocalRailSource(bad_after_open)
+        assert source.regions_for((49.6, 6.1, 49.6, 6.1)) == [REGION]
+        with caplog.at_level(logging.WARNING, logger="src.services.rail_source"):
+            assert source.nearest_station(49.5999681, 6.1342493) is None
+            assert source.relations_near(49.5999681, 6.1342493) == set()
+            assert source.relations_for_uic_pair(
+                "8200100", "8200710", [(49.60, 6.13), (49.64, 5.98)]) == []
+            assert source.relation_geometry([1], [(49.60, 6.13), (49.64, 5.98)]) == []
+            assert source.ways_in_bbox(49.5, 6.0, 49.7, 6.2) == []
+        assert "failed mid-query" in caplog.text
+
+    def test_the_resolve_falls_back_to_overpass_instead_of_failing(
+            self, bad_after_open, monkeypatch, oracle):
+        monkeypatch.setenv("RAIL_SOURCE", "local")
+        monkeypatch.setenv("RAIL_DATA_DIR", bad_after_open)
+        stops = [dict(LUX_GARE), dict(KLEINBETTINGEN)]
+        with patch.object(ov, "_overpass", side_effect=oracle):
+            result = ov.get_rail_geometry(stops)
+        assert not result.degraded
+        assert oracle.queries, "a store gone bad must send the resolve to Overpass"
+
+    def test_a_bug_in_our_own_merging_is_not_swallowed(self, lux_dir, monkeypatch):
+        """The guard is ``sqlite3.DatabaseError`` and nothing wider.
+
+        A blanket ``except`` around the query calls would answer a defect in
+        this module's merging or scoping with "region not covered" — the one
+        answer that looks exactly like success, and the reason the guard names
+        the file's own exception type rather than catching everything.
+        """
+        monkeypatch.setattr(RailStore, "ways_in_bbox",
+                            Mock(side_effect=TypeError("merge is broken")))
+        with pytest.raises(TypeError, match="merge is broken"):
+            LocalRailSource(lux_dir).ways_in_bbox(49.5, 6.0, 49.7, 6.2)
+
+    @pytest.mark.parametrize("ours", [
+        sqlite3.ProgrammingError("Incorrect number of bindings supplied."),
+        sqlite3.NotSupportedError("no such feature"),
+    ], ids=["wrong bindings", "unsupported"])
+    def test_our_own_sql_mistakes_are_not_mistaken_for_a_bad_file(
+            self, lux_dir, monkeypatch, ours):
+        """`sqlite3.DatabaseError` is not as narrow as it reads.
+
+        ``ProgrammingError`` and ``NotSupportedError`` are subclasses of it, and
+        both mean *we* built the query wrong — the wrong number of bindings, a
+        feature this SQLite does not have. Catching them would answer a defect
+        in this module with "region not covered", which is exactly the
+        looks-like-success failure the guard exists to avoid; the TypeError case
+        above cannot show it, because TypeError was never in the family.
+        """
+        monkeypatch.setattr(RailStore, "ways_in_bbox", Mock(side_effect=ours))
+        with pytest.raises(type(ours)):
+            LocalRailSource(lux_dir).ways_in_bbox(49.5, 6.0, 49.7, 6.2)
 
 
 class TestMalformedManifest:

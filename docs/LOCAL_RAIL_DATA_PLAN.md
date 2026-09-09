@@ -236,8 +236,10 @@ An in-process LRU bounds how many region files are open at once.
   284,607 vertices (~150 MB, measured 204 MB resident for the whole resolve); the
   whole-Germany box is 1,270,497 (~680 MB) on a 1 GB worker. `ways_in_bbox`
   therefore enforces its own vertex ceiling and raises rather than allocate
-  (Phase 3's merge across overlapping regions weakens this to ~2× the ceiling
-  transiently — see *Region selection* below), and
+  (Phase 3's merge across overlapping regions bounds the *result* the same way,
+  by counting every candidate before it decodes any of them; its peak can still
+  reach about twice the ceiling when candidates overlap heavily — see *Region
+  selection* below), and
   `_RAIL_BBOX_MAX_AREA` in the resolver guards the same failure from the other
   end: it is a memory bound now, not an Overpass workaround, and must survive
   Phase 6.
@@ -308,13 +310,20 @@ That is what makes the comparison period in Phase 4 possible at all.
   pair, which is common, and would have preserved essentially all of today's
   traffic.
 
-  **Known gap, to close before Phase 4 turns the flag on:** the guard wraps
-  opening a store, not querying one. A `sqlite3.DatabaseError` from an
-  already-open connection escapes into the job. Reachable only if a store file
-  is replaced *in place* while a connection holds it, so either widen the guard
-  to the query calls or make the refresh contract atomic-rename-only — but
-  `.env.example` promises a refresh needs no restart, so this is a commitment,
-  not a hypothetical.
+  **Closed in #352:** the guard wrapped opening a store, not querying one, so a
+  `sqlite3.DatabaseError` from an already-open connection escaped into the job.
+  Both halves are now in place. The delivery step publishes by atomic rename
+  only (see *Delivery*), so a refresh cannot pull a file out from under an open
+  connection — and `_ask` in `rail_source.py` guards the query calls anyway,
+  because SQLite reads pages lazily and a file whose header and `meta` are
+  intact can still meet a corrupt page on the first query that touches it. That
+  guard is narrower than it first reads: `sqlite3.ProgrammingError` and
+  `NotSupportedError` are subclasses of `DatabaseError` and both mean *we* built
+  the query wrong, so they are re-raised and only genuine unreadability is
+  caught. Wide is right for *opening* a file, where what it raises is not ours
+  to enumerate, and wrong for *querying* one, where answering a defect in this
+  module's own merging or scoping with "region not covered" is the one answer
+  that looks exactly like success.
 - **A bbox query over the vertex ceiling straight-lines and does not fall
   back.** The ceiling bounds *our* memory, not Overpass's patience: if Overpass
   answered, `_build_rail_graph` would rebuild the allocation just refused, on
@@ -329,14 +338,54 @@ That is what makes the comparison period in Phase 4 possible at all.
   effective ceiling toward `_MAX_BBOX_VERTICES / N` exactly at borders, where
   overlap is greatest.
 
-  **Known gap, to close before Phase 4 turns the flag on:** each candidate
-  region is decoded under the *full* ceiling and the merged total checked after,
-  so two overlapping regions transiently hold ~2× the ceiling — measured 392 MB
-  against the pre-fix 199 MB on a synthetic worst case. It does not scale with
-  candidate count (4 regions measure the same 392 MB) and the returned result is
-  still bounded, but it weakens the invariant stated for Phase 2 above. A
-  count-and-id pre-pass across candidates, deduplicated before decoding, would
-  restore an exact bound.
+  **Closed in #352, by counting before decoding.** Deciding the merged total
+  *after* decoding each region left the regions already merged and the region in
+  hand alive at once, so two candidates near the ceiling transiently held twice
+  it. Now `RailStore.vertex_counts_in_bbox` answers the same box as
+  `ways_in_bbox` with `{way id: vertex count}` — the per-way form of the
+  `SUM(LENGTH(geom))/8` scan `ways_in_bbox` already did, ids included so the
+  merge can drop the border ways both extracts hold — and
+  `LocalRailSource.ways_in_bbox` collects that from every candidate, merges by
+  id, checks the exact total, and only then decodes. Both passes keep the
+  *first* region's copy of a shared id, so what is counted is what is kept: an
+  id present in two extracts at different lengths — an OSM edit between two
+  refresh dates, or a node `builder.py` dropped in one extract and not the
+  other — cannot be charged as one copy and returned as another.
+
+  **What this bounds is the result, not the peak.** Duplicates are still
+  dropped after decoding, so fully overlapping candidates hold their shared
+  ways more than once in flight: the peak is the answer plus the duplicated
+  share of two consecutive candidates, up to about twice the ceiling. On real
+  cross-border boxes the duplication is 0.4-0.5% of the result, so this is
+  theory rather than a live risk — but it stops being theory if
+  `config/rail_regions.yml` ever gains one of the Geofabrik aggregates it
+  currently excludes for exactly that reason. Disjoint candidates do get the
+  full benefit:
+
+  | | peak allocated |
+  |---|---|
+  | 2 regions at the ceiling, before | 392.2 MB |
+  | 2 regions at the ceiling, after | 0.3 MB |
+  | 4 regions at the ceiling, after | 0.5 MB |
+  | 2 regions merging to the ceiling (accepted) | 196.1 MB before, 196.2 MB after |
+
+  Measured with synthetic stores and disjoint way ids, `tracemalloc` around the
+  call. Four fully overlapping regions measure 9.4 MB against 6.3 MB at small
+  scale, the difference being one region's decoded rows kept alive by the loop
+  variables; those are released explicitly.
+
+  The cost is one more index scan per candidate region, and it is a fixed cost
+  per region, so it is heaviest on the *smallest* boxes rather than the largest.
+  On Germany's real store a 9 sq° Rhine-Ruhr box goes from 278 ms to 328 ms for
+  one region and 829 ms to 961 ms for two — about +18% — while a Hamburg to
+  Flensburg box goes from 22 ms to 42 ms, and a small cross-border box from
+  4.3 ms to 6.0 ms. Quote the box, not the average.
+
+  About two thirds of the added time is `ways_in_bbox` re-running its own `SUM`
+  after the merge already counted the same rows (52 ms of the 77 ms added on
+  Rhine-Ruhr). That guard is kept unconditional deliberately, as a backstop no
+  caller can opt out of — it is what turns a miscounted merge into a refusal
+  rather than an allocation — and buying the 50 ms back would mean adding one.
 - **`RailStore.nearest_node` is deliberately not in the interface.** The
   resolver builds its own graph and snaps with `_nearest_node` over it;
   exposing the store's spatial index would change snapping, which is Phase 4's
@@ -421,7 +470,9 @@ Dockerfile now installs it, and `.dockerignore` un-excludes the one script in
   widen the guard to the query calls or make the refresh contract
   atomic-rename-only" (#352, finding 2) — by taking the second option: a
   worker holding a store open keeps the old inode and its query finishes
-  against whole, valid data. It is a contract, not an implementation detail,
+  against whole, valid data. #352 then took the first option as well, for the
+  corruption a rename cannot prevent — a page that goes bad on disk under a
+  connection that already opened the file. It is a contract, not an implementation detail,
   and `tests/test_rail_data_fetch.py` holds a `RailStore` open across a real
   refresh to prove it. Replacing the rename with an in-place copy makes that
   test fail by returning *zero* ways rather than by raising — the silent shape

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sqlite3
 from abc import ABC, abstractmethod
 from typing import Iterable, Optional, Sequence
 
@@ -78,11 +79,26 @@ _RELATION_SCOPE_M = 25_000
 # in the case this source calls common. An open store costs its connection's
 # page cache (2 MiB) and nothing else, so this is megabytes against re-opening
 # every region for each of the five questions a resolve asks.
+#
+# A box overlapping more than this many regions — a 9 sq° box in the western
+# Balkans plausibly reaches nine of the 49 — evicts and re-opens within a
+# resolve, and it is left that way on measurement: opening Germany's 57 MB
+# store, the largest published, is 0.33 ms, so the whole degradation is a few
+# milliseconds against a bbox read of hundreds. Raising the bound to cover
+# every case would hold page cache for regions no query is asking about.
 _MAX_OPEN_STORES = 8
 
 
 class RailSourceError(Exception):
-    """The local source cannot be used at all — bad manifest, bad directory."""
+    """The local source cannot be used at all — bad manifest, bad directory.
+
+    Nothing in production catches it, and nothing should: ``load_coverage``
+    cannot enumerate the shapes a hand-written manifest can be wrong in, so
+    ``_local_rail_source`` treats *every* exception as "no local coverage" and
+    this class would buy no distinction there (see ``load_coverage``). It is
+    kept because raising it says which failures this module recognised rather
+    than stumbled into, and the tests read it that way.
+    """
 
 
 class RailSourceOverload(Exception):
@@ -212,6 +228,36 @@ def _scope(near: Sequence[tuple[float, float]]) -> tuple[float, float, float, fl
     )
 
 
+def _ask(store: RailStore, question, *args, default):
+    """One question to one store, degrading a file that goes bad mid-query.
+
+    ``_stores_for`` guards *opening* a store; this guards *reading* one that
+    opened cleanly. SQLite reads pages lazily, so a file whose header and
+    ``meta`` are intact can still hit a corrupt or missing page on the first
+    query that touches it, and that raises from an already-open connection.
+    Unguarded it escapes ``get_rail_geometry`` into ``_resolve_route_job``'s
+    retry, where the same page is still corrupt — so every train resolve in the
+    deployment fails until someone notices.
+
+    Narrow on purpose, and narrower than ``sqlite3.DatabaseError`` alone.
+    ``ProgrammingError`` and ``NotSupportedError`` are subclasses of it and are
+    *ours*: a query built with the wrong number of bindings is a defect in this
+    module, and answering it with "region not covered" is the one answer that
+    looks exactly like success. They are re-raised. What is left — corruption,
+    an I/O error, an operational failure — is the file saying it is unreadable.
+    Distinct from ``_stores_for``, which is wide for the opposite reason: what
+    an unopenable file raises is not ours to enumerate.
+    """
+    try:
+        return question(*args)
+    except (sqlite3.ProgrammingError, sqlite3.NotSupportedError):
+        raise
+    except sqlite3.DatabaseError as exc:
+        _log.warning("rail region %s failed mid-query (%s) — skipped, this "
+                     "query falls back to Overpass", store.region, exc)
+        return default
+
+
 # ---------------------------------------------------------------------------
 # The local source
 # ---------------------------------------------------------------------------
@@ -291,7 +337,8 @@ class LocalRailSource(RailSource):
         best: Optional[dict] = None
         best_sq = math.inf
         for store in self._stores_near(lat, lon, radius_m):
-            found = store.nearest_station(lat, lon, radius_m)
+            found = _ask(store, store.nearest_station, lat, lon, radius_m,
+                         default=None)
             if found is None:
                 continue
             sq = (found["lat"] - lat) ** 2 + (found["lon"] - lon) ** 2
@@ -306,11 +353,14 @@ class LocalRailSource(RailSource):
         stores = list(self._stores_for(box))
         rel_ids = sorted({
             rel_id for store in stores
-            for rel_id in store.relations_for_uic_pair(uic1, uic2)
+            for rel_id in _ask(store, store.relations_for_uic_pair, uic1, uic2,
+                               default=())
         })
         if not rel_ids:
             return []
-        return _merge_relations(store.relation_geometry(rel_ids) for store in stores)
+        return _merge_relations(
+            _ask(store, store.relation_geometry, rel_ids, default=[])
+            for store in stores)
 
     def relations_near(
         self, lat: float, lon: float, radius_m: float = 25_000
@@ -323,7 +373,8 @@ class LocalRailSource(RailSource):
         """
         found: set[int] = set()
         for store in self._stores_near(lat, lon, radius_m):
-            found |= store.relations_near(lat, lon, radius_m)
+            found |= _ask(store, store.relations_near, lat, lon, radius_m,
+                          default=set())
         return found
 
     def relation_geometry(
@@ -332,7 +383,8 @@ class LocalRailSource(RailSource):
         if not rel_ids:
             return []
         return _merge_relations(
-            store.relation_geometry(rel_ids) for store in self._stores_for(_scope(near)))
+            _ask(store, store.relation_geometry, rel_ids, default=[])
+            for store in self._stores_for(_scope(near)))
 
     def ways_in_bbox(
         self, min_lat: float, min_lon: float, max_lat: float, max_lon: float
@@ -353,29 +405,64 @@ class LocalRailSource(RailSource):
         ``_MAX_BBOX_VERTICES / N`` for N candidate regions, and an overload
         straight-lines with no fallback.
 
-        Each region is still read under the full ceiling, so a single read
-        cannot allocate more than the ceiling allows and peak memory stays at
-        the merged result plus the region in hand.
+        So the merged size is settled **before anything is decoded**: every
+        candidate region is asked for ``{way id: vertex count}``, the ids merge
+        the border ways away, and the sum is the exact size of the result this
+        call would return. Decoding a region and checking the running total
+        after it instead is correct in what it returns and wrong in what it
+        allocates — the region in hand and the regions already merged coexist,
+        so two regions near the ceiling transiently hold twice it (measured
+        392 MB against the 196 MB the answer itself costs, issue #352).
+
+        Two counting scans then one decoding scan is more SQL than one decoding
+        scan. The counts are an index scan over ``LENGTH(geom)`` with no
+        geometry read, the store files are read-only and replaced by atomic
+        rename only, so nothing can move between the passes.
         """
         box = (min_lat, min_lon, max_lat, max_lon)
-        ways: dict[int, dict] = {}
-        kept = 0
+        counts: dict[int, int] = {}
+        stores = []
         for store in self._stores_for(box):
+            found = _ask(store, store.vertex_counts_in_bbox, *box, default=None)
+            if found is None:   # the file went bad under us — see _ask
+                continue
+            # setdefault, not update: the decode below keeps the *first*
+            # region's copy of a shared way id, so the count must charge for
+            # that same copy. update() charges the last region's instead, and
+            # when two extracts hold the same id at different lengths — an OSM
+            # edit between two regions' refresh dates, or a node builder.py
+            # dropped in one extract and not the other — the two passes stop
+            # describing the same set of bytes and the merged ceiling can be
+            # breached by the difference.
+            for way_id, vertices in found.items():
+                counts.setdefault(way_id, vertices)
+            stores.append(store)
+        total = sum(counts.values())
+        if total > _MAX_BBOX_VERTICES:
+            raise RailSourceOverload(
+                f"bbox {box} holds {total} vertices across "
+                f"{len(stores)} regions, over the "
+                f"{_MAX_BBOX_VERTICES} ceiling")
+
+        ways: dict[int, dict] = {}
+        for store in stores:
             try:
-                found = store.ways_in_bbox(*box, max_vertices=_MAX_BBOX_VERTICES)
+                found = _ask(store, store.ways_in_bbox, *box, _MAX_BBOX_VERTICES,
+                             default=[])
             except RailStoreError as exc:
-                # ways_in_bbox raises for one reason: the box is too big. The
-                # store was opened successfully, so this is not a broken file.
+                # The store's own ceiling, kept as a backstop under the merged
+                # one: a region cannot hold more than the merged total that was
+                # just accepted, so this converts an exception type that would
+                # otherwise escape rather than reporting a reachable state.
                 raise RailSourceOverload(str(exc)) from exc
             for way in found:
-                if way["id"] not in ways:
-                    ways[way["id"]] = way
-                    kept += len(way["geometry"])
-            if kept > _MAX_BBOX_VERTICES:
-                raise RailSourceOverload(
-                    f"bbox {box} holds {kept} vertices across "
-                    f"{len(self.regions_for(box))} regions, over the "
-                    f"{_MAX_BBOX_VERTICES} ceiling")
+                ways.setdefault(way["id"], way)
+            # Drop this region's decoded rows before opening the next one.
+            # Without it the loop variables stay bound across the outer
+            # iteration and a third region's worth of geometry is alive while
+            # the fourth is read: 4 fully-overlapping regions peaked at 590 MB
+            # instead of 398 MB (issue #352).
+            found = way = None
         # By id, so the graph is built in one order whatever order the regions
         # were read in — the same order Overpass returns elements in.
         return [ways[way_id] for way_id in sorted(ways)]
