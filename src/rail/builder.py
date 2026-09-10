@@ -73,13 +73,42 @@ CREATE TABLE relation (
 -- Every way member of the relation, in member order, whether or not the
 -- extract holds that way: the reader joins to `way` and reports the members it
 -- could not reconstruct rather than silently shortening the relation.
+--
+-- `role` is the OSM member role, verbatim. It is what tells the route's path
+-- from what the route merely touches: a `platform` member is a station's
+-- platform way, which is not track, is not connected to track, and sits exactly
+-- where a leg starts — so routing over it strands the search on a closed ring
+-- (issue #359). Stored verbatim rather than reduced to a flag because the
+-- consumer must be free to deny-list, and only a deny-list is safe: 2,299 of
+-- France's 681,815 rows carry `forward`, `backward` or `alternative`, all of
+-- which *are* the path.
 CREATE TABLE relation_way (
     rel_id INTEGER NOT NULL,
     way_id INTEGER NOT NULL,
-    seq    INTEGER NOT NULL
+    seq    INTEGER NOT NULL,
+    role   TEXT NOT NULL
 );
 CREATE INDEX relation_way_rel ON relation_way(rel_id);
 CREATE INDEX relation_way_way ON relation_way(way_id);
+
+-- The relation's node members, in member order: what it calls at, and in what
+-- sequence. `relation_uic` below answers "does this relation serve both these
+-- codes" and is the index for that question; it is a set, so it cannot answer
+-- "in what order", which is what routing a leg through its intermediate stops
+-- needs. Only nodes the extract carries have a location — Phase 1 keeps nodes
+-- with a `uic_ref` and station/halt nodes — so an ordinary stop node is named
+-- here with NULL lat/lon rather than dropped, because the *sequence* is the
+-- point and a hole in it is not the same as a shorter route.
+CREATE TABLE relation_node (
+    rel_id  INTEGER NOT NULL,
+    node_id INTEGER NOT NULL,
+    seq     INTEGER NOT NULL,
+    role    TEXT NOT NULL,
+    uic     TEXT NOT NULL,   -- '' when the node carries none
+    lat     REAL,            -- NULL when the extract does not locate the node
+    lon     REAL
+);
+CREATE INDEX relation_node_rel ON relation_node(rel_id);
 
 -- Strategy A asks "which relation serves both these UIC codes". The uic is the
 -- tag verbatim, because that is what Overpass compares against.
@@ -136,6 +165,7 @@ def build_store(
     station_boxes: list[tuple] = []
     relations: list[tuple] = []
     rel_ways: list[tuple] = []
+    rel_nodes: list[tuple] = []
     rel_uics: list[tuple] = []
     # Station relations resolve after the way pass: a multipolygon station's
     # centre is the centre of its members, and those are in the database by then.
@@ -158,6 +188,12 @@ def build_store(
     counts = {
         "ways": 0, "member_ways": 0, "nodes": 0, "stations": 0, "relations": 0,
         "relation_ways": 0, "relation_ways_held": 0,
+        # Node members of route relations, and how many of them the extract can
+        # place. Most cannot be: Phase 1 keeps nodes carrying a uic_ref, so an
+        # ordinary stop node is recorded in sequence with no location. The ratio
+        # is the honest measure of how much of a relation's calling pattern this
+        # region actually knows.
+        "relation_nodes": 0, "relation_nodes_located": 0,
         # Nodes a way references that the extract does not locate. Dropping one
         # welds its neighbours together, which silently moves the geometry, so
         # the number is recorded rather than left to be guessed at — and, above
@@ -239,14 +275,28 @@ def build_store(
             relations.append((obj.id, tags["route"], tags.get("name")))
             counts["relations"] += 1
             seq = 0
+            node_seq = 0
             seen_uic = set()
             for member in obj.members:
                 if member.type == "w":
-                    rel_ways.append((obj.id, member.ref, seq))
+                    rel_ways.append((obj.id, member.ref, seq, member.role or ""))
                     counts["relation_ways_held"] += member.ref in way_ids
                     seq += 1
                 elif member.type == "n":
                     member_uic = node_uic.get(member.ref)
+                    loc = node_loc.get(member.ref)
+                    # Every node member, in order, located or not — see the
+                    # relation_node comment in _SCHEMA. `relation_uic` below is
+                    # unchanged and still deduplicated: strategy A's pair query
+                    # is indexed on it, and this table is not a replacement for
+                    # it but the answer to a different question.
+                    rel_nodes.append((
+                        obj.id, member.ref, node_seq, member.role or "",
+                        member_uic or "",
+                        loc[0] if loc else None, loc[1] if loc else None,
+                    ))
+                    node_seq += 1
+                    counts["relation_nodes_located"] += loc is not None
                     if member_uic and member_uic not in seen_uic:
                         seen_uic.add(member_uic)
                         rel_uics.append((obj.id, member_uic))
@@ -271,8 +321,10 @@ def build_store(
     conn.executemany("INSERT INTO station VALUES (?, ?, ?, ?, ?, ?)", stations)
     conn.executemany("INSERT INTO station_pos VALUES (?, ?, ?, ?, ?)", station_boxes)
     conn.executemany("INSERT INTO relation VALUES (?, ?, ?)", relations)
-    conn.executemany("INSERT INTO relation_way VALUES (?, ?, ?)", rel_ways)
+    conn.executemany("INSERT INTO relation_way VALUES (?, ?, ?, ?)", rel_ways)
     counts["relation_ways"] = len(rel_ways)
+    conn.executemany("INSERT INTO relation_node VALUES (?, ?, ?, ?, ?, ?, ?)", rel_nodes)
+    counts["relation_nodes"] = len(rel_nodes)
     conn.executemany("INSERT INTO relation_uic VALUES (?, ?)", rel_uics)
 
     def refuse(why: str) -> None:

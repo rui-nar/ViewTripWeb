@@ -540,18 +540,92 @@ def _via_route_relations(
 def _route_relation_segment(
     s1: dict, s2: dict, source: Optional[RailSource] = None
 ) -> Optional[list[list[float]]]:
+    """The best relation serving this stop pair, or None if none is close enough.
+
+    Every candidate is scored, not just the first. Both sources answer
+    ``relations_for_uic_pair`` from a *single* query, so the candidates are
+    already in hand and scoring them costs CPU and no extra Overpass traffic —
+    while taking ``elements[0]`` and giving up threw away 31 usable candidates
+    on Paris Est → Strasbourg because the lowest-id one happened not to route
+    (issue #359).
+    """
     uic1 = _clean_uic(s1["uic"])
     uic2 = _clean_uic(s2["uic"])
 
     elements = (source or _OVERPASS_SOURCE).relations_for_uic_pair(
         uic1, uic2, [(s1["lat"], s1["lon"]), (s2["lat"], s2["lon"])])
-    if not elements:
-        return None
-    return _extract_relation_geometry(elements[0], s1["lat"], s1["lon"], s2["lat"], s2["lon"])
+    return _best_relation_geometry(
+        elements[:_MAX_RELATION_CANDIDATES],
+        s1["lat"], s1["lon"], s2["lat"], s2["lon"])
 
 
 def _clean_uic(uic: str) -> str:
     return uic.lstrip("0") or uic
+
+
+# How far a resolved polyline's ends may sit from the stops it claims to join.
+#
+# Strategies A and B both pick between relations, and "which relation is this
+# leg on" is answered by where the resolved line starts and ends — a relation
+# that serves other stations entirely still routes cleanly, it just does not go
+# where the traveller went. Strategy B has always scored that; strategy A never
+# checked it at all, and `_accept` does not either, because `_rail_length_ok`
+# tests a detour *ratio* and a plausible-length line to the wrong station is
+# plausible-length.
+#
+# 5 km, and in kilometres because that is a distance. The predecessor was
+# `_MAX_SCORE = 0.05` in squared degrees, commented "≈ both endpoints within
+# ~5 km" — but sqrt(0.05) is 0.2236°, which is 24.9 km of latitude. That is the
+# guard that passed issue #359's line, whose start sat 13.9 km from Gare de
+# l'Est and scored 0.0161 against it.
+#
+# Not tighter than 5 km: `_enrich_uic` snaps a stop to its OSM station node, so
+# a good relation lands within a few hundred metres and the slack is for real
+# gaps in OSM's relation membership rather than for noise. At 2 km, Paris
+# Montparnasse → Bordeaux — whose relations are genuinely disconnected at the
+# station throat, 3.5 km out — loses its route entirely and degrades to a
+# straight line, because its bounding box is 15.2 deg² and strategy C refuses
+# it (`_RAIL_BBOX_MAX_AREA`). A straight line across France is the worse answer.
+_ENDPOINT_TOLERANCE_KM = 5.0
+
+# How many relation candidates to score, per strategy. Both sources return the
+# whole candidate list from one query, so this bounds CPU, not requests.
+_MAX_RELATION_CANDIDATES = 10
+
+
+def _endpoints_near(
+    poly: list[list[float]], lat1: float, lon1: float, lat2: float, lon2: float
+) -> bool:
+    """Does *poly* actually run between these two stops?"""
+    return (_crow_km(lat1, lon1, poly[0][1], poly[0][0]) <= _ENDPOINT_TOLERANCE_KM
+            and _crow_km(lat2, lon2, poly[-1][1], poly[-1][0]) <= _ENDPOINT_TOLERANCE_KM)
+
+
+def _best_relation_geometry(
+    relations: list[dict], lat1: float, lon1: float, lat2: float, lon2: float
+) -> Optional[list[list[float]]]:
+    """The candidate whose resolved ends sit closest to the stops, or None.
+
+    Shared by strategies A and B so one tolerance governs both: they differ in
+    how they *find* candidates, never in how a candidate is judged.
+    """
+    best: Optional[list[list[float]]] = None
+    best_score = math.inf
+    for rel in relations:
+        geom = _extract_relation_geometry(rel, lat1, lon1, lat2, lon2)
+        if not geom or len(geom) < 2:
+            continue
+        if not _endpoints_near(geom, lat1, lon1, lat2, lon2):
+            _log.debug("rail relation %s rejected: ends %.1f km / %.1f km from "
+                       "the stops (tolerance %.1f km)", rel.get("id"),
+                       _crow_km(lat1, lon1, geom[0][1], geom[0][0]),
+                       _crow_km(lat2, lon2, geom[-1][1], geom[-1][0]),
+                       _ENDPOINT_TOLERANCE_KM)
+            continue
+        score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
+        if score < best_score:
+            best_score, best = score, geom
+    return best
 
 
 def _extract_relation_geometry(
@@ -574,25 +648,128 @@ def _extract_relation_geometry(
     instead yields a shortest on-graph path that visits each node at most once —
     no backtracking, no double-track duplication, and structurally no teleports
     (an edge exists only between vertices actually adjacent within a way).
-    Returns None when the member ways don't form a connected graph between the
-    two endpoints, so the caller falls through to another relation or strategy
-    rather than emitting a teleporting / self-overlapping line (observed on
-    Hanko→Salo: a 116 km teleport mid-line, 6.2x the real distance).
+    Returns None when there is no on-graph path at all, so the caller falls
+    through to another relation or strategy rather than emitting a teleporting /
+    self-overlapping line (observed on Hanko→Salo: a 116 km teleport mid-line,
+    6.2x the real distance).
+
+    **What comes back is the best path this relation offers, not a promise that
+    it runs between these two stops.** Since #359 the endpoints are snapped
+    inside one connected component (see ``_snap_endpoints``), so a relation
+    whose graph is in pieces returns its best piece instead of nothing — which
+    is what recovers a route whose station throat is disconnected upstream, and
+    equally what can return a short stub for a relation that holds no through
+    line. Judging that is ``_best_relation_geometry``'s job, via
+    ``_ENDPOINT_TOLERANCE_KM``, and every caller goes through it. Calling this
+    directly and shipping the result skips the only check that a relation is
+    the leg the traveller took.
     """
     ways = [
         m for m in rel.get("members", [])
         if m.get("type") == "way" and len(m.get("geometry", [])) >= 2
+        and _is_route_path(m.get("role", ""))
     ]
     if ways:
         nodes, adj = _build_rail_graph(ways)
         if nodes:
-            start = _nearest_node(nodes, lat1, lon1)
-            end = _nearest_node(nodes, lat2, lon2)
-            path = _dijkstra(nodes, adj, start, end)
-            if path and len(path) >= 2:
-                return [nodes[n] for n in path]
-    # Disconnected relation graph — reject (None) rather than chain into garbage.
+            snapped = _snap_endpoints(nodes, adj, lat1, lon1, lat2, lon2)
+            if snapped:
+                path = _dijkstra(nodes, adj, *snapped)
+                if path and len(path) >= 2:
+                    return [nodes[n] for n in path]
+    # No member way this relation contributes reaches any other — reject (None)
+    # rather than chain into garbage.
     return None
+
+
+# Member roles that are *not* the route's path. A deny-list, and it has to be:
+# an allow-list of the empty role reads as "the path is the members nobody
+# labelled", which is false — 2,299 of France's 681,815 way members carry
+# `forward`, `backward` or `alternative` and every one of them is track the
+# route runs on. Only these are things the route touches rather than follows.
+_NON_PATH_ROLES = ("platform", "hail_and_ride")
+
+
+def _is_route_path(role: str) -> bool:
+    """Is this member way part of the route's path, per its OSM role?
+
+    A `platform` member is a station's platform — mapped as a way or an area,
+    not connected to track, and lying exactly where a leg begins or ends. Left
+    in the graph it captures the endpoint snap and strands Dijkstra on a closed
+    ring, so the relation is rejected as disconnected and a *worse* relation
+    wins instead: issue #359, where Paris Est → Strasbourg discarded every
+    correct relation this way and shipped the Strasbourg–CDG-airport TGV, whose
+    Paris end is 14 km south of the station. One route relation in five carries
+    a platform way member (684 of France's 3,365), so this is not a corner.
+
+    `platform_entry_only` and `platform_exit_only` are prefixed, not separate
+    values, which is why this matches on the prefix.
+    """
+    return not (role or "").startswith(_NON_PATH_ROLES)
+
+
+def _snap_endpoints(
+    nodes: dict[str, list[float]],
+    adj: dict[str, list[str]],
+    lat1: float, lon1: float, lat2: float, lon2: float,
+) -> Optional[tuple[str, str]]:
+    """The two graph nodes to route between, chosen so a path can exist.
+
+    ``_nearest_node`` twice is right whenever the graph is connected, and wrong
+    in a specific way when it is not: it can put the start in one component and
+    the end in another, and Dijkstra then reports "no path" for a relation that
+    does contain the route. Relations *are* disconnected in practice — a member
+    way missing from OSM's membership, a station throat mapped as a separate
+    line — so the endpoints are picked per component instead, keeping the
+    component whose own two nearest nodes are closest to the stops.
+
+    On a connected graph this is exactly ``_nearest_node`` twice, because there
+    is one component and its nearest nodes are the graph's. It costs one
+    traversal of a graph Dijkstra is about to traverse anyway.
+
+    This is deliberately *not* the fix for #359 — ``_is_route_path`` is. It
+    reaches the same answer there by routing around the platform rather than by
+    keeping it out, and reaching the right answer for the wrong reason is how a
+    fix survives the bug that outlives it. It is here for the relations that
+    are genuinely broken upstream, and it is why the caller's result must still
+    pass the endpoint tolerance in ``_endpoints_near``: a component that reaches
+    neither stop is a legitimate winner of this comparison.
+    """
+    best: Optional[tuple[str, str]] = None
+    best_cost = math.inf
+    for component in _components(nodes, adj):
+        if len(component) < 2:
+            continue
+        start = min(component, key=lambda n: _sq(nodes[n], [lon1, lat1]))
+        end = min(component, key=lambda n: _sq(nodes[n], [lon2, lat2]))
+        cost = _sq(nodes[start], [lon1, lat1]) + _sq(nodes[end], [lon2, lat2])
+        if cost < best_cost:
+            best_cost, best = cost, (start, end)
+    return best
+
+
+def _components(
+    nodes: dict[str, list[float]], adj: dict[str, list[str]]
+) -> list[list[str]]:
+    """Connected components of the node graph. Iterative: a relation's graph
+    runs to tens of thousands of nodes in a chain, which recursion cannot walk."""
+    seen: set[str] = set()
+    out: list[list[str]] = []
+    for node in nodes:
+        if node in seen:
+            continue
+        stack = [node]
+        seen.add(node)
+        component = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbour in (adj.get(current) or []):
+                if neighbour not in seen:
+                    seen.add(neighbour)
+                    stack.append(neighbour)
+        out.append(component)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +786,9 @@ def _via_train_relations_endpoints(
     Works without UIC codes.  Avoids the large-bbox timeout that would occur
     if we queried a single bounding box for a long route (e.g. Helsinki–Oulu).
     Falls through to Strategy C if no common relation is found or the best
-    match's endpoints are too far from the query points.
+    match's endpoints are too far from the query points — the same
+    ``_ENDPOINT_TOLERANCE_KM`` strategy A now applies, so a relation rejected
+    here would have been rejected there.
     """
     lat1, lon1 = stops[0]["lat"], stops[0]["lon"]
     lat2, lon2 = stops[-1]["lat"], stops[-1]["lon"]
@@ -632,32 +811,18 @@ def _via_train_relations_endpoints(
     if not common:
         raise OverpassError("No train route relation serves both endpoints")
 
-    # Fetch geometry for at most 10 candidates (lowest IDs first to be
+    # Fetch geometry for a bounded number of candidates (lowest IDs first to be
     # deterministic; we score them all and pick the best).
     relations = src.relation_geometry(
-        sorted(common)[:10], [(lat1, lon1), (lat2, lon2)])
+        sorted(common)[:_MAX_RELATION_CANDIDATES], [(lat1, lon1), (lat2, lon2)])
     if not relations:
         raise OverpassError("Could not fetch geometry for candidate relations")
 
-    # Score by endpoint proximity (same logic as ferry Strategy A).
-    # More lenient threshold: train activity endpoints can be several km from
-    # the exact station node (parking lots, adjacent streets, etc.).
-    _MAX_SCORE = 0.05  # ≈ both endpoints within ~5 km
-
-    best: Optional[list[list[float]]] = None
-    best_score = math.inf
-    for rel in relations:
-        geom = _extract_relation_geometry(rel, lat1, lon1, lat2, lon2)
-        if geom and len(geom) >= 2:
-            score = _sq(geom[0], [lon1, lat1]) + _sq(geom[-1], [lon2, lat2])
-            if score < best_score:
-                best_score = score
-                best = geom
-
-    if best is None or best_score > _MAX_SCORE:
+    best = _best_relation_geometry(relations, lat1, lon1, lat2, lon2)
+    if best is None:
         raise OverpassError(
-            f"Train route relations found but none has endpoints close enough "
-            f"(best score {best_score:.4f} > threshold {_MAX_SCORE})"
+            f"Train route relations found but none runs between the two stops "
+            f"(within {_ENDPOINT_TOLERANCE_KM:.0f} km of each)"
         )
     return best
 

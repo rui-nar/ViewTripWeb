@@ -15,6 +15,7 @@ import pytest
 from src.services.overpass_service import (
     OverpassError,
     RailGeometry,
+    _best_relation_geometry,
     _extract_relation_geometry,
     _rail_length_ok,
     _via_train_relations_endpoints,
@@ -104,7 +105,7 @@ class TestTrainRelationsEndpoints:
             return {"elements": [wrong_rel]}
 
         with patch("src.services.overpass_service._overpass", side_effect=_overpass_side_effect):
-            with pytest.raises(OverpassError, match="endpoints close enough"):
+            with pytest.raises(OverpassError, match="runs between the two stops"):
                 _via_train_relations_endpoints([
                     {"lat": _LAT1, "lon": _LON1},
                     {"lat": _LAT2, "lon": _LON2},
@@ -333,18 +334,31 @@ class TestTrainRelationGraphExtraction:
         lats = [pt[1] for pt in geom]
         assert lats == sorted(lats), "path folds back on itself"
 
-    def test_disconnected_relation_returns_none_not_chain(self):
-        """When the relation's ways don't connect start→end, graph routing fails.
-        It must return None (so a cleaner strategy runs), NOT fall back to the
-        self-overlapping chain — the Hanko→Salo garbage (116 km teleport, 6.2x)
-        came from that old fallback.
+    def test_disconnected_relation_never_chains_across_the_gap(self):
+        """When the relation's ways don't connect start→end, nothing may bridge it.
+
+        The Hanko→Salo garbage (116 km teleport, 6.2x the real distance) came
+        from an old greedy chain that stitched disconnected ways together, and
+        graph routing is what makes that structurally impossible: an edge exists
+        only between vertices adjacent within one way.
+
+        Since #359 the extraction returns the best *component* rather than None
+        — that is what recovers a relation whose station throat is disconnected
+        upstream — so the guarantee moved rather than weakened. What comes back
+        never crosses the gap, and what a caller may ship is what
+        ``_best_relation_geometry`` returns, which refuses this outright.
         """
         # Two ways with no shared node: one near the start, one near the end.
-        rel = {"members": [
+        rel = {"id": 1, "members": [
             self._way([(0.0, 0.0), (0.1, 0.0)]),   # component near start
             self._way([(5.0, 5.0), (5.1, 5.0)]),   # disconnected, near end
         ]}
-        assert _extract_relation_geometry(rel, 0.0, 0.0, 5.0, 5.0) is None
+
+        geom = _extract_relation_geometry(rel, 0.0, 0.0, 5.0, 5.0)
+        # One component only — never a point from each, which is the teleport.
+        assert max(pt[0] for pt in geom) < 1.0
+
+        assert _best_relation_geometry([rel], 0.0, 0.0, 5.0, 5.0) is None
 
 
 class TestRailGeometryPlausibilityGate:

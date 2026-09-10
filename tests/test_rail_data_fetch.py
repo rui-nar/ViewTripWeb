@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from src.rail.store import RailStore, store_filename
+from src.rail.store import SCHEMA_VERSION, RailStore, store_filename
 from src.services.rail_source import LocalRailSource, load_coverage
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -469,10 +469,66 @@ def test_an_ok_entry_with_no_sha256_is_refused(tmp_path, capsys):
     assert json.loads((tmp_path / "manifest.json").read_text())["regions"] == []
 
 
+def test_a_store_schema_bump_rebuilds_regions_the_extract_did_not_change(
+        tmp_path, monkeypatch, capsys):
+    """The republish that would otherwise silently not happen (#359).
+
+    A schema bump changes what a store holds while leaving the published asset
+    byte-identical, so a skip keyed on the asset digest alone marks all 49
+    regions up to date and the box keeps stores the reader can only half use.
+    That is worse than an error: the operator runs the refresh, sees "49 up to
+    date", and believes the data is current.
+    """
+    lux = _lux()
+    bodies, _ = _world([lux])
+    _with_asset(bodies, lux, LUXEMBOURG)
+
+    get, _ = _transport(bodies)
+    assert fetch.refresh(tmp_path, get=get) == 0
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") == (
+        lux["sha256"], SCHEMA_VERSION)
+
+    # Same release, same asset, same digest — and a rebuilt store is still the
+    # only way to serve the new schema.
+    monkeypatch.setattr(fetch, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
+    get, calls = _transport(bodies)
+    assert fetch.refresh(tmp_path, get=get) == 0
+
+    assert "1 installed, 0 up to date" in capsys.readouterr().out
+    assert [c for c in calls if c.endswith(".osm.pbf")] == [
+        f"{BASE}/rail-data-2026-09-06/{lux['file']}"]
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") == (
+        lux["sha256"], SCHEMA_VERSION + 1)
+
+    # And having rebuilt once, it converges again at the new schema.
+    get, calls = _transport(bodies)
+    assert fetch.refresh(tmp_path, get=get) == 0
+    assert [c for c in calls if c.endswith(".osm.pbf")] == []
+
+
+def test_a_sidecar_from_before_the_schema_was_recorded_forces_a_rebuild(tmp_path):
+    """What the box actually holds on the first run after this ships: a sidecar
+    written by the previous release, carrying a digest and nothing else."""
+    lux = _lux()
+    bodies, _ = _world([lux])
+    _with_asset(bodies, lux, LUXEMBOURG)
+    get, _ = _transport(bodies)
+    assert fetch.refresh(tmp_path, get=get) == 0
+
+    sidecar = tmp_path / (store_filename("europe/luxembourg") + fetch.SHA_SUFFIX)
+    sidecar.write_text(lux["sha256"] + "\n", encoding="utf-8")
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") is None
+
+    get, calls = _transport(bodies)
+    assert fetch.refresh(tmp_path, get=get) == 0
+    assert [c for c in calls if c.endswith(".osm.pbf")] == [
+        f"{BASE}/rail-data-2026-09-06/{lux['file']}"]
+
+
 def test_the_digest_is_recorded_only_after_the_store_lands(tmp_path, monkeypatch):
     """A sidecar written before the rename would freeze the region forever.
 
-    ``installed_digest`` is what makes a re-run cheap, and the only thing that
+    ``installed_build`` is what makes a re-run cheap, and the only thing that
     makes it *safe* is that it can never describe a store that is not there:
     record the new digest and then fail to publish the store, and every later
     run skips the region as up to date while the old data sits on disk. Nobody
@@ -483,8 +539,8 @@ def test_the_digest_is_recorded_only_after_the_store_lands(tmp_path, monkeypatch
     _with_asset(bodies, lux, LUXEMBOURG)
     get, _ = _transport(bodies)
     fetch.refresh(tmp_path, get=get)
-    was_installed = fetch.installed_digest(tmp_path, "europe/luxembourg")
-    assert was_installed == lux["sha256"]
+    was_installed = fetch.installed_build(tmp_path, "europe/luxembourg")
+    assert was_installed == (lux["sha256"], SCHEMA_VERSION)
 
     # The next release builds fine, but publishing the store fails — a full
     # disk, a permissions change, an interrupted container.
@@ -503,7 +559,7 @@ def test_the_digest_is_recorded_only_after_the_store_lands(tmp_path, monkeypatch
     assert fetch.refresh(tmp_path, get=get) == 1
 
     # The record still describes the store that is actually on disk.
-    assert fetch.installed_digest(tmp_path, "europe/luxembourg") == was_installed
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") == was_installed
 
     # So the next run really does install the new data, rather than skipping it.
     monkeypatch.undo()
@@ -511,7 +567,7 @@ def test_the_digest_is_recorded_only_after_the_store_lands(tmp_path, monkeypatch
     assert fetch.refresh(tmp_path, get=get) == 0
     assert [c for c in calls if c.endswith(".osm.pbf")] == [
         f"{BASE}/rail-data-2026-10-06/{new['file']}"]
-    assert fetch.installed_digest(tmp_path, "europe/luxembourg") == new["sha256"]
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") == (new["sha256"], SCHEMA_VERSION)
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +988,7 @@ def test_a_full_disk_leaves_the_previous_sidecar_whole(tmp_path, monkeypatch):
     assert fetch.refresh(tmp_path, get=get) == 1
 
     assert sidecar.read_bytes() == before
-    assert fetch.installed_digest(tmp_path, "europe/luxembourg") == lux["sha256"]
+    assert fetch.installed_build(tmp_path, "europe/luxembourg") == (lux["sha256"], SCHEMA_VERSION)
 
 
 def test_a_full_disk_is_a_refusal_not_a_traceback(tmp_path, monkeypatch, capsys):
