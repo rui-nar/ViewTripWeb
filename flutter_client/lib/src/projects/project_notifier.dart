@@ -29,6 +29,7 @@ import 'project_people_crud_mixin.dart';
 import 'project_quota_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
+import 'trip_end_days.dart';
 
 /// Waits between the automatic retries of a failed project fetch.
 ///
@@ -1714,17 +1715,7 @@ class ProjectNotifier extends ChangeNotifier
     if (!identical(dayMeta, _orderedDayKeysCacheDayMeta) ||
         !identical(activities, _orderedDayKeysCacheActivities) ||
         !identical(items, _orderedDayKeysCacheItems)) {
-      final keys = <String>{...dayMeta.keys};
-      for (final a in activities) {
-        final ds = (a['start_date_local'] as String?)?.split('T').first;
-        if (ds != null && ds.isNotEmpty) keys.add(ds);
-      }
-      for (final item in items) {
-        if (item['item_type'] != 'memory') continue;
-        final m = item['memory'] as Map<String, dynamic>?;
-        final ds = (m?['date'] as String?)?.split('T').first;
-        if (ds != null && ds.isNotEmpty) keys.add(ds);
-      }
+      final keys = <String>{...dayMeta.keys, ...contentDayKeys(activities, items)};
       _orderedDayKeysCache = keys.toList()..sort();
       _orderedDayKeysCacheDayMeta = dayMeta;
       _orderedDayKeysCacheActivities = activities;
