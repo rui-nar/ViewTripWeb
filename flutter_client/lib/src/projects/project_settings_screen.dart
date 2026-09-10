@@ -228,12 +228,19 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     final tripEndStr = _tripEnd == null ? null : _toIso(_tripEnd!);
     if (tripEndStr != null) {
       final n = _notifier;
-      // Classify against the union of the local day-meta copy and the trip's
-      // real day list: a day is only actually removable when nothing but
-      // day-meta puts it there.
+      // A day is only actually removable when nothing but day-meta puts it
+      // there. Candidates come from the local day-meta copy, the notifier's
+      // day list and the content days themselves — the last because
+      // orderedDayKeys() is narrower than the activity panel's own bucketing
+      // (issue #370), so a day held on screen by a journal/encounter/segment
+      // alone would otherwise go unmentioned.
+      //
+      // Caveat: journals are per-user server-side, so a day pinned only by
+      // another member's journal is invisible here — see issue #372.
+      final pinned = contentDayKeys(n.activities, n.items);
       final orphans = classifyTripEndOrphans(
-        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys()},
-        daysWithContent: contentDayKeys(n.activities, n.items),
+        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys(), ...pinned},
+        daysWithContent: pinned,
         tripEnd: tripEndStr,
       );
       final gone = orphans.removable.length;

@@ -285,4 +285,31 @@ void main() {
     expect(find.text('Remove days after the end date?'), findsNothing);
     expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
   });
+
+  testWidgets('a journal-only day with no day-meta is still reported as staying',
+      (tester) async {
+    // Third review catch: the pin oracle counted journal/encounter/segment
+    // days but the candidate set did not, so a day held on screen by a
+    // journal alone — with no day-meta row of its own — was classified
+    // neither removable nor pinned, and the warning never mentioned it.
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14']),
+      items: [
+        {'item_type': 'journal', 'journal': {'id': 'j1', 'date': '2026-06-15'}},
+      ],
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+    expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14'});
+  });
 }
