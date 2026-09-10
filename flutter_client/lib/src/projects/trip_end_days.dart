@@ -24,21 +24,33 @@ class TripEndOrphans {
   const TripEndOrphans({required this.removable, required this.pinned});
 }
 
-/// Day keys ("YYYY-MM-DD") that carry an activity or a memory.
+/// Day keys ("YYYY-MM-DD") that carry trip content — an activity, or an item
+/// of any type (memory, journal, encounter, segment).
+///
+/// Every one of those buckets into a day header in the activity panel (see
+/// `_buildDisplayList`), so every one of them keeps a day on screen no matter
+/// what day-meta says. Items with no date of their own inherit the preceding
+/// dated item's date there, which can never introduce a day key the dated
+/// item did not already contribute — so ignoring that propagation here is
+/// safe for the *set* of days.
 Set<String> contentDayKeys(
   List<Map<String, dynamic>> activities,
   List<Map<String, dynamic>> items,
 ) {
   final keys = <String>{};
-  for (final a in activities) {
-    final ds = (a['start_date_local'] as String?)?.split('T').first;
+  void add(String? raw) {
+    final ds = raw?.split('T').first;
     if (ds != null && ds.isNotEmpty) keys.add(ds);
   }
+
+  for (final a in activities) {
+    add(a['start_date_local'] as String?);
+  }
   for (final item in items) {
-    if (item['item_type'] != 'memory') continue;
-    final m = item['memory'] as Map<String, dynamic>?;
-    final ds = (m?['date'] as String?)?.split('T').first;
-    if (ds != null && ds.isNotEmpty) keys.add(ds);
+    final type = item['item_type'];
+    if (type == 'activity') continue; // dated via `activities` above
+    final body = item[type] as Map<String, dynamic>?;
+    add(body?['date'] as String?);
   }
   return keys;
 }

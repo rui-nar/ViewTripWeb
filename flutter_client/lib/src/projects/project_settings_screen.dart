@@ -236,24 +236,31 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
         daysWithContent: contentDayKeys(n.activities, n.items),
         tripEnd: tripEndStr,
       );
-      if (orphans.removable.isNotEmpty) {
-        final gone = orphans.removable.length;
-        final kept = orphans.pinned.length;
-        final message = StringBuffer(
-          '$gone day${gone == 1 ? '' : 's'} after '
-          '${_fmtDate(_tripEnd!)} will be deleted.',
-        );
+      final gone = orphans.removable.length;
+      final kept = orphans.pinned.length;
+      if (gone > 0 || kept > 0) {
+        final when = _fmtDate(_tripEnd!);
+        final message = StringBuffer();
+        if (gone > 0) {
+          message.write('$gone day${gone == 1 ? '' : 's'} after $when will be '
+              'deleted.');
+        }
         if (kept > 0) {
-          message.write(
-            '\n\n$kept later day${kept == 1 ? '' : 's'} '
-            '${kept == 1 ? 'has' : 'have'} an activity or a memory and will '
-            'stay — move or delete that content first.',
-          );
+          if (gone > 0) message.write('\n\n');
+          message
+            ..write(gone > 0
+                ? '$kept later day${kept == 1 ? '' : 's'} '
+                : '$kept day${kept == 1 ? '' : 's'} after $when ')
+            ..write('${kept == 1 ? 'has' : 'have'} an activity or a memory '
+                'and will stay in the trip — move or delete that content '
+                'first.');
         }
         final confirmed = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Remove days after the end date?'),
+            title: Text(gone > 0
+                ? 'Remove days after the end date?'
+                : 'Days after the end date will stay'),
             content: Text(message.toString()),
             actions: [
               TextButton(
@@ -263,7 +270,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
                 onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Delete'),
+                child: Text(gone > 0 ? 'Delete' : 'Continue'),
               ),
             ],
           ),

@@ -1703,9 +1703,11 @@ class ProjectNotifier extends ChangeNotifier
   List<Map<String, dynamic>>? _orderedDayKeysCacheItems;
 
   /// Every day key ("YYYY-MM-DD") the project touches, ascending: the union of
-  /// day-meta days, activity dates and memory dates. This is the full-trip day
-  /// list regardless of any active filter (unlike the activity panel's
-  /// display-derived list), so it's safe to use from the add-FAB.
+  /// day-meta days, activity dates and the dates of every dated item (memory,
+  /// journal, encounter, segment) — the same buckets the activity panel turns
+  /// into day headers. This is the full-trip day list regardless of any active
+  /// filter (unlike the activity panel's display-derived list), so it's safe
+  /// to use from the add-FAB.
   ///
   /// Called from several places on every selection-triggered rebuild — the
   /// day carousel, computeSelectionStats, activeDayKey — each a fresh

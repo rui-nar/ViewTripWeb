@@ -11,9 +11,11 @@ import 'package:viewtrip_client/src/projects/trip_end_days.dart';
 
 Map<String, dynamic> _activity(String date) => {'start_date_local': date};
 
-Map<String, dynamic> _memory(String date) => {
-      'item_type': 'memory',
-      'memory': {'id': 'm-$date', 'date': date},
+Map<String, dynamic> _memory(String date) => _item('memory', date);
+
+Map<String, dynamic> _item(String type, String date) => {
+      'item_type': type,
+      type: {'id': '$type-$date', 'date': date},
     };
 
 void main() {
@@ -28,7 +30,21 @@ void main() {
       );
     });
 
-    test('ignores non-memory items and missing/empty dates', () {
+    test('counts every dated item type, not just memories', () {
+      // The activity panel turns journal/encounter/segment items into day
+      // headers exactly like memories do, so each one pins its day.
+      expect(
+        contentDayKeys(const [], [
+          _item('memory', '2026-07-01'),
+          _item('journal', '2026-07-02'),
+          _item('encounter', '2026-07-03'),
+          _item('segment', '2026-07-04'),
+        ]),
+        {'2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04'},
+      );
+    });
+
+    test('ignores missing, null and empty dates', () {
       expect(
         contentDayKeys(
           [
@@ -37,10 +53,24 @@ void main() {
             <String, dynamic>{},
           ],
           [
-            {'item_type': 'journal', 'journal': {'date': '2026-07-01'}},
-            {'item_type': 'encounter', 'encounter': {'date': '2026-07-02'}},
             {'item_type': 'memory', 'memory': null},
             {'item_type': 'memory', 'memory': {'date': ''}},
+            {'item_type': 'journal', 'journal': {'date': null}},
+            {'item_type': 'segment', 'segment': <String, dynamic>{}},
+          ],
+        ),
+        {'2026-06-14'},
+      );
+    });
+
+    test('an activity item does not need a date of its own', () {
+      // Activity items carry only an activity_id; the date lives on the
+      // activity itself, which is already covered by the activities list.
+      expect(
+        contentDayKeys(
+          [_activity('2026-06-14')],
+          [
+            {'item_type': 'activity', 'activity_id': 7},
           ],
         ),
         {'2026-06-14'},
@@ -95,6 +125,16 @@ void main() {
         tripEnd: '2026-09-30',
       );
       expect(o.removable, ['2026-10-01', '2027-01-02']);
+    });
+
+    test('every day after the end date can be pinned, leaving nothing removable', () {
+      final o = classifyTripEndOrphans(
+        dayKeys: ['2026-06-15', '2026-06-16'],
+        daysWithContent: const {'2026-06-15', '2026-06-16'},
+        tripEnd: '2026-06-14',
+      );
+      expect(o.removable, isEmpty);
+      expect(o.pinned, ['2026-06-15', '2026-06-16']);
     });
 
     test('nothing after the end date leaves both lists empty', () {

@@ -200,4 +200,49 @@ void main() {
     expect(find.text('Remove days after the end date?'), findsNothing);
     expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
   });
+
+  testWidgets('a journal-only day past the end date keeps its day-meta', (tester) async {
+    // The review catch: contentDayKeys used to count memories only, so a day
+    // held on screen by a journal entry was classified removable — the dialog
+    // promised it would go, its notes were wiped, and the day still rendered.
+    final n = _notifier(
+      tripEnd: '2026-06-14',
+      dayMeta: _days(['2026-06-14', '2026-06-15']),
+      items: [
+        {'item_type': 'journal', 'journal': {'id': 'j1', 'date': '2026-06-15'}},
+      ],
+    );
+    await _pumpSettings(tester, n);
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+    expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+    expect(find.text('Delete'), findsNothing);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
+  });
+
+  testWidgets('a fully pinned set still warns instead of saving silently', (tester) async {
+    final n = _notifier(
+      tripEnd: '2026-06-14',
+      dayMeta: _days(['2026-06-14', '2026-06-15']),
+      activities: [
+        {'start_date_local': '2026-06-15T08:00:00'},
+      ],
+    );
+    await _pumpSettings(tester, n);
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+
+    // Cancelling an informational warning must still abort the save.
+    await tester.tap(find.text('Cancel'));
+    await _frames(tester);
+    expect(putDayMeta, isEmpty);
+  });
 }
