@@ -118,6 +118,86 @@ def points_to_elevation_profile(
     return distances, elevations
 
 
+#: Half-width, in samples, of the centred moving average applied to elevations
+#: before gain is accumulated. ±5 (an 11-sample window) flattens per-sample GPS
+#: and barometric jitter without eating a real climb, which spans hundreds of
+#: samples at any normal recording rate.
+ELEV_SMOOTH_HALF_WINDOW = 5
+
+#: Metres a smoothed elevation must move away from the last counted reference
+#: before that move is treated as real ascent rather than drift.
+ELEV_GAIN_THRESHOLD_M = 3.0
+
+#: Below this many samples the moving average is skipped entirely — see
+#: :func:`_smooth_elevations`. Four times the half-window: enough series either
+#: side of a feature for the average to filter it rather than swallow it.
+ELEV_SMOOTH_MIN_SAMPLES = 4 * ELEV_SMOOTH_HALF_WINDOW
+
+
+def _smooth_elevations(elevations: List[float]) -> List[float]:
+    """Centred moving average over ``ELEV_SMOOTH_HALF_WINDOW`` samples either side.
+
+    The window is clamped at both ends rather than padded, so the first and last
+    samples average over whatever neighbours exist. Endpoints therefore keep
+    slightly more of their own noise than the middle does — immaterial for a
+    gain figure accumulated over the whole track.
+
+    Series shorter than :data:`ELEV_SMOOTH_MIN_SAMPLES` are returned untouched.
+    A window that spans a large fraction of the series does not filter it, it
+    erases it: averaging four samples of 100/150/120/170 m yields four identical
+    values and a gain of zero, when every step there is real. Below that length
+    the hysteresis band in :func:`elevation_gain` carries the whole job — the
+    absolute error it can leave over so few samples is metres.
+    """
+    n = len(elevations)
+    if n < ELEV_SMOOTH_MIN_SAMPLES:
+        return list(elevations)
+    w = ELEV_SMOOTH_HALF_WINDOW
+    out: List[float] = []
+    for i in range(n):
+        a = max(0, i - w)
+        b = min(n, i + w + 1)
+        out.append(sum(elevations[a:b]) / (b - a))
+    return out
+
+
+def elevation_gain(elevations: List[float]) -> float:
+    """Total ascent in metres over an ordered elevation series.
+
+    Summing every positive sample-to-sample delta — which is what this did until
+    issue #260 — counts sensor noise as climbing. Every upward flicker is added
+    and no downward one subtracts it, so the error accumulates in one direction
+    and grows with the sample count. On a 6000-sample track with a true 600 m
+    climb and ±1.2 m of ordinary GPS/barometric noise it reported 4094 m.
+
+    So: smooth first (:func:`_smooth_elevations`), then accumulate with a
+    hysteresis band. ``ref`` is the last elevation counted; a rise is only booked
+    once the series climbs ``ELEV_GAIN_THRESHOLD_M`` above it, and ``ref`` only
+    follows the series down once it falls that far below. Movement inside the
+    band is drift and is ignored. The same fixture then reports 598 m.
+
+    Both halves are needed. Smoothing alone leaves 644 m of residual jitter on
+    that fixture; the threshold alone leaves 1175 m, because noise still crosses
+    a 3 m band often enough over thousands of samples to matter.
+
+    Strava-synced activities never reach here — their ``total_elevation_gain``
+    arrives already processed. This is the figure for tracks we derive
+    ourselves: hand-edited pieces, splits, and GPX imports.
+    """
+    if len(elevations) < 2:
+        return 0.0
+    smoothed = _smooth_elevations(elevations)
+    gain = 0.0
+    ref = smoothed[0]
+    for value in smoothed[1:]:
+        if value - ref >= ELEV_GAIN_THRESHOLD_M:
+            gain += value - ref
+            ref = value
+        elif ref - value >= ELEV_GAIN_THRESHOLD_M:
+            ref = value
+    return gain
+
+
 @dataclass
 class TrackMetrics:
     distance: float               # metres
@@ -169,14 +249,7 @@ def recompute_track_metrics(
     distance_m = distance_km * 1000.0
 
     elevs = [p.elev for p in points if p.elev is not None]
-    gain = 0.0
-    prev: Optional[float] = None
-    for p in points:
-        if p.elev is None:
-            continue
-        if prev is not None and p.elev > prev:
-            gain += p.elev - prev
-        prev = p.elev
+    gain = elevation_gain(elevs)
     elev_high = max(elevs) if elevs else None
     elev_low = min(elevs) if elevs else None
 

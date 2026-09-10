@@ -11,6 +11,7 @@ from src.models.great_circle import haversine_km
 from src.models.track_edit import (
     TrackPoint,
     align_points,
+    elevation_gain,
     points_to_elevation_profile,
     points_to_polyline,
     recompute_track_metrics,
@@ -113,6 +114,60 @@ class TestAlignRoundTrip:
 
     def test_points_to_polyline_empty(self):
         assert points_to_polyline([]) is None
+
+
+class TestElevationGain:
+    """Regression tests for issue #260 — gain used to be a raw sum of positive
+    deltas, which counts sensor noise as climbing. The error only ever adds, so
+    it grows with the sample count: a 6000-sample track with a true 600 m climb
+    and ±1.2 m of ordinary jitter reported 4094 m.
+    """
+
+    @staticmethod
+    def _noisy_climb(n: int = 6000, peak: float = 600.0, sigma: float = 1.2):
+        """A single up-then-down climb of *peak* metres under Gaussian noise."""
+        import random
+
+        random.seed(7)
+        return [
+            200.0 + peak * (1 - abs(2 * (i / (n - 1)) - 1)) + random.gauss(0, sigma)
+            for i in range(n)
+        ]
+
+    def test_noisy_track_reports_the_real_climb(self):
+        assert elevation_gain(self._noisy_climb()) == pytest.approx(600.0, abs=25.0)
+
+    def test_raw_delta_sum_would_be_several_times_worse(self):
+        """Pins the size of the defect, so a regression can't pass quietly."""
+        elevs = self._noisy_climb()
+        raw = sum(max(0.0, b - a) for a, b in zip(elevs, elevs[1:]))
+        assert raw > 3000.0                       # what the old code returned
+        assert elevation_gain(elevs) < raw / 5    # what the fix returns
+
+    def test_short_series_keeps_its_real_steps(self):
+        """Smoothing is skipped below ELEV_SMOOTH_MIN_SAMPLES: a window that
+        spans the whole series would average 100/150/120/170 into four
+        identical values and report no climb at all."""
+        assert elevation_gain([100.0, 150.0, 120.0, 170.0]) == pytest.approx(100.0)
+
+    def test_drift_below_the_threshold_is_not_climbing(self):
+        elevs = [100.0 + (1.5 if i % 2 else -1.5) for i in range(400)]
+        assert elevation_gain(elevs) == pytest.approx(0.0)
+
+    def test_steady_climb_is_counted_in_full(self):
+        """A clean ramp comes back within ~1%: the clamped window flattens the
+        two ends slightly, and the hysteresis band can leave up to one
+        threshold's worth uncounted at the finish."""
+        elevs = [100.0 + i for i in range(500)]       # +1 m per sample, 499 m
+        assert elevation_gain(elevs) == pytest.approx(499.0, rel=0.02)
+
+    def test_pure_descent_yields_no_gain(self):
+        assert elevation_gain([500.0 - i for i in range(500)]) == pytest.approx(0.0)
+
+    def test_degenerate_series(self):
+        assert elevation_gain([]) == 0.0
+        assert elevation_gain([100.0]) == 0.0
+        assert elevation_gain([100.0, 100.0]) == 0.0
 
 
 class TestAlignPointsPerformance:
