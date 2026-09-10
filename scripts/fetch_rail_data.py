@@ -35,8 +35,10 @@ Four properties, in the order they matter:
    before it is built from**, and a region that fails leaves whatever is
    already installed exactly where it is.
 3. **Re-running converges.** A region whose store was installed from this
-   manifest's checksum is skipped, so a run interrupted after 30 of 49 regions
-   costs 19 regions the second time, not 49.
+   manifest's checksum *by this store schema* is skipped, so a run interrupted
+   after 30 of 49 regions costs 19 regions the second time, not 49 — while a
+   schema bump, which leaves the extract byte-identical, rebuilds all 49
+   instead of skipping them as up to date.
 4. **Bounded.** One region's extract plus the store built from it, and the
    extract is deleted the moment the store exists. Nothing accumulates: the
    VPS has 40 GB for two whole stacks.
@@ -46,9 +48,11 @@ Four properties, in the order they matter:
    staging directory.
 
 The record of what is installed is a sidecar ``<store>.sha256`` beside each
-store, written *after* the rename. The store itself cannot carry it — the
-builder's ``meta`` records the source file's name and date but not its digest,
-and the builder is not this step's to change.
+store, written *after* the rename, holding ``<asset digest> <store schema>``.
+The store itself cannot carry it — the builder's ``meta`` records the source
+file's name and date but not its digest, and the builder is not this step's to
+change. Both fields are part of the key: see :func:`installed_build` for why a
+digest alone turns a schema bump into a refresh that silently does not happen.
 """
 from __future__ import annotations
 
@@ -68,7 +72,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.rail.builder import build_store  # noqa: E402 — after the sys.path fix
-from src.rail.store import store_filename  # noqa: E402
+from src.rail.store import SCHEMA_VERSION, store_filename  # noqa: E402
 
 # The repository the extracts are published from. Public, so the releases API
 # answers unauthenticated (verified: GET /repos/<repo>/releases returns 200 with
@@ -183,26 +187,41 @@ def _sidecar(dest: Path, region: str) -> Path:
     return dest / (store_filename(region) + SHA_SUFFIX)
 
 
-def installed_digest(dest: Path, region: str) -> Optional[str]:
-    """The asset digest the installed store was built from, or None.
+def installed_build(dest: Path, region: str) -> Optional[tuple[str, int]]:
+    """(asset digest, store schema) the installed store was built from, or None.
 
     None whenever anything is missing or unreadable, so the region is simply
     rebuilt — this record exists to save work, never to authorise skipping it.
+
+    The schema is half of the record because the extract is not a store's only
+    input: the *builder* is the other, and a schema bump changes what the store
+    holds while the asset it was built from stays byte-identical. Keyed on the
+    digest alone, the first run after such a bump skips every region as up to
+    date and the box keeps stores the reader can only half use — a republish
+    that silently does not happen. Kept as a second field so that an old
+    sidecar, holding one token, reads as "schema unknown" and rebuilds, which
+    is exactly what that first run must do.
     """
     if not (dest / store_filename(region)).is_file():
         return None
     try:
-        return _sidecar(dest, region).read_text(encoding="utf-8").strip() or None
+        parts = _sidecar(dest, region).read_text(encoding="utf-8").split()
     except OSError:
+        return None
+    if len(parts) != 2 or not parts[0]:
+        return None
+    try:
+        return parts[0], int(parts[1])
+    except ValueError:
         return None
 
 
-def _record_digest(dest: Path, work: Path, region: str, digest: str) -> None:
+def _record_build(dest: Path, work: Path, region: str, digest: str) -> None:
     # Staged and renamed like everything else here. A torn sidecar would cost
     # only a needless rebuild, but "every file appears by atomic rename" is a
     # documented contract and an exception nobody can see is how contracts rot.
     staged = work / (store_filename(region) + SHA_SUFFIX + PART_SUFFIX)
-    staged.write_text(digest + "\n", encoding="utf-8")
+    staged.write_text(f"{digest} {SCHEMA_VERSION}\n", encoding="utf-8")
     os.replace(staged, _sidecar(dest, region))
 
 
@@ -258,7 +277,7 @@ def install_region(get: Callable, entry: dict, url: str, dest: Path, work: Path)
         # After the rename, never before: a sidecar recording a digest whose
         # store did not make it into place would make every later run skip the
         # region as "up to date" and the stale data would never be replaced.
-        _record_digest(dest, work, region, digest)
+        _record_build(dest, work, region, digest)
     finally:
         for leftover in (pbf, staged):
             try:
@@ -363,7 +382,8 @@ def _installed_manifest(dest: Path, release_manifest: dict, complete: bool) -> d
         region = entry.get("region")
         if entry.get("status", STATUS_OK) == STATUS_EMPTY:
             regions.append(entry)
-        elif entry.get("sha256") and installed_digest(dest, region) == entry["sha256"]:
+        elif (entry.get("sha256") and installed_build(dest, region)
+              == (entry["sha256"], SCHEMA_VERSION)):
             regions.append(entry)
         elif region in carried:
             regions.append(carried[region])
@@ -439,7 +459,7 @@ def refresh(
                 failed.append(region)
                 _log(f"[{region}] REFUSED: manifest entry has no sha256")
                 continue
-            if installed_digest(dest, region) == digest:
+            if installed_build(dest, region) == (digest, SCHEMA_VERSION):
                 skipped += 1
                 _log(f"[{region}] up to date ({entry.get('source_date', '?')})")
                 continue

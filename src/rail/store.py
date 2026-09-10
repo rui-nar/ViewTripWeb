@@ -38,9 +38,28 @@ from array import array
 from collections import OrderedDict
 from typing import Iterable, Optional
 
-# Bump when the schema changes shape; the reader refuses a store it cannot read
-# rather than returning wrong geometry from a half-understood file.
-SCHEMA_VERSION = 1
+# Bump when the schema changes shape. What the *builder* writes.
+SCHEMA_VERSION = 2
+
+# What the reader accepts. An explicit set, never a `>=` comparison: the point
+# of refusing a version is that a file we only half understand returns wrong
+# geometry rather than an error, and "anything at least this old" understands
+# nothing about what changed. A version listed here has a branch below that
+# says what it lacks.
+#
+# It is a *set* rather than the single current version because a schema bump is
+# otherwise an outage. `_stores_for` treats a refused file as "region not
+# covered", so a reader that accepts only its own version refuses every store on
+# the box until the data is rebuilt — and a reader shipped after the data would
+# refuse it just as flatly. Either order leaves every train resolve going to
+# Overpass, on the address Overpass has already blocked once, which is the
+# traffic issue #345 exists to stop. Accepting both lets the code ship first and
+# the data land whenever it lands.
+#
+#   1  no `relation_way.role` (members read back with role ""), no
+#      `relation_node`, so `relation_stops` is empty. Written before #359.
+#   2  current.
+_SUPPORTED_SCHEMAS = (1, 2)
 
 # Fixed-point scale for stored coordinates. 1e-7 degrees is OSM's own storage
 # precision, so encode/decode loses nothing, and 180e7 still fits in an int32.
@@ -163,11 +182,15 @@ class RailStore:
         self._conn.execute(f"PRAGMA cache_size = -{_CACHE_KIB}")
         self._conn.execute("PRAGMA query_only = 1")
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version != SCHEMA_VERSION:
+        if version not in _SUPPORTED_SCHEMAS:
             self._conn.close()
             raise RailStoreError(
-                f"{self.path}: schema version {version}, expected {SCHEMA_VERSION}"
+                f"{self.path}: schema version {version}, this reader supports "
+                f"{', '.join(str(v) for v in _SUPPORTED_SCHEMAS)}"
             )
+        # Which columns the queries below may name. A file older than the
+        # builder is read for what it holds, not refused — see _SUPPORTED_SCHEMAS.
+        self.schema = version
         self.meta = {
             k: v for k, v in self._conn.execute("SELECT key, value FROM meta")
         }
@@ -277,9 +300,22 @@ class RailStore:
     def relation_geometry(self, rel_ids: Iterable[int]) -> list[dict]:
         """Relations in Overpass ``out geom`` shape, member ways in member order.
 
-        ``_extract_relation_geometry`` reads ``members[].type`` and
-        ``members[].geometry`` only; member nodes and roles are omitted because
-        nothing consumes them.
+        ``_extract_relation_geometry`` reads ``members[].type``,
+        ``members[].role`` and ``members[].geometry``.
+
+        The role is what says whether a member way is the route's *path* or
+        something the route merely touches. Without it a station's
+        ``railway=platform`` way goes into the routing graph, and because a
+        platform is a closed ring unconnected to track it captures the endpoint
+        snap and strands Dijkstra on it — issue #359, where every correct
+        Paris Est ↔ Strasbourg relation was discarded that way. Overpass's
+        ``out geom`` has always carried it; this store did not, so filtering
+        had to wait for schema 2. A schema 1 file reads back ``""`` for every
+        role, which is "path" — the pre-#359 behaviour, unchanged, for as long
+        as that file is what the box holds.
+
+        Member nodes are omitted here because nothing consumes them; the stop
+        sequence they carry is served separately by ``relation_stops``.
 
         A member way the extract does not hold — a platform or service track
         dropped by the way filter — is still listed, with an empty geometry and
@@ -299,8 +335,9 @@ class RailStore:
             route, name = row[0]
             members = []
             missing = 0
-            for way_id, geom in self._query(
-                "SELECT rw.way_id, w.geom FROM relation_way rw "
+            role_col = "rw.role" if self.schema >= 2 else "''"
+            for way_id, role, geom in self._query(
+                f"SELECT rw.way_id, {role_col}, w.geom FROM relation_way rw "
                 "LEFT JOIN way w ON w.id = rw.way_id WHERE rw.rel_id = ? ORDER BY rw.seq",
                 (rel_id,),
             ):
@@ -309,6 +346,7 @@ class RailStore:
                 members.append({
                     "type": "way",
                     "ref": way_id,
+                    "role": role,
                     "held": held,
                     "geometry": decode_geometry(geom) if held else [],
                 })
@@ -323,6 +361,37 @@ class RailStore:
                 "missing_members": missing,
             })
         return out
+
+    def relation_stops(self, rel_id: int) -> list[dict]:
+        """The relation's node members in member order: what it calls at.
+
+        ``[{"ref", "role", "uic", "lat", "lon"}, …]``, ``uic`` empty and
+        ``lat``/``lon`` None for a node the extract does not carry — Phase 1
+        keeps nodes with a ``uic_ref`` and station/halt nodes, so an ordinary
+        stop node is named here and not located.
+
+        **Nothing in the resolver reads this yet, and that is deliberate.**
+        ``relation_uic`` answers strategy A's question — "which relation serves
+        both these codes" — as an unordered set, and it is what the pair query
+        is indexed for. What it cannot answer is *in what order* a relation
+        calls, which is what routing a leg through its intermediate stops needs
+        instead of a shortest path between its endpoints. Recording it is
+        nearly free at build time and costs a rebuild of every region to add
+        later, so it was written during the #359 bump rather than bundled into
+        whichever release first wants it.
+
+        Empty on a schema 1 file, which has no such table.
+        """
+        if self.schema < 2:
+            return []
+        return [
+            {"ref": ref, "role": role, "uic": uic, "lat": lat, "lon": lon}
+            for ref, role, uic, lat, lon in self._query(
+                "SELECT node_id, role, uic, lat, lon FROM relation_node "
+                "WHERE rel_id = ? ORDER BY seq",
+                (rel_id,),
+            )
+        ]
 
     # ------------------------------------------------------------------
     # Lookup 3 — railway ways in a bounding box  (strategy C)

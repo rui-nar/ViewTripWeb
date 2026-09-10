@@ -625,6 +625,16 @@ Monthly is ample — rail alignments change over years, and the workflow rebuild
 on the 2nd of each month. There is deliberately no timer installed: scheduling
 and data-age alerting are Phase 5 of `docs/LOCAL_RAIL_DATA_PLAN.md`.
 
+**A release that bumps the store schema also needs one of these runs**, and the
+step notices on its own: the sidecar beside each store records the schema it
+was built at as well as the asset digest, so a bump rebuilds every region even
+though the published extract has not changed. Expect `49 installed, 0 up to
+date` rather than the usual near-total skip, and roughly the time of a first
+install. It is not urgent and there is no window to plan around — the reader
+accepts the previous schema as well as the current one, so the box keeps
+serving the stores it already has until each is replaced. Issue #359 is the
+first such bump: schema 1 → 2, adding member roles and stop sequences.
+
 **No restart is needed and none is wanted.** Every file is built elsewhere and
 moved into place with an atomic rename, so a worker mid-resolve keeps reading
 the file it opened, whole, while the new one takes its name. Each process
