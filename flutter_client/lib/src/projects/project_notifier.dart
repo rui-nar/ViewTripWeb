@@ -1706,6 +1706,9 @@ class ProjectNotifier extends ChangeNotifier
   /// list regardless of any active filter (unlike the activity panel's
   /// display-derived list), so it's safe to use from the add-FAB.
   ///
+  /// Note this is narrower than the activity panel's own bucketing, which also
+  /// gives a day header to journal/encounter/segment dates — see issue #370.
+  ///
   /// Called from several places on every selection-triggered rebuild — the
   /// day carousel, computeSelectionStats, activeDayKey — each a fresh
   /// O(activities + items) scan before this cache existed. Same

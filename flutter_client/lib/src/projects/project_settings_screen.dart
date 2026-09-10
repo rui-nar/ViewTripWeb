@@ -9,6 +9,7 @@ import '../core/app_version.dart';
 import '../core/design_tokens.dart' show LineStyleKind, resolveTypeStyle, lineStyleName;
 import 'project_notifier.dart';
 import 'travel_companions_section.dart';
+import 'trip_end_days.dart';
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 const _kBg        = Color(0xFF0A1320);
@@ -227,18 +228,53 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     final tripEndStr = _tripEnd == null ? null : _toIso(_tripEnd!);
     if (tripEndStr != null) {
       final n = _notifier;
-      final orphaned = n.dayMeta.keys
-          .where((k) => k.compareTo(tripEndStr) > 0)
-          .toList();
-      if (orphaned.isNotEmpty) {
+      // A day is only actually removable when nothing but day-meta puts it
+      // there. Candidates come from the local day-meta copy, the notifier's
+      // day list and the content days themselves — the last because
+      // orderedDayKeys() is narrower than the activity panel's own bucketing
+      // (issue #370), so a day held on screen by a journal/encounter/segment
+      // alone would otherwise go unmentioned.
+      //
+      // Caveat: journals are per-user server-side, so a day pinned only by
+      // another member's journal is invisible here — see issue #372.
+      final pinned = contentDayKeys(n.activities, n.items);
+      final orphans = classifyTripEndOrphans(
+        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys(), ...pinned},
+        daysWithContent: pinned,
+        tripEnd: tripEndStr,
+      );
+      final gone = orphans.removable.length;
+      final kept = orphans.pinned.length;
+      // Days that can actually be removed are worth confirming on every save —
+      // one confirmation resolves them. Days that only *stay* are worth saying
+      // once, when the end date is set or moved: nothing the dialog offers can
+      // clear them, so raising it on an unrelated save (a colour tweak, say)
+      // would nag forever and throw the edit away if the user cancels.
+      final endMoved = tripEndStr != n.tripEnd?.split('T').first;
+      if (gone > 0 || (kept > 0 && endMoved)) {
+        final when = _fmtDate(_tripEnd!);
+        final message = StringBuffer();
+        if (gone > 0) {
+          message.write('$gone day${gone == 1 ? '' : 's'} after $when will be '
+              'deleted.');
+        }
+        if (kept > 0) {
+          if (gone > 0) message.write('\n\n');
+          message
+            ..write(gone > 0
+                ? '$kept later day${kept == 1 ? '' : 's'} '
+                : '$kept day${kept == 1 ? '' : 's'} after $when ')
+            ..write('still ${kept == 1 ? 'has' : 'have'} trip content on '
+                '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
+                'move or delete that content first.');
+        }
         final confirmed = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Remove future days?'),
-            content: Text(
-              '${orphaned.length} day${orphaned.length == 1 ? '' : 's'} after '
-              '${_fmtDate(_tripEnd!)} will be deleted.',
-            ),
+            title: Text(gone > 0
+                ? 'Remove days after the end date?'
+                : 'Days after the end date will stay'),
+            content: Text(message.toString()),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(false),
@@ -247,7 +283,7 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
               ElevatedButton(
                 style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
                 onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Delete'),
+                child: Text(gone > 0 ? 'Delete' : 'Continue'),
               ),
             ],
           ),
@@ -256,9 +292,11 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
           setState(() => _saving = false);
           return;
         }
-        final filtered = Map<String, Map<String, dynamic>>.from(n.dayMeta)
-          ..removeWhere((k, _) => k.compareTo(tripEndStr) > 0);
-        await n.saveDayMeta(newDayMeta: filtered);
+        // Prune the local copy rather than writing a filtered map here: the
+        // single saveDayMeta below sends _dayMeta, and a separate write would
+        // just be undone by that stale snapshot (issue #358).
+        final removable = orphans.removable.toSet();
+        _dayMeta.removeWhere((k, _) => removable.contains(k));
       }
     }
 
