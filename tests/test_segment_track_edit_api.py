@@ -105,6 +105,26 @@ def test_edit_track_stores_polyline_and_marks_edited(env):
     ]
 
 
+def test_edit_track_records_manual_provenance(env):
+    """issue #364. A hand-drawn track keeping whatever strategy the resolver
+    last used would have the "which segments did strategy X draw" query count a
+    person's edit as the resolver's work — the one query the persisted strategy
+    exists to answer."""
+    client, engine, uid = env
+    seg_id = client.post("/api/projects/My Trip/segments", json=_segment_body()).json()["id"]
+
+    client.put(
+        f"/api/projects/My Trip/segments/{seg_id}/track",
+        json={"points": [{"lat": 60.17, "lng": 24.94}, {"lat": 59.44, "lng": 24.75}]},
+    )
+    seg = _load_segment(engine, uid, seg_id)
+    assert seg.route_strategy == "manual"
+    # Not stamped with a resolver version: route_edited is what keeps the
+    # stale-stamp sweep away from this segment, and inventing a version for
+    # geometry no resolver produced would only obscure that.
+    assert seg.route_resolver_version == 0
+
+
 def test_edit_track_requires_at_least_two_points(env):
     client, *_ = env
     seg_id = client.post("/api/projects/My Trip/segments", json=_segment_body()).json()["id"]

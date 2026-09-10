@@ -11,7 +11,11 @@ from scalar_fastapi import get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
-from src.jobs.route_jobs import sweep_degraded_segments, sweep_orphaned_jobs
+from src.jobs.route_jobs import (
+    sweep_degraded_segments,
+    sweep_orphaned_jobs,
+    sweep_stale_resolver_segments,
+)
 from src.poster.poster_job_runner import sweep_orphaned_poster_jobs
 from src.project.project_repo import StaleWriteError
 
@@ -131,6 +135,19 @@ async def lifespan(_app: FastAPI):
     # that same budget.
     _scheduler.add_job(sweep_degraded_segments, "interval", hours=1,
                        id="degraded_segment_retry", replace_existing=True)
+    # The other half of the same problem: a resolve that *succeeded* and was
+    # wrong is invisible to the sweep above, so a resolver fix never reaches the
+    # geometry it already drew (issue #364). Segments stamped by an older
+    # resolver generation are re-resolved here, hard-capped per run because a
+    # RESOLVER_VERSION bump makes every rail segment a candidate at once.
+    #
+    # Cron on a fixed minute rather than "interval", so it does not sit
+    # permanently in step with the degraded sweep: an interval trigger counts
+    # from when it was added, and these two are added microseconds apart, so
+    # both would fire together every hour and compete for the single Overpass
+    # slot (src.jobs.upstream_slots) on every single run rather than by chance.
+    _scheduler.add_job(sweep_stale_resolver_segments, "cron", minute=20,
+                       id="stale_resolver_retry", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)
