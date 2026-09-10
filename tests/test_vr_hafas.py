@@ -15,6 +15,7 @@ import pytest
 from src.services.overpass_service import (
     OverpassError,
     RailGeometry,
+    _COMPONENT_BRIDGE_M,
     _best_relation_geometry,
     _extract_relation_geometry,
     _rail_length_ok,
@@ -356,6 +357,29 @@ class TestTrainRelationGraphExtraction:
 
         geom = _extract_relation_geometry(rel, 0.0, 0.0, 5.0, 5.0)
         # One component only — never a point from each, which is the teleport.
+        assert max(pt[0] for pt in geom) < 1.0
+
+        assert _best_relation_geometry([rel], 0.0, 0.0, 5.0, 5.0) is None
+
+    def test_naming_both_stops_does_not_buy_a_way_across_that_gap(self):
+        """#363 gave the extraction one bridge, and this is what bounds it.
+
+        The relation now names a stop at each end, exactly as the Paris
+        Montparnasse one does, so both endpoints anchor and both components are
+        eligible to be joined to what they nearly touch. They are 780 km apart,
+        against a ``_COMPONENT_BRIDGE_M`` of 250 m, so nothing is joined and the
+        answer is byte-identical to the one above. A named stop is permission to
+        cross a mapping gap, never a route to invent.
+        """
+        rel = {"id": 1, "members": [
+            self._way([(0.0, 0.0), (0.1, 0.0)]),
+            self._way([(5.0, 5.0), (5.1, 5.0)]),
+            {"type": "node", "ref": 10, "role": "stop", "lat": 0.0, "lon": 0.0},
+            {"type": "node", "ref": 11, "role": "stop", "lat": 5.0, "lon": 5.0},
+        ]}
+
+        assert _COMPONENT_BRIDGE_M < 1_000, "a bridge must stay a mapping gap"
+        geom = _extract_relation_geometry(rel, 0.0, 0.0, 5.0, 5.0)
         assert max(pt[0] for pt in geom) < 1.0
 
         assert _best_relation_geometry([rel], 0.0, 0.0, 5.0, 5.0) is None

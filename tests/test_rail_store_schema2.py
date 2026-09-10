@@ -94,8 +94,9 @@ def test_the_store_is_written_at_the_current_schema(store):
 
 
 def test_member_roles_survive_the_round_trip_verbatim(store):
-    rel = store.relation_geometry([100])[0]
-    assert [(m["ref"], m["role"]) for m in rel["members"]] == [
+    ways = [m for m in store.relation_geometry([100])[0]["members"]
+            if m["type"] == "way"]
+    assert [(m["ref"], m["role"]) for m in ways] == [
         (12, "platform"), (10, ""), (13, "forward"), (11, ""),
     ], "member order and role must both be preserved"
 
@@ -139,6 +140,76 @@ def test_a_stop_the_extract_cannot_place_is_named_not_dropped(store):
     assert stops[3]["uic"] == "" and stops[3]["lat"] is None and stops[3]["lon"] is None
     assert int(store.meta["relation_nodes"]) == 3
     assert int(store.meta["relation_nodes_located"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# …and the same sequence in `relation_geometry`, where the resolver reads it (#363)
+# ---------------------------------------------------------------------------
+
+def test_relation_geometry_carries_the_stops_in_overpass_member_shape(store):
+    """Overpass's ``out geom`` puts node members in ``members``; so does this.
+
+    Verified against overpass-api.de on relation 5928800: each node member comes
+    back as ``{"type": "node", "ref", "role", "lat", "lon"}``, all 16 located.
+    Emitting the same shape is what lets ``_relation_stop_near`` read
+    ``rel["members"]`` with no branch on which source answered — a store-only
+    accessor would have been a fix only the local source got.
+    """
+    members = store.relation_geometry([100])[0]["members"]
+    nodes = [m for m in members if m["type"] == "node"]
+
+    # Ways first, then nodes: the store keeps two sequences and cannot know how
+    # they interleaved, and putting the ways first leaves every positional
+    # expectation about way members exactly where schema 2 left it.
+    assert [m["type"] for m in members] == ["way"] * 4 + ["node"] * 3
+    assert [(m["ref"], m["role"]) for m in nodes] == [
+        (2, "stop"), (3, "stop"), (1, "stop_exit_only")]
+
+    located = next(m for m in nodes if m["ref"] == 2)
+    assert located == {"type": "node", "ref": 2, "role": "stop", "held": True,
+                       "lat": pytest.approx(49.70), "lon": pytest.approx(6.20)}
+    # `uic` is not repeated here: Overpass's member entries do not carry it, and
+    # a key only one source has is a key a consumer comes to depend on.
+    assert "uic" not in located
+
+
+def test_a_stop_the_extract_cannot_place_carries_no_coordinates(store):
+    """Overpass would have located it; we cannot, so we say so rather than lie.
+
+    ``held: False`` and *no* ``lat``/``lon`` keys, so a consumer reading
+    ``.get("lat") is not None`` is right on both sources.
+    """
+    unplaced = next(m for m in store.relation_geometry([100])[0]["members"]
+                    if m["type"] == "node" and m["ref"] == 3)
+
+    assert unplaced == {"type": "node", "ref": 3, "role": "stop", "held": False}
+    assert unplaced.get("lat") is None
+
+
+def test_missing_members_still_counts_only_the_path(store):
+    """It says how much of the relation's *path* was reconstructed.
+
+    Most node members are legitimately unlocated — France holds 11,957 of
+    18,361 — so folding them in would report a complete relation as two thirds
+    missing, and `_merge_relations` tie-breaks on this number.
+    """
+    rel = store.relation_geometry([100])[0]
+    assert rel["missing_members"] == 0
+    assert any(not m["held"] for m in rel["members"] if m["type"] == "node")
+
+
+def test_a_schema_1_store_carries_no_stops_in_relation_geometry(store, tmp_path):
+    """Schema 1 has no `relation_node`, so its relations name no stops at all.
+
+    The resolver then finds nothing to anchor on and returns exactly what it
+    returned before #363 — the pre-refresh behaviour, for as long as that file
+    is what the box holds.
+    """
+    old = _downgrade_to_schema_1(store.path, str(tmp_path / store_filename(REGION)))
+
+    with RailStore(old) as legacy:
+        members = legacy.relation_geometry([100])[0]["members"]
+        assert all(m["type"] == "way" for m in members)
 
 
 def test_relation_uic_is_unchanged_by_the_new_table(store):
