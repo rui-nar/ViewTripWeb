@@ -238,7 +238,13 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       );
       final gone = orphans.removable.length;
       final kept = orphans.pinned.length;
-      if (gone > 0 || kept > 0) {
+      // Days that can actually be removed are worth confirming on every save —
+      // one confirmation resolves them. Days that only *stay* are worth saying
+      // once, when the end date is set or moved: nothing the dialog offers can
+      // clear them, so raising it on an unrelated save (a colour tweak, say)
+      // would nag forever and throw the edit away if the user cancels.
+      final endMoved = tripEndStr != n.tripEnd?.split('T').first;
+      if (gone > 0 || (kept > 0 && endMoved)) {
         final when = _fmtDate(_tripEnd!);
         final message = StringBuffer();
         if (gone > 0) {
@@ -251,9 +257,9 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
             ..write(gone > 0
                 ? '$kept later day${kept == 1 ? '' : 's'} '
                 : '$kept day${kept == 1 ? '' : 's'} after $when ')
-            ..write('${kept == 1 ? 'has' : 'have'} an activity or a memory '
-                'and will stay in the trip — move or delete that content '
-                'first.');
+            ..write('still ${kept == 1 ? 'has' : 'have'} trip content on '
+                '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
+                'move or delete that content first.');
         }
         final confirmed = await showDialog<bool>(
           context: context,

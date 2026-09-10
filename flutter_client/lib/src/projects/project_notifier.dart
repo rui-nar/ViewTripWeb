@@ -29,7 +29,6 @@ import 'project_people_crud_mixin.dart';
 import 'project_quota_mixin.dart';
 import 'project_segment_crud_mixin.dart';
 import 'project_service.dart';
-import 'trip_end_days.dart';
 
 /// Waits between the automatic retries of a failed project fetch.
 ///
@@ -1703,11 +1702,12 @@ class ProjectNotifier extends ChangeNotifier
   List<Map<String, dynamic>>? _orderedDayKeysCacheItems;
 
   /// Every day key ("YYYY-MM-DD") the project touches, ascending: the union of
-  /// day-meta days, activity dates and the dates of every dated item (memory,
-  /// journal, encounter, segment) — the same buckets the activity panel turns
-  /// into day headers. This is the full-trip day list regardless of any active
-  /// filter (unlike the activity panel's display-derived list), so it's safe
-  /// to use from the add-FAB.
+  /// day-meta days, activity dates and memory dates. This is the full-trip day
+  /// list regardless of any active filter (unlike the activity panel's
+  /// display-derived list), so it's safe to use from the add-FAB.
+  ///
+  /// Note this is narrower than the activity panel's own bucketing, which also
+  /// gives a day header to journal/encounter/segment dates — see issue #370.
   ///
   /// Called from several places on every selection-triggered rebuild — the
   /// day carousel, computeSelectionStats, activeDayKey — each a fresh
@@ -1717,7 +1717,17 @@ class ProjectNotifier extends ChangeNotifier
     if (!identical(dayMeta, _orderedDayKeysCacheDayMeta) ||
         !identical(activities, _orderedDayKeysCacheActivities) ||
         !identical(items, _orderedDayKeysCacheItems)) {
-      final keys = <String>{...dayMeta.keys, ...contentDayKeys(activities, items)};
+      final keys = <String>{...dayMeta.keys};
+      for (final a in activities) {
+        final ds = (a['start_date_local'] as String?)?.split('T').first;
+        if (ds != null && ds.isNotEmpty) keys.add(ds);
+      }
+      for (final item in items) {
+        if (item['item_type'] != 'memory') continue;
+        final m = item['memory'] as Map<String, dynamic>?;
+        final ds = (m?['date'] as String?)?.split('T').first;
+        if (ds != null && ds.isNotEmpty) keys.add(ds);
+      }
       _orderedDayKeysCache = keys.toList()..sort();
       _orderedDayKeysCacheDayMeta = dayMeta;
       _orderedDayKeysCacheActivities = activities;

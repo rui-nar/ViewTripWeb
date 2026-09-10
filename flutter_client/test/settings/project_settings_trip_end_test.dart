@@ -103,6 +103,22 @@ Future<void> _tapSave(WidgetTester tester) async {
   await _frames(tester);
 }
 
+/// Moves the trip-end chip labelled [from] to [day] of the month it opens on.
+/// The informational half of the warning only fires when the end date is
+/// actually set or moved, so tests for it have to go through the picker.
+Future<void> _moveEndDate(
+    WidgetTester tester, String from, String day) async {
+  await tester.tap(find.text(from));
+  await _frames(tester);
+  await tester.tap(find.descendant(
+    of: find.byType(DatePickerDialog),
+    matching: find.text(day),
+  ));
+  await _frames(tester);
+  await tester.tap(find.text('OK'));
+  await _frames(tester);
+}
+
 Map<String, Map<String, dynamic>> _days(List<String> keys) => {
       for (final k in keys) k: <String, dynamic>{'note': 'note for $k'},
     };
@@ -202,17 +218,19 @@ void main() {
   });
 
   testWidgets('a journal-only day past the end date keeps its day-meta', (tester) async {
-    // The review catch: contentDayKeys used to count memories only, so a day
-    // held on screen by a journal entry was classified removable — the dialog
-    // promised it would go, its notes were wiped, and the day still rendered.
+    // The first review catch: contentDayKeys used to count memories only, so a
+    // day held on screen by a journal entry was classified removable — the
+    // dialog promised it would go, its notes were wiped, and the day still
+    // rendered.
     final n = _notifier(
-      tripEnd: '2026-06-14',
+      tripEnd: '2026-06-20',
       dayMeta: _days(['2026-06-14', '2026-06-15']),
       items: [
         {'item_type': 'journal', 'journal': {'id': 'j1', 'date': '2026-06-15'}},
       ],
     );
     await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
 
     await _tapSave(tester);
 
@@ -226,7 +244,32 @@ void main() {
     expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
   });
 
-  testWidgets('a fully pinned set still warns instead of saving silently', (tester) async {
+  testWidgets('moving the end date over a fully pinned set warns instead of saving silently',
+      (tester) async {
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14', '2026-06-15']),
+      activities: [
+        {'start_date_local': '2026-06-15T08:00:00'},
+      ],
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+
+    // Cancelling an informational warning must still abort the save.
+    await tester.tap(find.text('Cancel'));
+    await _frames(tester);
+    expect(putDayMeta, isEmpty);
+  });
+
+  testWidgets('an unrelated save is not blocked by days that can only stay',
+      (tester) async {
+    // The second review catch: warning about pinned-only days on every save
+    // raised a dialog nothing could ever satisfy — and cancelling it (the
+    // natural response when you came to change a colour) threw the edit away.
     final n = _notifier(
       tripEnd: '2026-06-14',
       dayMeta: _days(['2026-06-14', '2026-06-15']),
@@ -238,11 +281,8 @@ void main() {
 
     await _tapSave(tester);
 
-    expect(find.text('Days after the end date will stay'), findsOneWidget);
-
-    // Cancelling an informational warning must still abort the save.
-    await tester.tap(find.text('Cancel'));
-    await _frames(tester);
-    expect(putDayMeta, isEmpty);
+    expect(find.text('Days after the end date will stay'), findsNothing);
+    expect(find.text('Remove days after the end date?'), findsNothing);
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
   });
 }
