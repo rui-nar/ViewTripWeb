@@ -18,7 +18,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, insert, MetaData, Table, text
 
-from models.project_db import DBActivity
+from models.project_db import DBActivity, DBProject, DBProjectItem
 from src.models.track_edit import elevation_gain
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +56,30 @@ def _noisy_profile_json() -> str:
     return json.dumps({"distances_km": distances, "elevations_m": elevations})
 
 
+def _seed_row(engine, table_name: str, obj) -> None:
+    """Insert using only the columns that exist in *table_name* AT _PREV_REV.
+
+    Same idiom as test_migration_prune_orphaned_tails: the ORM class always
+    reflects the CURRENT model, so filtering against the reflected table keeps
+    this test immune to columns added after this migration.
+    """
+    data = {k: v for k, v in obj.__dict__.items() if not k.startswith("_sa_")}
+    tbl = Table(table_name, MetaData(), autoload_with=engine)
+    data = {k: v for k, v in data.items() if k in tbl.columns}
+    with engine.begin() as conn:
+        conn.execute(insert(tbl), data)
+
+
+def _dropout_profile_json() -> str:
+    """A ~500 m track with three points that carried no elevation."""
+    elevations = [
+        0.0 if i in (100, 101, 102) else 500.0 + (i * 0.1 if i < 150 else (300 - i) * 0.1)
+        for i in range(300)
+    ]
+    return json.dumps({"distances_km": [i * 0.01 for i in range(300)],
+                       "elevations_m": elevations})
+
+
 def _seed_activity(engine, **kwargs) -> None:
     """Insert using only the columns that exist in `activity` AT _PREV_REV.
 
@@ -63,12 +87,7 @@ def _seed_activity(engine, **kwargs) -> None:
     reflects the CURRENT model, so filtering against the reflected table keeps
     this test immune to columns added after this migration.
     """
-    obj = DBActivity(**kwargs)
-    data = {k: v for k, v in obj.__dict__.items() if not k.startswith("_sa_")}
-    tbl = Table("activity", MetaData(), autoload_with=engine)
-    data = {k: v for k, v in data.items() if k in tbl.columns}
-    with engine.begin() as conn:
-        conn.execute(insert(tbl), data)
+    _seed_row(engine, "activity", DBActivity(**kwargs))
 
 
 def _gains(engine) -> dict[int, float]:
@@ -104,12 +123,29 @@ def seeded(db):
     _seed_activity(engine, id=4, is_edited=True,
                    elevation_profile_json="v1.d3JhcHBlZA==.Y2lwaGVydGV4dA==",
                    **common)
+    # 5 — a GPX import whose track had points without <ele>. The stored profile
+    #     carries 0.0 at those samples (points_to_elevation_profile's sentinel),
+    #     so recomputing from it verbatim would invent a plunge to sea level and
+    #     a climb back out — the stored figure is the honest one.
+    _seed_activity(engine, id=-5, is_edited=False, source="gpx",
+                   elevation_profile_json=_dropout_profile_json(), **common)
+
+    # A trip holding the edited activity, with its totals already cached.
+    _seed_row(engine, "project", DBProject(
+        id=1, user_info_id=1, name="trip",
+        stats_json=json.dumps({"total_elev_m": _STORED_INFLATED})))
+    _seed_row(engine, "projectitem", DBProjectItem(
+        project_id=1, position=0, item_type="activity", activity_id=1))
     return cfg, engine, profile
 
 
 def test_backfill_corrects_derived_gains_and_spares_the_rest(seeded):
     cfg, engine, profile = seeded
-    expected = elevation_gain(json.loads(profile)["elevations_m"])
+    # Distances included, exactly as the migration reads them: the smoothing
+    # window spans metres of travel, so scoring the same series without them
+    # would produce a different number.
+    stored = json.loads(profile)
+    expected = elevation_gain(stored["elevations_m"], stored["distances_km"])
 
     command.upgrade(cfg, _BACKFILL_REV)
     gains = _gains(engine)
@@ -123,6 +159,25 @@ def test_backfill_corrects_derived_gains_and_spares_the_rest(seeded):
     assert gains[4] == pytest.approx(_STORED_INFLATED), (
         "an E2EE-enveloped profile cannot be decrypted server-side, so the row "
         "must survive the migration untouched — not zeroed (see issue #366)"
+    )
+    assert gains[-5] == pytest.approx(_STORED_INFLATED), (
+        "a profile carrying the 0.0 missing-elevation sentinel must be left "
+        "alone: recomputing from it reads each gap as a dive to sea level and "
+        "reports roughly ten times the real climb (see issue #374)"
+    )
+
+
+def test_backfill_clears_cached_trip_totals(seeded):
+    """A corrected activity inside an uncorrected trip total is still wrong to
+    the user — on their stats screen and on any public share page."""
+    cfg, engine, _ = seeded
+    command.upgrade(cfg, _BACKFILL_REV)
+    with engine.connect() as conn:
+        stats = conn.execute(
+            text("SELECT stats_json FROM project WHERE id = 1")).scalar()
+    assert stats is None, (
+        "project.stats_json caches summed elevation and is only recomputed when "
+        "NULL, so the migration must invalidate every trip it touched"
     )
 
 
