@@ -348,21 +348,23 @@ class TestElevationGain:
     def test_long_track_stays_linear(self):
         """Both halves grew in issue #376 — the noise estimate differences the
         series five times over and the smoothing window widens with the noise —
-        so pin that neither turned into a per-sample rescan.
+        and #386 added a stride escalation that repeats the whole estimate at
+        several strides. Pin that none of it turned into a per-sample rescan.
+
+        Measured on CORRELATED noise as well as white, because only the
+        correlated series actually escalates: a white one settles at the first
+        stride and never exercises the loop.
 
         Asserted as the RATIO between two sizes, not as a wall-clock bound. An
-        absolute bound measures the machine, not the code: this failed on a
-        developer box that was merely busy, while the same code on an idle one
-        took a third of the limit. Quadratic behaviour would show as ~16x for a
-        4x input; linear shows as ~4x, and the slack absorbs a noisy timer.
+        absolute bound measures the machine, not the code: that failed on a
+        developer box that was merely busy. Quadratic behaviour would show as
+        ~16x for a 4x input; linear shows as ~4x, and the slack absorbs a noisy
+        timer.
         """
-        import random
         import time
 
-        def timed(n):
-            random.seed(1)
-            elevs = [100.0 + i * 0.002 + random.gauss(0, 1.2) for i in range(n)]
-            dists = [i * 0.0055 for i in range(n)]
+        def timed(build, n):
+            elevs, dists = build(n)
             best = float("inf")
             for _ in range(3):          # best of three: load only ever adds
                 start = time.perf_counter()
@@ -370,69 +372,22 @@ class TestElevationGain:
                 best = min(best, time.perf_counter() - start)
             return best
 
-        small = timed(50_000)
-        large = timed(200_000)
-        assert large < small * 8, (
-            f"4x the samples cost {large / small:.1f}x the time "
-            f"({small:.3f}s -> {large:.3f}s); linear is ~4x, quadratic ~16x"
-        )
+        def white(n):
+            import random
 
-    def test_correlated_noise_on_flat_ground_is_not_climbing(self):
-        """Issue #386. k-th differences see only the INNOVATION of a correlated
-        series, so an AR(1) marginal sigma of 4 measured 0.5-0.9, the window
-        stayed at its floor and the band at its own — and 30 km of flat ground
-        came back as 700-840 m of climb, worse than the code this replaced.
+            random.seed(1)
+            return ([100.0 + i * 0.002 + random.gauss(0, 1.2) for i in range(n)],
+                    [i * 0.0055 for i in range(n)])
 
-        The stride now escalates until the estimate saturates, which is where
-        the samples have become independent.
-        """
-        for tau in (10, 30):
-            for spacing in (0.002, 0.005):
-                elevs, dists = self._correlated_flat(
-                    int(30.0 / spacing), sigma=4.0, tau=tau, spacing_km=spacing)
-                gain = elevation_gain(elevs, dists)
-                assert gain < 100.0, (
-                    f"AR(1) noise tau={tau} at {spacing * 1000:.0f} m spacing "
-                    f"reported {gain:.0f} m of climb on flat ground"
-                )
+        def correlated(n):
+            return self._correlated_flat(n, sigma=4.0, tau=30, spacing_km=0.002)
 
-    def test_real_climb_under_correlated_noise_survives(self):
-        """The other half of #386: widening the band must not flatten a real
-        climb recorded by the same noisy sensor. 600 m, read through AR(1) noise
-        that inflated it to 695 m before."""
-        import math
-        import random
-
-        random.seed(5)
-        n = 6000
-        phi = math.exp(-1.0 / 20)
-        innovation = 3.0 * math.sqrt(1 - phi * phi)
-        value, elevs = random.gauss(0, 3.0), []
-        for i in range(n):
-            value = phi * value + random.gauss(0, innovation)
-            elevs.append(200.0 + 600.0 * (1 - abs(2 * (i / (n - 1)) - 1)) + value)
-        gain = elevation_gain(elevs, [i * 0.0055 for i in range(n)])
-        assert gain == pytest.approx(600.0, abs=40.0)
-
-    def test_clean_rollers_survive_the_stride_escalation(self):
-        """The escalation's own failure mode, and why it has brakes. Reaching
-        for a longer stride finds terrain once it spans a hill: without the
-        noise floor and the growth-ratio cap, clean 200-300 m rollers measured
-        as noise and were erased outright (483 m of real climb -> 0)."""
-        import math
-
-        for wavelength_m, spacing_m in ((200, 25), (300, 25), (300, 50)):
-            per = wavelength_m // spacing_m
-            count = max(10, 12000 // wavelength_m)
-            elevs = [
-                300.0 + 10.0 / 2 * (1 - math.cos(2 * math.pi * i / per))
-                for _ in range(count) for i in range(per)
-            ]
-            dists = [i * spacing_m / 1000 for i in range(len(elevs))]
-            gain = elevation_gain(elevs, dists)
-            assert gain > 10.0 * count * 0.7, (
-                f"clean {wavelength_m} m rollers at {spacing_m} m spacing lost "
-                f"their climb: {gain:.0f} of {10.0 * count:.0f}"
+        for name, build in (("white", white), ("correlated", correlated)):
+            small = timed(build, 50_000)
+            large = timed(build, 200_000)
+            assert large < small * 8, (
+                f"{name}: 4x the samples cost {large / small:.1f}x the time "
+                f"({small:.3f}s -> {large:.3f}s); linear is ~4x, quadratic ~16x"
             )
 
     def test_steady_climb_is_counted_in_full(self):

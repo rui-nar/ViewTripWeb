@@ -283,6 +283,22 @@ _NOISE_MEDIAN_SAMPLE_CAP = 20_000
 #: climb, the sparse planned route — while AR(1) flat ground at marginal sigma
 #: 4 goes 839 -> 0 (tau 10) and 720 -> 0 (tau 30), and a real 600 m climb
 #: recorded under correlated noise goes 695 -> 600.
+#: Densest sample spacing, in metres, at which the escalation is allowed to run
+#: at all. Past it the terrain itself is under-sampled, and k-th differences
+#: stop being able to tell a hill from noise: 200 m rollers sampled every 50 m
+#: are four points per hill, so their third differences are large for reasons
+#: that have nothing to do with a sensor. The escalation then reads that as
+#: correlated noise, inflates sigma up to its ratio cap, and the band eats the
+#: terrain whole — measured, a clean 200 m/6 m roller series at 50 m spacing
+#: went from 360 m of real climb to 0, and a Garmin-style 40 m track over 300 m
+#: rollers from 1110 m to 0. Every one of those cases sits at 25 m or coarser.
+#:
+#: 15 m covers what the escalation is FOR — a fix-per-second recording, which
+#: is ~1.5 m per sample walking and ~7 m cycling, ~14 m at 50 km/h. Coarser than
+#: that and the series is smart-recorded or simplified, so it carries few enough
+#: samples that accumulated drift is bounded anyway.
+_NOISE_SATURATION_MAX_GAP_M = 15.0
+
 _NOISE_SATURATION_MIN_SIGMA_M = 0.4
 _NOISE_SATURATION_MAX_RATIO = 8.0
 _NOISE_SATURATION_MAX_SPAN_M = 1000.0
@@ -393,7 +409,8 @@ def _noise_estimate(
     # saturates at its true marginal sigma, terrain does not. See
     # _NOISE_SATURATION_MIN_SIGMA_M for the three brakes.
     best, best_stride = base, stride
-    if base >= _NOISE_SATURATION_MIN_SIGMA_M:
+    if (base >= _NOISE_SATURATION_MIN_SIGMA_M
+            and 0 < median_gap_m <= _NOISE_SATURATION_MAX_GAP_M):
         while True:
             wider = best_stride * 2
             span_m = wider * _NOISE_DIFFERENCE_ORDERS.stop * median_gap_m
@@ -471,7 +488,12 @@ def _smooth_elevations(
     and the band then sizes itself from the full noise.
     """
     n = len(elevations)
-    if n < 3 or not distances_km or len(distances_km) != n or median_gap_m <= 0:
+    # A zero median gap (more than half the samples sharing a position — a
+    # stationary stretch) still smooths: `wanted` collapses to nothing and the
+    # span falls back to its floor, which is what happened before the gap was
+    # hoisted out of here. Refusing to smooth instead cost a 300 m climb
+    # recorded from a stationary phone 236 m of phantom ascent.
+    if n < 3 or not distances_km or len(distances_km) != n:
         return list(elevations), 1.0
 
     wanted = stride * (sigma / ELEV_SMOOTH_TARGET_SIGMA_M) ** 2 * median_gap_m
