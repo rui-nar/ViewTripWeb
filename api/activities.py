@@ -25,6 +25,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from sqlmodel import select
 
+from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, field_validator
 
@@ -471,7 +472,14 @@ async def import_gpx_activity(
     # variant rewrites every field of the row from the snapshot loaded before
     # the mutation — so a PUT /day-meta (or any other write) committing in
     # that window was silently overwritten with pre-request values.
-    project = _repo.save_project_with_retry(
+    # In a threadpool: this handler is `async def`, and save_project_with_retry
+    # sleeps between attempts (src/project/repo_retry.py). Up to ~0.3 s of
+    # time.sleep on the event loop under contention would stall every other
+    # request on the worker. The bulk import above is a sync `def`, so Starlette
+    # already gives it a thread; this one awaits the upload, so it hands off
+    # just the blocking part.
+    project = await run_in_threadpool(
+        _repo.save_project_with_retry,
         owner_id, name, _add,
         legacy_path=_legacy_path(str(owner_id), name),
         activity_user_id=user_info_id,

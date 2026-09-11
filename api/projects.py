@@ -557,6 +557,7 @@ def update_project(
         if 'trip_end' in body.model_fields_set:
             row.trip_end = body.trip_end or None
 
+        _bump_lock_version(row)
         sess.add(row)
         sess.commit()
         result_name = row.name
@@ -586,6 +587,20 @@ class DayMetaUpdateRequest(BaseModel):
     sleeping_options: Optional[List[str]] = None
     sleeping_option_groups: Optional[Dict[str, str]] = None  # name → "Outdoors"|"Indoors"|"Other"
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
+
+
+def _bump_lock_version(row) -> None:
+    """Advance the project's optimistic-lock counter.
+
+    Every endpoint that writes DBProject columns directly must call this.
+    ``save_project(check_version=True)`` — the compare-and-swap behind
+    ``save_project_with_retry`` — is ``UPDATE ... WHERE lock_version = expected``
+    (src/project/repo_core.py). A direct write that leaves the counter alone is
+    therefore *invisible* to it: the CAS matches, and the save then rewrites the
+    whole row from the snapshot loaded before that write, silently reverting it.
+    The counter only works if every writer participates.
+    """
+    row.lock_version = (getattr(row, "lock_version", 0) or 0) + 1
 
 
 def _stored_day_meta(existing_json: str | None) -> dict:
@@ -618,7 +633,9 @@ def _day_meta_has_content(meta) -> bool:
     review).
     """
     if not isinstance(meta, dict):
-        return bool(meta)
+        # A corrupt entry is not something a user would miss, and protecting it
+        # would pin an unreadable day in place permanently.
+        return False
     return any(value not in (None, "", [], {}) for value in meta.values())
 
 
@@ -715,6 +732,7 @@ def update_day_meta(
                 for c in body.counters
             ])
         row.updated_at = time.time()
+        _bump_lock_version(row)
         sess.add(row)
         sess.commit()
     bust_project_cache(owner_id, name)
@@ -791,6 +809,7 @@ def update_track_style(
         if body.type_styles is not None:
             row.type_styles_json = json.dumps(body.type_styles)
         row.updated_at = time.time()
+        _bump_lock_version(row)
         sess.add(row)
         owner_id = row.user_info_id
         sess.commit()
@@ -814,6 +833,7 @@ def update_languages(
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         row.languages_json = json.dumps(body.languages)
         row.updated_at = time.time()
+        _bump_lock_version(row)
         sess.add(row)
         owner_id = row.user_info_id
         sess.commit()

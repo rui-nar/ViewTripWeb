@@ -575,7 +575,18 @@ class ProjectCoreMixin:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg, uid=ir.uid))
 
-        raw_dm = json.loads(getattr(row, 'day_meta_json', None) or "{}")
+        # Tolerate a stored blob that isn't an object, and days inside it that
+        # aren't either. api/projects.py guards the *write* the same way; if the
+        # loader still raised, a single bad row would 500 every project GET and
+        # every importer for that trip — the user would have no settings screen
+        # to save the repair from.
+        try:
+            raw_dm = json.loads(getattr(row, 'day_meta_json', None) or "{}")
+        except (ValueError, TypeError):
+            raw_dm = {}
+        if not isinstance(raw_dm, dict):
+            raw_dm = {}
+        raw_dm = {dk: v for dk, v in raw_dm.items() if isinstance(v, dict)}
         day_meta = {
             dk: DayMeta(
                 difficulty=v.get("difficulty"),
