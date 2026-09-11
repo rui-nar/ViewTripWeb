@@ -1,7 +1,8 @@
 /// Single-project service — wraps /api/projects/{name} and /api/geo/* endpoints.
 library;
 
-import 'package:flutter/foundation.dart' show compute, visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show compute, protected, visibleForTesting;
 
 import '../api/client.dart';
 import '../core/perf_timing.dart';
@@ -263,10 +264,15 @@ class ProjectService {
     final bucket = zoom.ceil();
     return _dedupFetch(
         'geoLod:${ref.ownerId ?? 0}:${ref.name}:$bucket:${bbox?.param ?? 'all'}',
-        () => _fetchSimplifiedGeo(ref, zoom, bbox));
+        () => fetchSimplifiedGeo(ref, zoom, bbox));
   }
 
-  Future<Map<String, dynamic>> _fetchSimplifiedGeo(
+  /// The request [getSimplifiedGeo] deduplicates. Override *this*, not
+  /// [getSimplifiedGeo], to serve the same answer from a different endpoint —
+  /// the share-token one does (issue #321) — and the dedup, and its key, stay
+  /// with the base class rather than being re-derived per subclass.
+  @protected
+  Future<Map<String, dynamic>> fetchSimplifiedGeo(
       ProjectRef ref, double zoom, GeoBox? bbox) async {
     final encoded = Uri.encodeComponent(ref.name);
     final box = bbox == null ? '' : '&bbox=${bbox.param}';
