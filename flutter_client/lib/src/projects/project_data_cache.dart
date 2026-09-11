@@ -150,6 +150,8 @@ class ProjectDataCache {
 
   Future<Map<String, dynamic>?> readLowResGeo(ProjectRef ref) =>
       _readHeavy(ref, (e) => e.lowResGeo);
+  /// L1 only in practice: a disk row's full geo is served as bytes rather
+  /// than decoded into an entry — see [_readDisk] and [readFullGeoBytes].
   Future<Map<String, dynamic>?> readFullGeo(ProjectRef ref) =>
       _readHeavy(ref, (e) => e.fullGeo);
 
@@ -179,12 +181,44 @@ class ProjectDataCache {
   Future<Map<String, dynamic>?> readFullDetails(ProjectRef ref) =>
       _readHeavy(ref, (e) => e.fullDetails);
 
+  /// Whether a full-res geo row is on disk for [ref], answered without
+  /// decompressing it — the offline seed's "already done" check (issue #317).
+  /// Reading it through [readFullGeo] would gunzip and decode several MB to
+  /// answer a yes/no question, and [readFullGeoBytes] would gunzip it.
+  ///
+  /// Always false on web, which has no L2 at all.
+  Future<bool> hasFullGeoOnDisk(ProjectRef ref) =>
+      store.cacheStoreHasFullGeo(_key(ref));
+
   void writeLowResGeo(ProjectRef ref, Map<String, dynamic> data) =>
       _writeHeavy(ref, 'lowResGeo', data);
   void writeFullGeo(ProjectRef ref, Map<String, dynamic> data) =>
       _writeHeavy(ref, 'fullGeo', data);
   void writeFullDetails(ProjectRef ref, Map<String, dynamic> data) =>
       _writeHeavy(ref, 'fullDetails', data);
+
+  /// Records [data] as the offline full-res geo for [ref] on disk **only**,
+  /// deliberately not in L1 (issue #317).
+  ///
+  /// The seed exists so a later *offline* open has a detailed track. Putting
+  /// the payload in L1 as well would make it the answer to every read for the
+  /// rest of the session (see [_readHeavy]), so the map would go back to
+  /// holding full-resolution geometry — the ~180 MB the zoom level-of-detail
+  /// path removed.
+  ///
+  /// Skipped when nothing is on file for [ref]: without a lock_version
+  /// confirmed by a live `/meta`, a row would be written that no later load
+  /// could tell was stale.
+  void seedFullGeoToDisk(ProjectRef ref, Map<String, dynamic> data) {
+    final key = _key(ref);
+    final entry = _mem[key];
+    if (entry == null) return;
+    store.cacheStoreWrite(key, {
+      'lockVersion': entry.lockVersion,
+      'schemaVersion': _kSchemaVersion,
+      'fullGeo': data,
+    });
+  }
 
   Future<Map<String, dynamic>?> _readHeavy(
       ProjectRef ref, Map<String, dynamic>? Function(_Entry) pick) async {
@@ -224,10 +258,16 @@ class ProjectDataCache {
   Future<_Entry?> _readDisk(String key) async {
     final row = await store.cacheStoreRead(key);
     if (row == null || row['schemaVersion'] != _kSchemaVersion) return null;
+    // fullGeo is deliberately absent: [cacheStoreRead] no longer decodes that
+    // column, because the Map it produced was never usable. Its coordinate
+    // lists are fresh objects that none of map_geometry_memo.dart's
+    // identity-keyed caches have seen, so `readCachedGeo` rejects them and
+    // goes to [readFullGeoBytes] anyway (issue #299) — which meant every cold
+    // load of a cached trip decoded and then retained a multi-MB payload
+    // nothing ever read (issue #317).
     final entry = _Entry(row['lockVersion'] as int)
       ..meta = row['meta'] as Map<String, dynamic>?
       ..lowResGeo = row['lowResGeo'] as Map<String, dynamic>?
-      ..fullGeo = row['fullGeo'] as Map<String, dynamic>?
       ..fullDetails = row['fullDetails'] as Map<String, dynamic>?;
     _mem[key] = entry; // promote so this session doesn't hit disk again
     return entry;

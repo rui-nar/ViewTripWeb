@@ -146,11 +146,47 @@ Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
   }
 }
 
+/// Whether a full-res geo blob is stored for [key] — a length check on the
+/// column, with no gunzip and no decode (issue #317). This is asked on every
+/// load to decide whether the offline seed still has work to do, so it must
+/// not cost what reading the payload costs.
+Future<bool> cacheStoreHasFullGeo(String key) async {
+  try {
+    final db = await _open();
+    if (db == null) return false;
+    final rows = await db.rawQuery(
+        'SELECT length(full_geo_gz) AS n FROM $_kTable WHERE cache_key = ? LIMIT 1',
+        [key]);
+    if (rows.isEmpty) return false;
+    final n = rows.first['n'];
+    return n is int && n > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Note what is *not* here: `full_geo_gz`. Decoding it produced a Map whose
+/// coordinate lists no geometry cache had ever seen, so every reader rejected
+/// it and went to [cacheStoreReadFullGeoBytes] instead (issue #299) — while
+/// the promoted copy sat in L1 for the rest of the session, several MB that
+/// nothing read (issue #317). Callers that want the geometry ask for the
+/// bytes.
 Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
   try {
     final db = await _open();
     if (db == null) return null;
-    final rows = await db.query(_kTable, where: 'cache_key = ?', whereArgs: [key], limit: 1);
+    final rows = await db.query(_kTable,
+        columns: [
+          'lock_version',
+          'schema_version',
+          'meta_gz',
+          'low_res_geo_gz',
+          'full_details_gz',
+          'updated_at',
+        ],
+        where: 'cache_key = ?',
+        whereArgs: [key],
+        limit: 1);
     if (rows.isEmpty) return null;
     final row = rows.first;
     return {
@@ -159,7 +195,6 @@ Future<Map<String, dynamic>?> cacheStoreRead(String key) async {
       'meta': await _ungz(row['meta_gz']),
       'lowResGeo': await _ungz(row['low_res_geo_gz']),
       'fullDetails': await _ungz(row['full_details_gz']),
-      'fullGeo': await _ungz(row['full_geo_gz']),
       'updatedAt': row['updated_at'] as int,
     };
   } catch (_) {

@@ -91,14 +91,25 @@ class _SharedProjectService extends ProjectService {
   Future<Map<String, dynamic>> getDetails(ProjectRef _, {bool bypassCache = false}) =>
       fetchFullDetails();
 
+  /// The base class's two full-res methods differ only in what they do to
+  /// `projectDataCache`, and this service caches nothing either way, so both
+  /// land on the one share endpoint below.
+  @override
+  Future<Map<String, dynamic>> getGeo(ProjectRef ref, {bool bypassCache = false}) =>
+      fetchFullGeoUncached(ref);
+
   /// Routed through [heavy.decodeGeoOffIsolate], not the plain JSON decode,
   /// so a shared viewer gets the same seeded coordinate/arc-midpoint caches an
   /// owner does (issue #294) instead of paying the cold derivation on the UI
   /// isolate. The share endpoint returns expanded `coordinates` rather than
   /// encoded polylines, and the expansion pass is a documented no-op on those,
   /// so sharing the owner-side path costs nothing here.
+  ///
+  /// Overriding [fetchFullGeoUncached] specifically is what keeps a shared
+  /// viewer's image export (issue #317, via the share card of issue #15) off
+  /// the owner-scoped `/api/geo/project`, which 401s for them.
   @override
-  Future<Map<String, dynamic>> getGeo(ProjectRef _, {bool bypassCache = false}) =>
+  Future<Map<String, dynamic>> fetchFullGeoUncached(ProjectRef _) =>
       () async {
         final bytes = await perfSpans.stage(
             'fetch_geo',
