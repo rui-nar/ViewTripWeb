@@ -229,17 +229,16 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     if (tripEndStr != null) {
       final n = _notifier;
       // A day is only actually removable when nothing but day-meta puts it
-      // there. Candidates come from the local day-meta copy, the notifier's
-      // day list and the content days themselves — the last because
-      // orderedDayKeys() is narrower than the activity panel's own bucketing
-      // (issue #370), so a day held on screen by a journal/encounter/segment
-      // alone would otherwise go unmentioned.
+      // there. Candidates come from the local day-meta copy — which carries
+      // the unsaved edits the notifier has not seen — and the notifier's day
+      // list, which since issue #370 is itself the union of day-meta and
+      // these same content days, so the content days need no separate spread.
       //
       // Caveat: journals are per-user server-side, so a day pinned only by
       // another member's journal is invisible here — see issue #372.
       final pinned = contentDayKeys(n.activities, n.items);
       final orphans = classifyTripEndOrphans(
-        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys(), ...pinned},
+        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys()},
         daysWithContent: pinned,
         tripEnd: tripEndStr,
       );

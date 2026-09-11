@@ -1,8 +1,8 @@
 // Unit tests for ProjectNotifier.orderedDayKeys() and activeDayKey() — the
 // day-resolution the add-FAB relies on. orderedDayKeys is the full-trip day
-// list (union of day-meta / activity / memory dates, ascending); activeDayKey
-// picks the FAB's default day: today while the trip is active, else the last
-// trip day.
+// list (union of day-meta days and every dated item's day, ascending, matching
+// the activity panel's day headers — issue #370); activeDayKey picks the FAB's
+// default day: today while the trip is active, else the last trip day.
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
@@ -54,6 +54,83 @@ void main() {
       );
     });
 
+    // Issue #370: the activity panel gives a day header to *every* dated
+    // item, so a day whose only content is a journal/encounter/segment used to
+    // render on screen while being absent from this list — the add-FAB, the
+    // day carousel and day numbering all disagreed with the panel.
+    test('includes a day whose only content is a journal entry', () {
+      final n = _notifier(items: [
+        {
+          'item_type': 'journal',
+          'journal': {'date': '2025-06-04'},
+        },
+      ]);
+      expect(n.orderedDayKeys(), ['2025-06-04']);
+    });
+
+    test('includes a day whose only content is an encounter', () {
+      final n = _notifier(items: [
+        {
+          'item_type': 'encounter',
+          'encounter': {'date': '2025-06-05'},
+        },
+      ]);
+      expect(n.orderedDayKeys(), ['2025-06-05']);
+    });
+
+    test('includes a day whose only content is a dated segment', () {
+      final n = _notifier(items: [
+        {
+          'item_type': 'segment',
+          'segment': {'date': '2025-06-06'},
+        },
+      ]);
+      expect(n.orderedDayKeys(), ['2025-06-06']);
+    });
+
+    test('an undated item adds no day', () {
+      final n = _notifier(items: [
+        {'item_type': 'journal', 'journal': <String, dynamic>{}},
+        {'item_type': 'segment', 'segment': null},
+      ]);
+      expect(n.orderedDayKeys(), isEmpty);
+    });
+
+    test('journal/encounter/segment days sort in with the activity, memory '
+        'and day-meta days', () {
+      final n = _notifier(
+        dayMeta: {'2025-06-05': {}},
+        activities: [
+          {'start_date_local': '2025-06-01T08:30:00'},
+        ],
+        items: [
+          {
+            'item_type': 'segment',
+            'segment': {'date': '2025-06-04'},
+          },
+          {
+            'item_type': 'memory',
+            'memory': {'date': '2025-06-02'},
+          },
+          {
+            'item_type': 'journal',
+            'journal': {'date': '2025-06-03'},
+          },
+          {
+            'item_type': 'encounter',
+            'encounter': {'date': '2025-06-03'}, // dup with the journal day
+          },
+        ],
+      );
+      expect(n.orderedDayKeys(), [
+        '2025-06-01',
+        '2025-06-02',
+        '2025-06-03',
+        '2025-06-04',
+        '2025-06-05',
+      ]);
+    });
+
     test('reflects a later reassignment of activities/items/dayMeta — '
         'guards the identical()-based cache against staleness', () {
       final n = _notifier(activities: [
@@ -100,6 +177,49 @@ void main() {
     test('returns null when the trip has ended and there are no days', () {
       final n = _notifier(tripEnd: '2025-06-05');
       expect(n.activeDayKey(), isNull);
+    });
+
+    // Issue #370: the FAB used to default to the last *activity* day even
+    // though the panel was already showing a later journal-only day.
+    test('returns a trailing journal-only day when the trip has ended', () {
+      final n = _notifier(
+        activities: [
+          {'start_date_local': '2025-06-01T08:30:00'},
+        ],
+        items: [
+          {
+            'item_type': 'journal',
+            'journal': {'date': '2025-06-03'},
+          },
+        ],
+        tripEnd: '2025-06-05',
+      );
+      expect(n.activeDayKey(), '2025-06-03');
+    });
+  });
+
+  group('dayTripNumbering over orderedDayKeys', () {
+    // Issue #370: the panel numbers its headers over every dated item, so a
+    // trailing journal day is "Day 3 of 3" there. Everything numbering off
+    // orderedDayKeys (the carousel, the map selection overlay) used to call
+    // the same trip 2 days long.
+    test('counts a trailing journal-only day in the trip total', () {
+      final n = _notifier(
+        activities: [
+          {'start_date_local': '2025-06-01T08:30:00'},
+        ],
+        items: [
+          {
+            'item_type': 'journal',
+            'journal': {'date': '2025-06-03'},
+          },
+        ],
+      );
+      final keys = n.orderedDayKeys();
+      expect(dayTripNumbering('2025-06-01', keys, null),
+          (dayNumber: 1, totalDays: 3));
+      expect(dayTripNumbering('2025-06-03', keys, null),
+          (dayNumber: 3, totalDays: 3));
     });
   });
 }

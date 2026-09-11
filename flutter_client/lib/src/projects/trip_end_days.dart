@@ -13,9 +13,9 @@ class TripEndOrphans {
   /// entry removes the day.
   final List<String> removable;
 
-  /// Days after the end date that carry an activity or a memory. The trip's
-  /// day list is the union of day-meta keys, activity dates and memory dates
-  /// (see [ProjectNotifier.orderedDayKeys]), so these stay visible whatever
+  /// Days after the end date that carry trip content. The trip's day list is
+  /// the union of day-meta keys and these content days (see
+  /// [ProjectNotifier.orderedDayKeys]), so these stay visible whatever
   /// day-meta says. Their day-meta is deliberately left alone: silently
   /// wiping the notes of a day the user can still see would be worse than
   /// leaving them.
