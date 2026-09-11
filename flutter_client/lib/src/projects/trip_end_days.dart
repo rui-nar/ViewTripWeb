@@ -82,3 +82,63 @@ TripEndOrphans classifyTripEndOrphans({
   }
   return TripEndOrphans(removable: removable, pinned: pinned);
 }
+
+/// Why the cross-member content check could not be answered.
+enum ContentCheckFailure {
+  /// The server was not reached at all — a genuine "you look offline".
+  unreachable,
+
+  /// The server answered and refused (404 on an older server, 403, 5xx). The
+  /// user is online, so telling them to reconnect would be wrong.
+  refused,
+}
+
+/// Builds the body of the "days after the end date" confirmation.
+///
+/// Pure so the copy can be unit-tested: the wrong sentence here is not
+/// cosmetic. Telling someone to "move or delete that content first" for a day
+/// pinned by *another member's* journal asks for something they can neither
+/// see nor touch, and saying "you're offline" when the server answered and
+/// refused sends them to fix the wrong thing.
+///
+/// [gone] is how many days will actually be deleted; [visibleKept] how many
+/// stay because of content this user can see and act on; [hiddenKept] how many
+/// stay because of content only the server can see. [failure] non-null means
+/// the check could not be run, in which case nothing is deleted.
+String tripEndWarningMessage({
+  required int gone,
+  required int visibleKept,
+  required int hiddenKept,
+  required String when,
+  ContentCheckFailure? failure,
+}) {
+  String days(int n) => '$n day${n == 1 ? '' : 's'}';
+  final out = <String>[];
+
+  if (gone > 0) {
+    out.add('${days(gone)} after $when will be deleted.');
+  }
+  if (failure != null) {
+    // An unanswered check pins every candidate, so gone is 0 here.
+    out.add('${days(visibleKept + hiddenKept)} after $when may hold content '
+        'from other trip members. That could not be checked just now, so '
+        'nothing will be deleted — '
+        '${failure == ContentCheckFailure.unreachable
+            ? 'try again once you are back online.'
+            : 'the server could not answer. Try again shortly.'}');
+    return out.join('\n\n');
+  }
+  if (visibleKept > 0) {
+    out.add('${days(visibleKept)} after $when still '
+        '${visibleKept == 1 ? 'has' : 'have'} trip content on '
+        '${visibleKept == 1 ? 'it' : 'them'} and will stay in the trip — move '
+        'or delete that content first.');
+  }
+  if (hiddenKept > 0) {
+    out.add('${days(hiddenKept)} after $when '
+        '${hiddenKept == 1 ? 'holds' : 'hold'} content belonging to other trip '
+        '${hiddenKept == 1 ? 'member' : 'members'} and will stay in the trip. '
+        'Only they can remove it.');
+  }
+  return out.join('\n\n');
+}
