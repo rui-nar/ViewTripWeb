@@ -303,6 +303,11 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     is_edited: bool = sqlmodel.Field(default=False)
     original_polyline: Optional[str] = sqlmodel.Field(default=None)
     original_elevation_profile_json: Optional[str] = sqlmodel.Field(default=None)
+    #: The gain this activity had before its first edit — Strava's own figure on
+    #: a synced activity, ours on a GPX import. Snapshotted beside the geometry
+    #: above and restored by a reset, because an edit no longer recomputes the
+    #: number from scratch: it scales whatever was there (issue #386).
+    original_total_elevation_gain: Optional[float] = sqlmodel.Field(default=None)
 
     # Split-family tracking (issue #45 follow-up). NULL on a row that has never
     # been split (or is the root of a family — the very first piece, which by

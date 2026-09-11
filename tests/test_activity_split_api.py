@@ -122,6 +122,22 @@ def test_split_distances_sum_to_original(env):
     assert acts[111]["distance"] + tail["distance"] == pytest.approx(full, rel=0.02)
 
 
+def test_split_elevation_gain_sums_to_original(env):
+    """The sibling of the distance property above, and the reason issue #386
+    added apportioning: each piece used to be measured from scratch, so cutting
+    a ride in two changed how much climb the trip contained. The pieces are
+    shares of the parent's figure now, so they add back up to it."""
+    client, engine = env
+    with Session(engine) as sess:
+        before = sess.get(DBActivity, 111).total_elevation_gain
+
+    resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
+    acts = {a["id"]: a for a in resp.json()["activities"]}
+    tail = next(a for i, a in acts.items() if i < 0)
+
+    assert acts[111]["total_elevation_gain"] + tail["total_elevation_gain"] ==         pytest.approx(before, rel=0.02)
+
+
 def test_split_tail_starts_after_head(env):
     client, _ = env
     resp = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
