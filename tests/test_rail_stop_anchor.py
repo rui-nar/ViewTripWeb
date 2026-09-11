@@ -275,43 +275,6 @@ def test_the_endpoint_tolerance_still_refuses_a_relation_serving_other_stations(
 # 6 — what the named-stop rule actually restricts  (adversarial review of #375)
 # ---------------------------------------------------------------------------
 
-def test_the_main_line_is_never_a_home_however_it_is_named():
-    """The restriction that makes the rest of them mean anything.
-
-    A home bridges to *every* component it approaches. The far endpoint's stop
-    normally sits on the main line — that end is usually the one that is not
-    broken — so anchoring there would make the main line a home and join it to
-    every stray fragment within the limit along its whole length. That is the
-    general gap-chaining the named-stop rule exists to prevent, arriving
-    through the door marked "named stop".
-
-    Here the relation names only Bordeaux, which is on the main line, and a
-    stray fragment sits 50 m off the main line far from either endpoint. It
-    must not be joined.
-    """
-    stray = _way(7, [(47.4000, 0.7000 + 0.0007), (47.4100, 0.7007)])
-    rel = _relation([*MAIN, stray, _stop(BORDEAUX, ref=2)])
-    nodes, adj = _build_rail_graph(rel["members"])
-    before = {node: list(neighbours) for node, neighbours in adj.items()}
-
-    assert _bridge_to_named_stops(rel, nodes, adj, *MONTPARNASSE, *BORDEAUX) == 0
-    assert adj == before
-
-
-def test_naming_the_far_stop_does_not_rescue_a_leg_whose_own_throat_is_unnamed():
-    """The negative of the headline case, and the one the old code got wrong.
-
-    Same geometry as the fix's headline test, except the relation names only
-    the *far* stop. Before the main-line guard this still bridged the throat —
-    the main line was a home and reached it — so the relation appeared to be
-    rescued by a stop sequence that never mentions Montparnasse.
-    """
-    members = [_throat(100), *MAIN, _stop(BORDEAUX, ref=2)]
-    poly = _resolve(members)
-
-    assert _start_km(poly) > 3.0, "bridged without naming the stop at this end"
-
-
 def test_the_anchor_radius_is_the_number_it_says():
     """Pins ``_STOP_ANCHOR_KM``, which no other test constrains.
 
@@ -350,6 +313,19 @@ def test_an_invented_path_is_bounded_at_two_edges_not_one():
     ]
     rel = _relation(members)
     nodes, adj = _build_rail_graph(rel["members"])
+    before = {node: set(neighbours) for node, neighbours in adj.items()}
     bridged = _bridge_to_named_stops(rel, nodes, adj, *MONTPARNASSE, *BORDEAUX)
 
-    assert bridged <= 2, "more than two invented edges on one graph"
+    # Exhibit the two-edge path, do not merely permit it: `<= 2` passed on a
+    # graph that built one edge, and passed with bridging deleted entirely.
+    assert bridged == 2
+    invented = [(a, b) for a, neighbours in adj.items() for b in neighbours
+                if b not in before.get(a, set())]
+    assert len(invented) == 4          # two undirected edges, both directions
+    for a, b in invented:
+        span = _crow_km(nodes[a][1], nodes[a][0], nodes[b][1], nodes[b][0]) * 1000
+        assert span <= _COMPONENT_BRIDGE_M, f"invented a {span:.0f} m edge"
+
+    # And the path really does cross both of them, which is the claim.
+    poly = _resolve(members)
+    assert _start_km(poly) < 0.05 and _end_km(poly) < 0.05

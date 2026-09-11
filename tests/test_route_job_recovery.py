@@ -726,31 +726,51 @@ class TestStaleSweepLeavesMotisGeometryAlone:
         assert sweep_stale_resolver_segments() == 0
         assert enqueued == []
 
-    def test_a_train_the_rail_resolver_did_draw_is_still_re_resolved(
+    def test_a_train_the_rail_resolver_did_draw_is_ALSO_left_alone(
             self, stale_env, monkeypatch):
-        """Not every train number means MOTIS drew it.
+        """The correction the second review round forced, and the whole point.
 
-        When MOTIS matches the train but returns fewer than two polyline
-        points, ``_compute_segment_geometry`` keeps its *stops* and hands them
-        to the rail resolver — no HAFAS failure, a rail strategy, and geometry a
-        rail fix genuinely improves. The stored strategy is what tells the two
-        cases apart, which is why the guard reads it rather than guessing from
-        the train number alone.
+        A rail strategy plus a train number is a real combination: MOTIS matches
+        the train, returns a trip with no shape, and its *stops* go to the rail
+        resolver. The first version of this guard admitted those, reasoning that
+        the rail resolver had drawn them and a rail fix could improve them.
+
+        Both true, and both beside the point. The damage is done by the resolve
+        *path*, not by whatever drew the line: re-resolving forwards the train
+        number, MOTIS is asked about a service date months gone, and the lookup
+        cannot succeed. The stored track — drawn through MOTIS's full stop list
+        — is replaced by a chord between two endpoints, and the segment is
+        flagged failed to the user. So the guard refuses on the train number.
         """
         stale_env(_stale_segment(
             train_number="ICE 596", route_strategy="relation_uic"))
         enqueued = _capture_enqueue(monkeypatch)
 
-        assert sweep_stale_resolver_segments() == 1
-        assert enqueued[0][3]["train_number"] == "ICE 596"
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
 
-    def test_a_motis_verdict_is_not_stamped_with_the_rail_version(self):
-        """The other half of the guard, at the write.
+    def test_a_motis_verdict_is_not_stamped_with_the_rail_version(
+            self, stale_env, monkeypatch):
+        """The other half of the guard, exercised at the write rather than read.
+
+        The first version of this test inspected the constant and called that
+        "at the write". Review round two pointed out that widening the set in
+        ``api.segments`` left all 67 tests green, so the guard the commit
+        message called independently verified had no test at all. This drives a
+        real ``_resolve_route_job`` and reads what it stored.
 
         Stamping a motis_trip verdict would claim a rail resolver generation
-        produced it, and every future bump would then mark it stale. The two
-        guards are independent on purpose: either alone stops the damage.
+        produced it, and every future bump would then mark it stale.
         """
+        engine, _user_id, _project_id = stale_env(_stale_segment())
+
+        assert TestTheStaleSweepTerminates._run_sweep_and_resolve(
+            monkeypatch, strategy="motis_trip") == 1
+        seg = _seg_json(engine, "seg-1")
+        assert seg["route_strategy"] == "motis_trip"
+        assert "route_resolver_version" not in seg or             seg["route_resolver_version"] == 0,             "a MOTIS verdict must not carry the rail resolver's generation"
+
+    def test_the_strategy_set_matches_what_the_resolver_can_emit(self):
         from src.jobs.route_jobs import RAIL_RESOLVER_STRATEGIES
 
         assert "motis_trip" not in RAIL_RESOLVER_STRATEGIES

@@ -74,19 +74,17 @@ RESOLVER_VERSION = 1
 # RESOLVER_VERSION bump says anything about (``RailGeometry.strategy`` in
 # src/services/overpass_service.py).
 #
-# A train segment carrying a ``train_number`` normally has none of them.
-# ``_compute_segment_geometry`` asks MOTIS for the trip first and returns its
-# track directly as ``motis_trip``, so the rail resolver never runs and no rail
-# fix can improve what is stored. Re-resolving one is not merely wasted work,
-# it is destructive: MOTIS answers from a departure board, which has nothing
-# for a train that ran months ago, so the lookup raises ``HafasError``, the
-# verdict persists ``route_hafas_failed`` with a "Train lookup failed" message
-# the client renders, and the trip's real track is replaced by a line drawn
-# between the two endpoints. The segment is then provisional, so the *uncapped*
-# ``sweep_degraded_segments`` inherits it for MAX_DEGRADE_RETRIES more attempts
-# that fail the same way. This app records past trips, so that is most train
-# segments in a deployment — the shape of traffic that got this IP banned,
-# arriving as the direct result of a fix meant to reduce it.
+# A matched train has none of them: ``_compute_segment_geometry`` returns the
+# MOTIS trip's own track as ``motis_trip`` and the rail resolver never runs, so
+# no rail fix can speak for that geometry and the version must not be stamped on
+# it — otherwise every future bump marks it stale. What stops it being *swept*
+# is :func:`_safe_to_re_resolve`, which refuses on the train number rather than
+# on the strategy, because the damage comes from the resolve path and not from
+# what drew the line.
+#
+# Keep this in step with ``RailGeometry.strategy``. A strategy added there and
+# not here is stamped nowhere and swept never — a silent hole, which is why the
+# set is asserted literally in the tests rather than derived.
 RAIL_RESOLVER_STRATEGIES = frozenset({
     "relation_uic", "relation_endpoints", "coordinate_dijkstra", "straight",
 })
@@ -382,24 +380,46 @@ def _requeue_resolve(
         return False
 
 
-def _drawn_by_the_rail_resolver(seg: ConnectingSegment) -> bool:
-    """Did the rail resolver draw this segment's stored geometry?
+def _safe_to_re_resolve(seg: ConnectingSegment) -> bool:
+    """Can this segment be re-resolved without losing what it already has?
 
-    Only geometry it drew can be improved by bumping :data:`RESOLVER_VERSION`,
-    and only that geometry is safe to redraw — see
-    :data:`RAIL_RESOLVER_STRATEGIES` for what redrawing a MOTIS trip destroys.
+    Two conditions, and the first is about the *resolve path*, not about what
+    drew the geometry — which is the distinction the first attempt at this
+    guard got wrong.
 
-    ``route_strategy`` answers it outright for anything resolved since #364.
-    For a row written before the stamp existed it is None, and "unknown" has to
-    resolve to a *refusal* wherever a wrong guess is destructive. It is only
-    destructive in one direction: a segment with a ``train_number`` had MOTIS
-    tried, so it is either a ``motis_trip`` we must not touch or a lookup that
-    already failed — and the caller has excluded the latter via
-    ``route_hafas_failed``. A segment without one never reached MOTIS at all,
-    so the rail resolver is the only thing that could have drawn it.
+    **No ``train_number``.** The sweep hands the segment's params back to
+    ``_compute_segment_geometry``, which asks MOTIS for that train on that date
+    before anything else. MOTIS answers from a departure board and holds
+    nothing for a service that ran months ago, so on a historical date the
+    lookup *cannot* succeed: it raises, the verdict persists
+    ``route_hafas_failed`` with a message the client renders, and the stored
+    track is replaced by a line between the two endpoints — drawn from two
+    points, where the original had MOTIS's full stop list. The segment is
+    provisional from then on, so the uncapped degraded sweep inherits it and
+    fails the same way for MAX_DEGRADE_RETRIES more attempts.
+
+    That is true whoever drew the geometry. A rail-drawn segment can carry a
+    train number — MOTIS matches the train but returns a trip with no shape, so
+    its *stops* go to the rail resolver — and re-resolving one destroys it just
+    as thoroughly as a ``motis_trip``. Keying this on ``route_strategy`` alone
+    admitted exactly that population.
+
+    The cost is real and accepted: train segments resolved between the rail
+    resolver arriving and the MOTIS switch carry a train number and rail-drawn
+    geometry, and this sweep will never reach them. A resolver fix reaches them
+    only if someone re-resolves the segment by hand, which is the trade against
+    silently replacing their track with a chord. Anything with a train number
+    is the user's to re-resolve, not ours.
+
+    **And geometry a rail fix can speak for.** ``route_strategy`` says so
+    outright for anything resolved since #364; for an older row it is None and
+    the first condition has already excluded the destructive case, so the rail
+    resolver is the only thing that can have drawn what remains.
     """
+    if seg.train_number:
+        return False
     if seg.route_strategy is None:
-        return not seg.train_number
+        return True
     return seg.route_strategy in RAIL_RESOLVER_STRATEGIES
 
 
@@ -472,7 +492,7 @@ def sweep_stale_resolver_segments() -> int:
                     continue
                 if seg.route_degraded or seg.route_hafas_failed:
                     continue
-                if not _drawn_by_the_rail_resolver(seg):
+                if not _safe_to_re_resolve(seg):
                     continue
                 if seg.route_resolver_version >= RESOLVER_VERSION:
                     continue
