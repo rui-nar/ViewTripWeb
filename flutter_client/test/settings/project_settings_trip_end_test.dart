@@ -9,6 +9,10 @@
 //
 // These tests drive the real screen and assert on the day-meta bodies that
 // actually reach the wire.
+//
+// The last group covers issue #372: the pin oracle now comes from the server
+// (GET /content-days), because a day another member's journal keeps on screen
+// is invisible to the caller's own item list.
 
 import 'dart:convert';
 
@@ -28,12 +32,22 @@ import 'package:viewtrip_client/src/projects/project_settings_screen.dart';
 /// Every day-meta map PUT during a test, in order.
 late List<Map<String, dynamic>> putDayMeta;
 
+/// What GET /content-days answers — the days the trip holds content on for
+/// *any* member (issue #372). [contentDaysFail] makes the request fail
+/// instead, which must never let a day be deleted.
+late List<String> serverContentDays;
+late bool contentDaysFail;
+
 ApiClient _recordingApi() => ApiClient(
       httpClient: MockClient((req) async {
         if (req.method == 'PUT' && req.url.path.endsWith('/day-meta')) {
           final body = jsonDecode(req.body) as Map<String, dynamic>;
           putDayMeta.add(body['day_meta'] as Map<String, dynamic>);
           return http.Response('', 204);
+        }
+        if (req.method == 'GET' && req.url.path.endsWith('/content-days')) {
+          if (contentDaysFail) return http.Response('boom', 500);
+          return http.Response(jsonEncode({'days': serverContentDays}), 200);
         }
         if (req.method == 'GET' && req.url.path.endsWith('/polarsteps/trips')) {
           return http.Response('[]', 200);
@@ -128,6 +142,8 @@ void main() {
 
   setUp(() {
     putDayMeta = [];
+    serverContentDays = [];
+    contentDaysFail = false;
     realApi = api;
     api = _recordingApi();
   });
@@ -298,6 +314,103 @@ void main() {
       items: [
         {'item_type': 'journal', 'journal': {'id': 'j1', 'date': '2026-06-15'}},
       ],
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+    expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14'});
+  });
+
+  // ── Issue #372: content the caller cannot see ───────────────────────────────
+
+  testWidgets('a day pinned only by a journal the caller cannot see is kept',
+      (tester) async {
+    // Journals are per-user server-side, so the caller's own item list shows
+    // nothing on 06-16 — only GET /content-days knows the companion wrote
+    // there. Classified locally, the day was "removable" and confirming the
+    // warning wiped its shared notes while it still rendered for its author.
+    final n = _notifier(
+      tripEnd: '2026-06-14',
+      dayMeta: _days(['2026-06-14', '2026-06-15', '2026-06-16']),
+    );
+    serverContentDays = ['2026-06-16'];
+    await _pumpSettings(tester, n);
+
+    await _tapSave(tester);
+
+    expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+    expect(find.textContaining('1 later day'), findsOneWidget);
+
+    await tester.tap(find.text('Delete'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-16'});
+    expect(n.dayMeta.keys, contains('2026-06-16'));
+  });
+
+  testWidgets('a failed content check deletes nothing', (tester) async {
+    // Fail safe: with the check unanswered the caller-local view is the one
+    // thing that must not decide — it is blind to exactly the content this
+    // endpoint exists to report.
+    final n = _notifier(
+      tripEnd: '2026-06-14',
+      dayMeta: _days(['2026-06-14', '2026-06-15', '2026-06-16']),
+    );
+    contentDaysFail = true;
+    await _pumpSettings(tester, n);
+
+    await _tapSave(tester);
+
+    expect(find.text('Remove days after the end date?'), findsNothing);
+    expect(putDayMeta.last.keys.toSet(),
+        {'2026-06-14', '2026-06-15', '2026-06-16'});
+  });
+
+  testWidgets('a failed content check says so when the end date moves',
+      (tester) async {
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14', '2026-06-15']),
+    );
+    contentDaysFail = true;
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+    expect(find.textContaining('could not be checked'), findsOneWidget);
+    expect(find.text('Delete'), findsNothing);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
+  });
+
+  testWidgets('a day only the server knows about is still reported as staying',
+      (tester) async {
+    // Integration gap found merging #370 and #372: the candidate set must
+    // spread the server's answer, not just the caller-visible sources. A day
+    // held on screen by another member's journal and carrying no day-meta of
+    // its own appears in *none* of _dayMeta, orderedDayKeys() or the local
+    // extraction — drop `...?serverDays` from the candidates and it is
+    // silently left out of the dialog, since classifyTripEndOrphans only
+    // reports days it is handed. Nothing is mis-deleted (there is no day-meta
+    // to delete), but the warning under-reports, which is the defect class
+    // #358 was about.
+    serverContentDays = ['2026-06-15'];
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14']),
     );
     await _pumpSettings(tester, n);
     await _moveEndDate(tester, 'Jun 20, 2026', '14');

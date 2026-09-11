@@ -7,6 +7,7 @@ Routes:
     GET    /api/projects/{name}/meta     — get project metadata (lightweight)
     GET    /api/projects/{name}/elevation  — compact per-activity elevation profiles
     GET    /api/projects/{name}/memory-photos — photo uuids per memory (poll-sized)
+    GET    /api/projects/{name}/content-days  — day keys holding content for any member
     GET    /api/projects/{name}/stats    — get project statistics
     PUT    /api/projects/{name}          — update project name or dates
     DELETE /api/projects/{name}          — delete a project
@@ -57,7 +58,16 @@ from api.project_shared import (
     queue_share_tiles_refresh,
     queue_stats_refresh,
 )
-from models.project_db import DBMemory, DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
+from models.project_db import (
+    DBActivity,
+    DBEncounter,
+    DBJournalEntry,
+    DBMemory,
+    DBProject,
+    DBProjectItem,
+    DBProjectMember,
+    DBProjectSyncMeta,
+)
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quota
@@ -352,6 +362,66 @@ def get_project_memory_photos(
             for mem_id, photos_json in rows
         }
     }
+
+
+def _day_key(raw: Optional[str]) -> str:
+    """The "YYYY-MM-DD" part of a date or datetime string; "" when absent."""
+    return (raw or "").split("T")[0]
+
+
+@router.get("/{name}/content-days", summary="Days holding content for any member")
+def get_project_content_days(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
+):
+    """``{"days": ["YYYY-MM-DD", ...]}`` — every day this trip holds content on
+    for *any* member: activities, memories, journal entries, encounters and
+    dated segments (issue #372).
+
+    A client cannot answer this for itself. Journal entries are per-user, so
+    every item list the API serves hides other members' ones (see
+    ``journal_visible_positions``); a day whose only content is another
+    member's journal therefore looks empty to the caller. The settings screen
+    needs the unfiltered answer before it prunes the days past a new trip end
+    date, or it deletes the *shared* day-meta of a day that still renders for
+    the member who owns that journal.
+
+    Deliberately not filtered by caller — that is the whole point — and it
+    leaks nothing beyond the dates themselves: no journal text, no author, not
+    even a count. Viewer tier is enough: every member already sees these days
+    as day headers in their own trip view.
+    """
+    user_info_id = int(current_user["sub"])
+    days: set[str] = set()
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        for model in (DBMemory, DBJournalEntry, DBEncounter):
+            days.update(
+                _day_key(d) for d in sess.exec(
+                    select(model.date).where(model.project_id == row.id)
+                ).all()
+            )
+        days.update(
+            _day_key(d) for d in sess.exec(
+                select(DBActivity.start_date_local)
+                .join(DBProjectItem, DBProjectItem.activity_id == DBActivity.id)
+                .where(DBProjectItem.project_id == row.id)
+            ).all()
+        )
+        # Segments carry their date inside the serialised ConnectingSegment,
+        # and an undated one is placed by its neighbours rather than by a day
+        # of its own — _day_key drops those to "".
+        for segment_json in sess.exec(
+            select(DBProjectItem.segment_json).where(
+                DBProjectItem.project_id == row.id,
+                DBProjectItem.item_type == "segment",
+            )
+        ).all():
+            if segment_json:
+                days.add(_day_key(json.loads(segment_json).get("date")))
+    days.discard("")
+    return {"days": sorted(days)}
 
 
 @router.get("/{name}/stats", summary="Get project statistics")
