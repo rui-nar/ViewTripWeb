@@ -940,13 +940,37 @@ def _bridge_to_named_stops(
     intersect still surface as a several-metre gap in the middle of that median.
     The populations are not separable by geometry alone.
 
-    Telling them apart needs ``layer``/``bridge``/``tunnel``, and the graph
-    carries none: ``_build_rail_graph`` keeps coordinates and adjacency only,
-    the store's ``way`` table is ``(id, rail, geom)``, and Overpass's ``out
-    geom`` returns member geometry without member tags. A fix is a store schema
-    bump *plus* an extra Overpass query per relation to hold parity — paid on an
-    address Overpass has banned once, against a failure nobody has yet shown
-    happens. #385 measures that first.
+    **Then measured, #385** — every edge this builds across France's 1,371
+    ``route=train`` relations, 557 of them, against the joined ways' real
+    ``layer``/``bridge``/``tunnel``:
+
+        meet end-to-end, same level    150   a plain missing junction
+        meet end-to-end, levels differ  48   a bridge abutment or tunnel
+                                             portal — the level changes *along*
+                                             the line and the join is correct
+                                             (18 of them are traversed)
+        cross, same level              348   a mid-line junction, correct
+        cross, levels differ            11   the false-junction shape:
+                                             **none traversed**
+
+    So the hazard is real and has never been reached. Eleven invented junctions
+    exist in the graph and no resolved path walks one, because the relations
+    carrying them are already connected where the route needs to go. Eleven is
+    an upper bound: two span ~200 m, which is a membership gap across a tunnel
+    rather than a crossing.
+
+    That also kills the third heuristic, the one the first two suggest.
+    *"Require both endpoints to be way-ends"* needs no tags and does separate
+    the 48 legitimate abutments from the 11 crossings — but alone it refuses
+    **64%** of all bridges (359/557), 348 of them legitimate same-level
+    mid-line junctions. Only terminality *and* level together isolate the 11,
+    and level is exactly what nothing here carries: ``_build_rail_graph`` keeps
+    coordinates and adjacency, the store's ``way`` table is ``(id, rail,
+    geom)``, and Overpass's ``out geom`` returns member geometry without member
+    tags. That is a store schema bump plus an Overpass query per relation to
+    hold parity, on an address Overpass has banned once, to delete eleven edges
+    nothing walks. Left alone deliberately; re-run the measurement before
+    paying for it.
 
     Doing nothing is the common case and costs one graph traversal: 238 of the
     400 France relations measured have a single component and return here.
