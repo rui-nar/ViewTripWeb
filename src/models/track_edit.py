@@ -107,6 +107,30 @@ def points_to_elevation_profile(
 ) -> Optional[Tuple[List[float], List[float]]]:
     """Re-derive ``(distances_km, elevations_m)`` from an ordered point list.
 
+    Points that carry no elevation are INTERPOLATED across, linearly by
+    cumulative distance between the bracketing known samples; a gap at the very
+    start or end extends the nearest known value. Until issue #374 they were
+    stored as ``0.0``, which is a fabricated reading, not a missing one: a track
+    through the Alps with three ``<ele>``-less points was stored as diving to
+    sea level and climbing back out. Anything recomputing from that series read
+    the dive as real — a 300-point track at ~500 m measured 12.1 m of gain on
+    the live import path and 152.3 m recomputed from its own stored profile.
+    The chart, which plots this array verbatim, drew the dive too.
+
+    Interpolating rather than carrying ``None`` through the profile, because:
+
+    * :func:`align_points` already interpolates by cumulative distance when it
+      reads a profile back, so the value stored here is the value every reader
+      would have derived anyway — the gap is filled once, consistently, instead
+      of differently by each reader;
+    * the array stays numeric, which is what the chart and the low-res
+      downsample (``downsample_elevation``) require — carrying ``None`` means
+      teaching every reader, client included, to skip holes;
+    * it makes a recompute from storage agree with the live path.
+      :func:`recompute_track_metrics` drops elevation-less points while still
+      accumulating their distance, so it sees a straight run between the
+      bracketing samples — exactly what the interpolated series holds.
+
     Returns ``None`` when no point carries an elevation value (so the caller
     stores no elevation profile rather than a degenerate all-None one).
     """
@@ -116,8 +140,43 @@ def points_to_elevation_profile(
     for i in range(1, len(points)):
         distances.append(distances[-1] + haversine_km(
             points[i - 1].lat, points[i - 1].lng, points[i].lat, points[i].lng))
-    elevations = [p.elev if p.elev is not None else 0.0 for p in points]
-    return distances, elevations
+    return distances, interpolate_elevation_gaps(
+        distances, [p.elev for p in points])
+
+
+def interpolate_elevation_gaps(
+    distances_km: List[float], elevations: List[Optional[float]],
+) -> List[float]:
+    """Fill the ``None`` holes in an elevation series, by cumulative distance.
+
+    Interior gaps are a straight line between the bracketing known samples;
+    a leading or trailing gap extends the nearest known value, there being
+    nothing on the other side to aim at. Every element must be ``None`` or a
+    number and at least one must be a number.
+
+    Shared with the repair migration for issue #374, which maps the stored
+    ``0.0`` sentinel back to ``None`` and calls this — so already-stored rows
+    are repaired to exactly what the fixed writer would have produced.
+    """
+    known = [i for i, e in enumerate(elevations) if e is not None]
+    if not known:
+        raise ValueError("no point carries an elevation")
+    filled: List[float] = [
+        e if e is not None else 0.0 for e in elevations]  # holes overwritten below
+    for i in range(known[0]):
+        filled[i] = filled[known[0]]
+    for i in range(known[-1] + 1, len(filled)):
+        filled[i] = filled[known[-1]]
+    for a, b in zip(known, known[1:]):
+        if b == a + 1:
+            continue
+        d0, d1 = distances_km[a], distances_km[b]
+        e0, e1 = filled[a], filled[b]
+        span = d1 - d0
+        for i in range(a + 1, b):
+            frac = (distances_km[i] - d0) / span if span else 0.0
+            filled[i] = e0 + frac * (e1 - e0)
+    return filled
 
 
 #: Distance, in metres of travel, spanned by the centred moving average applied

@@ -420,3 +420,87 @@ class TestAlignPointsPerformance:
         # The old O(N*M) scan took 20+ seconds at this size; a healthy
         # implementation finishes in well under a second.
         assert elapsed < 3.0, f"align_points took {elapsed:.2f}s for {n} points"
+
+
+class TestElevationGapInterpolation:
+    """Issue #374 — points with no ``<ele>`` used to be stored as ``0.0``.
+
+    That is a fabricated reading, not a missing one: a track at 500 m with three
+    elevation-less points was stored as diving to sea level and climbing back
+    out, which the chart drew and any recompute-from-storage believed. They are
+    interpolated across now, by cumulative distance, matching what
+    ``align_points`` already derives when it reads a profile back.
+    """
+
+    #: Roughly 10 m of latitude, so a 300-point fixture spans ~3 km.
+    _STEP_DEG = 10.0 / 111320.0
+
+    @classmethod
+    def _track(cls, missing=(), n=300):
+        """A ~3 km out-and-back at ~500 m, with *missing* indices lacking <ele>."""
+        pts = []
+        for i in range(n):
+            elev = 500.0 + (i * 0.1 if i < n // 2 else (n - i) * 0.1)
+            pts.append(TrackPoint(46.0 + i * cls._STEP_DEG, 8.0,
+                                  None if i in missing else elev))
+        return pts
+
+    def test_gap_in_the_middle_is_interpolated_not_zeroed(self):
+        pts = self._track(missing=(100, 101, 102))
+        distances, elevations = points_to_elevation_profile(pts)
+
+        assert 0.0 not in elevations, "no fabricated sea-level sample"
+        assert min(elevations) >= 500.0, "the track never leaves 500 m"
+        # A straight line between the bracketing samples: the fixture climbs
+        # 0.1 m per point, so the filled values continue that slope.
+        assert elevations[100] == pytest.approx(510.0, abs=0.01)
+        assert elevations[101] == pytest.approx(510.1, abs=0.01)
+        assert elevations[102] == pytest.approx(510.2, abs=0.01)
+        assert len(distances) == len(elevations) == len(pts)
+
+    def test_gap_at_the_start_extends_the_first_known_value(self):
+        """Nothing sits on the far side of a leading gap to aim at."""
+        pts = self._track(missing=(0, 1, 2))
+        _, elevations = points_to_elevation_profile(pts)
+        assert elevations[0] == pytest.approx(elevations[3])
+        assert elevations[1] == pytest.approx(elevations[3])
+        assert elevations[2] == pytest.approx(elevations[3])
+
+    def test_gap_at_the_end_extends_the_last_known_value(self):
+        pts = self._track(missing=(297, 298, 299))
+        _, elevations = points_to_elevation_profile(pts)
+        assert elevations[299] == pytest.approx(elevations[296])
+        assert elevations[298] == pytest.approx(elevations[296])
+        assert elevations[297] == pytest.approx(elevations[296])
+
+    def test_no_gaps_leaves_the_series_untouched(self):
+        pts = self._track()
+        _, elevations = points_to_elevation_profile(pts)
+        assert elevations == [p.elev for p in pts]
+
+    def test_all_none_still_returns_none(self):
+        """A point list with no elevation at all stores no profile, as before."""
+        pts = [TrackPoint(46.0, 8.0, None), TrackPoint(46.001, 8.0, None)]
+        assert points_to_elevation_profile(pts) is None
+
+    def test_recompute_from_storage_matches_the_live_path(self):
+        """The property the whole fix exists for (issue #374 criterion 2).
+
+        ``recompute_track_metrics`` drops elevation-less points while still
+        accumulating their distance, so it sees a straight run between the
+        bracketing samples — which is exactly what the interpolated series
+        holds. Storing ``0.0`` instead made the two disagree 16-fold.
+        """
+        pts = self._track(missing=(100, 101, 102))
+        live = recompute_track_metrics(pts).total_elevation_gain
+
+        distances, elevations = points_to_elevation_profile(pts)
+        from_storage = elevation_gain(elevations, distances)
+
+        assert from_storage == pytest.approx(live, abs=1.0)
+
+        sentinel = [p.elev if p.elev is not None else 0.0 for p in pts]
+        assert elevation_gain(sentinel, distances) > live * 10, (
+            "guard on the fixture itself: the old sentinel series must still "
+            "read as a huge phantom climb, or this test proves nothing"
+        )
