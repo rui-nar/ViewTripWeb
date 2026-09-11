@@ -288,3 +288,37 @@ def test_a_preserved_day_keeps_its_counters_exactly_once(env):
     assert _stored(engine) == {
         "2026-07-04": {"note": "shared", "counters": [{"name": "c", "value": 2}]}
     }
+
+
+# ── A malformed stored blob must not 500 the write ───────────────────────────
+
+@pytest.mark.parametrize("blob", ['"null"', "null", "[1, 2]", "not json", '"a string"'])
+def test_a_malformed_day_meta_row_does_not_break_the_write(env, blob):
+    """day_meta_json is expected to hold an object. A hand-edited row, a bad
+    migration or an older bug can leave something else there, and reading it
+    with a bare .items() turned every settings save for that trip into a 500 —
+    which the client reads as "cannot save at all"."""
+    client, engine, ids, _ = env
+    with Session(engine) as sess:
+        row = sess.exec(select(DBProject).where(DBProject.name == "Trip")).one()
+        row.day_meta_json = blob
+        sess.add(row)
+        sess.commit()
+
+    _put(client, {"2026-07-04": {"note": "written over the rubble"}})
+
+    assert _stored(engine) == {"2026-07-04": {"note": "written over the rubble"}}
+
+
+def test_a_day_entry_that_is_not_an_object_does_not_break_counter_merging(env):
+    """Same for one bad day inside an otherwise fine map."""
+    client, engine, _, _ = env
+    with Session(engine) as sess:
+        row = sess.exec(select(DBProject).where(DBProject.name == "Trip")).one()
+        row.day_meta_json = '{"2026-07-04": "rubble", "2026-07-05": {"note": "fine"}}'
+        sess.add(row)
+        sess.commit()
+
+    _put(client, {"2026-07-05": {"note": "fine"}})
+
+    assert _stored(engine) == {"2026-07-05": {"note": "fine"}}

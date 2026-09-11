@@ -588,6 +588,26 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
+def _stored_day_meta(existing_json: str | None) -> dict:
+    """The stored day-meta map, or ``{}`` for anything that is not one.
+
+    ``day_meta_json`` is expected to hold a JSON object, but a hand-edited row,
+    a bad migration or an older bug can leave ``"null"``, a list, or a broken
+    blob there. Reading it with a bare ``json.loads(...).items()`` turns that
+    into a 500 on every settings save for that trip, which the client reads as
+    "cannot save at all" — and, since #387, also as "cannot prune days". An
+    unreadable map means nothing to preserve and nothing to protect, so the
+    write proceeds on the caller's data rather than failing outright.
+    """
+    if not existing_json:
+        return {}
+    try:
+        parsed = json.loads(existing_json)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _day_meta_has_content(meta) -> bool:
     """True when a day-meta entry holds anything a user would miss.
 
@@ -622,9 +642,8 @@ def _keep_days_the_caller_cannot_see(
     there was something to lose. Clearing a day you can see still works, an
     empty entry still goes, and a day with no content at all still prunes.
     """
-    existing = json.loads(existing_json) if existing_json else {}
     dropped = {
-        key: meta for key, meta in existing.items()
+        key: meta for key, meta in _stored_day_meta(existing_json).items()
         if key not in incoming and _day_meta_has_content(meta)
     }
     if not dropped:
@@ -650,9 +669,10 @@ def _merge_day_meta_preserve_counters(incoming: dict, existing_json: str | None)
     This protects against a Flutter app saving settings from a session that
     started before an enrichment script added counter values.
     """
-    existing = json.loads(existing_json) if existing_json else {}
     merged = dict(incoming)
-    for date_key, existing_day in existing.items():
+    for date_key, existing_day in _stored_day_meta(existing_json).items():
+        if not isinstance(existing_day, dict):
+            continue
         existing_counters = existing_day.get("counters")
         if existing_counters:
             incoming_day = merged.get(date_key)
