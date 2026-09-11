@@ -216,6 +216,18 @@ class FixtureOverpass:
                     "SELECT rw.way_id, w.geom FROM relation_way rw LEFT JOIN way w "
                     "ON w.id = rw.way_id WHERE rw.rel_id = ? ORDER BY rw.seq", (rel_id,))
             ]
+            # Node members, as `out geom` returns them: ref, role and a location
+            # for every one of them. Overpass locates them all; the store can
+            # only locate the nodes its extract kept, and that difference is
+            # exactly what the parity tests exist to expose rather than hide.
+            members += [
+                {"type": "node", "ref": node_id, "role": role,
+                 "lat": lat, "lon": lon}
+                for node_id, role, lat, lon in self.conn.execute(
+                    "SELECT node_id, role, lat, lon FROM relation_node "
+                    "WHERE rel_id = ? ORDER BY seq", (rel_id,))
+                if lat is not None
+            ]
             tags = {"route": row[0]}
             if row[1]:
                 tags["name"] = row[1]

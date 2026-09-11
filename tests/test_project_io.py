@@ -470,3 +470,50 @@ class TestDataclassRoundTrips:
         restored = ConnectingSegment.from_dict({})
         assert restored.route_degraded is False
         assert restored.route_degrade_retries == 0
+
+    # ── Resolver provenance (issue #364) ─────────────────────────────────────
+
+    def test_connecting_segment_provenance_round_trips(self):
+        seg = ConnectingSegment(
+            id="seg-1", segment_type="train",
+            route_resolver_version=3, route_strategy="relation_uic",
+        )
+        restored = ConnectingSegment.from_dict(seg.to_dict())
+        assert restored.route_resolver_version == 3
+        assert restored.route_strategy == "relation_uic"
+
+    def test_a_segment_written_before_the_stamp_reads_as_version_zero(self):
+        """Deliberate, and the choice the whole issue turns on: an absent stamp
+        means "produced by a resolver older than any we stamped", so the stale
+        sweep reaches exactly the rows #359 drew wrongly. Reading it as
+        "unknown, leave it alone" would have the mechanism reach nothing at all
+        on the day it shipped and only ever help future bugs.
+        """
+        restored = ConnectingSegment.from_dict({"id": "s", "route_status": "resolved"})
+        assert restored.route_resolver_version == 0
+        assert restored.route_strategy is None
+
+    def test_the_db_row_mapper_carries_the_stamp_too(self):
+        """ProjectRepo reads segments through its own mapper, not from_dict, and
+        anything that mapper omits is *destroyed* rather than merely unread:
+        ``save_project`` writes every item's payload back from ``to_dict()``, so
+        a dropped field returns as its dataclass default on the next reorder.
+
+        For the stamp that would mean reverting a segment to version 0 every
+        time the user moved an item around, and the stale sweep re-resolving it
+        — the same re-resolve treadmill RESOLVER_VERSION's bump rule exists to
+        prevent, reached by editing a trip rather than by bumping a constant.
+        """
+        from src.project.repo_row_mappers import RowMappersMixin
+
+        stored = json.dumps(ConnectingSegment(
+            id="seg-1", segment_type="train", route_status="resolved",
+            route_resolver_version=2, route_strategy="coordinate_dijkstra",
+            route_degrade_retries=4,
+        ).to_dict())
+        seg = RowMappersMixin._json_to_segment(stored)
+        assert seg.route_resolver_version == 2
+        assert seg.route_strategy == "coordinate_dijkstra"
+        # Same omission, same consequence: the degraded retry budget was being
+        # silently reset to 0 by every structural save (issue #207's counter).
+        assert seg.route_degrade_retries == 4

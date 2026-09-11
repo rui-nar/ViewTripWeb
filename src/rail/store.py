@@ -298,10 +298,11 @@ class RailStore:
         return {r[0] for r in rows}
 
     def relation_geometry(self, rel_ids: Iterable[int]) -> list[dict]:
-        """Relations in Overpass ``out geom`` shape, member ways in member order.
+        """Relations in Overpass ``out geom`` shape: member ways, then member nodes.
 
         ``_extract_relation_geometry`` reads ``members[].type``,
-        ``members[].role`` and ``members[].geometry``.
+        ``members[].role``, ``members[].geometry`` and — since #363 — the
+        ``lat``/``lon`` of the node members.
 
         The role is what says whether a member way is the route's *path* or
         something the route merely touches. Without it a station's
@@ -314,8 +315,34 @@ class RailStore:
         role, which is "path" — the pre-#359 behaviour, unchanged, for as long
         as that file is what the box holds.
 
-        Member nodes are omitted here because nothing consumes them; the stop
-        sequence they carry is served separately by ``relation_stops``.
+        The node members are the relation's stops, and they are here rather
+        than only in ``relation_stops`` because Overpass's ``out geom`` puts
+        them here: ``{"type": "node", "ref", "role", "lat", "lon"}``, verified
+        against overpass-api.de on relation 5928800, whose 16 node members all
+        come back located. Emitting them in the same place means the resolver's
+        stop anchor (#363) reads ``rel["members"]`` and works on both sources
+        with no branch — a store-only accessor would have been a fix that only
+        the local source got, which Phase 4 of docs/LOCAL_RAIL_DATA_PLAN.md
+        exists to prevent.
+
+        Two differences from Overpass, both deliberate. **Ways come first, then
+        nodes**, because the store keeps the two member sequences in separate
+        tables and cannot reconstruct how they interleaved; each sequence is in
+        member order within itself, which is what order means for the stops.
+        And a node the extract cannot place — Phase 1 keeps nodes with a
+        ``uic_ref`` and station/halt nodes, so an ordinary stop node is named
+        and not located — carries ``"held": False`` and *no* ``lat``/``lon``
+        keys, where Overpass would have located it. So a consumer reads the
+        coordinates with ``.get("lat") is not None`` and is right on both
+        sources. ``uic`` is not repeated here: it is not in Overpass's member
+        entries, and a key only one source carries is a key a consumer can come
+        to depend on. ``relation_stops`` remains the way to ask for it.
+
+        ``missing_members`` still counts **way** members only. It is what says
+        how much of the relation's *path* was reconstructed, which is what
+        ``_merge_relations`` breaks ties on, and most node members are
+        legitimately unlocated (France: 11,957 of 18,361) — folding them in
+        would report a complete relation as two thirds missing.
 
         A member way the extract does not hold — a platform or service track
         dropped by the way filter — is still listed, with an empty geometry and
@@ -350,6 +377,12 @@ class RailStore:
                     "held": held,
                     "geometry": decode_geometry(geom) if held else [],
                 })
+            for stop in self.relation_stops(rel_id):
+                member = {"type": "node", "ref": stop["ref"],
+                          "role": stop["role"], "held": stop["lat"] is not None}
+                if member["held"]:
+                    member["lat"], member["lon"] = stop["lat"], stop["lon"]
+                members.append(member)
             tags = {"route": route}
             if name:
                 tags["name"] = name

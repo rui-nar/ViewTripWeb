@@ -490,8 +490,19 @@ def _merge_members(a: dict, b: dict) -> dict:
 
     Both list the relation's membership in full and in member order — the store
     records a member it does not hold rather than skipping it, precisely so the
-    lists line up — so the merge is positional, and guarded by the way id in case
-    the two extracts were cut from different days' data.
+    lists line up — so the merge is positional, and guarded by the member id in
+    case the two extracts were cut from different days' data.
+
+    Node members merge the same way and for the same reason: a relation's stop
+    is located only in the extract that holds the node, so a cross-border leg
+    would otherwise have the stop it anchors on (#363) in the neighbour's file
+    and unlocated in ours.
+
+    ``missing_members`` keeps counting **way** members only, as the store does:
+    it is what says how much of the relation's path was reconstructed, and most
+    node members are legitimately unlocated (France: 11,957 of 18,361), so
+    counting them would make every complete relation look mostly missing — and
+    this function tie-breaks on that number.
     """
     if len(a["members"]) != len(b["members"]):
         return a if a["missing_members"] <= b["missing_members"] else b
@@ -500,4 +511,5 @@ def _merge_members(a: dict, b: dict) -> dict:
         for ma, mb in zip(a["members"], b["members"])
     ]
     return {**a, "members": members,
-            "missing_members": sum(1 for m in members if not m["held"])}
+            "missing_members": sum(1 for m in members
+                                   if m["type"] == "way" and not m["held"])}

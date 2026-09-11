@@ -48,6 +48,52 @@ MAX_ATTEMPTS = 3
 # any other resolve.
 MAX_DEGRADE_RETRIES = 5
 
+# The generation of the rail resolver that produced a segment's geometry
+# (issue #364), stamped on every resolve as ``route_resolver_version``.
+# :func:`sweep_stale_resolver_segments` re-resolves anything below it, which is
+# what lets a resolver fix reach the geometry it already got wrong — nothing
+# else does, because nothing re-resolves a segment that did not fail.
+#
+# ── BUMP THIS ONLY WHEN A CHANGE ALTERS THE GEOMETRY A RESOLVE PRODUCES ──
+# The test is one question: run the resolver again on an unchanged segment —
+# would it now return a *different* polyline? A new or reordered strategy, a
+# change to how the routing graph is built, a fixed member filter (#359/#361):
+# yes, bump. Logging, a refactor, a new mirror in the endpoint list, a timeout
+# tweak, a release that happens to ship on the same day: no, leave it.
+#
+# Getting that wrong is not free. A bump makes every rail segment in the
+# deployment a candidate, and each one costs a full re-resolve to arrive at a
+# byte-identical answer. A stamp that moves every release is a permanent
+# re-resolve treadmill against a rate-limited public API.
+#
+# 1 — first stamped generation. Includes #361 (station platforms kept out of
+#     the routing graph); a segment stamped 0 predates the stamp entirely.
+RESOLVER_VERSION = 1
+
+# How many stale-stamp segments one sweep may queue.
+#
+# Deliberately not MAX_DEGRADE_RETRIES, which bounds a *per-segment* budget: a
+# version bump makes every rail segment stale simultaneously, so what needs
+# bounding here is the per-run count.
+#
+# The scarce resource is Overpass slot-seconds, not our CPU or wall clock:
+# ``_OVERPASS_CONCURRENCY`` is 1 (src/services/overpass_service.py), one rail
+# resolve issues four or five queries, and the endpoint measurements there put
+# a healthy query at 8.4s and an unreachable host at the full ``_TIMEOUT_HTTP``
+# of 60s. One re-resolve is therefore ~40s of the hour at best, ~5 minutes at
+# worst.
+#
+# 3 per hourly run is ~2 minutes of a good hour (3%) and ~15 minutes of a bad
+# one (25%), leaving the rest of the single slot to user-triggered resolves and
+# to sweep_degraded_segments, which is uncapped per run. It also drains a
+# few-hundred-segment deployment over a couple of days rather than in one pass
+# — slow is the point, not a compromise: a version bumped by mistake is noticed
+# and reverted long before it has re-resolved much, and this deployment's IPv4
+# was hard-banned by overpass-api.de in September 2026 for precisely this shape
+# of traffic. Under ``RAIL_SOURCE=local`` the cost is disk instead of quota and
+# the cap is merely conservative, which is the right way round.
+MAX_STALE_RESOLVES_PER_SWEEP = 3
+
 TERMINAL = ("done", "failed")
 
 
@@ -215,10 +261,6 @@ def sweep_degraded_segments() -> int:
     :func:`sweep_orphaned_jobs` reads ``DBRouteJob`` rows directly instead of
     going through a heavier path.
     """
-    from api.geo import bust_geo_cache
-    from api.segments import _resolve_route_job
-    from src.jobs.queue import QUEUE_RESOLVE, enqueue
-
     candidates: list = []
     try:
         with get_session() as sess:
@@ -250,39 +292,181 @@ def sweep_degraded_segments() -> int:
 
     retried = 0
     for project_id, user_info_id, name, seg_id, retries, params in candidates:
-        started_at = datetime.now(timezone.utc).isoformat()
-        try:
-            with get_session() as sess:
-                # Only if still resolved: a manual trigger or edit racing this
-                # sweep owns the outcome instead.
-                written = _repo.update_segment_fields(
-                    sess, project_id, seg_id,
-                    {
-                        "route_status": "pending",
-                        "route_started_at": started_at,
-                        "route_degrade_retries": retries + 1,
-                    },
-                    expect_status="resolved",
-                )
-                sess.commit()
-        except Exception:  # noqa: BLE001
-            _log.exception("could not mark seg=%s pending for a degraded retry", seg_id)
-            continue
-        if not written:
-            continue
-        # Mirrors resolve_segment_route: a cached /meta must not keep serving
-        # the pre-retry "resolved+degraded" state, including to a client's own
-        # periodic degraded-route-upgrade check (project_notifier.dart).
-        bust_geo_cache(user_info_id, name)
-
-        job_id = create_job(user_info_id, project_id, name, seg_id, started_at, params)
-        try:
-            enqueue(QUEUE_RESOLVE, _resolve_route_job,
-                    user_info_id, name, seg_id, params, started_at, job_id)
+        if _requeue_resolve(
+            project_id, user_info_id, name, seg_id, params,
+            extra_fields={"route_degrade_retries": retries + 1},
+            reason="degraded retry",
+        ):
             retried += 1
-        except Exception:  # noqa: BLE001
-            _log.exception("could not enqueue degraded retry for seg=%s", seg_id)
 
     if retried:
         _log.info("retried %d provisionally-resolved segment(s)", retried)
+    return retried
+
+
+def _requeue_resolve(
+    project_id: int, user_info_id: int, name: str, seg_id: str,
+    params: Dict[str, Any], *, extra_fields: Dict[str, Any], reason: str,
+) -> bool:
+    """Flip one resolved segment back to pending and queue a fresh resolve.
+
+    Shared by both sweeps: the compare-and-set, the cache bust and the
+    job-row-before-queue ordering are the parts that are easy to get subtly
+    wrong, and two sweeps disagreeing about any of them would be worse than the
+    indirection. The only thing they differ on is *extra_fields* — the degraded
+    sweep spends a retry from the per-segment budget, the stale-stamp sweep has
+    no counter to spend (see :func:`sweep_stale_resolver_segments`).
+
+    Returns True when a resolve was actually queued. Never raises: a sweep runs
+    on the scheduler, and one bad segment must not cost the rest of the batch.
+    """
+    from api.geo import bust_geo_cache
+    from api.segments import _resolve_route_job
+    from src.jobs.queue import QUEUE_RESOLVE, enqueue
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_session() as sess:
+            # Only if still resolved: a manual trigger or edit racing this
+            # sweep owns the outcome instead. This is also what stops the two
+            # sweeps double-queueing a segment that is both degraded and stale
+            # — whichever ran first has already taken it out of "resolved".
+            written = _repo.update_segment_fields(
+                sess, project_id, seg_id,
+                {
+                    "route_status": "pending",
+                    "route_started_at": started_at,
+                    **extra_fields,
+                },
+                expect_status="resolved",
+            )
+            sess.commit()
+    except Exception:  # noqa: BLE001
+        _log.exception("could not mark seg=%s pending for a %s", seg_id, reason)
+        return False
+    if not written:
+        return False
+    # Mirrors resolve_segment_route: a cached /meta must not keep serving
+    # the pre-retry "resolved+degraded" state, including to a client's own
+    # periodic degraded-route-upgrade check (project_notifier.dart).
+    bust_geo_cache(user_info_id, name)
+
+    job_id = create_job(user_info_id, project_id, name, seg_id, started_at, params)
+    try:
+        enqueue(QUEUE_RESOLVE, _resolve_route_job,
+                user_info_id, name, seg_id, params, started_at, job_id)
+        return True
+    except Exception:  # noqa: BLE001
+        _log.exception("could not enqueue %s for seg=%s", reason, seg_id)
+        return False
+
+
+def sweep_stale_resolver_segments() -> int:
+    """Re-resolve rail segments produced by an older resolver. Returns how many.
+
+    The gap this closes (issue #364): every flag a segment carries records
+    whether a resolve *failed*, so a resolve that succeeded and was wrong is
+    invisible to every mechanism we have. #359 came back
+    ``strategy=relation_endpoints``, ``degraded=False``, 6567 points, a
+    plausible 492 km — and started 13.9 km from the station it claimed to leave.
+    :func:`sweep_degraded_segments` will never look at that, so #361 fixed the
+    resolver and changed nothing for the trips already drawn. Comparing the
+    segment's stamp against :data:`RESOLVER_VERSION` is what makes a resolver
+    fix reach stored geometry at all.
+
+    Scope and guards, each load bearing:
+
+    * **Rail only.** The stamp tracks the rail resolver's generation, and
+      ``api.segments._compute_segment_geometry`` raises ``ValueError`` for a
+      flight segment — queueing one would kill a worker, not resolve anything.
+    * **No stored geometry, nothing to redo.** ``route_status`` is not enough on
+      its own: moving a segment's endpoints (``update_segment``) drops the
+      polyline and puts the route back to ``great_circle`` while leaving the
+      status at "resolved", so without the ``route_polyline`` check this sweep
+      would draw rail track on a segment the user had just reset to a plain arc.
+    * **``route_edited`` is skipped, explicitly.** That guard is *not* inherited
+      from :func:`sweep_degraded_segments`: the track-edit endpoint clears
+      ``route_degraded`` and ``route_hafas_failed``, so a hand-drawn track is
+      invisible to that sweep by accident of the flags rather than by a check.
+      A stale stamp has no such accident — an edited segment keeps whatever
+      version it was last resolved at, normally 0 — so without this line the
+      first version bump would silently discard every hand-drawn track in the
+      deployment (issue #150).
+    * **Already-provisional segments are skipped.** A degraded or HAFAS-fallback
+      segment belongs to the other sweep, which will re-resolve it with the new
+      resolver and stamp the version as a side effect. Disjoint candidate sets
+      mean one segment cannot consume both budgets.
+    * **At most :data:`MAX_STALE_RESOLVES_PER_SWEEP` per run** — the arithmetic
+      behind the number is with the constant.
+
+    One attempt per segment per version bump, deliberately: the resolve stamps
+    the current version on *any* resolved verdict, degraded included, so a
+    segment cannot come back for a second try. That choice has a real cost worth
+    naming — a re-resolve attempted while every Overpass mirror is unreachable
+    replaces good track with a straight chord. It is bounded rather than avoided:
+    the result is flagged degraded, shown as such in the UI, and
+    :func:`sweep_degraded_segments` then owns it with a fresh
+    ``MAX_DEGRADE_RETRIES`` attempts to get real track back. Refusing to write a
+    degraded verdict here instead would leave the segment stale forever, re-read
+    every hour, and starve the cap with segments that cannot succeed.
+    """
+    candidates: list = []
+    try:
+        with get_session() as sess:
+            rows = sess.exec(
+                select(DBProjectItem, DBProject.user_info_id, DBProject.name)
+                .join(DBProject, DBProject.id == DBProjectItem.project_id)
+                .where(DBProjectItem.item_type == "segment")
+            ).all()
+            for row, user_info_id, name in rows:
+                seg = ConnectingSegment.from_dict(json.loads(row.segment_json or "{}"))
+                if seg.segment_type != "train":
+                    continue
+                if seg.route_status != "resolved":
+                    continue
+                if not seg.route_polyline:
+                    continue
+                if seg.route_edited:
+                    continue
+                if seg.route_degraded or seg.route_hafas_failed:
+                    continue
+                if seg.route_resolver_version >= RESOLVER_VERSION:
+                    continue
+                candidates.append((
+                    row.project_id, user_info_id, name, seg.id,
+                    {
+                        "hafas_provider": seg.hafas_provider,
+                        "train_number": seg.train_number,
+                        "date": seg.date,
+                    },
+                ))
+                if len(candidates) >= MAX_STALE_RESOLVES_PER_SWEEP:
+                    # Stop reading, not merely stop enqueueing: the rows past the
+                    # cap cost a JSON parse each and will still be here next hour.
+                    # Taking them in row order drains the backlog deterministically
+                    # and cannot starve on a bad segment, because a swept segment
+                    # leaves the candidate set whatever happens — a resolved
+                    # verdict stamps the current version, and every other outcome
+                    # leaves route_status something other than "resolved".
+                    break
+    except Exception:  # noqa: BLE001 — a broken sweep must not take the scheduler down
+        _log.exception("stale-resolver sweep failed to read candidates")
+        return 0
+
+    retried = 0
+    for project_id, user_info_id, name, seg_id, params in candidates:
+        if _requeue_resolve(
+            project_id, user_info_id, name, seg_id, params,
+            # No counter to bump: the resolve stamps RESOLVER_VERSION on its
+            # verdict, and that is what takes the segment out of this candidate
+            # set. route_degrade_retries belongs to the other sweep and is left
+            # exactly as it was.
+            extra_fields={},
+            reason="stale-resolver re-resolve",
+        ):
+            retried += 1
+
+    if retried:
+        _log.info("re-resolving %d segment(s) stamped below resolver v%d",
+                  retried, RESOLVER_VERSION)
     return retried
