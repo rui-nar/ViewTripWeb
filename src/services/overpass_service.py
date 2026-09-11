@@ -910,11 +910,43 @@ def _bridge_to_named_stops(
       approximation ``_dijkstra`` weights its edges with, so what is drawn is
       what was measured.
 
-    Known and unmitigated: two components of one relation that cross without a
-    junction — a grade separation — are 0 m apart and will be joined, giving
-    Dijkstra a junction that does not exist. Telling that from the missing
-    junction this function is *for* needs ``layer``/``bridge``/``tunnel`` tags
-    the graph does not carry.
+    **Known and unmitigated: grade separation** (issue #385). Two components of
+    one relation that cross without a junction — a flyover, a dive-under — are
+    0 m apart in plan view and will be joined, giving Dijkstra a junction no
+    train can use. It is the one wrong-route class this function can create that
+    nothing downstream catches: the invented edge is metres long and therefore
+    nearly free, so a shortest path is drawn *to* it, and ``_rail_length_ok``
+    rejects results that are implausibly long while this produces a short one.
+    What bounds it is that both components are members of the same relation, so
+    both are track this train runs on somewhere.
+
+    Two cheap geometric defences look obvious and are both measured dead
+    (412 invented edges over 600 France ``route=train`` relations):
+
+    * *"refuse an edge that joins mid-way on both sides"* — the crossing
+      signature, and also **66%** (273/412) of all bridges, because relation
+      member ways are chopped into pieces and most vertices are interior by
+      construction. A legitimate junction between two through tracks looks
+      identical.
+    * *"refuse an edge shorter than some floor"* — a crossing is 0 m and a real
+      gap is wider, except it is not: 505 of the 868 component gaps surveyed sit
+      within 10 m, and #359's defect at Gare de l'Est was two distinct nodes
+      **1.30 m** apart. Any floor high enough to exclude crossings excludes most
+      of the gaps this exists to close.
+
+    Nor does the span distribution settle it — min 1.04 m, median 8.14 m, none
+    under 1 m. Closest approach is measured vertex to vertex, not segment to
+    segment, and rail vertices are tens of metres apart, so two ways that truly
+    intersect still surface as a several-metre gap in the middle of that median.
+    The populations are not separable by geometry alone.
+
+    Telling them apart needs ``layer``/``bridge``/``tunnel``, and the graph
+    carries none: ``_build_rail_graph`` keeps coordinates and adjacency only,
+    the store's ``way`` table is ``(id, rail, geom)``, and Overpass's ``out
+    geom`` returns member geometry without member tags. A fix is a store schema
+    bump *plus* an extra Overpass query per relation to hold parity — paid on an
+    address Overpass has banned once, against a failure nobody has yet shown
+    happens. #385 measures that first.
 
     Doing nothing is the common case and costs one graph traversal: 238 of the
     400 France relations measured have a single component and return here.
