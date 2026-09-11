@@ -342,3 +342,136 @@ def simplify_lonlat(poly: list, tolerance_m: float) -> list:
             stack.append((i, at))
             stack.append((at, j))
     return [p for p, k in zip(poly, keep) if k]
+
+
+# Bump when anything changes what :func:`simplify_for_zoom` would return for a
+# given line and level — the tolerance formula, ``MAX_INPUT_POINTS``,
+# ``MIN_POINTS``, or the RDP itself. Persisted alongside every prepared line so
+# a stale row is detected rather than served (issue #369).
+#
+# Deliberately cheap to bump, unlike ``RESOLVER_VERSION``: recomputing is ~25 ms
+# of local CPU per activity and calls no upstream API, so a bump costs a
+# backfill sweep rather than a re-resolve treadmill.
+PREPARED_GEO_VERSION = 1
+
+# The deepest level the geo endpoints accept (they validate 0 <= zoom <= 22 and
+# ``math.ceil`` it, so 22 is the largest integer level ever asked for).
+MAX_ZOOM_LEVEL = 22
+
+# A vertex no level in 0..MAX_ZOOM_LEVEL keeps: collinear, or inside the
+# tolerance even at the finest zoom. Stored rather than dropped so the level
+# array stays index-aligned with the working set.
+NEVER_KEPT = 255
+
+
+def vertex_levels(poly: list) -> bytes:
+    """For each vertex of *poly*, the lowest zoom level that keeps it.
+
+    The identity this exists for: filtering by ``level <= L`` gives exactly the
+    points :func:`simplify_lonlat` would keep at level *L*'s tolerance, so a
+    line can be simplified once and served at every level. That turns a
+    per-request Ramer-Douglas-Peucker pass — over a second for a whole trip at
+    any zoom — into a list comprehension (issue #369).
+
+    Why it holds. RDP keeps a vertex when the deviation at its split exceeds
+    the tolerance. Recording that deviation per vertex, and **clamping it to
+    its parent's**, makes the hierarchy nest: a vertex can never be kept by a
+    tolerance that already discarded the split above it, which is what makes
+    "was it selected" a property of the vertex rather than of the traversal.
+    Filtering by ``deviation > eps`` is then the same set, and quantising to
+    the lowest integer level whose ``eps`` it clears loses nothing, because the
+    endpoints only ever ask for integer levels.
+
+    *poly* must be the :func:`working_set` — the levels are computed against
+    the projection scale and midpoint latitude of the line they are stored
+    with, exactly as :func:`simplify_for_zoom` computes them from the working
+    set it simplifies.
+
+    Endpoints are level 0 (always kept); a vertex no level keeps is
+    :data:`NEVER_KEPT`. Returns one byte per vertex.
+    """
+    n = len(poly)
+    if n < 3:
+        # simplify_for_zoom returns such a line unchanged at every level.
+        return bytes(n)
+
+    # Same projection, same scale clamp and same degenerate-denominator branch
+    # as simplify_lonlat: the identity is by construction, not by luck.
+    scale = max(math.cos(math.radians(midpoint_latitude(poly))), 0.01)
+    proj = [(p[0] * scale, p[1]) for p in poly]
+
+    deviation = [0.0] * n
+    deviation[0] = deviation[n - 1] = math.inf
+    # Iterative for the same reason simplify_lonlat is: an 11k-point trip would
+    # otherwise risk the stack.
+    stack = [(0, n - 1, math.inf)]
+    while stack:
+        i, j, parent = stack.pop()
+        if j - i < 2:
+            continue
+        ax, ay = proj[i]
+        bx, by = proj[j]
+        dx, dy = bx - ax, by - ay
+        den = math.hypot(dx, dy)
+        worst, at = -1.0, -1
+        for k in range(i + 1, j):
+            px, py = proj[k]
+            if den == 0:
+                dist = math.hypot(px - ax, py - ay)
+            else:
+                dist = abs(dy * px - dx * py + bx * ay - by * ax) / den
+            if dist > worst:
+                worst, at = dist, k
+        # Unlike simplify_lonlat there is no tolerance to compare against and
+        # so no pruning: every interior vertex becomes the split of some
+        # subrange exactly once, and every one gets a deviation.
+        clamped = min(worst, parent)
+        deviation[at] = clamped
+        stack.append((i, at, clamped))
+        stack.append((at, j, clamped))
+
+    latitude = midpoint_latitude(poly)
+    # Monotonically decreasing in level, so the first level a vertex clears is
+    # also every deeper one.
+    epsilons = [
+        zoom_tolerance_m(level, latitude) / 111_000.0
+        for level in range(MAX_ZOOM_LEVEL + 1)
+    ]
+    levels = bytearray(n)
+    for index in range(n):
+        value = deviation[index]
+        if value == math.inf:
+            continue  # endpoint, level 0
+        lowest = NEVER_KEPT
+        for level, eps in enumerate(epsilons):
+            if value > eps:
+                lowest = level
+                break
+        levels[index] = lowest
+    return bytes(levels)
+
+
+def filter_to_level(
+    poly: list,
+    levels: bytes,
+    level: int,
+    *,
+    min_points: int = MIN_POINTS,
+) -> list:
+    """*poly* reduced to *level* using the precomputed *levels*.
+
+    Equivalent to ``simplify_for_zoom(poly, level)`` for a *poly* that is
+    already a :func:`working_set` and a *levels* from :func:`vertex_levels` on
+    that same list — including the ``min_points`` floor, which is applied on
+    the same condition and to the same line.
+
+    The bounding-box branch is not repeated here: a caller that has a box
+    decides between this and :func:`floor_line` itself, as the geo endpoints
+    already do.
+    """
+    if len(poly) < 3:
+        return poly
+    kept = [p for p, lowest in zip(poly, levels) if lowest <= level]
+    if len(kept) >= min_points:
+        return kept
+    return floor_line(poly, min_points=min_points)
