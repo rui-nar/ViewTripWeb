@@ -389,13 +389,18 @@ def get_project_content_days(
 
     Deliberately not filtered by caller — that is the whole point — and it
     leaks nothing beyond the dates themselves: no journal text, no author, not
-    even a count. Viewer tier is enough: every member already sees these days
-    as day headers in their own trip view.
+    even a count.
+
+    Editor tier, not viewer: a journal-only day is precisely the day a member
+    does *not* see in their own trip view, so answering for every member does
+    disclose that *somebody* wrote something that day. Only the day-meta prune
+    consumes this, and that write is editor-gated already, so nothing is lost
+    by matching it.
     """
     user_info_id = int(current_user["sub"])
     days: set[str] = set()
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
+        row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         for model in (DBMemory, DBJournalEntry, DBEncounter):
             days.update(
                 _day_key(d) for d in sess.exec(
@@ -418,8 +423,18 @@ def get_project_content_days(
                 DBProjectItem.item_type == "segment",
             )
         ).all():
-            if segment_json:
-                days.add(_day_key(json.loads(segment_json).get("date")))
+            if not segment_json:
+                continue
+            try:
+                parsed = json.loads(segment_json) or {}
+                days.add(_day_key(parsed.get("date")))
+            except (ValueError, TypeError, AttributeError):
+                # A blob that isn't a JSON object can't name a day. Skipping it
+                # over-deletes nothing (the day simply isn't pinned by this
+                # segment) and keeps a single malformed row from 500-ing the
+                # check, which the client reads as "can't prune at all".
+                # Mirrors src/billing/trip_days.py:project_day_bounds.
+                continue
     days.discard("")
     return {"days": sorted(days)}
 

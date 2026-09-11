@@ -165,18 +165,47 @@ def test_days_do_not_leak_between_projects(env):
 
 # ── Access ────────────────────────────────────────────────────────────────────
 
-def test_every_member_including_a_viewer_may_read_it(env):
-    """A viewer cannot change anything, but they see these days as day headers
-    in their own trip view already — and a co-owner editing the end date needs
-    the same answer whatever their tier."""
+def test_editor_and_owner_may_read_it(env):
+    """Editor tier, matching the only write that consumes this answer."""
     client, engine, ids, act_as = env
     with Session(engine) as sess:
         sess.add(DBMemory(project_id=ids["project"], date="2026-07-01"))
         sess.commit()
 
-    for who in ("owner", "editor", "viewer"):
+    for who in ("owner", "editor"):
         act_as(who)
         assert _days(client, owner_id=ids["owner"]) == ["2026-07-01"], who
+
+
+def test_a_viewer_may_not_read_it(env):
+    """A journal-only day is exactly the day a viewer does NOT see in their own
+    trip view, so this endpoint would disclose that somebody wrote something
+    that day. A viewer can't prune days anyway — PUT /day-meta is editor+."""
+    client, engine, ids, act_as = env
+    with Session(engine) as sess:
+        sess.add(DBMemory(project_id=ids["project"], date="2026-07-01"))
+        sess.commit()
+
+    act_as("viewer")
+    r = client.get(f"/api/projects/Trip/content-days?owner={ids['owner']}")
+    assert r.status_code == 403
+
+
+def test_a_malformed_segment_blob_does_not_break_the_check(env):
+    """A single bad row must not 500 the endpoint: the client reads a failure
+    as "cannot prune at all", which would be permanent for that trip."""
+    client, engine, ids, _ = env
+    with Session(engine) as sess:
+        sess.add(DBMemory(project_id=ids["project"], date="2026-07-01"))
+        sess.add(DBProjectItem(
+            project_id=ids["project"], item_type="segment", position=0,
+            segment_json="null"))
+        sess.add(DBProjectItem(
+            project_id=ids["project"], item_type="segment", position=1,
+            segment_json="not json at all"))
+        sess.commit()
+
+    assert _days(client) == ["2026-07-01"]
 
 
 def test_a_non_member_gets_the_same_404_as_a_missing_project(env):

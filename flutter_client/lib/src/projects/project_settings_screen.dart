@@ -229,15 +229,26 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
   /// a day another member's journal keeps on screen. A null here must never
   /// be read as "that day is empty": the caller-local view is exactly the one
   /// that deletes a still-visible day's shared day-meta.
-  Future<Set<String>?> _fetchContentDays() async {
+  Future<({Set<String>? days, ContentCheckFailure? failure})>
+      _fetchContentDays() async {
     final ref = _notifier.ref;
-    if (ref == null) return null;
+    if (ref == null) {
+      return (days: null, failure: ContentCheckFailure.refused);
+    }
     try {
       final data =
           await api.get(ref.path('/content-days')) as Map<String, dynamic>;
-      return (data['days'] as List<dynamic>).cast<String>().toSet();
+      return (
+        days: (data['days'] as List<dynamic>).cast<String>().toSet(),
+        failure: null,
+      );
+    } on ApiException catch (_) {
+      // The server answered — an older one without this route (404), a role
+      // refusal, a 500. The user is online; telling them otherwise sends them
+      // to fix the wrong thing.
+      return (days: null, failure: ContentCheckFailure.refused);
     } catch (_) {
-      return null;
+      return (days: null, failure: ContentCheckFailure.unreachable);
     }
   }
 
@@ -264,16 +275,32 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       // When the server can't be reached, every candidate counts as pinned:
       // nothing is deleted and the dialog says why. Falling back to the
       // caller-local set there is the bug itself.
-      final serverDays = await _fetchContentDays();
-      if (!mounted) return;
-      final unchecked = serverDays == null;
       final localPinned = contentDayKeys(n.activities, n.items);
-      final candidates = {
+      final localCandidates = {
         ..._dayMeta.keys,
         ...n.orderedDayKeys(),
         ...localPinned,
-        ...?serverDays,
       };
+      // Days that can actually be removed are worth confirming on every save —
+      // one confirmation resolves them. Days that only *stay* are worth saying
+      // once, when the end date is set or moved: nothing the dialog offers can
+      // clear them, so raising it on an unrelated save (a colour tweak, say)
+      // would nag forever and throw the edit away if the user cancels.
+      final endMoved = tripEndStr != n.tripEnd?.split('T').first;
+      // Skip the round trip when its answer cannot matter: the end date hasn't
+      // moved (so the stay-only half is suppressed) and nothing local sits past
+      // it (so there is nothing to delete either). Otherwise every settings
+      // save on a dated trip would block on the network — up to the 30 s API
+      // timeout — to compute a dialog it will not show.
+      final needsCheck = endMoved ||
+          localCandidates.any((k) => k.compareTo(tripEndStr) > 0);
+      final checked = needsCheck
+          ? await _fetchContentDays()
+          : (days: <String>{}, failure: null);
+      if (!mounted) return;
+      final serverDays = checked.days;
+      final failure = checked.failure;
+      final candidates = {...localCandidates, ...?serverDays};
       final orphans = classifyTripEndOrphans(
         dayKeys: candidates,
         daysWithContent:
@@ -282,41 +309,32 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       );
       final gone = orphans.removable.length;
       final kept = orphans.pinned.length;
-      // Days that can actually be removed are worth confirming on every save —
-      // one confirmation resolves them. Days that only *stay* are worth saying
-      // once, when the end date is set or moved: nothing the dialog offers can
-      // clear them, so raising it on an unrelated save (a colour tweak, say)
-      // would nag forever and throw the edit away if the user cancels.
-      final endMoved = tripEndStr != n.tripEnd?.split('T').first;
+      // A pinned day whose *content* this user can see is one they can act on;
+      // otherwise what pins it is another member's, and telling them to "move
+      // or delete that content" asks for something they can neither see nor
+      // touch. The test is localPinned, not localCandidates: a day is in
+      // localCandidates merely by having a day-meta row, and having notes on a
+      // day says nothing about whose content keeps it on screen. The #372 case
+      // is exactly a day that has both — shared day-meta *and* a companion's
+      // journal — so testing membership of the wider set silently excludes it.
+      final hiddenKept =
+          orphans.pinned.where((k) => !localPinned.contains(k)).length;
       if (gone > 0 || (kept > 0 && endMoved)) {
         final when = _fmtDate(_tripEnd!);
-        final message = StringBuffer();
-        if (gone > 0) {
-          message.write('$gone day${gone == 1 ? '' : 's'} after $when will be '
-              'deleted.');
-        }
-        if (kept > 0) {
-          if (gone > 0) message.write('\n\n');
-          message
-            ..write(gone > 0
-                ? '$kept later day${kept == 1 ? '' : 's'} '
-                : '$kept day${kept == 1 ? '' : 's'} after $when ')
-            ..write(unchecked
-                // gone is always 0 here: an unanswered check pins everything.
-                ? 'may hold content from other trip members. That could not '
-                    'be checked just now, so nothing will be deleted — try '
-                    'again once you are back online.'
-                : 'still ${kept == 1 ? 'has' : 'have'} trip content on '
-                    '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
-                    'move or delete that content first.');
-        }
+        final message = tripEndWarningMessage(
+          gone: gone,
+          visibleKept: kept - hiddenKept,
+          hiddenKept: hiddenKept,
+          when: when,
+          failure: failure,
+        );
         final confirmed = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
             title: Text(gone > 0
                 ? 'Remove days after the end date?'
                 : 'Days after the end date will stay'),
-            content: Text(message.toString()),
+            content: Text(message),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(false),

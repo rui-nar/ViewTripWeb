@@ -15,6 +15,7 @@
 // is invisible to the caller's own item list.
 
 import 'dart:convert';
+import 'dart:io' show SocketException;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +39,14 @@ late List<Map<String, dynamic>> putDayMeta;
 late List<String> serverContentDays;
 late bool contentDaysFail;
 
+/// How many times GET /content-days was actually requested — the save path
+/// skips it when its answer cannot change the outcome.
+late int contentDaysCalls;
+
+/// When true the request throws instead of answering, standing in for "no
+/// network at all" as opposed to a server that answered and refused.
+late bool contentDaysUnreachable;
+
 ApiClient _recordingApi() => ApiClient(
       httpClient: MockClient((req) async {
         if (req.method == 'PUT' && req.url.path.endsWith('/day-meta')) {
@@ -46,6 +55,8 @@ ApiClient _recordingApi() => ApiClient(
           return http.Response('', 204);
         }
         if (req.method == 'GET' && req.url.path.endsWith('/content-days')) {
+          contentDaysCalls++;
+          if (contentDaysUnreachable) throw const SocketException('offline');
           if (contentDaysFail) return http.Response('boom', 500);
           return http.Response(jsonEncode({'days': serverContentDays}), 200);
         }
@@ -144,6 +155,8 @@ void main() {
     putDayMeta = [];
     serverContentDays = [];
     contentDaysFail = false;
+    contentDaysCalls = 0;
+    contentDaysUnreachable = false;
     realApi = api;
     api = _recordingApi();
   });
@@ -213,7 +226,8 @@ void main() {
     // Only 06-15 actually disappears; 06-16 is pinned by its activity and the
     // dialog says so instead of over-promising.
     expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
-    expect(find.textContaining('1 later day'), findsOneWidget);
+    expect(find.textContaining('move or delete that content first'),
+        findsOneWidget);
 
     await tester.tap(find.text('Delete'));
     await _frames(tester);
@@ -347,7 +361,13 @@ void main() {
     await _tapSave(tester);
 
     expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
-    expect(find.textContaining('1 later day'), findsOneWidget);
+    // 06-16 has day-meta of its own *and* is pinned only by the companion's
+    // journal — the actual #372 state. Testing "can the user see this day"
+    // instead of "can the user see what pins it" classifies it as actionable
+    // and prints the one sentence this whole branch exists to avoid.
+    expect(find.textContaining('Only they can remove it.'), findsOneWidget);
+    expect(find.textContaining('move or delete that content first'),
+        findsNothing);
 
     await tester.tap(find.text('Delete'));
     await _frames(tester);
@@ -424,5 +444,120 @@ void main() {
     await _frames(tester);
 
     expect(putDayMeta.last.keys.toSet(), {'2026-06-14'});
+  });
+
+  group('the cross-member check is only run when it can matter', () {
+    testWidgets('an unrelated save with nothing past the end date skips it',
+        (tester) async {
+      // Otherwise every settings save on a dated trip blocks on the network —
+      // up to the 30 s API timeout — to compute a dialog it will not show.
+      final n = _notifier(
+        tripEnd: '2026-06-20',
+        dayMeta: _days(['2026-06-14', '2026-06-15']),
+      );
+      await _pumpSettings(tester, n);
+
+      await _tapSave(tester);
+
+      expect(contentDaysCalls, 0);
+      expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
+    });
+
+    testWidgets('a day past the end date still runs it even if the date did not move',
+        (tester) async {
+      // Here the answer decides whether that day is deleted, so it must run.
+      final n = _notifier(
+        tripEnd: '2026-06-14',
+        dayMeta: _days(['2026-06-14', '2026-06-15']),
+      );
+      await _pumpSettings(tester, n);
+
+      await _tapSave(tester);
+
+      expect(contentDaysCalls, 1);
+      expect(find.text('Remove days after the end date?'), findsOneWidget);
+    });
+  });
+
+  group('what the dialog tells the user', () {
+    testWidgets('a day pinned only by another member does not ask the user to '
+        'remove content they cannot see', (tester) async {
+      serverContentDays = ['2026-06-15'];
+      final n = _notifier(
+        tripEnd: '2026-06-20',
+        dayMeta: _days(['2026-06-14']),
+      );
+      await _pumpSettings(tester, n);
+      await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+      await _tapSave(tester);
+
+      expect(find.textContaining('Only they can remove it.'), findsOneWidget);
+      expect(find.textContaining('move or delete that content first'),
+          findsNothing);
+    });
+
+    testWidgets('a server that answered and refused is not reported as offline',
+        (tester) async {
+      contentDaysFail = true; // 500 — the user is online
+      final n = _notifier(
+        tripEnd: '2026-06-20',
+        dayMeta: _days(['2026-06-14', '2026-06-15']),
+      );
+      await _pumpSettings(tester, n);
+      await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+      await _tapSave(tester);
+
+      expect(find.textContaining('nothing will be deleted'), findsOneWidget);
+      expect(find.textContaining('back online'), findsNothing);
+    });
+
+    testWidgets('an unreachable server is reported as offline', (tester) async {
+      contentDaysUnreachable = true;
+      final n = _notifier(
+        tripEnd: '2026-06-20',
+        dayMeta: _days(['2026-06-14', '2026-06-15']),
+      );
+      await _pumpSettings(tester, n);
+      await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+      await _tapSave(tester);
+
+      expect(find.textContaining('back online'), findsOneWidget);
+
+      await tester.tap(find.text('Continue'));
+      await _frames(tester);
+      expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
+    });
+  });
+
+  testWidgets('a mixed set names the actionable days and the others separately',
+      (tester) async {
+    // Both sentences at once: 06-15 is pinned by the caller's own activity,
+    // 06-16 only by a companion's journal, and both carry day-meta — so the
+    // day-meta row cannot be what decides which sentence a day gets.
+    serverContentDays = ['2026-06-16'];
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14', '2026-06-15', '2026-06-16']),
+      activities: [
+        {'start_date_local': '2026-06-15T08:00:00'},
+      ],
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.textContaining('move or delete that content first'),
+        findsOneWidget);
+    expect(find.textContaining('Only they can remove it.'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(),
+        {'2026-06-14', '2026-06-15', '2026-06-16'});
   });
 }

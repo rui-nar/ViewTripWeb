@@ -147,4 +147,71 @@ void main() {
       expect(o.pinned, isEmpty);
     });
   });
+
+  group('tripEndWarningMessage', () {
+    // The wrong sentence here is not cosmetic — see the function's doc.
+    test('days that only stay because of another member say so, and do not '
+        'ask the user to remove content they cannot see', () {
+      final msg = tripEndWarningMessage(
+        gone: 0, visibleKept: 0, hiddenKept: 1, when: 'Jun 14, 2026');
+      expect(msg, contains('1 day after Jun 14, 2026'));
+      expect(msg, contains('other trip'));
+      expect(msg, contains('Only they can remove it.'));
+      expect(msg, isNot(contains('move or delete that content first')));
+    });
+
+    test('days the user can act on keep the actionable wording', () {
+      final msg = tripEndWarningMessage(
+        gone: 0, visibleKept: 2, hiddenKept: 0, when: 'Jun 14, 2026');
+      expect(msg, contains('2 days after Jun 14, 2026'));
+      expect(msg, contains('move or delete that content first'));
+      expect(msg, isNot(contains('Only they can remove it.')));
+    });
+
+    test('a mix names both, in separate sentences', () {
+      final msg = tripEndWarningMessage(
+        gone: 1, visibleKept: 1, hiddenKept: 2, when: 'Jun 14, 2026');
+      final parts = msg.split('\n\n');
+      expect(parts, hasLength(3));
+      expect(parts[0], contains('1 day after Jun 14, 2026 will be deleted.'));
+      expect(parts[1], contains('move or delete that content first'));
+      expect(parts[2], contains('2 days'));
+      expect(parts[2], contains('Only they can remove it.'));
+    });
+
+    test('an unreachable server says offline; a refusal does not', () {
+      final offline = tripEndWarningMessage(
+        gone: 0, visibleKept: 0, hiddenKept: 1, when: 'Jun 14, 2026',
+        failure: ContentCheckFailure.unreachable);
+      expect(offline, contains('nothing will be deleted'));
+      expect(offline, contains('back online'));
+
+      final refused = tripEndWarningMessage(
+        gone: 0, visibleKept: 1, hiddenKept: 0, when: 'Jun 14, 2026',
+        failure: ContentCheckFailure.refused);
+      expect(refused, contains('nothing will be deleted'));
+      expect(refused, isNot(contains('back online')));
+      expect(refused, contains('server could not answer'));
+    });
+
+    test('a failed check counts every pinned day, however it was classified', () {
+      final msg = tripEndWarningMessage(
+        gone: 0, visibleKept: 2, hiddenKept: 3, when: 'Jun 14, 2026',
+        failure: ContentCheckFailure.unreachable);
+      expect(msg, contains('5 days after Jun 14, 2026'));
+    });
+
+    test('singular and plural agree', () {
+      expect(
+        tripEndWarningMessage(
+          gone: 1, visibleKept: 0, hiddenKept: 0, when: 'Jun 14, 2026'),
+        '1 day after Jun 14, 2026 will be deleted.',
+      );
+      expect(
+        tripEndWarningMessage(
+          gone: 3, visibleKept: 0, hiddenKept: 0, when: 'Jun 14, 2026'),
+        '3 days after Jun 14, 2026 will be deleted.',
+      );
+    });
+  });
 }
