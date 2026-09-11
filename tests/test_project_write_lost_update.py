@@ -28,7 +28,10 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import models.db as db_module
+from api.activities import router as activities_router
 from api.deps import get_current_user
+from api.projects import router as projects_router
+from api.strava import router as strava_router
 from models.project_db import DBProject
 from models.user import UserInfo
 
@@ -45,31 +48,30 @@ def _gpx_bytes():
     ).encode("utf-8")
 
 
-@pytest.fixture(scope="module")
-def _engine(tmp_path_factory):
-    """ONE engine for the whole module, deliberately.
-
-    A file-backed database, not the usual in-memory StaticPool one: this module
-    is about two writers racing, and StaticPool hands every Session the same
-    connection, so the "concurrent" write would share the caller's transaction
-    and the isolation under test would be fake.
-
-    Module-scoped because something under api/ binds a session factory on first
-    use; with a fresh engine per test, the second test's writes landed in the
-    first test's database and the race quietly stopped happening. One engine
-    for the module keeps every binding correct; the tables are recreated per
-    test below, so the tests are still independent.
-    """
-    path = tmp_path_factory.mktemp("db") / "test.db"
-    return create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
-
-
 @pytest.fixture
-def env(monkeypatch, _engine):
-    engine = _engine
+def env(monkeypatch, tmp_path):
+    """A file-backed database, per test.
+
+    Not the usual in-memory StaticPool engine: this module is about two writers
+    racing, and StaticPool hands every Session the same connection, so the
+    "concurrent" write would share the caller's transaction and the isolation
+    under test would be fake.
+
+    Only `db_module.engine` is patched, never `get_session`. Patching the
+    factory was what made an earlier version of this file mis-route writes
+    between tests: the routers are imported lazily below, so the first import
+    ran `from models.db import get_session` while the patch was live and bound
+    *that* test's lambda — and with it that test's engine — permanently into
+    the router module. The second test's PUT then wrote to the first test's
+    database and the race quietly stopped happening. The real `get_session`
+    reads the `engine` global at call time, so patching the engine alone is
+    both sufficient and stable. (Nothing in api/ binds a factory on its own;
+    this was the harness doing it to itself.)
+    """
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'test.db'}",
+        connect_args={"check_same_thread": False})
     monkeypatch.setattr(db_module, "engine", engine)
-    monkeypatch.setattr(db_module, "get_session", lambda: Session(engine))
-    SQLModel.metadata.drop_all(engine)
     SQLModel.metadata.create_all(engine)
 
     with Session(engine) as sess:
@@ -80,12 +82,11 @@ def env(monkeypatch, _engine):
         sess.add(proj); sess.commit(); sess.refresh(proj)
         ids = {"owner": owner.id, "project": proj.id, "name": proj.name}
 
-    from api.activities import router as activities_router
-    from api.projects import router as projects_router
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(ids["owner"])}
     app.include_router(activities_router)
     app.include_router(projects_router)
+    app.include_router(strava_router)
     return TestClient(app), engine, ids
 
 
@@ -161,9 +162,15 @@ def _raw_strava_activity(act_id, start):
 
 def test_strava_sync_does_not_revert_a_day_meta_write_made_during_the_fetch(
         env, monkeypatch):
-    """The Strava fetch is a network round trip sitting inside the load-save
-    window — the widest one in the app. A write committing there was reverted
-    to its pre-request value."""
+    """The Strava fetch is a network round trip that used to sit inside the
+    load-save window — the widest one in the app. A write committing there was
+    reverted to its pre-request value.
+
+    Note what this does and does not pin. The fix moved the fetch *before* the
+    load, so this test passes on the narrowed window alone and would still pass
+    with the optimistic lock broken; the CAS itself is pinned by the two GPX
+    tests. Keep that in mind before trusting it as a lock regression test —
+    an earlier commit message wrongly claimed it was one."""
     client, engine, ids = env
     from models.user import StravaToken
     import api.strava as strava_mod
@@ -172,8 +179,6 @@ def test_strava_sync_does_not_revert_a_day_meta_write_made_during_the_fetch(
         sess.add(StravaToken(user_info_id=ids["owner"], access_token="tok",
                              refresh_token="ref", expires_at=9e9))
         sess.commit()
-
-    client.app.include_router(strava_mod.router)
 
     fired = {"done": False}
 
@@ -269,3 +274,60 @@ def test_a_quota_refusal_surfaces_as_402_instead_of_being_retried(env, monkeypat
     )
     assert r.status_code == 402, r.text
     assert calls["n"] == 1, "the quota refusal was retried instead of surfacing"
+
+
+def test_every_direct_project_write_advances_the_lock_through_the_sql_helper(
+        env, monkeypatch):
+    """Each endpoint that writes DBProject columns must delegate to
+    repo_core.bump_lock_version, which emits `SET lock_version = lock_version + 1`.
+
+    Not a style preference. An inline `row.lock_version = loaded + 1` computes
+    the new value from what this request's ORM loaded, so two overlapping
+    writers both store N+1, the counter stands still, and the compare-and-swap
+    behind save_project_with_retry is blind to one of them — the hole this
+    branch exists to close, reintroduced. SQLite serialises writers, so no
+    sequential test can tell the two implementations apart; this pins the
+    mechanism instead.
+    """
+    import api.projects as projects_mod
+
+    calls = []
+    real = projects_mod.bump_lock_version
+    monkeypatch.setattr(
+        projects_mod, "bump_lock_version",
+        lambda sess, pid: (calls.append(pid), real(sess, pid))[1])
+
+    client, engine, ids = env
+    name = ids["name"]
+    writes = {
+        "day-meta": ("put", f"/api/projects/{name}/day-meta",
+                     {"day_meta": {"2024-06-05": {"note": "a"}}}),
+        "trip dates": ("put", f"/api/projects/{name}",
+                       {"trip_start": "2024-06-01"}),
+        "track style": ("put", f"/api/projects/{name}/track-style",
+                        {"track_color": "#ff0000"}),
+        "languages": ("put", f"/api/projects/{name}/languages",
+                      {"languages": ["fr"]}),
+    }
+    for label, (_verb, url, body) in writes.items():
+        calls.clear()
+        r = client.put(url, json=body)
+        assert r.status_code in (200, 204), f"{label}: {r.text}"
+        assert calls == [ids["project"]], (
+            f"{label} committed without going through bump_lock_version — a "
+            "write invisible to the optimistic lock"
+        )
+
+
+def test_a_corrupt_day_entry_is_never_treated_as_content_to_protect(env):
+    """_day_meta_has_content must say False for a non-dict entry: protecting an
+    unreadable blob would pin that day in place permanently, and there is
+    nothing in it a user could miss."""
+    from api.projects import _day_meta_has_content
+
+    assert _day_meta_has_content("rubble") is False
+    assert _day_meta_has_content(["rubble"]) is False
+    assert _day_meta_has_content(None) is False
+    assert _day_meta_has_content({}) is False
+    assert _day_meta_has_content({"note": None, "counters": []}) is False
+    assert _day_meta_has_content({"note": "real"}) is True
