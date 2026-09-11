@@ -222,6 +222,25 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     }
   }
 
+  /// Day keys the trip holds content on for *any* member, from the server
+  /// (issue #372) — null when the question could not be answered.
+  ///
+  /// Journal entries are per-user, so the caller's own item list is blind to
+  /// a day another member's journal keeps on screen. A null here must never
+  /// be read as "that day is empty": the caller-local view is exactly the one
+  /// that deletes a still-visible day's shared day-meta.
+  Future<Set<String>?> _fetchContentDays() async {
+    final ref = _notifier.ref;
+    if (ref == null) return null;
+    try {
+      final data =
+          await api.get(ref.path('/content-days')) as Map<String, dynamic>;
+      return (data['days'] as List<dynamic>).cast<String>().toSet();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _save() async {
     setState(() => _saving = true);
 
@@ -235,12 +254,25 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       // (issue #370), so a day held on screen by a journal/encounter/segment
       // alone would otherwise go unmentioned.
       //
-      // Caveat: journals are per-user server-side, so a day pinned only by
-      // another member's journal is invisible here — see issue #372.
-      final pinned = contentDayKeys(n.activities, n.items);
+      // The content days come from the server, which sees every member's
+      // (issue #372); the local extraction is unioned in so unsaved local
+      // edits still pin their day. When the server can't be reached, every
+      // candidate counts as pinned: nothing is deleted and the dialog says
+      // why. Falling back to the caller-local set there is the bug itself.
+      final serverDays = await _fetchContentDays();
+      if (!mounted) return;
+      final unchecked = serverDays == null;
+      final localPinned = contentDayKeys(n.activities, n.items);
+      final candidates = {
+        ..._dayMeta.keys,
+        ...n.orderedDayKeys(),
+        ...localPinned,
+        ...?serverDays,
+      };
       final orphans = classifyTripEndOrphans(
-        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys(), ...pinned},
-        daysWithContent: pinned,
+        dayKeys: candidates,
+        daysWithContent:
+            serverDays == null ? candidates : {...localPinned, ...serverDays},
         tripEnd: tripEndStr,
       );
       final gone = orphans.removable.length;
@@ -264,9 +296,14 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
             ..write(gone > 0
                 ? '$kept later day${kept == 1 ? '' : 's'} '
                 : '$kept day${kept == 1 ? '' : 's'} after $when ')
-            ..write('still ${kept == 1 ? 'has' : 'have'} trip content on '
-                '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
-                'move or delete that content first.');
+            ..write(unchecked
+                // gone is always 0 here: an unanswered check pins everything.
+                ? 'may hold content from other trip members. That could not '
+                    'be checked just now, so nothing will be deleted — try '
+                    'again once you are back online.'
+                : 'still ${kept == 1 ? 'has' : 'have'} trip content on '
+                    '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
+                    'move or delete that content first.');
         }
         final confirmed = await showDialog<bool>(
           context: context,
