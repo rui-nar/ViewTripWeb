@@ -119,6 +119,28 @@ class ProjectService {
   /// this is the wait before a *retry*, not before a visible failure.
   static const _kLoadTimeout = Duration(seconds: 60);
 
+  /// Photo uuids per memory — `{memory_id: [uuid, ...]}` — and nothing else.
+  /// GET /api/projects/{name}/memory-photos
+  ///
+  /// The one question the post-import poll asks, at the size of its answer
+  /// (issue #308). Measured on the 219-activity / 600-memory shape: 75 KB
+  /// against 492 KB for `/meta` and 36 MB for [getDetails], which is what that
+  /// poll used to fetch sixty times over.
+  ///
+  /// Uuids, not counts: a marker needs `photos.first` to build its thumbnail
+  /// URL, so a count can never take a memory from "no photo" to "thumbnail".
+  ///
+  /// Always live, and deliberately outside [projectDataCache]: this exists to
+  /// observe a change the client cannot predict, so a cached answer is the one
+  /// answer it must never give.
+  Future<Map<String, List<String>>> getMemoryPhotos(ProjectRef ref) async {
+    final data = await api.get(ref.path('/memory-photos'));
+    final photos = (data as Map<String, dynamic>)['photos'];
+    if (photos is! Map) return const {};
+    return photos.map((id, uuids) => MapEntry(
+        id.toString(), (uuids as List?)?.cast<String>().toList() ?? const []));
+  }
+
   /// The cached full-res geo for [ref], or null when nothing is on file.
   /// Never touches the network.
   ///

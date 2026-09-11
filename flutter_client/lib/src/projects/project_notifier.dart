@@ -2451,18 +2451,24 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _refreshMemoryPhotos(ProjectRef ref) async {
     perfSpans.recordBackgroundRefresh('photo_poll');
     try {
-      final details = await _service.getDetails(ref, bypassCache: true);
+      final photosById = await _service.getMemoryPhotos(ref);
       if (this.ref != ref) return;
-      final rawItems = details['items'];
-      if (rawItems is! List) return;
-      final freshItems = rawItems.cast<Map<String, dynamic>>();
+      // The merge below swaps a whole item in, so each candidate is the item
+      // already on screen rebuilt around the server's photo list — the shape
+      // the full details payload used to hand it, minus the 36 MB (issue #308).
       final freshById = <String, Map<String, dynamic>>{};
-      for (final item in freshItems) {
+      for (final item in items) {
         if (item['item_type'] != 'memory') continue;
         final mem = item['memory'] as Map?;
         if (mem == null) continue;
         final id = mem['id']?.toString();
-        if (id != null) freshById[id] = item;
+        if (id == null) continue;
+        final photos = photosById[id];
+        if (photos == null) continue;
+        freshById[id] = {
+          ...item,
+          'memory': {...Map<String, dynamic>.from(mem), 'photos': photos},
+        };
       }
       var changed = false;
       for (int i = 0; i < items.length; i++) {

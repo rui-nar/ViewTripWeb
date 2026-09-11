@@ -6,6 +6,7 @@ Routes:
     GET    /api/projects/{name}          — get project data (GeoJSON + metadata)
     GET    /api/projects/{name}/meta     — get project metadata (lightweight)
     GET    /api/projects/{name}/elevation  — compact per-activity elevation profiles
+    GET    /api/projects/{name}/memory-photos — photo uuids per memory (poll-sized)
     GET    /api/projects/{name}/stats    — get project statistics
     PUT    /api/projects/{name}          — update project name or dates
     DELETE /api/projects/{name}          — delete a project
@@ -56,7 +57,7 @@ from api.project_shared import (
     queue_share_tiles_refresh,
     queue_stats_refresh,
 )
-from models.project_db import DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
+from models.project_db import DBMemory, DBProject, DBProjectItem, DBProjectMember, DBProjectSyncMeta
 from models.user import UserInfo, PolarstepsToken, StravaToken
 from src.api.polarsteps_client import PolarstepsClient, format_step
 from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quota
@@ -305,6 +306,52 @@ def get_project_meta(
     _log.info("project_meta name=%s load=%.3fs gzip=%.3fs cache=MISS",
               name, t1 - t0, time.time() - t1)
     return _gzip_response(gz_bytes, "MISS")
+
+
+@router.get("/{name}/memory-photos", summary="Photo uuids per memory (poll-sized)")
+def get_project_memory_photos(
+    name: str,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    owner: OwnerParam = None,
+):
+    """``{"photos": {memory_id: [uuid, ...]}}`` and nothing else (issue #308).
+
+    The client polls this every few seconds for three minutes after a
+    Polarsteps import, waiting for background photo downloads to land. It used
+    to poll ``GET /{name}`` with the cache bypassed: 36 MB on a 180-day trip,
+    up to 60 times, while the server was busy fetching those very photos.
+
+    ``/meta`` also carries these uuids — memory photos are hydrated whatever
+    ``include_heavy`` says — and it is 73x smaller than the details payload, so
+    polling it was the obvious alternative. Measured on the 219-activity /
+    600-memory shape it is still the wrong instrument: ``/meta`` is 492 KB
+    (76 KB gzipped) and 92 ms to rebuild against 75 KB (42 KB gzipped) and 7 ms
+    here. And that cost is paid on *every* tick rather than absorbed by the
+    payload cache, because ``_write_memory_photo`` busts the project's cached
+    payloads as each photo lands: during the polling window a ``/meta`` poll is
+    a MISS almost every time.
+
+    Uncached for the same reason — an entry stored here would be invalidated
+    before the next tick read it, so it could only ever cost a gzip and a
+    store. And unkeyed by caller, unlike ``/meta``: ``photos_json`` holds no
+    per-author content and is never encrypted (a memory's E2EE marker covers
+    its name and description), so every member gets the same body.
+    """
+    user_info_id = int(current_user["sub"])
+    with get_session() as sess:
+        row = resolve_project(sess, user_info_id, name, owner)
+        rows = sess.exec(
+            select(DBMemory.id, DBMemory.photos_json)
+            .where(DBMemory.project_id == row.id)
+        ).all()
+    # Falsy entries are unfilled placeholders for a download that hasn't landed
+    # yet — filtered out exactly as _row_to_memory does (see api/photo_locks.py).
+    return {
+        "photos": {
+            str(mem_id): [p for p in json.loads(photos_json or "[]") if p]
+            for mem_id, photos_json in rows
+        }
+    }
 
 
 @router.get("/{name}/stats", summary="Get project statistics")
