@@ -30,7 +30,13 @@ from api.project_access import (
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh, warm_meta_cache
 from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
-from src.jobs.route_jobs import RESOLVER_VERSION, create_job, mark_done, mark_running
+from src.jobs.route_jobs import (
+    RAIL_RESOLVER_STRATEGIES,
+    RESOLVER_VERSION,
+    create_job,
+    mark_done,
+    mark_running,
+)
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.utils.logging import get_logger
 
@@ -211,20 +217,27 @@ def _resolve_route_job(
                 # A fresh auto-resolve is authoritative again — clears the
                 # guard a prior manual edit (issue #150) set.
                 "route_edited": False,
-                # Provenance (issue #364). Stamped on every resolved verdict,
-                # degraded ones included: the stamp answers "which generation of
-                # the resolver produced this", not "was the answer any good" —
-                # route_degraded already says that, and a degraded result really
-                # was produced by this generation. Stamping it unconditionally is
-                # also what guarantees sweep_stale_resolver_segments terminates:
-                # a segment it queues leaves the stale set on the first attempt,
-                # whatever comes back.
-                "route_resolver_version": RESOLVER_VERSION,
-                # Already computed and, until now, only logged. Persisting it is
-                # what turns "which trips did the buggy strategy draw" from
-                # unanswerable into one query over segment_json.
+                # Provenance (issue #364). Always recorded, whatever drew the
+                # geometry: this is what turns "which trips did the buggy
+                # strategy draw" from unanswerable into one query over
+                # segment_json, and it is already computed — until now it was
+                # logged and discarded.
                 "route_strategy": strategy,
             }
+            # The version stamp is narrower than the strategy, and deliberately.
+            # It names a generation of the *rail* resolver, so it may only be
+            # written when the rail resolver is what ran: a matched train comes
+            # back as `motis_trip`, carrying the trip's own track, and stamping
+            # that would claim a rail fix had produced it and make every future
+            # bump mark it stale (see RAIL_RESOLVER_STRATEGIES for what
+            # re-resolving one destroys). Degraded verdicts *are* stamped — the
+            # stamp answers "which generation produced this", not "was it any
+            # good", route_degraded already says that, and stamping them is what
+            # guarantees sweep_stale_resolver_segments terminates: a segment it
+            # queues leaves the stale set on the first attempt whatever comes
+            # back. A verdict left unstamped is one the sweep never selected.
+            if strategy in RAIL_RESOLVER_STRATEGIES:
+                fields["route_resolver_version"] = RESOLVER_VERSION
             if not degraded and not seg.route_hafas_failed:
                 # Only a resolve that produced a *real* route restarts the
                 # automatic-retry budget (issue #207).

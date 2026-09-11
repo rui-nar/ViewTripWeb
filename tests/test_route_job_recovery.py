@@ -463,6 +463,13 @@ def _stale_segment(**overrides):
     literal shape of every segment row written before #364, and the population
     the sweep exists to reach — a test that seeded ``0`` explicitly would pass
     while ``from_dict`` defaulted the missing key to anything at all.
+
+    Also absent, and just as deliberate: no ``train_number``. An unstamped row
+    carrying one is a row the rail resolver probably never drew — MOTIS returns
+    the trip's own track and the resolver is skipped entirely — and the sweep
+    leaves those alone (see :class:`TestStaleSweepLeavesMotisGeometryAlone`).
+    The routes #359 drew wrongly are exactly the ones with no train number, so
+    this is the population the sweep exists for.
     """
     seg = {
         "id": "seg-1", "segment_type": "train",
@@ -470,7 +477,7 @@ def _stale_segment(**overrides):
         "route_polyline": json.dumps([[0.0, 0.0], [1.0, 1.0]]),
         "route_degraded": False, "route_hafas_failed": False,
         "route_edited": False,
-        "hafas_provider": "db", "train_number": "ICE 596",
+        "hafas_provider": "db",
         "date": "2026-08-01",
     }
     seg.update(overrides)
@@ -531,10 +538,10 @@ class TestStaleResolverSweep:
         assert sweep_stale_resolver_segments() == 1
         user_arg, name_arg, seg_id_arg, params, _started_at, _job_id = enqueued[0]
         assert (user_arg, name_arg, seg_id_arg) == (user_id, "Trip", "seg-1")
-        # The train the user picked is carried into the retry, same as the
-        # degraded sweep — a re-resolve must not quietly become a generic one.
+        # What the user picked is carried into the retry, same as the degraded
+        # sweep — a re-resolve must not quietly become a generic one.
         assert params == {
-            "hafas_provider": "db", "train_number": "ICE 596", "date": "2026-08-01",
+            "hafas_provider": "db", "train_number": None, "date": "2026-08-01",
         }
         assert _seg_json(engine, "seg-1")["route_status"] == "pending"
 
@@ -678,6 +685,82 @@ def _stamp_resolved(engine, seg_id: str) -> None:
         })
         row.segment_json = json.dumps(data)
         sess.add(row); sess.commit()
+
+
+class TestStaleSweepLeavesMotisGeometryAlone:
+    """A resolver-version bump must not re-draw what the resolver never drew.
+
+    Found in adversarial review of #375, and it is the difference between this
+    sweep doing its job and it being the worst thing in the release.
+    ``_compute_segment_geometry`` asks MOTIS for a matched train and returns the
+    trip's own track as ``motis_trip``, never reaching the rail resolver. Queue
+    one of those again and MOTIS is asked about a service date that has passed:
+    the board has nothing, ``HafasError`` is raised, and the verdict replaces
+    real track with a two-endpoint line while persisting ``route_hafas_failed``
+    and a "Train lookup failed" message the client shows the user. The segment
+    is provisional from then on, so the *uncapped* degraded sweep inherits it
+    for MAX_DEGRADE_RETRIES more attempts that fail identically.
+
+    This app records past trips, so without these guards the first bump
+    silently downgrades most train segments in the deployment.
+    """
+
+    def test_an_unstamped_segment_with_a_train_number_is_left_alone(
+            self, stale_env, monkeypatch):
+        """Unstamped means "we cannot tell what drew it". A train number means
+        MOTIS was tried, so it is either a motis_trip we must not touch or a
+        lookup that already failed — and a failed one is excluded as
+        provisional. Either way, not ours."""
+        stale_env(_stale_segment(train_number="ICE 596"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_motis_trip_segment_is_left_alone(self, stale_env, monkeypatch):
+        """Stamped explicitly: the strategy says the rail resolver never ran."""
+        stale_env(_stale_segment(
+            train_number="ICE 596", route_strategy="motis_trip"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_train_the_rail_resolver_did_draw_is_still_re_resolved(
+            self, stale_env, monkeypatch):
+        """Not every train number means MOTIS drew it.
+
+        When MOTIS matches the train but returns fewer than two polyline
+        points, ``_compute_segment_geometry`` keeps its *stops* and hands them
+        to the rail resolver — no HAFAS failure, a rail strategy, and geometry a
+        rail fix genuinely improves. The stored strategy is what tells the two
+        cases apart, which is why the guard reads it rather than guessing from
+        the train number alone.
+        """
+        stale_env(_stale_segment(
+            train_number="ICE 596", route_strategy="relation_uic"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 1
+        assert enqueued[0][3]["train_number"] == "ICE 596"
+
+    def test_a_motis_verdict_is_not_stamped_with_the_rail_version(self):
+        """The other half of the guard, at the write.
+
+        Stamping a motis_trip verdict would claim a rail resolver generation
+        produced it, and every future bump would then mark it stale. The two
+        guards are independent on purpose: either alone stops the damage.
+        """
+        from src.jobs.route_jobs import RAIL_RESOLVER_STRATEGIES
+
+        assert "motis_trip" not in RAIL_RESOLVER_STRATEGIES
+        assert "ferry" not in RAIL_RESOLVER_STRATEGIES
+        assert "bus" not in RAIL_RESOLVER_STRATEGIES
+        assert "manual" not in RAIL_RESOLVER_STRATEGIES
+        # Every strategy RailGeometry can report, and nothing else.
+        assert RAIL_RESOLVER_STRATEGIES == {
+            "relation_uic", "relation_endpoints", "coordinate_dijkstra", "straight",
+        }
 
 
 class TestTheStaleSweepTerminates:

@@ -879,15 +879,25 @@ def _bridge_to_named_stops(
     throat is reachable, and the drawn line runs on real track apart from one
     100 m segment across the gap OSM left.
 
-    **Every restriction here is load-bearing.** Only a component reaching a
-    *named* stop may be bridged, so this can never become the general
-    gap-chaining that produced the Hanko→Salo teleport — a relation that does
-    not call at this leg's endpoints gets no bridge at all and is still refused
-    by ``_ENDPOINT_TOLERANCE_KM``. Only one edge per other component is added,
-    at that component's closest approach, so a bridge cannot accumulate into a
-    path. And the metre limit is checked exactly, on the same equirectangular
-    approximation ``_dijkstra`` weights its edges with, so what is drawn is what
-    was measured.
+    **Every restriction here is load-bearing**, and each one is narrower than
+    it first looks:
+
+    * Only a component that reaches a *named* stop bridges outward, so this can
+      never become general gap-chaining. A relation that does not call at this
+      leg's endpoints gets no bridge at all and is still refused by
+      ``_ENDPOINT_TOLERANCE_KM``.
+    * And never the component the route already runs on, however it was named
+      — see ``main`` below. Without that, the far endpoint's stop makes the
+      main line a home and the first restriction buys nothing.
+    * One edge per other component, at its closest approach. With at most two
+      homes that bounds an invented *path* at two edges, not one: two broken
+      throats either side of a shared fragment can each bridge to it. So the
+      hard guarantee is **at most two invented edges, each at most
+      ``_COMPONENT_BRIDGE_M``** — 500 m against the 116 km Hanko→Salo teleport,
+      and ``_rail_length_ok`` still weighs the result.
+    * The metre limit is checked exactly, on the same equirectangular
+      approximation ``_dijkstra`` weights its edges with, so what is drawn is
+      what was measured.
 
     Doing nothing is the common case and costs one graph traversal: 238 of the
     400 France relations measured have a single component and return here.
@@ -896,6 +906,16 @@ def _bridge_to_named_stops(
     if len(comps) < 2:
         return 0
     owner = {node: i for i, comp in enumerate(comps) for node in comp}
+    # The component the route will run on anyway, and never a home. A stop
+    # already sitting on it has no gap to close at that end — and anchoring
+    # there is not merely pointless, it dissolves the restriction this function
+    # is built on. A home is bridged to *every* component it approaches, so the
+    # main line anchored by the far endpoint's stop — the ordinary case, since
+    # the far end is usually the end that is not broken — would be joined to
+    # every stray fragment within `_COMPONENT_BRIDGE_M` along its whole length.
+    # That is exactly the general gap-chaining the named-stop rule exists to
+    # prevent, reached through the door marked "named stop".
+    main = max(range(len(comps)), key=lambda i: len(comps[i]))
 
     # Both ends of a leg usually anchor in the same component — the leg is on
     # the relation's main line and only one end's throat is broken — and the
@@ -908,7 +928,7 @@ def _bridge_to_named_stops(
         if stop is None:
             continue
         home = owner[_nearest_node(nodes, *stop)]
-        if home in homes:
+        if home == main or home in homes:
             continue
         homes.add(home)
         for a, b in _closest_approaches(nodes, comps, home):
