@@ -447,21 +447,38 @@ def strava_sync(
         _save_cache(user_info_id, all_raw)
 
         activities = parse_activities_or_log(all_raw, "strava_sync")
-
-        project = _project_repo.get_project(sess, owner_id, name)
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-        # Plan limit on trip length (issue #121) — an import that reaches
-        # outside the trip's current span stretches it.
-        ensure_trip_days_quota(
-            sess, row.id, owner_id,
-            *[a.start_date_local for a in activities],
-        )
-        added = project.add_activities(activities)
-        # New activity rows record the IMPORTER (the caller), not the project
-        # owner — a companion's imports must stay tied to their Strava account.
-        _project_repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+        project_row_id = row.id
         _save_refreshed_token(sess, token_row, client)
+
+    added_holder: Dict[str, int] = {}
+
+    def _add(project) -> None:
+        # Plan limit on trip length (issue #121) — an import that reaches
+        # outside the trip's current span stretches it. Re-checked from
+        # scratch on every retry attempt, in its own short-lived read-only
+        # session, against current DB state rather than the stale snapshot of
+        # a previous failed attempt.
+        with get_session() as qsess:
+            ensure_trip_days_quota(
+                qsess, project_row_id, owner_id,
+                *[a.start_date_local for a in activities],
+            )
+        added_holder["added"] = project.add_activities(activities)
+
+    # New activity rows record the IMPORTER (the caller), not the project
+    # owner — a companion's imports must stay tied to their Strava account.
+    # save_project_with_retry rather than a blind save_project: this is a
+    # load-mutate-save, and the blind variant rewrites every field of the row
+    # from the snapshot loaded before the mutation — so a PUT /day-meta (or any
+    # other write) committing during the Strava fetch, which is a network round
+    # trip and by far the widest window in the app, was silently overwritten
+    # with pre-request values. Mirrors the bulk import in api/activities.py.
+    project = _project_repo.save_project_with_retry(
+        owner_id, name, _add, activity_user_id=user_info_id,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    added = added_holder["added"]
 
     if added > 0:
         bust_geo_cache(owner_id, name)

@@ -456,18 +456,28 @@ async def import_gpx_activity(
                                  detail="Could not allocate a unique activity id.")
         activity.id = candidate_id
 
-        ensure_trip_days_quota(sess, project_row_id, owner_id, activity.start_date_local)
-
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    def _add(project) -> None:
+        # Re-checked from scratch on every retry attempt, in its own
+        # short-lived read-only session, against current DB state rather than
+        # a stale snapshot — same reasoning as the bulk Strava import above.
+        with get_session() as qsess:
+            ensure_trip_days_quota(
+                qsess, project_row_id, owner_id, activity.start_date_local)
         project.add_activities([activity])
-        # New activity rows record the IMPORTER (the caller), not the project
-        # owner — see add_activities.
-        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+
+    # New activity rows record the IMPORTER (the caller), not the project
+    # owner — see add_activities. Goes through save_project_with_retry rather
+    # than a blind save_project: this is a load-mutate-save, and the blind
+    # variant rewrites every field of the row from the snapshot loaded before
+    # the mutation — so a PUT /day-meta (or any other write) committing in
+    # that window was silently overwritten with pre-request values.
+    project = _repo.save_project_with_retry(
+        owner_id, name, _add,
+        legacy_path=_legacy_path(str(owner_id), name),
+        activity_user_id=user_info_id,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
