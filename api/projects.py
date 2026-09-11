@@ -369,6 +369,65 @@ def _day_key(raw: Optional[str]) -> str:
     return (raw or "").split("T")[0]
 
 
+def _content_day_keys(sess, project, visible_to: int | None = None) -> set[str]:
+    """Day keys this project holds content on: activities, memories, journal
+    entries, encounters and dated segments.
+
+    ``visible_to`` None counts *every* member's content. An id counts only what
+    that user can actually see, which differs for journals alone — they are
+    per-user (issue #106), and a NULL author is a legacy row belonging to the
+    project owner. The difference between the two answers is exactly the set of
+    days a caller cannot account for, which is what #372 turns on.
+    """
+    days: set[str] = set()
+    for model in (DBMemory, DBEncounter):
+        days.update(
+            _day_key(d) for d in sess.exec(
+                select(model.date).where(model.project_id == project.id)
+            ).all()
+        )
+    journals = select(DBJournalEntry.date).where(
+        DBJournalEntry.project_id == project.id
+    )
+    if visible_to is not None:
+        journals = journals.where(
+            (DBJournalEntry.user_info_id == visible_to)
+            | (
+                (DBJournalEntry.user_info_id.is_(None))
+                & (project.user_info_id == visible_to)
+            )
+        )
+    days.update(_day_key(d) for d in sess.exec(journals).all())
+    days.update(
+        _day_key(d) for d in sess.exec(
+            select(DBActivity.start_date_local)
+            .join(DBProjectItem, DBProjectItem.activity_id == DBActivity.id)
+            .where(DBProjectItem.project_id == project.id)
+        ).all()
+    )
+    # Segments carry their date inside the serialised ConnectingSegment, and an
+    # undated one is placed by its neighbours rather than by a day of its own —
+    # _day_key drops those to "".
+    for segment_json in sess.exec(
+        select(DBProjectItem.segment_json).where(
+            DBProjectItem.project_id == project.id,
+            DBProjectItem.item_type == "segment",
+        )
+    ).all():
+        if not segment_json:
+            continue
+        try:
+            days.add(_day_key((json.loads(segment_json) or {}).get("date")))
+        except (ValueError, TypeError, AttributeError):
+            # A blob that isn't a JSON object can't name a day. Skipping it
+            # pins nothing extra and keeps one malformed row from 500-ing the
+            # check, which the client reads as "can't prune at all".
+            # Mirrors src/billing/trip_days.py:project_day_bounds.
+            continue
+    days.discard("")
+    return days
+
+
 @router.get("/{name}/content-days", summary="Days holding content for any member")
 def get_project_content_days(
     name: str,
@@ -398,45 +457,9 @@ def get_project_content_days(
     by matching it.
     """
     user_info_id = int(current_user["sub"])
-    days: set[str] = set()
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
-        for model in (DBMemory, DBJournalEntry, DBEncounter):
-            days.update(
-                _day_key(d) for d in sess.exec(
-                    select(model.date).where(model.project_id == row.id)
-                ).all()
-            )
-        days.update(
-            _day_key(d) for d in sess.exec(
-                select(DBActivity.start_date_local)
-                .join(DBProjectItem, DBProjectItem.activity_id == DBActivity.id)
-                .where(DBProjectItem.project_id == row.id)
-            ).all()
-        )
-        # Segments carry their date inside the serialised ConnectingSegment,
-        # and an undated one is placed by its neighbours rather than by a day
-        # of its own — _day_key drops those to "".
-        for segment_json in sess.exec(
-            select(DBProjectItem.segment_json).where(
-                DBProjectItem.project_id == row.id,
-                DBProjectItem.item_type == "segment",
-            )
-        ).all():
-            if not segment_json:
-                continue
-            try:
-                parsed = json.loads(segment_json) or {}
-                days.add(_day_key(parsed.get("date")))
-            except (ValueError, TypeError, AttributeError):
-                # A blob that isn't a JSON object can't name a day. Skipping it
-                # over-deletes nothing (the day simply isn't pinned by this
-                # segment) and keeps a single malformed row from 500-ing the
-                # check, which the client reads as "can't prune at all".
-                # Mirrors src/billing/trip_days.py:project_day_bounds.
-                continue
-    days.discard("")
-    return {"days": sorted(days)}
+        return {"days": sorted(_content_day_keys(sess, row))}
 
 
 @router.get("/{name}/stats", summary="Get project statistics")
@@ -549,6 +572,44 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
+def _keep_days_the_caller_cannot_see(
+    sess, project, incoming: dict, existing_json: str | None, caller_id: int
+) -> dict:
+    """Put back any non-empty day-meta entry the caller dropped for a day whose
+    content they cannot see (issue #387).
+
+    ``PUT /day-meta`` replaces the whole map, so "the user cleared this day's
+    notes" and "the trip-end prune dropped a day it should not have" arrive as
+    the same payload: a key that is simply absent. Client-side, #372 settled
+    which days may go — but only a current client asks. A stale build, another
+    client, or a future bug computing the pruned map wrongly would still wipe
+    the *shared* notes of a day that only another member's journal keeps on
+    screen, and the owner of that journal would watch a day's notes vanish.
+
+    The narrow rule that separates the two cases without blocking real edits:
+    refuse the drop only when the caller demonstrably could not have known what
+    they were dropping — the day has content, none of it visible to them, and
+    there was something to lose. Clearing a day you can see still works, an
+    empty entry still goes, and a day with no content at all still prunes.
+    """
+    existing = json.loads(existing_json) if existing_json else {}
+    dropped = {
+        key: meta for key, meta in existing.items()
+        if key not in incoming and meta
+    }
+    if not dropped:
+        return incoming
+    # Only pay for the scan when something non-empty is actually being removed.
+    invisible = (
+        _content_day_keys(sess, project)
+        - _content_day_keys(sess, project, visible_to=caller_id)
+    )
+    protected = invisible.intersection(dropped)
+    if not protected:
+        return incoming
+    return {**incoming, **{key: dropped[key] for key in protected}}
+
+
 def _merge_day_meta_preserve_counters(incoming: dict, existing_json: str | None) -> dict:
     """Return incoming day_meta with existing per-day counter values preserved.
 
@@ -585,7 +646,12 @@ def update_day_meta(
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
         row.day_meta_json = json.dumps(
-            _merge_day_meta_preserve_counters(body.day_meta, row.day_meta_json)
+            _merge_day_meta_preserve_counters(
+                _keep_days_the_caller_cannot_see(
+                    sess, row, body.day_meta, row.day_meta_json, user_info_id
+                ),
+                row.day_meta_json,
+            )
         )
         if body.sleeping_options:  # ignore empty list — never wipe sleeping options
             groups = body.sleeping_option_groups or {}
