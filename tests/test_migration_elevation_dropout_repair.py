@@ -66,6 +66,22 @@ def _sea_level_elevations():
     return [0.0 if i % 3 == 0 else float(i % 7) for i in range(_N)]
 
 
+def _descent_to_the_sea_elevations():
+    """A real descent from 800 m to a beach — high median, genuine 0.0 readings.
+
+    The zeros here are walked down to: the samples either side of them are a few
+    metres up, not hundreds. That is what separates a coastline from a dropout,
+    and a whole-series median test cannot see the difference.
+    """
+    elevations = []
+    for i in range(_N):
+        if i < _N - 12:
+            elevations.append(800.0 - (800.0 * i / (_N - 12)))
+        else:
+            elevations.append(0.0)             # arrived, and stayed at sea level
+    return elevations
+
+
 def _seed_row(engine, table_name: str, obj) -> None:
     """Insert using only the columns that exist in *table_name* AT _PREV_REV.
 
@@ -126,6 +142,12 @@ def seeded(db):
     # 5 — an untouched Strava row: its profile and gain are Strava's own.
     _seed_activity(engine, id=5, is_edited=False,
                    elevation_profile_json=dropout, **common)
+    # 6 — a real descent from 800 m to the sea. High median AND real 0.0s, so a
+    #     median-based test would call it a dropout and interpolate the coast
+    #     away. The zeros are reached gradually, which is what marks them real.
+    _seed_activity(engine, id=6, is_edited=True,
+                   elevation_profile_json=_profile_json(
+                       _descent_to_the_sea_elevations()), **common)
 
     # A trip holding the GPX import, with its totals already cached.
     _seed_row(engine, "project", DBProject(
@@ -179,6 +201,23 @@ def test_genuine_sea_level_track_is_not_mangled(seeded):
     assert _rows(engine)[3] == before, (
         "a series whose median sits at sea level must come through untouched — "
         "its zeros are readings, and filling them would invent terrain"
+    )
+
+
+def test_real_descent_to_sea_level_keeps_its_coastline(seeded):
+    """The narrow case the per-run test exists for: a track whose median is high
+    but whose 0.0 samples are genuine. Filling those would invent altitude over
+    the last stretch of a real ride, irreversibly."""
+    cfg, engine = seeded
+    before = json.loads(_rows(engine)[6][1])["elevations_m"]
+
+    command.upgrade(cfg, _REPAIR_REV)
+
+    after = json.loads(_rows(engine)[6][1])["elevations_m"]
+    assert after == before, (
+        "zeros approached gradually are a coastline, not a missing reading — "
+        "a whole-series median test cannot tell them apart, so detection is "
+        "per run of zeros, by its own neighbours"
     )
 
 

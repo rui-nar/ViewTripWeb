@@ -25,8 +25,10 @@ Deliberately NOT touched, following ``b7f1a3c9d204``:
 
 * Rows whose profile is a client-side E2EE envelope — the server holds no key
   and cannot read, let alone repair, them (counted and logged; issue #366).
-* Rows whose median elevation is itself near sea level: there a ``0.0`` is a
-  valid reading, and "repairing" it would mangle a genuine coastal track.
+* Zeros that are genuine sea-level readings rather than the sentinel — judged
+  per run of zeros, by whether the samples around it are themselves near sea
+  level. A track descending from the Alps to a beach has both a high median and
+  real 0.0 samples, and filling those in would destroy a real coastline.
 * ``original_elevation_profile_json`` and the rest of the edit-undo snapshot.
   Those record what the geometry WAS; ``reset_activity_track`` recomputes
   through the fixed code path when it restores them.
@@ -55,21 +57,62 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _log = logging.getLogger("alembic.runtime.migration")
 
-#: How far a series' median elevation must sit from zero before an exact 0.0
-#: sample is read as a missing-elevation sentinel rather than a real reading.
-#: Same value and same test as ``b7f1a3c9d204._has_elevation_dropout``, which is
-#: what decided these rows were unsafe to recompute in the first place — the two
-#: must agree, or this pass would repair a row that one never skipped.
+#: How far the samples AROUND a run of zeros must sit from sea level before
+#: those zeros are read as the missing-elevation sentinel rather than real
+#: readings. Same value as ``b7f1a3c9d204._has_elevation_dropout``, applied to
+#: each run's own neighbours rather than to the whole series' median — see
+#: :func:`_sentinel_mask`. Strictly narrower than that test, which is the safe
+#: direction: every row this repairs is one b7f1a3c9d204 skipped, and a row it
+#: now declines to touch simply keeps the honest figure the live path gave it.
 _SEA_LEVEL_MARGIN_M = 50.0
+
+
+def _sentinel_mask(elevations: list) -> list:
+    """Mark which exact ``0.0`` samples are the sentinel, not a real reading.
+
+    ``b7f1a3c9d204`` only had to decide whether a row was safe to *recompute*,
+    so "any 0.0 while the median sits above 50 m" was enough to make it skip.
+    Repairing is destructive where skipping was not: a track that descends from
+    the Alps to a Mediterranean beach has a high median AND genuine 0.0 samples
+    at the end, and blanket-filling every 0.0 would interpolate that real
+    coastline away with no way back.
+
+    So each run of zeros is judged by its own neighbours instead. The sentinel
+    was written in place of a missing reading, which leaves a cliff: the samples
+    on either side sit at whatever altitude the track was actually at, hundreds
+    of metres up. Real sea level is *walked* to — the readings approaching it are
+    themselves small. A run whose surrounding samples are within the margin of
+    zero is therefore a genuine coastal stretch and is left alone.
+
+    Returns a list of bools, one per sample.
+    """
+    n = len(elevations)
+    mask = [False] * n
+    i = 0
+    while i < n:
+        if elevations[i] != 0.0:
+            i += 1
+            continue
+        run_end = i
+        while run_end < n and elevations[run_end] == 0.0:
+            run_end += 1
+        before = elevations[i - 1] if i > 0 else None
+        after = elevations[run_end] if run_end < n else None
+        neighbours = [abs(v) for v in (before, after) if v is not None]
+        # No non-sentinel neighbour at all (a series that is all zeros) is not a
+        # dropout either — there is nothing to interpolate from.
+        if neighbours and max(neighbours) > _SEA_LEVEL_MARGIN_M:
+            for j in range(i, run_end):
+                mask[j] = True
+        i = run_end
+    return mask
 
 
 def _has_elevation_dropout(elevations: list) -> bool:
     """True if the series carries the ``0.0`` sentinel rather than real elevation."""
     if 0.0 not in elevations:
         return False
-    ordered = sorted(elevations)
-    median = ordered[len(ordered) // 2]
-    return abs(median) > _SEA_LEVEL_MARGIN_M
+    return any(_sentinel_mask(elevations))
 
 
 def upgrade() -> None:
@@ -117,7 +160,8 @@ def upgrade() -> None:
 
         # Map the sentinel back to the "no reading" it always meant, then fill
         # the holes exactly as the fixed writer now does.
-        holed = [None if e == 0.0 else float(e) for e in elevations]
+        mask = _sentinel_mask(elevations)
+        holed = [None if flag else float(e) for e, flag in zip(elevations, mask)]
         repaired = interpolate_elevation_gaps(distances, holed)
         repaired_json = json.dumps(
             {"distances_km": distances, "elevations_m": repaired})
