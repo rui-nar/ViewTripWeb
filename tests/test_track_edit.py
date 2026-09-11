@@ -325,21 +325,34 @@ class TestElevationGain:
     def test_long_track_stays_linear(self):
         """Both halves grew in issue #376 — the noise estimate differences the
         series five times over and the smoothing window widens with the noise —
-        so pin that neither turned into a per-sample rescan. 200k samples is a
-        long dense ride; this measures ~0.2 s, the same as before the change.
+        so pin that neither turned into a per-sample rescan.
+
+        Asserted as the RATIO between two sizes, not as a wall-clock bound. An
+        absolute bound measures the machine, not the code: this failed on a
+        developer box that was merely busy, while the same code on an idle one
+        took a third of the limit. Quadratic behaviour would show as ~16x for a
+        4x input; linear shows as ~4x, and the slack absorbs a noisy timer.
         """
         import random
         import time
 
-        random.seed(1)
-        n = 200_000
-        elevs = [100.0 + i * 0.002 + random.gauss(0, 1.2) for i in range(n)]
-        dists = [i * 0.0055 for i in range(n)]
+        def timed(n):
+            random.seed(1)
+            elevs = [100.0 + i * 0.002 + random.gauss(0, 1.2) for i in range(n)]
+            dists = [i * 0.0055 for i in range(n)]
+            best = float("inf")
+            for _ in range(3):          # best of three: load only ever adds
+                start = time.perf_counter()
+                elevation_gain(elevs, dists)
+                best = min(best, time.perf_counter() - start)
+            return best
 
-        start = time.time()
-        elevation_gain(elevs, dists)
-        elapsed = time.time() - start
-        assert elapsed < 1.0, f"elevation_gain took {elapsed:.2f}s at {n}"
+        small = timed(50_000)
+        large = timed(200_000)
+        assert large < small * 8, (
+            f"4x the samples cost {large / small:.1f}x the time "
+            f"({small:.3f}s -> {large:.3f}s); linear is ~4x, quadratic ~16x"
+        )
 
     def test_steady_climb_is_counted_in_full(self):
         """A clean ramp comes back within ~1%: the clamped window flattens the

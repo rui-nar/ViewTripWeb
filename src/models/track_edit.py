@@ -194,9 +194,13 @@ ELEV_SMOOTH_SPAN_M = 60.0
 #: Ceiling on that widening. Past a few hundred metres a moving average stops
 #: telling noise from terrain — a 240 m window already halves a 500 m roller —
 #: so beyond this we stop filtering and let the hysteresis band absorb whatever
-#: noise is left. Measured over 20 noise seeds, 30 km at 100 m spacing with
-#: sigma 2 over 20 m hills: uncapped widening averaged 277 m of the real 600,
-#: this cap 349 m.
+#: noise is left.
+#:
+#: Fixture, spelled out so the number can be re-derived: 30 sinusoidal hills of
+#: 20 m over 600 m (12 km of track) sampled every 100 m under sigma 2 noise,
+#: true ascent 600 m, mean of 20 noise seeds. This cap recovers 239 m
+#: (218-254); letting the window widen without limit recovers 108 m (4-252) —
+#: it swallows the hills outright on the noisier seeds.
 ELEV_SMOOTH_MAX_SPAN_M = 240.0
 
 #: Residual noise the window aims to leave behind, in metres. Averaging m
@@ -215,11 +219,14 @@ ELEV_SMOOTH_TARGET_SIGMA_M = 1.0
 #: a sparse noisy track read 236 m of a true 600 that way, 349 m this way). A
 #: smoothed series wanders rather than jitters, so the band has to cover the
 #: largest excursion of a correlated series, not a one-sample outlier — several
-#: sigma, not the 3x that suits per-sample jitter. Worst case over 20 noise
-#: seeds: 3x left 58 m of phantom climb on 30 km of sparse flat ground and 4x
-#: still left 53 m, while 4.5x caps it at 20 m for 24 m of the real climb on a
-#: sparse noisy track (373 -> 349 of a true 600). 5x costs another 20 m of that
-#: and returns 3.
+#: sigma, not the 3x that suits per-sample jitter.
+#:
+#: Fixture: 30 km of flat ground sampled every 40 m under sigma 3 noise, true
+#: ascent 0, mean (and worst) of 20 noise seeds. 3x leaves 25 m of phantom
+#: climb (worst 52), 4x leaves 8 m (worst 35), this 4.5x leaves 3 m (worst 28),
+#: 5x leaves 0 m (worst 7). The last step is not free: a wider band also eats
+#: real rollers, and 4.5 is where flat ground is quiet without spending more
+#: hill than it has to.
 ELEV_NOISE_SIGMA_MULTIPLE = 4.5
 ELEV_GAIN_THRESHOLD_MIN_M = 1.0
 ELEV_GAIN_THRESHOLD_MAX_M = 20.0

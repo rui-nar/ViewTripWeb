@@ -66,6 +66,30 @@ def _sea_level_elevations():
     return [0.0 if i % 3 == 0 else float(i % 7) for i in range(_N)]
 
 
+def _lowland_elevations(missing=_MISSING):
+    """A Dutch-flat ~3 km at ~30 m, with *missing* samples carrying 0.0.
+
+    Its median sits below any sea-level margin, so the altitude test that
+    `b7f1a3c9d204` used never saw the dropout at all.
+    """
+    return [
+        0.0 if i in missing
+        else 30.0 + (i * 0.01 if i < _N // 2 else (_N - i) * 0.01)
+        for i in range(_N)
+    ]
+
+
+def _beach_then_cliff_elevations():
+    """A route along 2 km of DEM beach at exactly 0.0, then a 60 m cliff climb.
+
+    The zeros are real (DEM sea level is exactly 0) and one neighbour is far
+    above any sea-level margin, so a neighbour-altitude test condemns the whole
+    beach. The step to the cliff is 60 m over 100 m of travel — steep, but a
+    grade terrain can actually have.
+    """
+    return [3.0, 2.0] + [0.0] * 20 + [60.0, 90.0]
+
+
 def _descent_to_the_sea_elevations():
     """A real descent from 800 m to a beach — high median, genuine 0.0 readings.
 
@@ -142,6 +166,18 @@ def seeded(db):
     # 5 — an untouched Strava row: its profile and gain are Strava's own.
     _seed_activity(engine, id=5, is_edited=False,
                    elevation_profile_json=dropout, **common)
+    # 7 — a lowland track at ~30 m with the same three missing samples.
+    #     b7f1a3c9d204 ran first and, seeing a median under its sea-level
+    #     margin, recomputed this row FROM the sentinel — so it arrives here
+    #     already inflated, and this pass is its only chance to be corrected.
+    _seed_activity(engine, id=7, is_edited=False, source="gpx",
+                   elevation_profile_json=_profile_json(_lowland_elevations()),
+                   **common)
+    # 8 — a DEM beach ending in a coastal cliff. Real zeros beside a big step.
+    _seed_activity(engine, id=8, is_edited=True,
+                   elevation_profile_json=_profile_json(
+                       _beach_then_cliff_elevations(),
+                       distances=[i * 0.1 for i in range(24)]), **common)
     # 6 — a real descent from 800 m to the sea. High median AND real 0.0s, so a
     #     median-based test would call it a dropout and interpolate the coast
     #     away. The zeros are reached gradually, which is what marks them real.
@@ -219,6 +255,36 @@ def test_real_descent_to_sea_level_keeps_its_coastline(seeded):
         "a whole-series median test cannot tell them apart, so detection is "
         "per run of zeros, by its own neighbours"
     )
+
+
+def test_lowland_dropout_is_repaired_too(seeded):
+    """The altitude test missed these entirely: a track at 30 m has a median
+    below any sea-level margin, so its dropout went unrepaired while
+    b7f1a3c9d204 — shipping in the same release — recomputed its gain from the
+    fabricated dive. Grade sees it: 30 m of step over 10 m of travel."""
+    cfg, engine = seeded
+
+    command.upgrade(cfg, _REPAIR_REV)
+
+    gain, ep_json, _ = _rows(engine)[7]
+    assert 0.0 not in json.loads(ep_json)["elevations_m"], (
+        "the fabricated dive to sea level must be filled in"
+    )
+    assert gain < 5.0, (
+        f"gain must come back to the real ascent of this flat track, got {gain}"
+    )
+
+
+def test_beach_beside_a_cliff_keeps_its_zeros(seeded):
+    """Real DEM sea level is exactly 0.0, and a coastal route can climb a cliff
+    right after it. Judging the run by its neighbours' ALTITUDE condemned the
+    whole beach; judging it by grade does not — 60 m over 100 m is terrain."""
+    cfg, engine = seeded
+    before = json.loads(_rows(engine)[8][1])["elevations_m"]
+
+    command.upgrade(cfg, _REPAIR_REV)
+
+    assert json.loads(_rows(engine)[8][1])["elevations_m"] == before
 
 
 def test_encrypted_profile_is_left_alone(seeded):
