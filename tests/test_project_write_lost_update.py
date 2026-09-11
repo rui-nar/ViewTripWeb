@@ -276,46 +276,59 @@ def test_a_quota_refusal_surfaces_as_402_instead_of_being_retried(env, monkeypat
     assert calls["n"] == 1, "the quota refusal was retried instead of surfacing"
 
 
-def test_every_direct_project_write_advances_the_lock_through_the_sql_helper(
+def test_every_direct_project_write_advances_the_lock_past_a_concurrent_bump(
         env, monkeypatch):
-    """Each endpoint that writes DBProject columns must delegate to
-    repo_core.bump_lock_version, which emits `SET lock_version = lock_version + 1`.
+    """The counter must be advanced in SQL, and this asserts the *effect*.
 
-    Not a style preference. An inline `row.lock_version = loaded + 1` computes
-    the new value from what this request's ORM loaded, so two overlapping
-    writers both store N+1, the counter stands still, and the compare-and-swap
-    behind save_project_with_retry is blind to one of them — the hole this
-    branch exists to close, reintroduced. SQLite serialises writers, so no
-    sequential test can tell the two implementations apart; this pins the
-    mechanism instead.
+    An inline `row.lock_version = loaded + 1` computes the new value from what
+    this request's ORM loaded. Land another writer's bump between that load and
+    this one's write and the two resolve to the same N+1: the counter stands
+    still, and the compare-and-swap behind save_project_with_retry is blind to
+    one of them.
+
+    An earlier version of this test asserted only that bump_lock_version was
+    *called*, on the stated grounds that SQLite serialises writers so no
+    sequential test could tell the two forms apart. That was wrong — injecting
+    the concurrent bump at exactly this point distinguishes them — and the
+    call-only test passed with the lock fully disabled.
     """
     import api.projects as projects_mod
 
-    calls = []
-    real = projects_mod.bump_lock_version
-    monkeypatch.setattr(
-        projects_mod, "bump_lock_version",
-        lambda sess, pid: (calls.append(pid), real(sess, pid))[1])
-
     client, engine, ids = env
     name = ids["name"]
+
+    def lock_version():
+        with Session(engine) as sess:
+            return sess.exec(
+                select(DBProject).where(DBProject.name == name)
+            ).one().lock_version
+
+    real = projects_mod.bump_lock_version
+
+    def _bump_after_someone_else(sess, project_id):
+        # Another writer commits between this request's load and its bump.
+        with Session(engine) as other:
+            real(other, project_id)
+            other.commit()
+        real(sess, project_id)
+
+    monkeypatch.setattr(projects_mod, "bump_lock_version", _bump_after_someone_else)
+
     writes = {
-        "day-meta": ("put", f"/api/projects/{name}/day-meta",
+        "day-meta": (f"/api/projects/{name}/day-meta",
                      {"day_meta": {"2024-06-05": {"note": "a"}}}),
-        "trip dates": ("put", f"/api/projects/{name}",
-                       {"trip_start": "2024-06-01"}),
-        "track style": ("put", f"/api/projects/{name}/track-style",
+        "trip dates": (f"/api/projects/{name}", {"trip_start": "2024-06-01"}),
+        "track style": (f"/api/projects/{name}/track-style",
                         {"track_color": "#ff0000"}),
-        "languages": ("put", f"/api/projects/{name}/languages",
-                      {"languages": ["fr"]}),
+        "languages": (f"/api/projects/{name}/languages", {"languages": ["fr"]}),
     }
-    for label, (_verb, url, body) in writes.items():
-        calls.clear()
+    for label, (url, body) in writes.items():
+        before = lock_version()
         r = client.put(url, json=body)
         assert r.status_code in (200, 204), f"{label}: {r.text}"
-        assert calls == [ids["project"]], (
-            f"{label} committed without going through bump_lock_version — a "
-            "write invisible to the optimistic lock"
+        assert lock_version() == before + 2, (
+            f"{label}: counter went {before} -> {lock_version()}; one of the two "
+            "writes was invisible to the optimistic lock"
         )
 
 

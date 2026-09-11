@@ -340,3 +340,21 @@ def test_a_malformed_day_meta_row_does_not_break_loading_the_project(env, blob):
 
     r = client.get("/api/projects/Trip")
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("blob", ['"null"', "null", "[]", "not json",
+                                  '{"2026-07-04": "rubble"}'])
+def test_a_malformed_day_meta_row_does_not_break_the_stats_endpoint(env, blob):
+    """The client fires GET /stats in parallel with the project load. Making
+    only the loader and the save path tolerant left this one returning 500, so
+    a trip with one bad row still looked broken while the user was on the very
+    screen that would repair it."""
+    client, engine, _, _ = env
+    with Session(engine) as sess:
+        row = sess.exec(select(DBProject).where(DBProject.name == "Trip")).one()
+        row.day_meta_json = blob
+        sess.add(row)
+        sess.commit()
+
+    r = client.get("/api/projects/Trip/stats")
+    assert r.status_code == 200, r.text

@@ -74,7 +74,7 @@ from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quot
 from src.models.activity import parse_activities_or_log
 from src.models.project import DEFAULT_SLEEPING_GROUPS, tag_options_with_untagged
 from src.project.project_io import ProjectIO
-from src.project.repo_core import bump_lock_version
+from src.project.repo_core import _parse_day_meta_json, bump_lock_version
 from src.project.project_repo import _compute_stats
 from src.utils.logging import get_logger
 
@@ -508,7 +508,7 @@ def get_project_stats(
         # Always derive tag_options live from day_meta_json so they are never
         # stale (cached stats pre-date the tag-save fix and stored [] here).
         stats["tag_options"] = tag_options_with_untagged(
-            dm.get("tags") for dm in json.loads(row.day_meta_json or "{}").values()
+            dm.get("tags") for dm in _parse_day_meta_json(row.day_meta_json)[0].values()
         )
     return stats
 

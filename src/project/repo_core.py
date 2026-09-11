@@ -45,7 +45,7 @@ class StaleWriteError(Exception):
     surface a 409 to the client."""
 
 
-def _parse_day_meta_json(raw: str | None, project_id=None) -> tuple[dict, str]:
+def _parse_day_meta_json(raw: str | None) -> tuple[dict, str]:
     """Parse a stored day-meta blob, tolerating rubble.
 
     Returns ``(map, reason)`` — *reason* empty when nothing was dropped, so the
@@ -603,8 +603,7 @@ class ProjectCoreMixin:
         # loader still raised, a single bad row would 500 every project GET and
         # every importer for that trip — the user would have no settings screen
         # to save the repair from.
-        raw_dm, dropped = _parse_day_meta_json(
-            getattr(row, 'day_meta_json', None), getattr(row, 'id', None))
+        raw_dm, dropped = _parse_day_meta_json(getattr(row, 'day_meta_json', None))
         if dropped:
             # Loud, because this is lossy: the next structural save rewrites
             # day_meta_json from what was loaded here, so whatever could not be
