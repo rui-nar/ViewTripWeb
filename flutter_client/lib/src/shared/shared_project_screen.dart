@@ -120,15 +120,31 @@ class _SharedProjectService extends ProjectService {
             'decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
       }();
 
-  /// There is no share-scoped zoom-simplified endpoint yet, and the owner one
-  /// is auth-gated on a real project name — calling it with a share token
-  /// would 401 on every shared load for nothing. Failing here immediately
-  /// takes the same fallback a 404 would, minus the round trip.
+  /// The share-scoped zoom-simplified endpoint (issue #321). A public link
+  /// used to be the one path that still shipped the full-resolution geometry
+  /// the zoom level of detail exists to avoid — 4.5 MB and ~180 MB of heap on
+  /// the trip it was measured against, on the device least likely to have room
+  /// for it.
+  ///
+  /// [fetchSimplifiedGeo] rather than getSimplifiedGeo, so the base class's
+  /// in-flight dedup still applies: a mode toggle mid-load and a concurrent
+  /// zoom refetch then share one request instead of racing two.
+  ///
+  /// No `aid` — it is the visitor id, and /meta already records the visit.
   @override
-  Future<Map<String, dynamic>> getSimplifiedGeo(ProjectRef _, double zoom,
-          {GeoBox? bbox}) =>
-      Future.error(UnsupportedError(
-          'no share-scoped simplified geo endpoint (issue #321)'));
+  Future<Map<String, dynamic>> fetchSimplifiedGeo(
+      ProjectRef _, double zoom, GeoBox? bbox) async {
+    final box = bbox == null ? '' : '&bbox=${bbox.param}';
+    final bytes = await perfSpans.stage(
+        'fetch_geo_lod',
+        () => api.getBytes('/api/share/$token/geo/simplified?zoom=$zoom$box',
+            timeout: const Duration(seconds: 90)));
+    perfSpans.note('geo_lod', perfSizeLabel(bytes.length));
+    // Same off-isolate hop the owner path uses, so the geometry caches are
+    // seeded and the map's first build after the swap does no O(points) work.
+    return perfSpans.stage(
+        'decode_geo_lod', () => heavy.decodeGeoOffIsolate(bytes));
+  }
 
   @override
   Future<Map<String, dynamic>> getLowResGeo(ProjectRef _) =>

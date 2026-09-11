@@ -1236,6 +1236,25 @@ class ProjectNotifier extends ChangeNotifier
   bool _refetchInFlight = false;
   int _geoRefetchCount = 0;
 
+  /// True while the refetch that captured [token] and [r] is still the one to
+  /// apply.
+  ///
+  /// Deliberately not [_isCurrent]. That compares against the ref [load] was
+  /// *begun* with, and `ref` drifts away from it the moment the server
+  /// answers: load() corrects the name and the role from `caller_role`. On a
+  /// share link the name goes from the token to the trip's own name, and for
+  /// a companion whose real tier is not the "editor" placeholder the role
+  /// changes — so on both paths a refetch, which reads `ref`, held a ref the
+  /// track could never match, and every refetched level was fetched and then
+  /// thrown away. A viewer kept the detail of whatever zoom the trip first
+  /// loaded at however far they zoomed in (issue #321).
+  ///
+  /// The token is what catches supersession — a second load, a project
+  /// switch, a teardown all bump it. The ref only has to still be the project
+  /// this refetch was started for.
+  bool _refetchIsCurrent(int token, ProjectRef r) =>
+      _loadTrack.token == token && ref == r;
+
   Future<void> _refetchGeoForZoomInner(ProjectRef r) async {
     final bucket = _bucketOf(_mapZoom);
     // Captured before the awaits, for the same reason the load path captures
@@ -1248,12 +1267,12 @@ class ProjectNotifier extends ChangeNotifier
     final token = _loadTrack.token;
     try {
       final next = await _service.getSimplifiedGeo(r, _mapZoom, bbox: box);
-      if (!_isCurrent(token, r)) return;
+      if (!_refetchIsCurrent(token, r)) return;
       // See the load path: a response with no feature list is not an empty
       // trip. Keep what is on screen rather than blanking it.
       if (next['features'] is! List) return;
       await _waitForCameraIdle();
-      if (!_isCurrent(token, r)) return;
+      if (!_refetchIsCurrent(token, r)) return;
       // Re-read the bucket: the user may have kept zooming while this was in
       // flight, in which case a newer refetch is already scheduled and this
       // result is for a level nobody is looking at. The BOX is deliberately
@@ -1286,7 +1305,7 @@ class ProjectNotifier extends ChangeNotifier
         perfSpans.note('geo_box_unsatisfiable', 'yes');
       }
       await _buildFullTrack();
-      if (!_isCurrent(token, r)) return;
+      if (!_refetchIsCurrent(token, r)) return;
       notifyListeners();
     } on Object {
       // Non-fatal: the geometry already on screen stays. A failed refetch
