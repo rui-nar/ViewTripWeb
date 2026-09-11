@@ -174,6 +174,31 @@ def test_reset_restores_original(env):
         assert row.distance == pytest.approx(full_geom_dist, rel=1e-6)
 
 
+def test_reset_restores_the_original_elevation_gain(env):
+    """A synced activity's climb is Strava's number, not ours. An edit keeps a
+    share of it and a reset must hand back the whole of it — recomputing here
+    would return a different figure than the one the reset is undoing to
+    (issue #386)."""
+    client, engine = env
+    with Session(engine) as sess:
+        before = sess.get(DBActivity, 111).total_elevation_gain
+
+    client.put("/api/projects/My Trip/activities/111/track",
+               json={"points": [{"lat": 48.0, "lng": 2.0, "elev": 100.0},
+                                {"lat": 48.0, "lng": 2.01, "elev": 120.0},
+                                {"lat": 48.0, "lng": 2.02, "elev": 110.0}]})
+    with Session(engine) as sess:
+        edited = sess.get(DBActivity, 111)
+        assert edited.total_elevation_gain != pytest.approx(before)
+        assert edited.original_total_elevation_gain == pytest.approx(before)
+
+    client.post("/api/projects/My Trip/activities/111/reset")
+    with Session(engine) as sess:
+        row = sess.get(DBActivity, 111)
+        assert row.total_elevation_gain == pytest.approx(before)
+        assert row.original_total_elevation_gain is None
+
+
 def test_reset_without_edit_is_conflict(env):
     client, _ = env
     resp = client.post("/api/projects/My Trip/activities/111/reset")

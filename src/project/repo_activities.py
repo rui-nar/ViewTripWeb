@@ -51,6 +51,20 @@ def _parse_ep(ep_json: Optional[str]):
         return None
 
 
+def _apportion_gain(stored: Optional[float], before: float, after: float) -> float:
+    """Scale a stored elevation gain to the share *after* accounts for.
+
+    ``before`` and ``after`` are OUR measure of the same two geometries, so the
+    estimator's own bias divides out and only the proportion survives. Falls
+    back to the freshly measured figure when there is nothing to scale — no
+    stored value, or a ``before`` of zero, which is what a flat activity or an
+    unreadable (client-encrypted) profile gives.
+    """
+    if stored is None or before <= 0:
+        return after
+    return stored * (after / before)
+
+
 class ActivityMixin:
     """Activity CRUD, enrichment writes, and track-geometry editing."""
 
@@ -102,6 +116,20 @@ class ActivityMixin:
 
         Snapshots the pre-edit polyline/elevation into the original_* columns on
         the FIRST edit only, so a later "Reset to Strava" can restore them.
+
+        Elevation gain is SCALED, not recomputed (issue #386). A synced activity
+        arrives with Strava's own figure, measured from data we never see and
+        corrected in ways we cannot reproduce; recomputing from the stored
+        profile threw that away and replaced it with ours, so trimming fifty
+        metres off a ride could move its climb by hundreds. The edited piece now
+        keeps the share of the original figure that its own geometry accounts
+        for — the same treatment moving/elapsed time already gets just below,
+        and for the same reason.
+
+        The share is measured with our own estimator on both sides, so its
+        absolute bias cancels: only the RATIO between the two geometries is
+        used. That also makes a split's pieces sum to their parent, since each
+        piece is apportioned against the same pre-split denominator.
         """
         from src.models.track_edit import (
             align_points,
@@ -113,6 +141,7 @@ class ActivityMixin:
         if not row.is_edited:
             row.original_polyline = row.summary_polyline
             row.original_elevation_profile_json = row.elevation_profile_json
+            row.original_total_elevation_gain = row.total_elevation_gain
 
         # Apportion times against the CURRENT geometry's haversine length (not
         # the stored scalar distance, which Strava derives differently). This
@@ -139,7 +168,11 @@ class ActivityMixin:
         row.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
 
         row.distance = metrics.distance
-        row.total_elevation_gain = metrics.total_elevation_gain
+        row.total_elevation_gain = _apportion_gain(
+            row.total_elevation_gain,
+            prev_metrics.total_elevation_gain,
+            metrics.total_elevation_gain,
+        )
         row.elev_high = metrics.elev_high
         row.elev_low = metrics.elev_low
         row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
@@ -305,7 +338,15 @@ class ActivityMixin:
             edited_distance = row.distance or 0.0
             metrics = recompute_track_metrics(points)
             row.distance = metrics.distance
-            row.total_elevation_gain = metrics.total_elevation_gain
+            # The snapshot is the figure the activity had before anything was
+            # edited — Strava's own, where Strava supplied one. Restoring it is
+            # the whole point of keeping it; recomputing here would hand back a
+            # different number than the one the reset is undoing to.
+            row.total_elevation_gain = (
+                row.original_total_elevation_gain
+                if row.original_total_elevation_gain is not None
+                else metrics.total_elevation_gain
+            )
             row.elev_high = metrics.elev_high
             row.elev_low = metrics.elev_low
             row.start_latlng_json = json.dumps(metrics.start_latlng) if metrics.start_latlng else None
@@ -321,6 +362,7 @@ class ActivityMixin:
         row.is_edited = False
         row.original_polyline = None
         row.original_elevation_profile_json = None
+        row.original_total_elevation_gain = None
         sess.commit()
         return True
 
@@ -481,6 +523,12 @@ class ActivityMixin:
         # denominator than the head and inflate it.
         tail.summary_polyline = head.summary_polyline
         tail.elevation_profile_json = head.elevation_profile_json
+        # The pre-split gain rides along for the same reason the times do: each
+        # piece then keeps the share of it its own geometry accounts for, and
+        # the two sum to the track they came out of instead of each being
+        # measured from scratch. Captured before the head is written, since that
+        # write replaces the head's figure with its own share.
+        tail.total_elevation_gain = head.total_elevation_gain
         sess.add(tail)
 
         # Write head then tail geometry (each snapshots its own original + recomputes).
@@ -513,6 +561,7 @@ class ActivityMixin:
         # keeps the seeding trick and decouples it from the snapshot.
         tail.original_polyline = tail.summary_polyline
         tail.original_elevation_profile_json = tail.elevation_profile_json
+        tail.original_total_elevation_gain = tail.total_elevation_gain
 
         # Insert the tail item directly after the head item, renumbering positions.
         item_rows = sess.exec(
