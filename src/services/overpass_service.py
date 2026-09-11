@@ -653,6 +653,12 @@ def _extract_relation_geometry(
     self-overlapping line (observed on Hanko→Salo: a 116 km teleport mid-line,
     6.2x the real distance).
 
+    Since #363 one exception to "no teleports" exists and it is bounded to
+    ``_COMPONENT_BRIDGE_M``: see ``_bridge_to_named_stops``, which joins the
+    component holding a stop *this relation names at this leg's endpoint* to
+    whatever it comes within that many metres of. Nothing else may bridge, and
+    the limit is 250 m against the 116 km this docstring is otherwise about.
+
     **What comes back is the best path this relation offers, not a promise that
     it runs between these two stops.** Since #359 the endpoints are snapped
     inside one connected component (see ``_snap_endpoints``), so a relation
@@ -672,6 +678,7 @@ def _extract_relation_geometry(
     if ways:
         nodes, adj = _build_rail_graph(ways)
         if nodes:
+            _bridge_to_named_stops(rel, nodes, adj, lat1, lon1, lat2, lon2)
             snapped = _snap_endpoints(nodes, adj, lat1, lon1, lat2, lon2)
             if snapped:
                 path = _dijkstra(nodes, adj, *snapped)
@@ -748,6 +755,78 @@ def _snap_endpoints(
     return best
 
 
+# How close one of the relation's own node members must be to a leg endpoint
+# before it is read as "this relation calls here". A route relation lists its
+# stops as node members, and `_enrich_uic` has already snapped the leg's
+# endpoint onto the OSM station node those stops sit on, so a match is metres:
+# Paris Montparnasse is 69 m from the raw trip coordinate and 0 m from the
+# enriched one. 1 km is slack for strategy B, which never enriches, and for a
+# relation referencing a stop node on the platform rather than at the station
+# centre. It is well inside `_ENDPOINT_TOLERANCE_KM` deliberately — an anchor
+# must never be the reason a relation clears the check that says it is this leg.
+_STOP_ANCHOR_KM = 1.0
+
+# The longest gap one bridge may span, in metres.
+#
+# This is the *only* place `_extract_relation_geometry` may join two things that
+# OSM does not join, and the number is what keeps it from being the Hanko→Salo
+# teleport again (116 km mid-line, 6.2x the real distance) — three orders of
+# magnitude, not a margin.
+#
+# Measured over the first 400 France route relations with more than 20 member
+# ways: 162 have a graph in pieces, and their 868 non-main components sit this
+# far from the rest of their own relation's graph:
+#
+#     ≤10 m  505    ≤100 m   43    ≤250 m    6    >1 km  50
+#     ≤25 m  140    ≤150 m   20    ≤500 m   16
+#     ≤50 m   44    ≤200 m   18    ≤1 km    22
+#
+# There is no cliff in that tail to read a limit off, so the limit is a
+# judgement and these are its two sides. Paris Montparnasse → Bordeaux, the leg
+# in issue #363, needs 100 m: the throat island reaches within 13 m of the
+# station and stops 100 m short of the main line at the Petite Ceinture, in all
+# three of its candidate relations. 250 m is the 95th percentile of the gaps
+# above, so it covers that with headroom while leaving the kilometre tail — a
+# straight line drawn a kilometre across a city, which is a visible lie — out.
+#
+# What makes 250 m safe is not the number alone but that only a component
+# holding a stop the relation *names at this leg's endpoint* may be bridged at
+# all. A blanket 250 m join would let a relation that does not serve this leg
+# stitch itself into reach of `_ENDPOINT_TOLERANCE_KM`; anchoring on the stop
+# sequence means a bridge is only ever built towards a station the relation
+# itself says it calls at, which is not a guess about geometry.
+_COMPONENT_BRIDGE_M = 250.0
+
+
+def _relation_stop_near(
+    rel: dict, lat: float, lon: float
+) -> Optional[tuple[float, float]]:
+    """Where this relation says it stops nearest (*lat*, *lon*), or None.
+
+    Reads the relation's node members, which is where both sources put the stop
+    sequence: Overpass's ``out geom`` returns ``{"type": "node", "ref", "role",
+    "lat", "lon"}`` per node member (verified against overpass-api.de — all 16
+    of relation 5928800's come back located), and since #363 ``RailStore.
+    relation_geometry`` emits the same shape from ``relation_node``. So this
+    needs no branch on where the relation came from, and a store that cannot
+    place a node simply omits its coordinates, which reads here as "no stop".
+
+    Every role counts, ``platform`` included. The deny-list in ``_is_route_path``
+    is about which *ways* the train runs over; a node member is a point the
+    relation calls at whatever it is labelled, and it is used here only to say
+    where — never as a graph vertex.
+    """
+    best: Optional[tuple[float, float]] = None
+    best_km = _STOP_ANCHOR_KM
+    for member in rel.get("members", []):
+        if member.get("type") != "node" or member.get("lat") is None:
+            continue
+        km = _crow_km(lat, lon, member["lat"], member["lon"])
+        if km <= best_km:
+            best_km, best = km, (member["lat"], member["lon"])
+    return best
+
+
 def _components(
     nodes: dict[str, list[float]], adj: dict[str, list[str]]
 ) -> list[list[str]]:
@@ -770,6 +849,132 @@ def _components(
                     stack.append(neighbour)
         out.append(component)
     return out
+
+
+def _bridge_to_named_stops(
+    rel: dict,
+    nodes: dict[str, list[float]],
+    adj: dict[str, list[str]],
+    lat1: float, lon1: float, lat2: float, lon2: float,
+) -> int:
+    """Join the component holding a stop this relation names to what it touches.
+
+    Adds edges to *adj* in place and returns how many. Each one spans at most
+    ``_COMPONENT_BRIDGE_M``.
+
+    The case it exists for is issue #363. Paris Montparnasse → Bordeaux has
+    three candidate relations, all with ``missing_members = 0`` and no platform
+    member, so neither of #359's fixes applies — and all three are in pieces
+    anyway, because OSM's membership does not join the Montparnasse station
+    throat to the main line. ``_snap_endpoints`` then correctly keeps the piece
+    that reaches Bordeaux, and the leg is drawn starting 3.5 km late, from the
+    Petite Ceinture. Overpass returns the same gap; there is no track to find.
+
+    What there *is* is the relation saying, in its own node members, that it
+    calls at Paris Montparnasse — and a 322-node component that reaches within
+    13 m of it and stops 100 m short of the main line. So: find the stop this
+    relation names at each end of the leg, find the component holding it, and
+    join that component to every other one it comes within
+    ``_COMPONENT_BRIDGE_M`` of. Dijkstra then routes over a graph where the
+    throat is reachable, and the drawn line runs on real track apart from one
+    100 m segment across the gap OSM left.
+
+    **Every restriction here is load-bearing.** Only a component reaching a
+    *named* stop may be bridged, so this can never become the general
+    gap-chaining that produced the Hanko→Salo teleport — a relation that does
+    not call at this leg's endpoints gets no bridge at all and is still refused
+    by ``_ENDPOINT_TOLERANCE_KM``. Only one edge per other component is added,
+    at that component's closest approach, so a bridge cannot accumulate into a
+    path. And the metre limit is checked exactly, on the same equirectangular
+    approximation ``_dijkstra`` weights its edges with, so what is drawn is what
+    was measured.
+
+    Doing nothing is the common case and costs one graph traversal: 238 of the
+    400 France relations measured have a single component and return here.
+    """
+    comps = _components(nodes, adj)
+    if len(comps) < 2:
+        return 0
+    owner = {node: i for i, comp in enumerate(comps) for node in comp}
+
+    # Both ends of a leg usually anchor in the same component — the leg is on
+    # the relation's main line and only one end's throat is broken — and the
+    # two would then look for the same gaps and add the same edges twice.
+    added: set[tuple[str, str]] = set()
+    homes: set[int] = set()
+    bridged = 0
+    for lat, lon in ((lat1, lon1), (lat2, lon2)):
+        stop = _relation_stop_near(rel, lat, lon)
+        if stop is None:
+            continue
+        home = owner[_nearest_node(nodes, *stop)]
+        if home in homes:
+            continue
+        homes.add(home)
+        for a, b in _closest_approaches(nodes, comps, home):
+            edge = (a, b) if a < b else (b, a)
+            if edge in added:
+                continue
+            added.add(edge)
+            adj.setdefault(a, []).append(b)
+            adj.setdefault(b, []).append(a)
+            bridged += 1
+    if bridged:
+        _log.debug("rail relation %s: bridged %d component gap(s) under %.0f m "
+                   "to reach a stop it names", rel.get("id"), bridged,
+                   _COMPONENT_BRIDGE_M)
+    return bridged
+
+
+def _closest_approaches(
+    nodes: dict[str, list[float]], comps: list[list[str]], home: int
+) -> list[tuple[str, str]]:
+    """One (home node, other node) pair per component within the bridge limit.
+
+    Brute force is O(|home| × |rest|) — 322 × 20,833 on the reported leg, and
+    that is the *small* component of one candidate relation out of ten. So the
+    other components' nodes go into a grid of roughly ``_COMPONENT_BRIDGE_M``
+    cells and each home node looks only at its own cell and the eight around it.
+
+    The grid is metric, projected once at the home component's mean latitude,
+    because a degree of longitude is not a degree of latitude and cells keyed in
+    raw degrees are too narrow east-west to guarantee a neighbour is adjacent.
+    One reference latitude distorts distant components by a few percent, which
+    the 3×3 window's full cell of slack absorbs; where it would not, the miss is
+    a bridge not built, and a leg 3.5 km short is the failure this already had.
+    Candidates the grid offers are then measured exactly, so the grid only ever
+    prunes.
+    """
+    cell = _COMPONENT_BRIDGE_M / 111_000.0
+    home_nodes = comps[home]
+    ref_lat = sum(nodes[n][1] for n in home_nodes) / len(home_nodes)
+    x_scale = max(math.cos(math.radians(ref_lat)), 0.01)
+
+    def _key(node: str) -> tuple[int, int]:
+        lon, lat = nodes[node]
+        return int(lat / cell), int(lon * x_scale / cell)
+
+    grid: dict[tuple[int, int], list[str]] = {}
+    for node in home_nodes:
+        grid.setdefault(_key(node), []).append(node)
+
+    best: dict[int, tuple[float, str, str]] = {}
+    for index, comp in enumerate(comps):
+        if index == home:
+            continue
+        for other in comp:
+            olat, olon = nodes[other][1], nodes[other][0]
+            ci, cj = _key(other)
+            for i in (ci - 1, ci, ci + 1):
+                for j in (cj - 1, cj, cj + 1):
+                    for node in grid.get((i, j), ()):
+                        metres = _crow_km(
+                            nodes[node][1], nodes[node][0], olat, olon) * 1000
+                        if metres > _COMPONENT_BRIDGE_M:
+                            continue
+                        if index not in best or metres < best[index][0]:
+                            best[index] = (metres, node, other)
+    return [(node, other) for _, node, other in best.values()]
 
 
 # ---------------------------------------------------------------------------

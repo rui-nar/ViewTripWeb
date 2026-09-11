@@ -1,0 +1,73 @@
+/// Pure rules for the days that fall after a trip's end date.
+///
+/// Split out of project_settings_screen.dart so the claim the "Remove days
+/// after the end date?" confirmation makes can be unit-tested on its own
+/// (issue #358), and so the day list here and the one the trip actually
+/// renders are derived from the same extraction.
+library;
+
+/// The days sitting after a trip end date, split by whether dropping their
+/// day-meta entry actually makes them disappear from the trip.
+class TripEndOrphans {
+  /// Days after the end date whose only content is day-meta. Removing that
+  /// entry removes the day.
+  final List<String> removable;
+
+  /// Days after the end date that carry an activity or a memory. The trip's
+  /// day list is the union of day-meta keys, activity dates and memory dates
+  /// (see [ProjectNotifier.orderedDayKeys]), so these stay visible whatever
+  /// day-meta says. Their day-meta is deliberately left alone: silently
+  /// wiping the notes of a day the user can still see would be worse than
+  /// leaving them.
+  final List<String> pinned;
+
+  const TripEndOrphans({required this.removable, required this.pinned});
+}
+
+/// Day keys ("YYYY-MM-DD") that carry trip content — an activity, or an item
+/// of any type (memory, journal, encounter, segment).
+///
+/// Every one of those buckets into a day header in the activity panel (see
+/// `_buildDisplayList`), so every one of them keeps a day on screen no matter
+/// what day-meta says. Items with no date of their own inherit the preceding
+/// dated item's date there, which can never introduce a day key the dated
+/// item did not already contribute — so ignoring that propagation here is
+/// safe for the *set* of days.
+Set<String> contentDayKeys(
+  List<Map<String, dynamic>> activities,
+  List<Map<String, dynamic>> items,
+) {
+  final keys = <String>{};
+  void add(String? raw) {
+    final ds = raw?.split('T').first;
+    if (ds != null && ds.isNotEmpty) keys.add(ds);
+  }
+
+  for (final a in activities) {
+    add(a['start_date_local'] as String?);
+  }
+  for (final item in items) {
+    final type = item['item_type'];
+    if (type == 'activity') continue; // dated via `activities` above
+    final body = item[type] as Map<String, dynamic>?;
+    add(body?['date'] as String?);
+  }
+  return keys;
+}
+
+/// Classifies every day in [dayKeys] strictly after [tripEnd] (both plain
+/// "YYYY-MM-DD", so a lexicographic compare is a date compare). Both returned
+/// lists are sorted ascending and duplicate-free.
+TripEndOrphans classifyTripEndOrphans({
+  required Iterable<String> dayKeys,
+  required Set<String> daysWithContent,
+  required String tripEnd,
+}) {
+  final removable = <String>[];
+  final pinned = <String>[];
+  for (final key in dayKeys.toSet().toList()..sort()) {
+    if (key.compareTo(tripEnd) <= 0) continue;
+    (daysWithContent.contains(key) ? pinned : removable).add(key);
+  }
+  return TripEndOrphans(removable: removable, pinned: pinned);
+}

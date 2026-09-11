@@ -125,4 +125,18 @@ class RowMappersMixin:
             route_degraded=sd.get("route_degraded", False),
             route_hafas_failed=sd.get("route_hafas_failed", False),
             route_edited=sd.get("route_edited", False),
+            # Anything omitted here is silently *destroyed* on the next
+            # structural write, not merely unread: a reorder or an added item
+            # loads the project through this mapper and ``save_project`` writes
+            # every item's payload back from ``to_dict()``, so a field the
+            # mapper drops comes back as its dataclass default.
+            #
+            # For the provenance stamp (issue #364) that would reset a segment
+            # to version 0 every time the user moved an item, and the stale-stamp
+            # sweep would re-resolve it — the re-resolve treadmill the version
+            # rule exists to prevent, triggered by editing a trip rather than by
+            # bumping the constant.
+            route_degrade_retries=sd.get("route_degrade_retries", 0),
+            route_resolver_version=sd.get("route_resolver_version", 0),
+            route_strategy=sd.get("route_strategy"),
         )

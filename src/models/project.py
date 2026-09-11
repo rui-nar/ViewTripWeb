@@ -150,6 +150,21 @@ class ConnectingSegment:
     #   sweep_degraded_segments before each automatic retry, capped at MAX_DEGRADE_RETRIES.
     route_edited: bool = False              # True after a manual track edit (issue #150) — guards
     #   a subsequent auto-resolve from silently discarding the user's hand-drawn geometry.
+    # ── Provenance (issue #364) ───────────────────────────────────────────────
+    # Every field above records whether a resolve *failed*. Neither of these
+    # does: they record how the stored geometry was *produced*, which is what a
+    # confidently-wrong result (#359 resolved successfully, degraded=False, and
+    # started 13.9 km from the station it claimed to leave) leaves no trace of.
+    route_resolver_version: int = 0         # which generation of the rail resolver
+    #   produced route_polyline. 0 is the deliberate default for a row written
+    #   before the stamp existed — see RESOLVER_VERSION in src/jobs/route_jobs.py
+    #   for what a bump means, what it costs, and why 0 means "re-resolve me".
+    route_strategy: Optional[str] = None    # how the geometry was obtained:
+    #   relation_uic | relation_endpoints | coordinate_dijkstra | straight |
+    #   motis_trip | ferry | bus | manual. RailGeometry.strategy was computed
+    #   and logged on every resolve and then discarded, so "which trips does
+    #   this resolver bug affect" was unanswerable; persisting it costs nothing
+    #   and makes it one query.
 
     def to_dict(self) -> dict:
         """Serialise to a dict that can be round-tripped via from_dict()."""
@@ -179,6 +194,8 @@ class ConnectingSegment:
             "route_hafas_failed": self.route_hafas_failed,
             "route_degrade_retries": self.route_degrade_retries,
             "route_edited": self.route_edited,
+            "route_resolver_version": self.route_resolver_version,
+            "route_strategy": self.route_strategy,
         }
 
     @classmethod
@@ -210,6 +227,13 @@ class ConnectingSegment:
             route_hafas_failed=d.get("route_hafas_failed", False),
             route_degrade_retries=d.get("route_degrade_retries", 0),
             route_edited=d.get("route_edited", False),
+            # Absent on every row written before #364 — and "absent" has to mean
+            # "produced by a resolver older than any we stamped", not "unknown,
+            # leave it alone". The routes #359 got wrong are exactly the ones
+            # with no stamp, so treating them as unknown would make the sweep
+            # reach nothing on the day it ships and only ever help future bugs.
+            route_resolver_version=d.get("route_resolver_version", 0),
+            route_strategy=d.get("route_strategy"),
         )
 
 

@@ -30,7 +30,7 @@ from api.project_access import (
 from api.project_shared import _legacy_path, _refresh_share_tiles, _refresh_stats_background, _repo, queue_share_tiles_refresh, queue_stats_refresh, warm_meta_cache
 from src.billing.entitlements import ensure_trip_days_quota
 from src.jobs.queue import QUEUE_RESOLVE, enqueue
-from src.jobs.route_jobs import create_job, mark_done, mark_running
+from src.jobs.route_jobs import RESOLVER_VERSION, create_job, mark_done, mark_running
 from src.models.project import ConnectingSegment, ProjectItem, SegmentEndpoint
 from src.utils.logging import get_logger
 
@@ -211,6 +211,19 @@ def _resolve_route_job(
                 # A fresh auto-resolve is authoritative again — clears the
                 # guard a prior manual edit (issue #150) set.
                 "route_edited": False,
+                # Provenance (issue #364). Stamped on every resolved verdict,
+                # degraded ones included: the stamp answers "which generation of
+                # the resolver produced this", not "was the answer any good" —
+                # route_degraded already says that, and a degraded result really
+                # was produced by this generation. Stamping it unconditionally is
+                # also what guarantees sweep_stale_resolver_segments terminates:
+                # a segment it queues leaves the stale set on the first attempt,
+                # whatever comes back.
+                "route_resolver_version": RESOLVER_VERSION,
+                # Already computed and, until now, only logged. Persisting it is
+                # what turns "which trips did the buggy strategy draw" from
+                # unanswerable into one query over segment_json.
+                "route_strategy": strategy,
             }
             if not degraded and not seg.route_hafas_failed:
                 # Only a resolve that produced a *real* route restarts the
@@ -556,6 +569,14 @@ def edit_segment_track(
             "route_hafas_failed": False,
             "route_edited": True,
             "route_started_at": None,
+            # Provenance (issue #364): no resolver produced this geometry, a
+            # person did. Leaving the previous strategy in place would have the
+            # "which segments did strategy X draw" query count a hand-drawn
+            # track as the resolver's work. route_resolver_version is
+            # deliberately *not* touched — route_edited is the guard that keeps
+            # the stale-stamp sweep away from this segment, and inventing a
+            # version for geometry no resolver produced would only hide that.
+            "route_strategy": "manual",
         }
         if not _repo.update_segment_fields(sess, row.id, seg_id, fields):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")

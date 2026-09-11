@@ -50,3 +50,40 @@ a platform way, which is the entire failure. Do not regenerate this without
 re-reading `test_the_fixture_still_contains_the_trap` — it asserts the two
 properties that make the file a test rather than a decoration, and a fixture
 that loses them would let the regression back in with a green suite.
+
+## `issue-363-montparnasse.json`
+
+Relation **5928800**, `TGV 405 : Paris -- Angoulême -- Bordeaux -- Arcachon` —
+one of the three candidates behind issue #363, where Paris Montparnasse →
+Bordeaux resolves onto the right line and starts 3.5 km late.
+
+Nothing #359 fixed applies here, which is why France needs a second fixture:
+this relation holds every member way (`missing_members = 0`) and has no
+platform member. Its graph is in pieces because OSM's own membership does not
+join the Montparnasse station throat to the main line, and Overpass returns the
+same gap. What closes it is in the file too — the relation's node members, 16
+of them, all located, including node **65331500** (`uic_ref` 8739100, Paris
+Montparnasse). Those are what `RailStore.relation_geometry` started emitting in
+#363, in the shape Overpass's `out geom` has always returned them in.
+
+Cut from the same `europe/france` store built from the `rail-data-2026-09-08`
+extract, keeping every member way with its role and every node member whole.
+Inside a way it keeps every fortieth vertex, both ends, **and every vertex
+another member way also touches** — 297 KB against the 6 MB the untrimmed
+relation costs. That last rule is not in the #359 recipe above and is needed
+here: thinning on ends alone shattered this graph into 25 components instead of
+4, because a route relation does join mid-way at junctions. With the junctions
+kept, the number the tests turn on survives exactly — the throat island still
+stops **100.24 m** short of the main line.
+
+What the trim does not preserve is the component sizes the issue quotes
+(20745 / 322 / 84 / 4 become 2226 / 57 / 3) or the full 532 km, which measures
+531 km here. Assert on the gap, the endpoint offsets and the stop node, never
+on those.
+
+Regenerating it is a `RailStore.relation_geometry([5928800])` away, but read
+`test_the_fixture_still_contains_the_trap` in `tests/test_rail_issue_363.py`
+first: it pins the facts that make this a test — no platform member, no missing
+member, a graph in pieces with the throat stranded, and a located stop node
+naming Montparnasse. A fixture that loses any of them would let the regression
+back in with a green suite.

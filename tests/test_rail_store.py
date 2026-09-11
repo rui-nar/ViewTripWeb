@@ -190,11 +190,14 @@ def test_relation_geometry_feeds_extract_relation_geometry(store):
     assert len(rels) == 1
     rel = rels[0]
     assert rel["tags"]["route"] in {"train", "railway", "light_rail"}
-    held = [m for m in rel["members"] if m["held"]]
+    # Way members and node members share the list, as they do in Overpass's own
+    # `out geom`; only the ways carry geometry and only they are counted missing.
+    ways = [m for m in rel["members"] if m["type"] == "way"]
+    held = [m for m in ways if m["held"]]
     assert len(held) >= 2
-    assert all(m["type"] == "way" and len(m["geometry"]) >= 2 for m in held)
-    assert all(m["geometry"] == [] for m in rel["members"] if not m["held"])
-    assert rel["missing_members"] == len(rel["members"]) - len(held)
+    assert all(len(m["geometry"]) >= 2 for m in held)
+    assert all(m["geometry"] == [] for m in ways if not m["held"])
+    assert rel["missing_members"] == len(ways) - len(held)
 
     # Not merely "does not raise": the existing strategy-A/B code path must get
     # a real polyline out of the store's relation, endpoints included.
@@ -395,7 +398,7 @@ def test_builder_applies_the_strategy_c_way_selection(synthetic_store):
 
 def test_a_member_way_the_extract_does_not_hold_is_reported_not_hidden(synthetic_store):
     rel = synthetic_store.relation_geometry([100])[0]
-    held, unheld = rel["members"]
+    held, unheld = [m for m in rel["members"] if m["type"] == "way"]
     assert held["ref"] == 10 and held["held"] is True and len(held["geometry"]) == 2
     assert unheld["ref"] == 99 and unheld["held"] is False and unheld["geometry"] == []
     assert rel["missing_members"] == 1

@@ -11,6 +11,7 @@ from src.models.great_circle import haversine_km
 from src.models.track_edit import (
     TrackPoint,
     align_points,
+    elevation_gain,
     points_to_elevation_profile,
     points_to_polyline,
     recompute_track_metrics,
@@ -113,6 +114,134 @@ class TestAlignRoundTrip:
 
     def test_points_to_polyline_empty(self):
         assert points_to_polyline([]) is None
+
+
+class TestElevationGain:
+    """Regression tests for issue #260 — gain used to be a raw sum of positive
+    deltas, which counts sensor noise as climbing. The error only ever adds, so
+    it grows with the sample count: a 6000-sample track with a true 600 m climb
+    and ±1.2 m of ordinary jitter reported 4094 m.
+
+    The second wave of cases guards the fix's own failure mode. A window
+    measured in SAMPLES is a different physical width per recording rate, and an
+    11-sample window over a planned route exported at one point per 100 m spans
+    a kilometre — which reported 3 m of climb on a route holding 600 m of it.
+    """
+
+    @staticmethod
+    def _climb(n=6000, peak=600.0, sigma=1.2, spacing_km=0.0055, seed=7):
+        """One up-then-down climb under Gaussian noise, plus its distances."""
+        import random
+
+        random.seed(seed)
+        elevs = [
+            200.0 + peak * (1 - abs(2 * (i / (n - 1)) - 1)) + random.gauss(0, sigma)
+            for i in range(n)
+        ]
+        return elevs, [i * spacing_km for i in range(n)]
+
+    @staticmethod
+    def _hills(count, height, samples, spacing_km, sigma=0.0, seed=3):
+        """*count* identical triangular hills — the shape rolling terrain has."""
+        import random
+
+        random.seed(seed)
+        elevs = []
+        for _ in range(count):
+            for i in range(samples):
+                half = samples / 2
+                frac = i / half if i < half else (samples - i) / half
+                elevs.append(300.0 + height * frac + random.gauss(0, sigma))
+        return elevs, [i * spacing_km for i in range(len(elevs))]
+
+    def test_noisy_track_reports_the_real_climb(self):
+        elevs, dists = self._climb()
+        assert elevation_gain(elevs, dists) == pytest.approx(600.0, abs=25.0)
+
+    def test_raw_delta_sum_would_be_several_times_worse(self):
+        """Pins the size of the defect from both ends, so neither the old
+        inflation nor an implementation that just returns 0 can pass."""
+        elevs, dists = self._climb()
+        raw = sum(max(0.0, b - a) for a, b in zip(elevs, elevs[1:]))
+        assert raw > 3000.0                        # what the old code returned
+        assert 575.0 < elevation_gain(elevs, dists) < raw / 5
+
+    def test_sparse_planned_route_keeps_its_hills(self):
+        """A route planner exports ~1 point per 100 m of DEM elevation. Under a
+        sample-counted window every hill vanished (600 m of climb read as 3 m);
+        the window is distance-based, so a series this sparse is left alone."""
+        elevs, dists = self._hills(30, height=20.0, samples=12, spacing_km=0.1)
+        assert elevation_gain(elevs, dists) == pytest.approx(600.0, abs=30.0)
+
+    def test_clean_small_rollers_are_counted(self):
+        """DEM elevations carry no noise, so the band drops to its floor and
+        4 m rollers survive — a fixed 3 m band would have discarded them."""
+        elevs, dists = self._hills(50, height=4.0, samples=10, spacing_km=0.05)
+        assert elevation_gain(elevs, dists) > 100.0
+
+    def test_noise_on_flat_ground_is_not_climbing(self):
+        import random
+
+        random.seed(11)
+        n = 3000
+        for sigma in (1.2, 3.0):
+            elevs = [100.0 + random.gauss(0, sigma) for _ in range(n)]
+            dists = [i * 0.0055 for i in range(n)]
+            assert elevation_gain(elevs, dists) < 15.0, (
+                f"flat ground at sigma={sigma} must not accumulate ascent"
+            )
+
+    def test_rolling_terrain_is_under_reported_but_not_erased(self):
+        """Honest about a real limit: hills only a few metres tall sit close to
+        the noise, and the band costs roughly its own height per hill. The
+        figure is conservative — what it must never be again is inflated."""
+        elevs, dists = self._hills(100, height=6.0, samples=60,
+                                   spacing_km=0.005, sigma=1.2)
+        gain = elevation_gain(elevs, dists)
+        assert 150.0 < gain < 600.0
+
+    def test_steady_climb_is_counted_in_full(self):
+        """A clean ramp comes back within ~1%: the clamped window flattens the
+        two ends slightly, and the hysteresis band can leave up to one band's
+        worth uncounted at the finish."""
+        elevs = [100.0 + i for i in range(500)]       # +1 m per sample, 499 m
+        dists = [i * 0.0055 for i in range(500)]
+        assert elevation_gain(elevs, dists) == pytest.approx(499.0, rel=0.02)
+
+    def test_short_series_keeps_its_real_steps(self):
+        assert elevation_gain([100.0, 150.0, 120.0, 170.0],
+                              [0.0, 0.5, 1.0, 1.5]) == pytest.approx(100.0)
+
+    def test_pure_descent_yields_no_gain(self):
+        elevs = [500.0 - i for i in range(500)]
+        assert elevation_gain(elevs, [i * 0.0055 for i in range(500)]) == 0.0
+
+    def test_works_without_distances(self):
+        """Both callers pass distances; this is the defensive path.
+
+        Without them there is no window to average over, so the band alone does
+        the work: bounded and far better than the raw sum, but not accurate.
+        Asserted as a bound rather than a value, because claiming otherwise
+        would promise a precision this path cannot deliver."""
+        elevs, _ = self._climb()
+        raw = sum(max(0.0, b - a) for a, b in zip(elevs, elevs[1:]))
+        assert 600.0 <= elevation_gain(elevs) < raw / 3
+
+    def test_degenerate_series(self):
+        assert elevation_gain([]) == 0.0
+        assert elevation_gain([100.0]) == 0.0
+        assert elevation_gain([100.0, 100.0]) == 0.0
+
+    def test_points_without_elevation_do_not_invent_a_climb(self):
+        """A gap in elevation must leave a gap in the series, not a plunge to
+        sea level: recompute drops those points and keeps the distance."""
+        pts = []
+        for i in range(300):
+            elev = 500.0 + (i * 0.1 if i < 150 else (300 - i) * 0.1)
+            if i in (100, 101, 102):
+                elev = None
+            pts.append(TrackPoint(45.0 + i * 1e-5, 6.0 + i * 1e-5, elev))
+        assert recompute_track_metrics(pts).total_elevation_gain < 30.0
 
 
 class TestAlignPointsPerformance:

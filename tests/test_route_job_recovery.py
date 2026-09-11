@@ -24,12 +24,15 @@ from models.user import UserInfo
 from src.jobs.route_jobs import (
     MAX_ATTEMPTS,
     MAX_DEGRADE_RETRIES,
+    MAX_STALE_RESOLVES_PER_SWEEP,
+    RESOLVER_VERSION,
     create_job,
     mark_done,
     mark_failed,
     mark_running,
     sweep_degraded_segments,
     sweep_orphaned_jobs,
+    sweep_stale_resolver_segments,
 )
 
 
@@ -442,3 +445,302 @@ class TestTheDegradedRetryBudgetActuallyTerminates:
         seg = json.loads(_segment_row(engine).segment_json)
         assert seg["route_degrade_retries"] == 0
         assert seg["route_degraded"] is False
+
+
+# ── Stale resolver stamps (issue #364) ───────────────────────────────────────
+#
+# The sweep above only ever sees a resolve that failed. #359 was a resolve that
+# *succeeded* and was wrong — strategy=relation_endpoints, degraded=False, a
+# plausible 492 km line starting 13.9 km from the station — so fixing the
+# resolver in #361 reached none of the trips it had already drawn. These cover
+# the mechanism that does reach them.
+
+
+def _stale_segment(**overrides):
+    """A rail segment resolved cleanly by a resolver older than the stamp.
+
+    Note what is *absent*: no ``route_resolver_version`` key at all. That is the
+    literal shape of every segment row written before #364, and the population
+    the sweep exists to reach — a test that seeded ``0`` explicitly would pass
+    while ``from_dict`` defaulted the missing key to anything at all.
+    """
+    seg = {
+        "id": "seg-1", "segment_type": "train",
+        "route_status": "resolved", "route_mode": "rail",
+        "route_polyline": json.dumps([[0.0, 0.0], [1.0, 1.0]]),
+        "route_degraded": False, "route_hafas_failed": False,
+        "route_edited": False,
+        "hafas_provider": "db", "train_number": "ICE 596",
+        "date": "2026-08-01",
+    }
+    seg.update(overrides)
+    return seg
+
+
+@pytest.fixture
+def stale_env(monkeypatch):
+    """One project holding as many segments as the test passes in."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    monkeypatch.setattr(db_module, "engine", engine)
+    SQLModel.metadata.create_all(engine)
+
+    def _seed(*segs: dict):
+        with Session(engine) as sess:
+            user = UserInfo(display_name="A", email="a@e.com")
+            sess.add(user); sess.commit(); sess.refresh(user)
+            proj = DBProject(user_info_id=user.id, name="Trip")
+            sess.add(proj); sess.commit(); sess.refresh(proj)
+            for i, seg in enumerate(segs):
+                sess.add(DBProjectItem(
+                    project_id=proj.id, position=i, item_type="segment",
+                    uid=f"u{i}", segment_id=seg["id"],
+                    segment_json=json.dumps(seg),
+                ))
+            sess.commit()
+            return engine, user.id, proj.id
+
+    return _seed
+
+
+def _capture_enqueue(monkeypatch) -> list:
+    import src.jobs.queue as queue_mod
+    enqueued: list = []
+    monkeypatch.setattr(queue_mod, "enqueue",
+                        lambda q, f, *a, **k: enqueued.append(a) or True)
+    return enqueued
+
+
+def _seg_json(engine, seg_id: str) -> dict:
+    with Session(engine) as sess:
+        row = sess.exec(select(DBProjectItem).where(
+            DBProjectItem.segment_id == seg_id)).first()
+    return json.loads(row.segment_json)
+
+
+class TestStaleResolverSweep:
+    def test_a_segment_with_no_stamp_is_re_resolved(self, stale_env, monkeypatch):
+        """The whole point: an unstamped row is "older than any resolver we
+        stamped", not "unknown, leave it alone"."""
+        engine, user_id, _project_id = stale_env(_stale_segment())
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 1
+        user_arg, name_arg, seg_id_arg, params, _started_at, _job_id = enqueued[0]
+        assert (user_arg, name_arg, seg_id_arg) == (user_id, "Trip", "seg-1")
+        # The train the user picked is carried into the retry, same as the
+        # degraded sweep — a re-resolve must not quietly become a generic one.
+        assert params == {
+            "hafas_provider": "db", "train_number": "ICE 596", "date": "2026-08-01",
+        }
+        assert _seg_json(engine, "seg-1")["route_status"] == "pending"
+
+    def test_a_segment_stamped_current_is_left_alone(self, stale_env, monkeypatch):
+        stale_env(_stale_segment(route_resolver_version=RESOLVER_VERSION))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_stamp_above_the_current_version_is_left_alone(
+            self, stale_env, monkeypatch):
+        """A rolled-back deployment must not re-resolve everything the newer
+        build stamped — the comparison is "below", not "different"."""
+        stale_env(_stale_segment(route_resolver_version=RESOLVER_VERSION + 1))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_hand_edited_track_is_never_re_resolved(self, stale_env, monkeypatch):
+        """issue #150. This guard is *not* inherited from the degraded sweep:
+        the track-edit endpoint clears route_degraded and route_hafas_failed, so
+        that sweep skips a hand-drawn track by accident of the flags. A stale
+        stamp has no such accident — an edited segment keeps whatever version it
+        was last resolved at — so without an explicit check the first
+        RESOLVER_VERSION bump silently discards every manual edit."""
+        engine, _user_id, _project_id = stale_env(_stale_segment(route_edited=True))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+        # Untouched, not merely un-queued.
+        seg = _seg_json(engine, "seg-1")
+        assert seg["route_status"] == "resolved"
+        assert seg["route_edited"] is True
+
+    def test_a_degraded_segment_is_left_to_the_other_sweep(
+            self, stale_env, monkeypatch):
+        """It is stale too, but sweep_degraded_segments already owns it and will
+        stamp the current version as a side effect of its own retry. Disjoint
+        candidate sets stop one segment consuming both budgets."""
+        stale_env(_stale_segment(route_degraded=True))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_hafas_fallback_segment_is_left_to_the_other_sweep(
+            self, stale_env, monkeypatch):
+        stale_env(_stale_segment(route_hafas_failed=True))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_segment_with_no_stored_geometry_is_left_alone(
+            self, stale_env, monkeypatch):
+        """Moving a segment's endpoints (update_segment) drops route_polyline
+        and puts route_mode back to great_circle, but leaves route_status at
+        "resolved". Sweeping that would draw rail track across a segment the
+        user had just reset to a plain arc — and there is no old geometry to
+        redo in the first place."""
+        stale_env(_stale_segment(
+            route_polyline=None, route_mode="great_circle"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_pending_segment_is_not_re_resolved(self, stale_env, monkeypatch):
+        stale_env(_stale_segment(route_status="pending"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_a_flight_segment_is_never_queued(self, stale_env, monkeypatch):
+        """_compute_segment_geometry raises ValueError for a flight, so queueing
+        one would kill a resolve worker rather than resolve anything."""
+        stale_env(_stale_segment(segment_type="flight"))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == 0
+        assert enqueued == []
+
+    def test_one_run_queues_at_most_the_cap(self, stale_env, monkeypatch):
+        """A RESOLVER_VERSION bump makes every rail segment in the deployment a
+        candidate at once. Without a per-run cap that is the whole backlog
+        queued against a single Overpass slot in one pass — the traffic shape
+        that got this deployment's IPv4 hard-banned in September 2026."""
+        over = MAX_STALE_RESOLVES_PER_SWEEP + 2
+        engine, _user_id, _project_id = stale_env(
+            *[_stale_segment(id=f"seg-{i}") for i in range(over)])
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == MAX_STALE_RESOLVES_PER_SWEEP
+        assert len(enqueued) == MAX_STALE_RESOLVES_PER_SWEEP
+
+        pending = [i for i in range(over)
+                   if _seg_json(engine, f"seg-{i}")["route_status"] == "pending"]
+        assert len(pending) == MAX_STALE_RESOLVES_PER_SWEEP
+
+    def test_the_rest_of_the_backlog_is_picked_up_on_the_next_run(
+            self, stale_env, monkeypatch):
+        """Capping must slow the drain, not stop it: the segments left behind
+        are still candidates an hour later."""
+        over = MAX_STALE_RESOLVES_PER_SWEEP + 2
+        engine, _user_id, _project_id = stale_env(
+            *[_stale_segment(id=f"seg-{i}") for i in range(over)])
+        _capture_enqueue(monkeypatch)
+
+        assert sweep_stale_resolver_segments() == MAX_STALE_RESOLVES_PER_SWEEP
+        # Simulate the queued resolves landing: they stamp the current version.
+        for i in range(over):
+            if _seg_json(engine, f"seg-{i}")["route_status"] == "pending":
+                _stamp_resolved(engine, f"seg-{i}")
+
+        assert sweep_stale_resolver_segments() == over - MAX_STALE_RESOLVES_PER_SWEEP
+
+    def test_a_broken_sweep_does_not_raise(self, stale_env, monkeypatch):
+        stale_env(_stale_segment())
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(route_jobs, "get_session", _boom)
+        assert sweep_stale_resolver_segments() == 0   # logged, not raised
+
+
+def _stamp_resolved(engine, seg_id: str) -> None:
+    """What a landing resolve writes back, reduced to the parts these tests need."""
+    with Session(engine) as sess:
+        row = sess.exec(select(DBProjectItem).where(
+            DBProjectItem.segment_id == seg_id)).first()
+        data = json.loads(row.segment_json)
+        data.update({
+            "route_status": "resolved",
+            "route_resolver_version": RESOLVER_VERSION,
+            "route_strategy": "relation_uic",
+        })
+        row.segment_json = json.dumps(data)
+        sess.add(row); sess.commit()
+
+
+class TestTheStaleSweepTerminates:
+    """The sweep and the resolve it queues must agree, or a version bump becomes
+    a permanent hourly re-resolve of the same segments.
+
+    #207 is the precedent: the degraded sweep incremented a counter the resolve
+    it queued wrote straight back to 0, so MAX_DEGRADE_RETRIES was unreachable
+    and every degraded segment was re-resolved forever. These drive the real
+    round trip rather than seeding the stamp.
+    """
+
+    @staticmethod
+    def _run_sweep_and_resolve(monkeypatch, *, degraded=False, strategy="relation_uic"):
+        import api.segments as segments_mod
+        import src.jobs.queue as queue_mod
+
+        enqueued: list = []
+        monkeypatch.setattr(queue_mod, "enqueue",
+                            lambda q, f, *a, **k: enqueued.append((f, a)) or True)
+        monkeypatch.setattr(segments_mod, "bust_geo_cache", lambda *a, **k: None)
+        monkeypatch.setattr(segments_mod, "warm_geo_cache", lambda *a, **k: None)
+        monkeypatch.setattr(segments_mod, "warm_meta_cache", lambda *a, **k: None)
+
+        def _geometry(seg, _params):
+            seg.route_hafas_failed = False
+            return [[0.0, 0.0], [1.0, 1.0]], 2, degraded, strategy
+
+        monkeypatch.setattr(segments_mod, "_compute_segment_geometry", _geometry)
+
+        swept = sweep_stale_resolver_segments()
+        for func, args in enqueued:
+            func(*args)
+        return swept
+
+    def test_the_resolve_stamps_the_version_and_the_strategy(
+            self, stale_env, monkeypatch):
+        engine, _user_id, _project_id = stale_env(_stale_segment())
+
+        assert self._run_sweep_and_resolve(monkeypatch) == 1
+        seg = _seg_json(engine, "seg-1")
+        assert seg["route_status"] == "resolved"
+        assert seg["route_resolver_version"] == RESOLVER_VERSION
+        assert seg["route_strategy"] == "relation_uic"
+
+        # And it is out of the candidate set — the second hour queues nothing.
+        assert self._run_sweep_and_resolve(monkeypatch) == 0
+
+    def test_a_degraded_result_still_leaves_the_stale_set(
+            self, stale_env, monkeypatch):
+        """A re-resolve that runs while every Overpass mirror is down comes back
+        degraded. It is stamped anyway: the stamp says which resolver produced
+        the geometry, not whether the answer was good — route_degraded already
+        says that, and sweep_degraded_segments owns it from here with its own
+        budget. Without this, the segment stays stale forever and re-queues
+        every hour against hosts that are refusing us."""
+        engine, _user_id, _project_id = stale_env(_stale_segment())
+
+        assert self._run_sweep_and_resolve(
+            monkeypatch, degraded=True, strategy="straight") == 1
+        seg = _seg_json(engine, "seg-1")
+        assert seg["route_degraded"] is True
+        assert seg["route_resolver_version"] == RESOLVER_VERSION
+        assert seg["route_strategy"] == "straight"
+
+        assert self._run_sweep_and_resolve(monkeypatch) == 0
