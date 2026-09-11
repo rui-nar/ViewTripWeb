@@ -26,6 +26,7 @@ from api.journal import router as journal_router
 from api.projects import router as projects_router
 from models.project_db import (
     DBActivity,
+    DBMemory,
     DBProject,
     DBProjectItem,
     DBProjectMember,
@@ -191,3 +192,99 @@ def test_the_journals_author_can_still_drop_their_own_day(env):
 
     act_as("owner")
     assert _stored(engine) == {}
+
+def test_a_journal_left_behind_by_a_departed_member_pins_nothing(env):
+    """remove_member deletes the membership, not the member's journal rows. An
+    orphan like that is visible to nobody — the ex-member gets a 404 on the
+    trip too — so pinning its day would make those notes unclearable by
+    anyone, forever. Found in adversarial review of the first cut."""
+    client, engine, ids, act_as = env
+    _put(client, {"2026-07-04": {"note": "shared notes"}})
+    _companion_journal(client, act_as, ids, "2026-07-04")
+
+    with Session(engine) as sess:
+        member = sess.exec(
+            select(DBProjectMember).where(
+                DBProjectMember.project_id == ids["project"],
+                DBProjectMember.user_info_id == ids["editor"],
+            )
+        ).one()
+        sess.delete(member)
+        sess.commit()
+
+    _put(client, {})
+
+    assert _stored(engine) == {}
+
+
+def test_a_gap_filled_day_row_is_not_treated_as_something_to_lose(env):
+    """_fill_day_gaps writes an all-null dict for every gap day. It is truthy
+    but holds nothing, so it must not pin a day in place."""
+    client, engine, ids, act_as = env
+    _put(client, {"2026-07-04": {
+        "difficulty": None, "sleeping": None, "weather": None,
+        "journal": None, "tags": None, "counters": [],
+    }})
+    _companion_journal(client, act_as, ids, "2026-07-04")
+
+    _put(client, {})
+
+    assert _stored(engine) == {}
+
+
+def test_a_day_pinned_by_another_members_memory_is_still_droppable(env):
+    """Memories and encounters are shared, not per-user, so the caller can see
+    what pins the day and needs no protection from dropping it."""
+    client, engine, ids, _ = env
+    with Session(engine) as sess:
+        sess.add(DBMemory(project_id=ids["project"], date="2026-07-04"))
+        sess.commit()
+    _put(client, {"2026-07-04": {"note": "my notes"}})
+
+    _put(client, {})
+
+    assert _stored(engine) == {}
+
+
+def test_a_legacy_null_author_journal_is_the_owners_on_the_shared_path(env):
+    """A NULL author is a pre-#106 row belonging to the project owner. The
+    owner may drop that day; an editor coming through ?owner= may not."""
+    client, engine, ids, act_as = env
+    _put(client, {"2026-07-04": {"note": "shared notes"}})
+    r = client.post("/api/journal/", json={
+        "project_name": "Trip", "date": "2026-07-04",
+        "geo_mode": "custom", "lat": 1.0, "lon": 2.0,
+        "description": "legacy",
+    })
+    assert r.status_code == 201, r.text
+    with Session(engine) as sess:
+        from models.project_db import DBJournalEntry
+        entry = sess.exec(select(DBJournalEntry).where(
+            DBJournalEntry.project_id == ids["project"])).one()
+        entry.user_info_id = None
+        sess.add(entry)
+        sess.commit()
+
+    act_as("editor")
+    r = client.put(f"/api/projects/Trip/day-meta?owner={ids['owner']}",
+                   json={"day_meta": {}})
+    assert r.status_code == 204, r.text
+    assert _stored(engine) == {"2026-07-04": {"note": "shared notes"}}
+
+    act_as("owner")
+    _put(client, {})
+    assert _stored(engine) == {}
+
+
+def test_a_preserved_day_keeps_its_counters_exactly_once(env):
+    """The guard runs before _merge_day_meta_preserve_counters; a day it puts
+    back must not come out with duplicated or dropped counters."""
+    client, engine, ids, act_as = env
+    _put(client, {"2026-07-04": {"note": "shared", "counters": [{"name": "c", "value": 2}]}})
+    _companion_journal(client, act_as, ids, "2026-07-04")
+
+    _put(client, {})
+
+    assert _stored(engine) == {
+        "2026-07-04": {"note": "shared", "counters": [{"name": "c", "value": 2}]}
+    }

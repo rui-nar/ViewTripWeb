@@ -386,18 +386,34 @@ def _content_day_keys(sess, project, visible_to: int | None = None) -> set[str]:
                 select(model.date).where(model.project_id == project.id)
             ).all()
         )
-    journals = select(DBJournalEntry.date).where(
-        DBJournalEntry.project_id == project.id
-    )
     if visible_to is not None:
-        journals = journals.where(
-            (DBJournalEntry.user_info_id == visible_to)
-            | (
-                (DBJournalEntry.user_info_id.is_(None))
-                & (project.user_info_id == visible_to)
-            )
+        # Only this user's own journals, plus legacy NULL-author rows when they
+        # are the project owner.
+        authors = (DBJournalEntry.user_info_id == visible_to) | (
+            (DBJournalEntry.user_info_id.is_(None))
+            & (project.user_info_id == visible_to)
         )
-    days.update(_day_key(d) for d in sess.exec(journals).all())
+    else:
+        # Every journal that somebody can still *see*. A member who leaves
+        # keeps their rows (remove_member drops only the membership), and an
+        # orphan like that is visible to nobody: counting it would pin its day
+        # for everyone, forever, with no one able to clear it (issue #387
+        # review). Legacy NULL authors belong to the owner.
+        member_ids = select(DBProjectMember.user_info_id).where(
+            DBProjectMember.project_id == project.id
+        )
+        authors = (
+            DBJournalEntry.user_info_id.is_(None)
+            | (DBJournalEntry.user_info_id == project.user_info_id)
+            | DBJournalEntry.user_info_id.in_(member_ids)
+        )
+    days.update(
+        _day_key(d) for d in sess.exec(
+            select(DBJournalEntry.date).where(
+                DBJournalEntry.project_id == project.id, authors
+            )
+        ).all()
+    )
     days.update(
         _day_key(d) for d in sess.exec(
             select(DBActivity.start_date_local)
@@ -572,6 +588,20 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
+def _day_meta_has_content(meta) -> bool:
+    """True when a day-meta entry holds anything a user would miss.
+
+    Not just ``bool(meta)``: ``_fill_day_gaps`` (src/project/repo_core.py)
+    writes ``{"difficulty": None, "sleeping": None, ..., "counters": []}`` for
+    every gap day, which is a truthy dict carrying nothing at all. Treating
+    those as "something to lose" would pin empty days in place (issue #387
+    review).
+    """
+    if not isinstance(meta, dict):
+        return bool(meta)
+    return any(value not in (None, "", [], {}) for value in meta.values())
+
+
 def _keep_days_the_caller_cannot_see(
     sess, project, incoming: dict, existing_json: str | None, caller_id: int
 ) -> dict:
@@ -595,7 +625,7 @@ def _keep_days_the_caller_cannot_see(
     existing = json.loads(existing_json) if existing_json else {}
     dropped = {
         key: meta for key, meta in existing.items()
-        if key not in incoming and meta
+        if key not in incoming and _day_meta_has_content(meta)
     }
     if not dropped:
         return incoming
