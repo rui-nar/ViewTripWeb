@@ -25,10 +25,15 @@ class ShareAssetSourceImpl implements ShareAssetSource {
   @override
   Future<Uint8List?> renderMapImage(
       {required bool dayFocus, String? date}) async {
+    // Fetched once here and handed to the exporter, rather than read off the
+    // notifier (whose geometry is simplified to the map's zoom, issue #317):
+    // the day's bounds and the image it frames have to come from the same
+    // geometry, and this is also the one fetch instead of two.
+    final geo = await notifier.fullResGeoForExport();
     LatLngBounds? bounds;
     if (dayFocus && date != null) {
       final points = dayRoutePoints(
-        geo: notifier.geo,
+        geo: geo,
         items: notifier.items,
         activities: notifier.activities,
         date: date,
@@ -41,6 +46,7 @@ class ShareAssetSourceImpl implements ShareAssetSource {
       projectName: notifier.projectName ?? 'trip',
       opts: const ImageExportOptions(includeChart: false, includeTitle: false),
       boundsOverride: bounds,
+      geoOverride: geo,
     );
   }
 

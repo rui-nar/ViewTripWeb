@@ -12,6 +12,8 @@ Future<void> cacheStoreClearAll() async {}
 
 Future<Map<String, dynamic>?> cacheStoreRead(String key) async => null;
 
+Future<bool> cacheStoreHasFullGeo(String key) async => false;
+
 Future<({int lockVersion, int schemaVersion, Uint8List? bytes})?>
     cacheStoreReadFullGeoBytes(String key) async => null;
 

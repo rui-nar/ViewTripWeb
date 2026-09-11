@@ -114,15 +114,27 @@ bool isThumbnailBlank(Uint8List bytes) {
 ///
 /// [boundsOverride] fits the camera to a specific region (e.g. one day's
 /// route); when null the whole trip's bounds are used.
+///
+/// [geoOverride] supplies the geometry to draw, for a caller that has already
+/// fetched it — the share card reads the same full-resolution geometry to
+/// work out the day's bounds, and passing it in is what keeps that one fetch
+/// from becoming two.
 Future<Uint8List?> performOffscreenExport({
   required BuildContext context,
   required ProjectNotifier notifier,
   required String projectName,
   required ImageExportOptions opts,
   LatLngBounds? boundsOverride,
+  Map<String, dynamic>? geoOverride,
 }) async {
-  final geo = notifier.geo;
+  // Not `notifier.geo`: that is simplified to the zoom the map is showing
+  // (issue #295), and an export fits its own camera — a day-scoped one much
+  // tighter than the whole trip — so it rendered visibly angular (issue
+  // #317). The extra request is affordable on an operation the user asked
+  // for and that already waits seconds for tiles.
+  final geo = geoOverride ?? await notifier.fullResGeoForExport();
   if (geo == null) return null;
+  if (!context.mounted) return null;
 
   final allPoints = <LatLng>[];
   final polylines = <Polyline>[];

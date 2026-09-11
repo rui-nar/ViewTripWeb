@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:viewtrip_client/src/api/client.dart';
+import 'package:viewtrip_client/src/core/perf_timing.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/geo_viewport.dart';
 import 'package:viewtrip_client/src/projects/project_data_cache.dart';
@@ -65,6 +66,8 @@ class _Calls {
   final boxes = <String?>[];
   int fullGeo = 0;
   bool failLod = false;
+  /// Makes the full-resolution endpoint fail, for the export path's fallback.
+  bool failFullGeo = false;
   /// Highest number of simplified requests outstanding at once. The refetch
   /// awaits a fetch, a camera-idle wait and _buildFullTrack, and the last of
   /// those copies `geo` into an isolate — so overlapping them is what turned
@@ -110,6 +113,7 @@ ApiClient _api(_Calls calls,
         }
         if (path == '/api/geo/project') {
           calls.fullGeo++;
+          if (calls.failFullGeo) return http.Response('nope', 500);
           return _json(_geoWith(999));
         }
         if (path == '/api/projects/Trip/elevation') {
@@ -150,9 +154,15 @@ void main() {
     expect(await _waitFor(() => _points(n) > 0), isTrue);
 
     expect(calls.zooms, ['9.0']);
-    expect(calls.fullGeo, 0,
-        reason: 'full-resolution geometry is what this exists to avoid');
-    expect(_points(n), 9);
+    expect(_points(n), 9,
+        reason: 'what the map holds is what the zoom asked for');
+    // The full-resolution payload is fetched once afterwards, in the
+    // background, purely to seed the offline cache (issue #317) — see the
+    // group below. What matters here is that it never becomes the geometry
+    // this notifier holds.
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(_points(n), 9,
+        reason: 'the offline seed must not replace what is on screen');
   });
 
   test('zooming in asks for more detail', () async {
@@ -395,4 +405,195 @@ void main() {
           reason: 'refetches must not overlap');
     });
   });
+
+  // ── Offline cache seeding (issue #317) ───────────────────────────────────
+  //
+  // ProjectService.getGeo is the only thing that ever wrote the full-res row
+  // the offline fallback reads, and the level-of-detail path returns before
+  // reaching it. So a trip first opened on a device never got one, and a
+  // later offline open fell back to low-res straight lines instead of the
+  // detailed track it used to show.
+  //
+  // The seed runs in the background, and the row it writes is a *fallback* —
+  // the naive version of this fix put the cached branch ahead of the
+  // simplified fetch, which would have meant the first open used LOD and
+  // every open after it rendered full resolution again.
+
+  group('offline seeding', () {
+    test('the load seeds the offline cache without holding the payload',
+        () async {
+      final calls = _Calls();
+      api = _api(calls);
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 9), isTrue);
+      expect(await _waitFor(() => calls.fullGeo == 1), isTrue,
+          reason: 'a trip with no full-res row on file must get one');
+
+      expect(_points(n), 9, reason: 'the map keeps the simplified geometry');
+      expect(await projectDataCache.readFullGeo(_ref), isNull,
+          reason: 'the seed goes to disk only — an L1 copy would be the '
+              '~180 MB the level of detail exists not to hold, and would '
+              'become the answer to every read for the rest of the session');
+    });
+
+    test('a second open of a seeded trip still asks for simplified geometry',
+        () async {
+      // The regression the naive fix would have caused. A full-res row on
+      // file is an offline fallback, not a shortcut: with it present the load
+      // must still ask the server for the zoom it is showing.
+      final calls = _Calls();
+      api = _api(calls);
+      projectDataCache.onMetaFetched(_ref, {'lock_version': 1, 'name': 'Trip'});
+      projectDataCache.writeFullGeo(_ref, _geoWith(999));
+
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) > 0), isTrue);
+
+      expect(calls.zooms, ['9.0'],
+          reason: 'a seeded trip must not skip the simplified endpoint');
+      expect(_points(n), 9,
+          reason: 'the second open renders the zoom it asked for, not the '
+              'full-resolution row on file');
+    });
+
+    test('the cached row is what an offline open falls back to', () async {
+      // The behaviour the seed exists to restore: the simplified fetch fails
+      // (no network), and the detailed track comes off the device rather than
+      // the low-res straight lines.
+      final calls = _Calls();
+      api = _api(calls, lodStatus: 503);
+      projectDataCache.onMetaFetched(_ref, {'lock_version': 1, 'name': 'Trip'});
+      projectDataCache.writeFullGeo(_ref, _geoWith(999));
+
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) > 0), isTrue);
+
+      expect(_points(n), 999, reason: 'the detailed track, from the device');
+      expect(calls.fullGeo, 0,
+          reason: 'offline is exactly when the network cannot answer');
+    });
+
+    test('a shared viewer never seeds', () async {
+      // SharedProjectNotifier extends ProjectNotifier and does not override
+      // the load path, so once a share-scoped simplified endpoint exists
+      // (issue #321) shared viewers take the branch above. loadOwnerExtras is
+      // what keeps the seed — a multi-MB owner-scoped fetch, for a screen
+      // with no offline story — from firing for them. This stands in for it:
+      // that getter is the only thing SharedProjectNotifier changes here.
+      final calls = _Calls();
+      api = _api(calls);
+      final n = _ViewerNotifier()..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 9), isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(calls.fullGeo, 0,
+          reason: 'no full-resolution fetch may follow a successful LOD for '
+              'a viewer who is not the owner');
+    });
+
+    test('a trip past the coordinate ceiling is not seeded', () async {
+      final calls = _Calls();
+      api = _api(calls);
+      perfSpans.enabled = true;
+      addTearDown(() => perfSpans.enabled = false);
+      final n = ProjectNotifier(ProjectService())
+        ..setMapZoom(9)
+        ..offlineSeedCoordinateCeiling = 5;
+
+      await n.load(_ref);
+      expect(await _waitFor(() => calls.fullGeo == 1), isTrue);
+      expect(
+          await _waitFor(
+              () => perfSpans.notes['geo_offline_seed'] != null),
+          isTrue);
+
+      expect(perfSpans.notes['geo_offline_seed'], 'skipped, 999 coords',
+          reason: 'a trip whose geometry is too large to expand safely keeps '
+              'the low-res offline map it has today');
+    });
+
+    test('a trip under the ceiling records the seed', () async {
+      final calls = _Calls();
+      api = _api(calls);
+      perfSpans.enabled = true;
+      addTearDown(() => perfSpans.enabled = false);
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(
+          await _waitFor(
+              () => perfSpans.notes['geo_offline_seed'] != null),
+          isTrue);
+      expect(perfSpans.notes['geo_offline_seed'], '999 coords');
+    });
+  });
+
+  // ── Full-resolution geometry for exports (issue #317) ────────────────────
+  //
+  // image_export.dart used to read notifier.geo, which is simplified for the
+  // zoom the map is showing. An export fits its own camera — a day-scoped one
+  // much tighter than the whole trip — so tracks rendered visibly angular.
+
+  group('geometry for exports', () {
+    test('an export gets full resolution, not the map\'s zoom level',
+        () async {
+      final calls = _Calls();
+      api = _api(calls);
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 9), isTrue);
+
+      final exportGeo = await n.fullResGeoForExport();
+      expect((exportGeo!['features'] as List).first['geometry']['coordinates'],
+          hasLength(999));
+      expect(_points(n), 9,
+          reason: 'fetching for the export must not swap what the map holds');
+    });
+
+    test('geometry that is already full resolution is not refetched',
+        () async {
+      // The offline and older-server fallbacks apply the full payload, and an
+      // E2EE trip builds it client-side; there is nothing to upgrade.
+      final calls = _Calls();
+      api = _api(calls, lodStatus: 503);
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 999), isTrue);
+      final before = calls.fullGeo;
+
+      expect(await n.fullResGeoForExport(), same(n.geo));
+      expect(calls.fullGeo, before, reason: 'no second request');
+    });
+
+    test('a failed fetch falls back to what is on screen', () async {
+      // An angular export beats no export.
+      final calls = _Calls();
+      api = _api(calls);
+      final n = ProjectNotifier(ProjectService())..setMapZoom(9);
+
+      await n.load(_ref);
+      expect(await _waitFor(() => _points(n) == 9), isTrue);
+      calls.failFullGeo = true;
+
+      expect(await n.fullResGeoForExport(), same(n.geo));
+    });
+  });
+}
+
+/// Stands in for `SharedProjectNotifier`, which differs from
+/// `ProjectNotifier` in exactly this getter as far as the geo load path is
+/// concerned — it does not override `_loadFullGeoProgressively`.
+class _ViewerNotifier extends ProjectNotifier {
+  _ViewerNotifier() : super(ProjectService());
+
+  @override
+  bool get loadOwnerExtras => false;
 }

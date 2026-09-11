@@ -1374,44 +1374,12 @@ class ProjectNotifier extends ChangeNotifier
       return;
     }
 
-    // A trip already opened in the other mode this session (or restored from
-    // the on-device cache) has its full-res geo sitting in memory already —
-    // nothing is actually "progressively arriving" in that case, so replaying
-    // the batched reveal below would just repaint the whole map (every marker
-    // + polyline) up to ~8 extra times, 80ms apart, for a payload that was
-    // already complete. On a large trip each of those repaints is itself
-    // "tens-to-hundreds of ms", and toggling
-    // between view/manage mode re-ran this on every switch — several seconds
-    // of back-to-back main-thread rebuilds was enough to trip Android's ANR
-    // watchdog. Apply the cached geo in one shot instead, exactly like the
-    // final pass below does for a real fetch.
-    final cachedFullGeo = await _service.readCachedGeo(ref);
-    if (cachedFullGeo != null) {
-      if (!_isCurrent(token, ref)) return;
-      try {
-        reconcileSegmentOverlay(cachedFullGeo);
-        final features = mergePendingSegmentPatches(
-            List<dynamic>.from(cachedFullGeo['features'] as List? ?? []));
-        geo = {'type': 'FeatureCollection', 'features': features};
-        await _buildFullTrack();
-        // Same bug #1 fix as the encrypted branch above.
-        if (!_isCurrent(token, ref)) return;
-        isGeoLoaded = true;
-      } catch (e) {
-        if (!_isCurrent(token, ref)) return;
-        error = _loadErrorMessage(e);
-      }
-      await _waitForCameraIdle();
-      if (!_isCurrent(token, ref)) return;
-      notifyListeners();
-      return;
-    }
-
     // Zoom level of detail first (issue #295): geometry simplified to the
     // zoom actually on screen is a fraction of the full-resolution payload,
     // and it is the client's largest single heap consumer. Falls through to
-    // the full-res path below on any failure — an older server without the
-    // endpoint, or offline, where the cached full payload is the answer.
+    // the offline cache and then the full-res path below on any failure — an
+    // older server without the endpoint, or offline, where the cached full
+    // payload is the answer.
     try {
       // Captured before the await: the fit-bounds animation runs during the
       // fetch and the camera-idle wait, so reading _mapZoom afterwards would
@@ -1439,9 +1407,53 @@ class ProjectNotifier extends ChangeNotifier
       if (!_isCurrent(token, ref)) return;
       isGeoLoaded = true;
       notifyListeners();
+      // Nothing above this line ever writes the full-resolution row the
+      // offline fallback below reads, so a trip first opened on this device
+      // had none to fall back to (issue #317). Seeding runs in the
+      // background, after the map is already on screen.
+      unawaited(_seedOfflineFullGeo(ref, token));
       return;
     } on Object {
-      // Fall through to the full-resolution path.
+      // Fall through to the offline cache, then the full-resolution path.
+    }
+
+    // Offline fallback (issue #317). This branch used to sit *ahead* of the
+    // level-of-detail fetch above, as a mode-toggle shortcut. Leaving it
+    // there once seeding was restored would have meant the first open used
+    // LOD and every open after it rendered full resolution instead — L1 is
+    // authoritative for the session (see ProjectDataCache), so the cache
+    // would quietly re-hold the ~180 MB the LOD exists to avoid. It is
+    // consulted only when the fetch above could not answer: offline, or a
+    // server too old to have the endpoint.
+    //
+    // Applied in one shot, which is what this branch has always been for: a
+    // payload that is already complete has nothing to reveal progressively,
+    // and replaying a staged reveal over it repainted the whole map (every
+    // marker + polyline) several times over. Toggling between view and manage
+    // mode re-ran that on every switch — several seconds of back-to-back
+    // main-thread rebuilds, enough to trip Android's ANR watchdog. Falling
+    // through to the network path below instead would be worse still: the
+    // multi-MB full-res fetch, for data already on the device.
+    final cachedFullGeo = await _service.readCachedGeo(ref);
+    if (cachedFullGeo != null) {
+      if (!_isCurrent(token, ref)) return;
+      try {
+        reconcileSegmentOverlay(cachedFullGeo);
+        final features = mergePendingSegmentPatches(
+            List<dynamic>.from(cachedFullGeo['features'] as List? ?? []));
+        geo = {'type': 'FeatureCollection', 'features': features};
+        await _buildFullTrack();
+        // Same bug #1 fix as the encrypted branch above.
+        if (!_isCurrent(token, ref)) return;
+        isGeoLoaded = true;
+      } catch (e) {
+        if (!_isCurrent(token, ref)) return;
+        error = _loadErrorMessage(e);
+      }
+      await _waitForCameraIdle();
+      if (!_isCurrent(token, ref)) return;
+      notifyListeners();
+      return;
     }
 
     // Fetch the full-res geo with one retry. A cold-cache miss can be slow
@@ -1513,6 +1525,119 @@ class ProjectNotifier extends ChangeNotifier
       if (!_isCurrent(token, ref)) return;
       error = _loadErrorMessage(e);
       notifyListeners();
+    }
+  }
+
+  /// Coordinates above which a trip is not seeded into the offline cache at
+  /// all (issue #317).
+  ///
+  /// The seed is the one place this app deliberately materialises the
+  /// full-resolution payload it otherwise no longer holds: expanding it costs
+  /// roughly 180 MB for the 1,465,345 coordinates of the 219-activity trip
+  /// behind issue #295, and gzipping it for disk hands the same structure to
+  /// a second isolate, which copies it. Transient, and off the render path —
+  /// but on a device profiled at ~625 MB steady and killed above ~1.3 GB,
+  /// "transient" is not the same as "free".
+  ///
+  /// 500,000 caps that at roughly a third of the worst case (~60 MB expanded,
+  /// ~1.5 MB on the wire) while still covering trips far longer than most.
+  /// Past it, the offline map keeps the low-res straight lines it has today:
+  /// the trips whose offline geometry costs the most are exactly the ones
+  /// whose owners can least afford the app being killed for holding it.
+  ///
+  /// Overridable so a test can reach the ceiling without a 500,000-point
+  /// fixture, like [zoomRefetchDebounce].
+  @visibleForTesting
+  int offlineSeedCoordinateCeiling = 500000;
+
+  /// Writes the full-resolution geometry to the on-device cache so a later
+  /// *offline* open has a detailed track to fall back on (issue #317).
+  ///
+  /// Costs the full-res fetch that the level-of-detail path exists to avoid,
+  /// so it is deliberately narrow:
+  ///  - native only. L2 is the whole point and web has no L2 (see
+  ///    ProjectDataCache), so on web this would be heap and bandwidth spent
+  ///    for nothing.
+  ///  - owners only. A shared viewer's screen is served by the share
+  ///    endpoints, has no offline story, and issue #321 exists to stop it
+  ///    fetching this payload at all — SharedProjectNotifier inherits this
+  ///    method, and [loadOwnerExtras] is what keeps it out.
+  ///  - once per trip per lock_version. A mutation invalidates the row, which
+  ///    is correct — the cached geometry really is stale — and the next open
+  ///    seeds the new one.
+  ///  - never above [offlineSeedCoordinateCeiling].
+  ///
+  /// The payload is written to disk only, never into L1: holding it in memory
+  /// for the rest of the session is precisely the cost the LOD path removed.
+  Future<void> _seedOfflineFullGeo(ProjectRef ref, int token) async {
+    if (kIsWeb || !loadOwnerExtras) return;
+    try {
+      if (await projectDataCache.hasFullGeoOnDisk(ref)) return;
+      if (!_isCurrent(token, ref)) return;
+      // The fetch is background, but its decode lands back on this isolate,
+      // so it waits for the camera like every other heavy apply here does.
+      await _waitForCameraIdle();
+      if (!_isCurrent(token, ref)) return;
+      final full = await _service.fetchFullGeoUncached(ref);
+      if (!_isCurrent(token, ref)) return;
+      // Noted either way: "does this trip have offline geometry, and if not
+      // why not" is otherwise invisible until someone is offline.
+      final coords = _coordinateCount(full);
+      if (coords > offlineSeedCoordinateCeiling) {
+        perfSpans.note('geo_offline_seed', 'skipped, $coords coords');
+        return;
+      }
+      projectDataCache.seedFullGeoToDisk(ref, full);
+      perfSpans.note('geo_offline_seed', '$coords coords');
+    } on Object {
+      // Best effort by construction: a failed seed costs the user nothing
+      // beyond the offline detail they already do not have, and must never
+      // surface as an error over a map that loaded fine.
+    }
+  }
+
+  /// Total coordinates across every feature of [geo] — the size measure the
+  /// seed ceiling is expressed in, since it is what the heap actually holds.
+  static int _coordinateCount(Map<String, dynamic> geo) {
+    var n = 0;
+    final features = geo['features'];
+    if (features is! List) return 0;
+    for (final f in features) {
+      if (f is! Map) continue;
+      final coords = (f['geometry'] as Map? ?? const {})['coordinates'];
+      if (coords is List) n += coords.length;
+    }
+    return n;
+  }
+
+  /// Full-resolution geometry for a rendering that is not the map — an image
+  /// export or a share card (issue #317).
+  ///
+  /// [geo] is simplified to the zoom the map is showing, which is the right
+  /// trade for the map and the wrong one for an export: a day-scoped export
+  /// fits a far tighter camera than the geometry was built for, and renders
+  /// visibly angular. The extra request is affordable here because the
+  /// operation is user-initiated and already slow.
+  ///
+  /// Returns [geo] unchanged when it is already full resolution (an E2EE trip
+  /// builds it client-side, and the offline/older-server fallbacks apply the
+  /// full payload), and falls back to it if the fetch fails — an angular
+  /// export beats no export.
+  Future<Map<String, dynamic>?> fullResGeoForExport() async {
+    final r = ref;
+    if (_loadedZoomBucket == null || r == null) return geo;
+    try {
+      final full = await _service.fetchFullGeoUncached(r);
+      // The durable segment overlay wins over the server snapshot here for
+      // the same reason it does on the load path: a segment the user just
+      // added or removed must appear in the export as it does on the map.
+      return {
+        'type': 'FeatureCollection',
+        'features': mergePendingSegmentPatches(
+            List<dynamic>.from(full['features'] as List? ?? [])),
+      };
+    } on Object {
+      return geo;
     }
   }
 

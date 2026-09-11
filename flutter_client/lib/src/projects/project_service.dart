@@ -182,27 +182,52 @@ class ProjectService {
       if (cached != null) return cached;
     }
     return _dedupFetch('geo:${ref.ownerId ?? 0}:${ref.name}', () async {
-      final encoded = Uri.encodeComponent(ref.name);
-      // Compact payload: activity tracks as Google-encoded polylines, decoded by
-      // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
-      // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
-      // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
-      // (see polyline_decoder.dart). The generous timeout covers a cold-cache
-      // build of a large trip.
-      final bytes = await perfSpans.stage(
-          'fetch_geo',
-          () => api.getBytes(
-              ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
-              timeout: const Duration(seconds: 90)));
-      perfSpans.note('geo', perfSizeLabel(bytes.length));
-      // Parse and polyline-expansion fused into one worker-isolate hop — they
-      // used to run as two consecutive inline passes over the same 300k+
-      // points. See heavy_decode.dart.
-      final expanded =
-          await perfSpans.stage('decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
+      final expanded = await _fetchFullGeo(ref);
       projectDataCache.writeFullGeo(ref, expanded);
       return expanded;
     });
+  }
+
+  /// The same full-resolution payload [getGeo] serves, fetched fresh and
+  /// returned to the caller alone — [projectDataCache] is consulted neither
+  /// before (no cached answer) nor after (no L1 or disk write).
+  ///
+  /// For the two callers that need full-resolution geometry without the map
+  /// keeping it (issue #317): the offline cache seed, which writes it to disk
+  /// itself and drops it, and the image export, which draws it once. Both
+  /// would otherwise leave the whole payload resident in L1 for the rest of
+  /// the session — the ~180 MB the zoom level-of-detail path exists to avoid
+  /// (see [getSimplifiedGeo]).
+  ///
+  /// Deduplicated under its own key rather than [getGeo]'s, so that a caller
+  /// joining an in-flight [getGeo] still gets the cache write [getGeo]
+  /// promises, and one joining this does not get one it did not ask for.
+  ///
+  /// Overridden by the shared-project service, which is on the share
+  /// endpoints and would 401 against this one.
+  Future<Map<String, dynamic>> fetchFullGeoUncached(ProjectRef ref) =>
+      _dedupFetch('geoFullUncached:${ref.ownerId ?? 0}:${ref.name}',
+          () => _fetchFullGeo(ref));
+
+  Future<Map<String, dynamic>> _fetchFullGeo(ProjectRef ref) async {
+    final encoded = Uri.encodeComponent(ref.name);
+    // Compact payload: activity tracks as Google-encoded polylines, decoded by
+    // expandEncodedActivities (~4.5× smaller than expanded coordinates). The
+    // earlier web crash — decodePolyline yielding a ~42e6 latitude — was a
+    // Dart-on-web bitwise/`~` semantics bug, now fixed in the decoder itself
+    // (see polyline_decoder.dart). The generous timeout covers a cold-cache
+    // build of a large trip.
+    final bytes = await perfSpans.stage(
+        'fetch_geo',
+        () => api.getBytes(
+            ref.withOwner('/api/geo/project?name=$encoded&encoded=1'),
+            timeout: const Duration(seconds: 90)));
+    perfSpans.note('geo', perfSizeLabel(bytes.length));
+    // Parse and polyline-expansion fused into one worker-isolate hop — they
+    // used to run as two consecutive inline passes over the same 300k+
+    // points. See heavy_decode.dart.
+    return perfSpans.stage(
+        'decode_geo', () => heavy.decodeGeoOffIsolate(bytes));
   }
 
   /// Geometry simplified to roughly one screen pixel at [zoom] (issue #295).
