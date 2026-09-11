@@ -178,6 +178,29 @@ class TestElevationGain:
         return elevs, [i * spacing_km for i in range(len(elevs))]
 
     @staticmethod
+    def _correlated_flat(n, sigma, tau, spacing_km, seed=5):
+        """Flat ground under AUTOCORRELATED noise — true gain zero.
+
+        GPS altitude error drifts with satellite geometry and multipath, over
+        minutes rather than samples, so consecutive readings are not
+        independent. Modelled as AR(1) with marginal deviation *sigma* and
+        correlation time *tau* samples. This is what a phone or a watch without
+        a barometer produces, and what issue #386 is about.
+        """
+        import math
+        import random
+
+        random.seed(seed)
+        phi = math.exp(-1.0 / tau)
+        innovation = sigma * math.sqrt(1 - phi * phi)
+        value = random.gauss(0, sigma)
+        elevs = []
+        for _ in range(n):
+            value = phi * value + random.gauss(0, innovation)
+            elevs.append(100.0 + value)
+        return elevs, [i * spacing_km for i in range(n)]
+
+    @staticmethod
     def _flat(n, sigma, spacing_km, hold=1, seed=11):
         """Flat ground under Gaussian noise — true gain zero.
 
@@ -353,6 +376,64 @@ class TestElevationGain:
             f"4x the samples cost {large / small:.1f}x the time "
             f"({small:.3f}s -> {large:.3f}s); linear is ~4x, quadratic ~16x"
         )
+
+    def test_correlated_noise_on_flat_ground_is_not_climbing(self):
+        """Issue #386. k-th differences see only the INNOVATION of a correlated
+        series, so an AR(1) marginal sigma of 4 measured 0.5-0.9, the window
+        stayed at its floor and the band at its own — and 30 km of flat ground
+        came back as 700-840 m of climb, worse than the code this replaced.
+
+        The stride now escalates until the estimate saturates, which is where
+        the samples have become independent.
+        """
+        for tau in (10, 30):
+            for spacing in (0.002, 0.005):
+                elevs, dists = self._correlated_flat(
+                    int(30.0 / spacing), sigma=4.0, tau=tau, spacing_km=spacing)
+                gain = elevation_gain(elevs, dists)
+                assert gain < 100.0, (
+                    f"AR(1) noise tau={tau} at {spacing * 1000:.0f} m spacing "
+                    f"reported {gain:.0f} m of climb on flat ground"
+                )
+
+    def test_real_climb_under_correlated_noise_survives(self):
+        """The other half of #386: widening the band must not flatten a real
+        climb recorded by the same noisy sensor. 600 m, read through AR(1) noise
+        that inflated it to 695 m before."""
+        import math
+        import random
+
+        random.seed(5)
+        n = 6000
+        phi = math.exp(-1.0 / 20)
+        innovation = 3.0 * math.sqrt(1 - phi * phi)
+        value, elevs = random.gauss(0, 3.0), []
+        for i in range(n):
+            value = phi * value + random.gauss(0, innovation)
+            elevs.append(200.0 + 600.0 * (1 - abs(2 * (i / (n - 1)) - 1)) + value)
+        gain = elevation_gain(elevs, [i * 0.0055 for i in range(n)])
+        assert gain == pytest.approx(600.0, abs=40.0)
+
+    def test_clean_rollers_survive_the_stride_escalation(self):
+        """The escalation's own failure mode, and why it has brakes. Reaching
+        for a longer stride finds terrain once it spans a hill: without the
+        noise floor and the growth-ratio cap, clean 200-300 m rollers measured
+        as noise and were erased outright (483 m of real climb -> 0)."""
+        import math
+
+        for wavelength_m, spacing_m in ((200, 25), (300, 25), (300, 50)):
+            per = wavelength_m // spacing_m
+            count = max(10, 12000 // wavelength_m)
+            elevs = [
+                300.0 + 10.0 / 2 * (1 - math.cos(2 * math.pi * i / per))
+                for _ in range(count) for i in range(per)
+            ]
+            dists = [i * spacing_m / 1000 for i in range(len(elevs))]
+            gain = elevation_gain(elevs, dists)
+            assert gain > 10.0 * count * 0.7, (
+                f"clean {wavelength_m} m rollers at {spacing_m} m spacing lost "
+                f"their climb: {gain:.0f} of {10.0 * count:.0f}"
+            )
 
     def test_steady_climb_is_counted_in_full(self):
         """A clean ramp comes back within ~1%: the clamped window flattens the

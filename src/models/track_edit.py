@@ -256,6 +256,51 @@ _NOISE_MAX_RUN_STRIDE = 16
 #: three times over cost 0.27 s of the 0.68 s a full pass took.
 _NOISE_MEDIAN_SAMPLE_CAP = 20_000
 
+#: GPS altitude noise is correlated in time — satellite geometry and multipath
+#: drift over minutes, not samples — and k-th differences see only its
+#: INNOVATION, which is far smaller than how far the series actually wanders.
+#: Measured at stride 1 an AR(1) series of marginal sigma 4 reads 0.5-0.9, the
+#: window then stays at its floor, the band collapses to its own floor, and
+#: 30 km of flat ground came back as 700-840 m of climb (issue #386).
+#:
+#: Differencing at a longer stride fixes that: as the stride passes the
+#: correlation length the samples become effectively independent and the
+#: estimate saturates at the true marginal sigma. So escalate while the estimate
+#: keeps growing, and use the stride it saturated at — which is also the
+#: correct divisor for :func:`_noise_threshold`'s independent-reading count.
+#:
+#: Three brakes stop that escalation eating terrain, which grows without
+#: saturating once the stride spans a hill:
+#:
+#: * A floor. Below this the series has no measurable noise to saturate — a
+#:   DEM-sampled route reads 0.23 — and escalating could only find terrain.
+#: * A growth ratio. Real saturation is bounded (sigma_marginal / innovation is
+#:   sqrt(tau/2), ~2x at tau 10 and ~4x at tau 30); terrain runs away past it.
+#: * A span. Past a kilometre a k-th difference spans whole hills.
+#:
+#: Verified to leave every terrain fixture byte-identical — clean sinusoidal
+#: rollers from 200 m to 600 m wavelength, noisy triangular rollers, the 1 Hz
+#: climb, the sparse planned route — while AR(1) flat ground at marginal sigma
+#: 4 goes 839 -> 0 (tau 10) and 720 -> 0 (tau 30), and a real 600 m climb
+#: recorded under correlated noise goes 695 -> 600.
+_NOISE_SATURATION_MIN_SIGMA_M = 0.4
+_NOISE_SATURATION_MAX_RATIO = 8.0
+_NOISE_SATURATION_MAX_SPAN_M = 1000.0
+_NOISE_SATURATION_GROWTH = 1.15
+
+
+def _median_gap_m(distances_km: Optional[List[float]], count: int) -> float:
+    """Median distance in metres between consecutive samples, 0.0 if unknowable.
+
+    Both the noise estimate and the smoothing window are sized in metres of
+    travel, so both need this; it is computed once per call and handed to each.
+    """
+    if not distances_km or len(distances_km) != count or count < 2:
+        return 0.0
+    gaps = sorted([b - a for a, b
+                   in zip(distances_km, islice(distances_km, 1, None))])
+    return gaps[len(gaps) // 2] * 1000.0
+
 
 def _run_stride(elevations: List[float]) -> int:
     """Samples per distinct altitude reading, as a median run length.
@@ -297,7 +342,9 @@ def _run_stride(elevations: List[float]) -> int:
     return _NOISE_MAX_RUN_STRIDE
 
 
-def _noise_estimate(elevations: List[float]) -> Tuple[float, int]:
+def _noise_estimate(
+    elevations: List[float], median_gap_m: float
+) -> Tuple[float, int]:
     """Per-sample sensor noise in metres, plus the run stride it was read at.
 
     Noise cannot be inferred from how the track was sampled, which is what
@@ -338,6 +385,36 @@ def _noise_estimate(elevations: List[float]) -> Tuple[float, int]:
     dismissing them as jitter on the strength of two or three samples.
     """
     stride = _run_stride(elevations)
+    base = _sigma_at_stride(elevations, stride)
+    if base is None:
+        return 0.0, stride
+
+    # Escalate the stride while the estimate keeps climbing: correlated noise
+    # saturates at its true marginal sigma, terrain does not. See
+    # _NOISE_SATURATION_MIN_SIGMA_M for the three brakes.
+    best, best_stride = base, stride
+    if base >= _NOISE_SATURATION_MIN_SIGMA_M:
+        while True:
+            wider = best_stride * 2
+            span_m = wider * _NOISE_DIFFERENCE_ORDERS.stop * median_gap_m
+            if span_m > _NOISE_SATURATION_MAX_SPAN_M:
+                break
+            wider_sigma = _sigma_at_stride(elevations, wider)
+            if wider_sigma is None or wider_sigma < best * _NOISE_SATURATION_GROWTH:
+                break                      # saturated: this is the marginal sigma
+            if wider_sigma > base * _NOISE_SATURATION_MAX_RATIO:
+                break                      # still climbing at this scale: terrain
+            best, best_stride = wider_sigma, wider
+    return best, best_stride
+
+
+def _sigma_at_stride(elevations: List[float], stride: int) -> Optional[float]:
+    """The smallest across-order sigma estimate at one differencing stride.
+
+    None when the series is too short to yield :data:`_NOISE_MIN_DIFFERENCES`
+    differences at this stride — which is also what stops the escalation in
+    :func:`_noise_estimate` running off the end of a short series.
+    """
     differences = elevations
     estimate: Optional[float] = None
     for order in range(1, _NOISE_DIFFERENCE_ORDERS.stop):
@@ -352,7 +429,7 @@ def _noise_estimate(elevations: List[float]) -> Tuple[float, int]:
         middle = magnitudes[len(magnitudes) // 2]
         sigma = _NOISE_DIFFERENCE_SCALE[order] * middle
         estimate = sigma if estimate is None else min(estimate, sigma)
-    return (estimate if estimate is not None else 0.0), stride
+    return estimate
 
 
 def _smooth_elevations(
@@ -360,6 +437,7 @@ def _smooth_elevations(
     distances_km: Optional[List[float]],
     sigma: float,
     stride: int,
+    median_gap_m: float,
 ) -> Tuple[List[float], float]:
     """Centred moving average over travel, widened to suit the measured noise.
 
@@ -393,12 +471,9 @@ def _smooth_elevations(
     and the band then sizes itself from the full noise.
     """
     n = len(elevations)
-    if n < 3 or not distances_km or len(distances_km) != n:
+    if n < 3 or not distances_km or len(distances_km) != n or median_gap_m <= 0:
         return list(elevations), 1.0
 
-    gaps = sorted([b - a for a, b
-                   in zip(distances_km, islice(distances_km, 1, None))])
-    median_gap_m = gaps[len(gaps) // 2] * 1000.0
     wanted = stride * (sigma / ELEV_SMOOTH_TARGET_SIGMA_M) ** 2 * median_gap_m
     span = max(ELEV_SMOOTH_SPAN_M, min(ELEV_SMOOTH_MAX_SPAN_M, wanted))
     half_km = (span / 2.0) / 1000.0
@@ -483,9 +558,10 @@ def elevation_gain(
     """
     if len(elevations) < 2:
         return 0.0
-    sigma, stride = _noise_estimate(elevations)
+    median_gap_m = _median_gap_m(distances_km, len(elevations))
+    sigma, stride = _noise_estimate(elevations, median_gap_m)
     smoothed, window = _smooth_elevations(
-        elevations, distances_km, sigma, stride)
+        elevations, distances_km, sigma, stride, median_gap_m)
     threshold = _noise_threshold(sigma, stride, window)
     gain = 0.0
     ref = smoothed[0]
