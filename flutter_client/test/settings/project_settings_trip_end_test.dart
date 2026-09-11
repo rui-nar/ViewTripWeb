@@ -395,4 +395,34 @@ void main() {
 
     expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
   });
+
+  testWidgets('a day only the server knows about is still reported as staying',
+      (tester) async {
+    // Integration gap found merging #370 and #372: the candidate set must
+    // spread the server's answer, not just the caller-visible sources. A day
+    // held on screen by another member's journal and carrying no day-meta of
+    // its own appears in *none* of _dayMeta, orderedDayKeys() or the local
+    // extraction — drop `...?serverDays` from the candidates and it is
+    // silently left out of the dialog, since classifyTripEndOrphans only
+    // reports days it is handed. Nothing is mis-deleted (there is no day-meta
+    // to delete), but the warning under-reports, which is the defect class
+    // #358 was about.
+    serverContentDays = ['2026-06-15'];
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14']),
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.text('Days after the end date will stay'), findsOneWidget);
+    expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(), {'2026-06-14'});
+  });
 }
