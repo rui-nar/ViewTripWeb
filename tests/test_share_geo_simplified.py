@@ -33,6 +33,7 @@ import src.tile_renderer as tile_renderer
 from api.deps import get_current_user
 from api.geo import _geo_cache, _geo_gen, _track_cache, bust_geo_cache
 from api.geo import router as geo_router
+from api.projects import router as projects_router
 from api.share import router as share_router
 from models.project_db import DBActivity, DBProject, DBProjectItem, DBShareVisit
 from models.user import UserInfo
@@ -138,6 +139,9 @@ def env(tmp_path, monkeypatch):
     app.dependency_overrides[get_current_user] = lambda: {"sub": str(uid)}
     app.include_router(share_router)
     app.include_router(geo_router)
+    # The real rename route, not a stand-in: the share caches it has to drop
+    # live in that route, so a test that mirrored it would exercise nothing.
+    app.include_router(projects_router)
     yield TestClient(app), uid, engine
 
 
@@ -406,3 +410,54 @@ def test_no_visit_is_recorded_however_much_the_viewer_zooms(env):
     assert client.get(f"/api/share/{TOKEN}/meta?aid=visitor-a").status_code == 200
     with Session(engine) as sess:
         assert len(sess.exec(select(DBShareVisit)).all()) == 1
+
+
+# ── a rename must not strand the shared link (issue #321 review) ─────────────
+
+def test_a_rename_does_not_break_the_shared_zoom_endpoint(env):
+    """The share caches hold the project under the name it had when they warmed.
+
+    ``/{token}/geo`` survives a rename because it builds from the cached project
+    *object*, where the name is irrelevant. The zoom-simplified route resolves by
+    ``(owner, name)`` instead, so before the rename route learned to drop the
+    share caches this 404'd for as long as the 60 s per-token entry lived — and
+    the client fell back to the full-resolution payload this endpoint exists to
+    avoid. Any level it *did* build would also be keyed under a name no later
+    bust would target.
+    """
+    client, uid, _engine = env
+    # Warm both the per-token project cache and a simplified level.
+    assert client.get(f"/api/share/{TOKEN}/geo").status_code == 200
+    assert _simplified(client, 10).status_code == 200
+
+    renamed = client.put("/api/projects/Trip", json={"new_name": "Trip Renamed"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Trip Renamed"
+
+    # The token is unchanged, so the link must keep working — at every level,
+    # including one that was never warmed.
+    assert client.get(f"/api/share/{TOKEN}/geo").status_code == 200
+    for zoom in (10, 14):
+        resp = _simplified(client, zoom)
+        assert resp.status_code == 200, f"zoom {zoom}: {resp.status_code} {resp.text}"
+        assert _coords(resp) > 0
+
+
+def test_a_renamed_project_is_still_bustable_for_shared_viewers(env):
+    """The level a share viewer gets after a rename must still answer to a bust.
+
+    Guards the second-order half: serving from an entry keyed under the stale
+    name would look fine here and then never be invalidated again.
+    """
+    client, uid, engine = env
+    assert _simplified(client, 10).status_code == 200
+    assert client.put(
+        "/api/projects/Trip", json={"new_name": "Trip Renamed"}).status_code == 200
+    before = _coords(_simplified(client, 10))
+
+    _mutate(engine, uid, 5.0)
+    bust_geo_cache(uid, "Trip Renamed")
+    after = _simplified(client, 10)
+    assert after.status_code == 200
+    assert _coords(after) == before  # same shape, moved
+    assert _features(after)[0]["geometry"]["coordinates"] != []
