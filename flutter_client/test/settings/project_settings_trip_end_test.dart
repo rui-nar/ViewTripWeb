@@ -361,8 +361,13 @@ void main() {
     await _tapSave(tester);
 
     expect(find.textContaining('1 day after Jun 14, 2026'), findsOneWidget);
+    // 06-16 has day-meta of its own *and* is pinned only by the companion's
+    // journal — the actual #372 state. Testing "can the user see this day"
+    // instead of "can the user see what pins it" classifies it as actionable
+    // and prints the one sentence this whole branch exists to avoid.
+    expect(find.textContaining('Only they can remove it.'), findsOneWidget);
     expect(find.textContaining('move or delete that content first'),
-        findsOneWidget);
+        findsNothing);
 
     await tester.tap(find.text('Delete'));
     await _frames(tester);
@@ -525,5 +530,34 @@ void main() {
       await _frames(tester);
       expect(putDayMeta.last.keys.toSet(), {'2026-06-14', '2026-06-15'});
     });
+  });
+
+  testWidgets('a mixed set names the actionable days and the others separately',
+      (tester) async {
+    // Both sentences at once: 06-15 is pinned by the caller's own activity,
+    // 06-16 only by a companion's journal, and both carry day-meta — so the
+    // day-meta row cannot be what decides which sentence a day gets.
+    serverContentDays = ['2026-06-16'];
+    final n = _notifier(
+      tripEnd: '2026-06-20',
+      dayMeta: _days(['2026-06-14', '2026-06-15', '2026-06-16']),
+      activities: [
+        {'start_date_local': '2026-06-15T08:00:00'},
+      ],
+    );
+    await _pumpSettings(tester, n);
+    await _moveEndDate(tester, 'Jun 20, 2026', '14');
+
+    await _tapSave(tester);
+
+    expect(find.textContaining('move or delete that content first'),
+        findsOneWidget);
+    expect(find.textContaining('Only they can remove it.'), findsOneWidget);
+
+    await tester.tap(find.text('Continue'));
+    await _frames(tester);
+
+    expect(putDayMeta.last.keys.toSet(),
+        {'2026-06-14', '2026-06-15', '2026-06-16'});
   });
 }

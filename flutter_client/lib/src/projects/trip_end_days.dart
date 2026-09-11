@@ -125,7 +125,7 @@ String tripEndWarningMessage({
         'nothing will be deleted — '
         '${failure == ContentCheckFailure.unreachable
             ? 'try again once you are back online.'
-            : 'the server could not answer. Try again shortly.'}');
+            : 'the server could not answer that check.'}');
     return out.join('\n\n');
   }
   if (visibleKept > 0) {

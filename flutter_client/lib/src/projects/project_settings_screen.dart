@@ -309,12 +309,16 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
       );
       final gone = orphans.removable.length;
       final kept = orphans.pinned.length;
-      // A pinned day the caller can see somewhere in their own trip is one
-      // they can act on; a day only the server knows about is another
-      // member's, and telling them to "move or delete that content" would ask
-      // for something they can neither see nor touch.
+      // A pinned day whose *content* this user can see is one they can act on;
+      // otherwise what pins it is another member's, and telling them to "move
+      // or delete that content" asks for something they can neither see nor
+      // touch. The test is localPinned, not localCandidates: a day is in
+      // localCandidates merely by having a day-meta row, and having notes on a
+      // day says nothing about whose content keeps it on screen. The #372 case
+      // is exactly a day that has both — shared day-meta *and* a companion's
+      // journal — so testing membership of the wider set silently excludes it.
       final hiddenKept =
-          orphans.pinned.where((k) => !localCandidates.contains(k)).length;
+          orphans.pinned.where((k) => !localPinned.contains(k)).length;
       if (gone > 0 || (kept > 0 && endMoved)) {
         final when = _fmtDate(_tripEnd!);
         final message = tripEndWarningMessage(
