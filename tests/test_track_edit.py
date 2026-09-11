@@ -142,7 +142,7 @@ class TestElevationGain:
 
     @staticmethod
     def _hills(count, height, samples, spacing_km, sigma=0.0, seed=3):
-        """*count* identical triangular hills — the shape rolling terrain has."""
+        """*count* identical triangular hills — straight flanks, sharp peaks."""
         import random
 
         random.seed(seed)
@@ -153,6 +153,47 @@ class TestElevationGain:
                 frac = i / half if i < half else (samples - i) / half
                 elevs.append(300.0 + height * frac + random.gauss(0, sigma))
         return elevs, [i * spacing_km for i in range(len(elevs))]
+
+    @staticmethod
+    def _sine_hills(count, height, samples, spacing_km, sigma=0.0, seed=3):
+        """*count* identical sinusoidal hills — the shape rolling terrain has.
+
+        Triangles have straight flanks, so every second difference along them is
+        zero no matter how coarse the sampling. That is exactly the blind spot
+        issue #376 is about, which is why the triangular fixture could never
+        show it: real terrain bends, second differences grow with the square of
+        the spacing on a bend, and a clean curved route therefore measured as
+        noisy and had its rollers erased.
+        """
+        import math
+        import random
+
+        random.seed(seed)
+        elevs = []
+        for _ in range(count):
+            for i in range(samples):
+                phase = 2 * math.pi * i / samples
+                elevs.append(300.0 + height / 2.0 * (1 - math.cos(phase))
+                             + random.gauss(0, sigma))
+        return elevs, [i * spacing_km for i in range(len(elevs))]
+
+    @staticmethod
+    def _flat(n, sigma, spacing_km, hold=1, seed=11):
+        """Flat ground under Gaussian noise — true gain zero.
+
+        ``hold`` repeats each altitude reading that many samples, the way a
+        device whose barometer updates slower than its GPS fix does.
+        """
+        import random
+
+        random.seed(seed)
+        elevs = []
+        reading = 100.0
+        for i in range(n):
+            if i % hold == 0:
+                reading = 100.0 + random.gauss(0, sigma)
+            elevs.append(reading)
+        return elevs, [i * spacing_km for i in range(n)]
 
     def test_noisy_track_reports_the_real_climb(self):
         elevs, dists = self._climb()
@@ -194,11 +235,111 @@ class TestElevationGain:
     def test_rolling_terrain_is_under_reported_but_not_erased(self):
         """Honest about a real limit: hills only a few metres tall sit close to
         the noise, and the band costs roughly its own height per hill. The
-        figure is conservative — what it must never be again is inflated."""
-        elevs, dists = self._hills(100, height=6.0, samples=60,
-                                   spacing_km=0.005, sigma=1.2)
+        figure is conservative — what it must never be again is inflated.
+
+        Sinusoidal hills, not the triangles this used to use (issue #376).
+        Triangular flanks are straight, so they carry no curvature for the noise
+        estimate to trip over and the old bound of 150-600 m was wide enough to
+        hide the miss anyway. With real curvature the previous estimator read
+        the bend itself as noise and reported 377 m of this true 600.
+        """
+        elevs, dists = self._sine_hills(100, height=6.0, samples=60,
+                                        spacing_km=0.005, sigma=1.2)
         gain = elevation_gain(elevs, dists)
-        assert 150.0 < gain < 600.0
+        assert 400.0 < gain < 520.0
+
+    def test_sparse_noisy_ground_is_not_phantom_climb(self):
+        """Issue #376, first false premise: sparse sampling was taken to mean
+        route-planner DEM output with no sensor noise in it, so smoothing was
+        skipped outright and a 5 m band was the only defence left.
+
+        Spacing does not identify the source. A non-barometric phone, a Garmin
+        on smart recording and a track simplified before upload are all sparse
+        AND noisy. 30 km of flat ground at 40 m spacing reported 188 m of climb
+        at sigma 2, 675 m at sigma 3 and 1639 m at sigma 5.
+        """
+        for sigma in (2.0, 3.0, 5.0):
+            elevs, dists = self._flat(750, sigma, spacing_km=0.04)
+            gain = elevation_gain(elevs, dists)
+            assert gain < 50.0, (
+                f"30 km of flat ground at 40 m spacing, sigma={sigma}: "
+                f"reported {gain:.0f} m of climb"
+            )
+
+    def test_clean_curved_route_keeps_its_rollers(self):
+        """Issue #376, second false premise: that second differences are near
+        zero for a smooth series however steep. True on a straight flank, false
+        on a bend — they scale with the square of the sample spacing — so a
+        CLEAN curved route at 100 m spacing measured as sigma 2 and earned a
+        band wide enough to swallow its rollers whole.
+
+        Rollers up to roughly twice the band vanish entirely, because the
+        reference elevation ends up sitting mid-oscillation: 10 m hills over
+        600 m reported 253 m of their true 500, and 4 m hills over 500 m
+        reported 0 of their true 240.
+        """
+        elevs, dists = self._sine_hills(50, height=10.0, samples=6,
+                                        spacing_km=0.1)
+        assert elevation_gain(elevs, dists) > 400.0      # true 500
+
+        elevs, dists = self._sine_hills(60, height=4.0, samples=5,
+                                        spacing_km=0.1)
+        assert elevation_gain(elevs, dists) > 150.0      # true 240
+
+    def test_held_altitude_readings_are_not_climbing(self):
+        """Issue #376, third symptom of the same root cause: a device whose
+        altitude updates slower than its position writes runs of identical
+        values. Every difference taken inside a run is exactly zero, so the
+        median collapsed, the band dropped to its 1 m floor, and the full-sized
+        steps between readings were all counted as climb.
+
+        30 km of flat ground with altitude held for 5 samples reported 167 m at
+        sigma 1.2, 385 m at sigma 2 and 680 m at sigma 3.
+        """
+        for hold in (5, 10):
+            for sigma in (1.2, 2.0, 3.0):
+                elevs, dists = self._flat(6000, sigma, spacing_km=0.005,
+                                          hold=hold)
+                gain = elevation_gain(elevs, dists)
+                assert gain < 50.0, (
+                    f"altitude held for {hold} samples at sigma={sigma}: "
+                    f"reported {gain:.0f} m of climb on flat ground"
+                )
+
+    def test_quantised_barometric_input_matches_unquantised(self):
+        """Barometric altitude arrives rounded — to 0.1, 0.2 or a whole metre.
+
+        That also produces runs of equal values, and the run-aware noise
+        estimate must not mistake them for a slow sensor: a quantised reading
+        still changes almost every sample, so its runs are one or two long.
+        This held before issue #376 as well; it is here so that the stride
+        logic added for held readings cannot quietly break it.
+        """
+        elevs, dists = self._climb()
+        baseline = elevation_gain(elevs, dists)
+        for step in (0.1, 0.2, 1.0):
+            quantised = [round(e / step) * step for e in elevs]
+            assert elevation_gain(quantised, dists) == pytest.approx(
+                baseline, rel=0.02), f"quantising to {step} m moved the figure"
+
+    def test_long_track_stays_linear(self):
+        """Both halves grew in issue #376 — the noise estimate differences the
+        series five times over and the smoothing window widens with the noise —
+        so pin that neither turned into a per-sample rescan. 200k samples is a
+        long dense ride; this measures ~0.2 s, the same as before the change.
+        """
+        import random
+        import time
+
+        random.seed(1)
+        n = 200_000
+        elevs = [100.0 + i * 0.002 + random.gauss(0, 1.2) for i in range(n)]
+        dists = [i * 0.0055 for i in range(n)]
+
+        start = time.time()
+        elevation_gain(elevs, dists)
+        elapsed = time.time() - start
+        assert elapsed < 1.0, f"elevation_gain took {elapsed:.2f}s at {n}"
 
     def test_steady_climb_is_counted_in_full(self):
         """A clean ramp comes back within ~1%: the clamped window flattens the
