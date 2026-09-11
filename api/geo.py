@@ -14,7 +14,7 @@ from array import array
 from itertools import chain
 from threading import Lock
 from time import monotonic
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Callable, Dict, List
 
 import polyline as polyline_lib
 import requests
@@ -871,6 +871,143 @@ def _parse_bbox(raw: str) -> tuple:
     return (min_lon, min_lat, max_lon, max_lat)
 
 
+def serve_simplified_geo(
+    owner_id: int,
+    name: str,
+    zoom: float,
+    bbox: str | None,
+    load_project: Callable[[], Project | None],
+) -> Response:
+    """Serve *name*'s geometry simplified to roughly one pixel at *zoom*.
+
+    The body of :func:`project_geo_simplified` — see there for what the answer
+    means — shared with the token-scoped share route (issue #321) so a public
+    viewer gets the same payload, and the same cache entries, an owner does.
+    The caller decides *who* is asking and hands over the owner's id and the
+    project name; everything from there on is identity-independent, which is
+    also why nothing caller-specific may reach the cache keys.
+
+    ``load_project`` is called only on a track-cache miss, and must read the
+    project **fresh from the DB**. What it returns is prepared into an entry
+    held for 15 minutes, so a caller's own short-lived project cache must not
+    be its source: that would stretch that cache's staleness window to the
+    track cache's (issue #321).
+
+    Cached in two layers, because the two costs are different sizes.
+
+    The *trip* — decoded, and each line reduced to the working set, bounding
+    box and coarseness floor that every zoom is served from — is what is
+    expensive: preparing one decodes every activity polyline (1.83 s measured
+    for a 219-activity trip) before anything is simplified. It is both zoom-
+    and box-independent, so one entry serves every level and every viewport,
+    and the decode is paid once per trip rather than once per level.
+
+    Simplification results are memoised on that entry per ``(level, line)``.
+    A line simplified to a level does not depend on the box, so it is
+    shareable; and the box decides which lines are worth simplifying at all,
+    so a request only pays for what it can show. A new box at a known level
+    costs the lines it newly brought on screen, and a level fills in
+    incrementally across a session (issue #338). Neither #325's per-box builds
+    (cheap but unshareable) nor #331's box-free levels (shareable but
+    unskippable) had both.
+
+    The *bytes* — this level restricted to this box and gzipped — are cached in
+    front of that, keyed by the tile-snapped box as well, because serialising
+    is not free either and a repeat request should cost nothing. A miss there
+    falls through to the prepared trip, never to a rebuild.
+
+    The box is snapped server-side (:func:`snap_bbox_to_tiles`) so an unsnapped
+    client cannot mint an entry per pan pixel. Both layers are generation
+    checked, so one bust per mutation still covers every level and every box —
+    and, since the keys are the owner's, one bust covers the share route too.
+    """
+    if not (0 <= zoom <= 22):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Zoom must be between 0 and 22",
+        )
+    # Quantised to whole levels: a continuous camera zoom would otherwise mint
+    # a distinct cache entry per pixel of pinch.
+    #
+    # Rounded UP, not down. Flooring served zoom 11.9 the zoom-11 tolerance —
+    # 54 m instead of 29 m, a 1.87x over-simplification and about two pixels
+    # of visible drift. Ceiling errs towards more detail than asked for, which
+    # is invisible, and costs no extra cache entries.
+    level = math.ceil(zoom)
+    # Snapped here, not trusted from the client: the snapped box is both what
+    # gets filtered against and what keys the cache, so an unsnapped one would
+    # mint an entry per pan pixel.
+    box = None
+    box_key = "all"
+    if bbox is not None:
+        box, tiles = snap_bbox_to_tiles(_parse_bbox(bbox), level)
+        box_key = "{}.{}.{}.{}".format(*tiles)
+    # Cheapest path first: the exact bytes this caller asked for.
+    byte_key = (owner_id, name, f"simplified-{level}-{box_key}")
+    cached_bytes = _geo_cache_get(byte_key)
+    if cached_bytes is not None:
+        return Response(
+            content=cached_bytes,
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
+        )
+    gen_for_bytes = _geo_generation(owner_id, name)
+    track_key = (owner_id, name)
+    track = _track_cache_get(track_key)
+
+    cache_state = "HIT"
+    if track is None:
+        cache_state = "MISS"
+        gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
+        project = load_project()
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        track = _prepare_track(_build_full_geo_features(project, encoded=False))
+        _track_cache_store(track_key, track, gen)
+
+    features, fresh = _features_for(track, level, box)
+    if fresh:
+        # Honest: this request simplified something. A pan that brings no new
+        # line on screen reads HIT, one that does reads MISS.
+        cache_state = "MISS"
+        _track_cache_merge(track_key, track, fresh)
+    gz_bytes = _gzip_geo(features)
+    # Serialising is not free, and reusing a prepared trip does not avoid it:
+    # gzipping a large level measured ~0.5 s, which on a single-process server
+    # is still enough GIL-holding CPU to time out someone else's request. So
+    # the bytes are cached per (level, box) in front of it.
+    #
+    # This is not the cache #325 had. A miss here falls through to the
+    # *prepared trip*, not to a rebuild, so a pan to a new box costs the lines
+    # it newly revealed plus one gzip, rather than decoding every polyline in
+    # the trip again. Keeping the short TTL for the reason the original comment
+    # gave: there are many of these, they share a cache with /project,
+    # /low-res and /meta, and they are by far the cheapest thing in it to
+    # rebuild.
+    _geo_cache_store(byte_key, gz_bytes, gen_for_bytes, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
+    return Response(
+        content=gz_bytes,
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip", "X-Cache": cache_state},
+    )
+
+
+def load_project_for_geo(owner_id: int, name: str) -> Project | None:
+    """A project's geometry, loaded fresh from the DB in its own session.
+
+    The ``load_project`` :func:`serve_simplified_geo` wants: it reads through
+    to the database every time, and holds no session open across the
+    simplification that follows.
+    """
+    with get_session() as sess:
+        return _repo.get_project(
+            sess, owner_id, name,
+            legacy_path=_legacy_path(str(owner_id), name),
+            include_elevation=False,
+        )
+
+
 @router.get("/project/simplified", summary="Zoom-appropriate GeoJSON (gzip)")
 def project_geo_simplified(
     name: str,
@@ -905,114 +1042,15 @@ def project_geo_simplified(
     what it did before; an older server ignores the parameter and serves the
     whole trip, which is a superset of what was asked for.
 
-    Cached in two layers, because the two costs are different sizes.
-
-    The *trip* — decoded, and each line reduced to the working set, bounding
-    box and coarseness floor that every zoom is served from — is what is
-    expensive: preparing one decodes every activity polyline (1.83 s measured
-    for a 219-activity trip) before anything is simplified. It is both zoom-
-    and box-independent, so one entry serves every level and every viewport,
-    and the decode is paid once per trip rather than once per level.
-
-    Simplification results are memoised on that entry per ``(level, line)``.
-    A line simplified to a level does not depend on the box, so it is
-    shareable; and the box decides which lines are worth simplifying at all,
-    so a request only pays for what it can show. A new box at a known level
-    costs the lines it newly brought on screen, and a level fills in
-    incrementally across a session (issue #338). Neither #325's per-box builds
-    (cheap but unshareable) nor #331's box-free levels (shareable but
-    unskippable) had both.
-
-    The *bytes* — this level restricted to this box and gzipped — are cached in
-    front of that, keyed by the tile-snapped box as well, because serialising
-    is not free either and a repeat request should cost nothing. A miss there
-    falls through to the prepared trip, never to a rebuild.
-
-    The box is snapped server-side (:func:`snap_bbox_to_tiles`) so an unsnapped
-    client cannot mint an entry per pan pixel. Both layers are generation
-    checked, so one bust per mutation still covers every level and every box.
+    Caching — two layers, both keyed on the *owner*, so this route and the
+    token-scoped share one (issue #321) share every entry — is described on
+    :func:`serve_simplified_geo`, which is where the work happens.
     """
-    if not (0 <= zoom <= 22):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Zoom must be between 0 and 22",
-        )
-    # Quantised to whole levels: a continuous camera zoom would otherwise mint
-    # a distinct cache entry per pixel of pinch.
-    #
-    # Rounded UP, not down. Flooring served zoom 11.9 the zoom-11 tolerance —
-    # 54 m instead of 29 m, a 1.87x over-simplification and about two pixels
-    # of visible drift. Ceiling errs towards more detail than asked for, which
-    # is invisible, and costs no extra cache entries.
-    level = math.ceil(zoom)
-    # Snapped here, not trusted from the client: the snapped box is both what
-    # gets filtered against and what keys the cache, so an unsnapped one would
-    # mint an entry per pan pixel.
-    box = None
-    box_key = "all"
-    if bbox is not None:
-        box, tiles = snap_bbox_to_tiles(_parse_bbox(bbox), level)
-        box_key = "{}.{}.{}.{}".format(*tiles)
     user_info_id = int(current_user["sub"])
-    gen = 0
-    project = None
     with get_session() as sess:
-        row = resolve_project(sess, user_info_id, name, owner)
-        owner_id = row.user_info_id
-        # Cheapest path first: the exact bytes this caller asked for.
-        byte_key = (owner_id, name, f"simplified-{level}-{box_key}")
-        cached_bytes = _geo_cache_get(byte_key)
-        if cached_bytes is not None:
-            return Response(
-                content=cached_bytes,
-                media_type="application/json",
-                headers={"Content-Encoding": "gzip", "X-Cache": "HIT"},
-            )
-        gen_for_bytes = _geo_generation(owner_id, name)
-        track_key = (owner_id, name)
-        track = _track_cache_get(track_key)
-        if track is None:
-            gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
-            project = _repo.get_project(
-                sess, owner_id, name,
-                legacy_path=_legacy_path(str(owner_id), name),
-                include_elevation=False,
-            )
-            if project is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-
-    cache_state = "HIT"
-    if track is None:
-        cache_state = "MISS"
-        track = _prepare_track(_build_full_geo_features(project, encoded=False))
-        _track_cache_store(track_key, track, gen)
-
-    features, fresh = _features_for(track, level, box)
-    if fresh:
-        # Honest: this request simplified something. A pan that brings no new
-        # line on screen reads HIT, one that does reads MISS.
-        cache_state = "MISS"
-        _track_cache_merge(track_key, track, fresh)
-    gz_bytes = _gzip_geo(features)
-    # Serialising is not free, and reusing a prepared trip does not avoid it:
-    # gzipping a large level measured ~0.5 s, which on a single-process server
-    # is still enough GIL-holding CPU to time out someone else's request. So
-    # the bytes are cached per (level, box) in front of it.
-    #
-    # This is not the cache #325 had. A miss here falls through to the
-    # *prepared trip*, not to a rebuild, so a pan to a new box costs the lines
-    # it newly revealed plus one gzip, rather than decoding every polyline in
-    # the trip again. Keeping the short TTL for the reason the original comment
-    # gave: there are many of these, they share a cache with /project,
-    # /low-res and /meta, and they are by far the cheapest thing in it to
-    # rebuild.
-    _geo_cache_store(byte_key, gz_bytes, gen_for_bytes, ttl_s=_SIMPLIFIED_CACHE_TTL_S)
-    return Response(
-        content=gz_bytes,
-        media_type="application/json",
-        headers={"Content-Encoding": "gzip", "X-Cache": cache_state},
-    )
+        owner_id = resolve_project(sess, user_info_id, name, owner).user_info_id
+    return serve_simplified_geo(
+        owner_id, name, zoom, bbox, lambda: load_project_for_geo(owner_id, name))
 
 
 @router.get("/project", summary="Full-resolution GeoJSON (gzip)")

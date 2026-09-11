@@ -4,6 +4,7 @@ Routes:
     GET /api/share/{token}                                     — project details for a shared link
     GET /api/share/{token}/meta                                — lightweight details (no elevation/polylines)
     GET /api/share/{token}/geo                                 — GeoJSON for a shared project
+    GET /api/share/{token}/geo/simplified                      — GeoJSON simplified to a zoom (and bbox)
     GET /api/share/{token}/stats                               — project statistics (no auth required)
     GET /api/share/{token}/tiles/{z}/{x}/{y}.png               — raster track tile (cached)
     GET /api/share/{token}/photos/{memory_id}/{uuid}/thumb     — memory photo thumbnail (no auth)
@@ -65,7 +66,6 @@ def invalidate_share_cache(token: str) -> None:
     _details_cache.delete(token)
     _meta_cache.delete(token)
 
-import polyline as polyline_lib
 from models.db import get_session
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
@@ -73,6 +73,7 @@ from fastapi.responses import FileResponse, Response
 from sqlmodel import select
 
 from api.deps import get_optional_current_user
+from api.geo import _build_full_geo_features, serve_simplified_geo
 from models.project_db import (
     DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBShareMemoryContent, DBShareVisit,
 )
@@ -396,70 +397,18 @@ def shared_project_meta(
 
 
 def _build_features(project) -> List[Dict[str, Any]]:
-    """Build GeoJSON-style feature dicts for all activities and segments."""
-    features: List[Dict[str, Any]] = []
+    """Build GeoJSON-style feature dicts for all activities and segments.
 
-    for item in project.items:
-        if item.item_type == "activity":
-            activity = project.activity_by_id(item.activity_id)
-            if activity is None:
-                continue
-            if is_encrypted_envelope(activity.summary_polyline):
-                # Encrypted geometry (issue #29) is out of scope for sharing
-                # (issue #28) — skip it entirely, same as "no geometry".
-                continue
-
-            if activity.summary_polyline:
-                decoded = polyline_lib.decode(activity.summary_polyline)
-                coords = [[lon, lat] for lat, lon in decoded]
-            elif activity.start_latlng and activity.end_latlng:
-                coords = [
-                    [activity.start_latlng[1], activity.start_latlng[0]],
-                    [activity.end_latlng[1],   activity.end_latlng[0]],
-                ]
-            else:
-                continue
-
-            if len(coords) < 2:
-                continue
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {
-                    "type": "activity",
-                    "activity_id": activity.id,
-                    "name": activity.name,
-                    "sport_type": activity.type,
-                },
-            })
-
-        elif item.item_type == "segment" and item.segment is not None:
-            seg = item.segment
-            if seg.route_mode == "rail" and seg.route_polyline:
-                import json as _json
-                coords = _json.loads(seg.route_polyline)
-            else:
-                pts = great_circle_points(
-                    seg.start.lat, seg.start.lon,
-                    seg.end.lat, seg.end.lon,
-                    n_points=50,
-                )
-                coords = [[lon, lat] for lat, lon in pts]
-            if len(coords) < 2:
-                continue
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {
-                    "type": "segment",
-                    "segment_id": seg.id,
-                    "segment_type": seg.segment_type,
-                    "label": seg.label,
-                    "route_mode": seg.route_mode,
-                },
-            })
-
-    return features
+    The owner-side builder, unchanged — the two had drifted apart (issue #321).
+    This one used a segment's stored ``route_polyline`` for ``rail`` only, so a
+    ferry or bus segment whose route had been resolved was drawn along that
+    route for the owner and as a straight great-circle arc for anyone holding a
+    share link, in the payload *and* in the pre-rendered raster tiles. A share
+    link is a view of the same trip, so it has to be built by the same code —
+    and now that both go through the zoom-simplified path, they also share the
+    prepared-track cache, which one builder per key could not survive.
+    """
+    return _build_full_geo_features(project, encoded=False)
 
 
 @router.get("/{token}/geo/low-res", summary="Low-res GeoJSON for shared project")
@@ -530,6 +479,59 @@ def shared_project_geo(
     _record_visit(project_id, token_type, aid, current_user)
     features = get_or_build_features(token, lambda: _build_features(project))
     return {"type": "FeatureCollection", "features": features}
+
+
+def _load_shared_project(owner_uid: int, name: str):
+    """The shared project's geometry, read fresh from the DB.
+
+    Deliberately not the project :func:`_get_project_and_type` hands back: that
+    one is cached for 60 s per token and invalidated from a worker process, so
+    in this one it just ages out. What this returns is prepared into a track
+    held for 15 minutes — seeding that from a 60-second-stale copy would
+    stretch a one-minute staleness window into a quarter-hour one (issue #321).
+    """
+    with get_session() as sess:
+        return _repo.get_project(sess, owner_uid, name, include_elevation=False)
+
+
+@router.get("/{token}/geo/simplified",
+            summary="Zoom-appropriate GeoJSON for a shared project (gzip)")
+def shared_project_geo_simplified(
+    token: str,
+    zoom: float,
+    bbox: Optional[str] = Query(default=None),
+):
+    """The share-link counterpart of ``GET /api/geo/project/simplified``.
+
+    Same answer, same two caches, same keys — the owner's id and project name —
+    so a public viewer and the owner share every entry and one mutation busts
+    both. See :func:`api.geo.serve_simplified_geo` for what those layers are.
+
+    Everyone opening a public link used to get the full-resolution geometry:
+    1,465,345 coordinates and a 4.5 MB payload on the trip this was measured
+    against, about 180 MB of client heap, on the device least likely to have
+    room for it. The zoom level of detail (issue #295) had landed for the owner
+    path only (issue #321).
+
+    Three things it deliberately does *not* do:
+
+    - it takes no ``aid``. That is the anonymous visitor id, not a filter;
+      keying a cache on it would mint an entry per visitor, which is the very
+      failure this endpoint exists to avoid;
+    - it does not record a visit. ``/{token}/meta`` already does that on every
+      shared load, and this route is called again on every zoom-bucket change
+      and every pan — a DB write on each would be pure cost;
+    - it resolves the token before reading any cache, so a revoked link stops
+      working immediately rather than for as long as some level stays warm.
+    """
+    # First, and before any cache is consulted: no token, no answer.
+    project, _token_type, _project_id, owner_uid = _get_meta_project_and_type(token)
+    # The lightweight variant is enough — only the owner's id and the project
+    # name are wanted here, and it reuses the full cache when that is already
+    # warm. Loading every polyline just to read a name would undo the saving.
+    name = project.name
+    return serve_simplified_geo(
+        owner_uid, name, zoom, bbox, lambda: _load_shared_project(owner_uid, name))
 
 
 @router.get("/{token}/stats", summary="Get shared project statistics")

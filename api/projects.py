@@ -437,11 +437,23 @@ def update_project(
         sess.commit()
         result_name = row.name
         result_trip_start = row.trip_start
+        # Read inside the session, used after it: the share module caches the
+        # project object per token, and that copy carries the old name.
+        share_tokens = [t for t in (row.share_token, row.share_token_no_memories) if t]
     # Both names: cache entries are keyed by project name, so a rename would
     # otherwise strand the old name's payload for whoever still asks for it.
     bust_project_cache(owner_id, name)
     if result_name != name:
         bust_project_cache(owner_id, result_name)
+        # The share module's per-token project cache still holds the old name
+        # for up to 60s, and the share geo routes resolve a project by
+        # (owner, name) — so a shared link would 404 on the zoom-simplified
+        # endpoint until that expired, and any level it did build would be
+        # keyed under a name no later bust will ever target (issue #321).
+        # Mirrors what the revoke paths in api/project_shares.py already do.
+        from api.share import invalidate_share_cache
+        for token in share_tokens:
+            invalidate_share_cache(token)
     return {"name": result_name, "trip_start": result_trip_start}
 
 
