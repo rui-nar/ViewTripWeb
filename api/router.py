@@ -15,6 +15,7 @@ from src.jobs.route_jobs import (
     sweep_degraded_segments,
     sweep_orphaned_jobs,
     sweep_stale_resolver_segments,
+    sweep_stuck_pending_segments,
 )
 from src.poster.poster_job_runner import sweep_orphaned_poster_jobs
 from src.project.project_repo import StaleWriteError
@@ -148,6 +149,16 @@ async def lifespan(_app: FastAPI):
     # slot (src.jobs.upstream_slots) on every single run rather than by chance.
     _scheduler.add_job(sweep_stale_resolver_segments, "cron", minute=20,
                        id="stale_resolver_retry", replace_existing=True)
+    # And the segments no job owes at all: a resolve that marked its job done
+    # without writing a verdict (a project renamed mid-resolve), or an enqueue
+    # that failed after the segment was already flipped to pending. Neither is
+    # reachable by sweep_orphaned_jobs, which asks whether a *job* is owed and
+    # only at startup; this asks whether a *segment* is waiting for something
+    # that is never coming. Safe against a live API because it skips anything
+    # holding a non-terminal job row — see STUCK_PENDING_AFTER_S. On its own
+    # minute for the same reason as above.
+    _scheduler.add_job(sweep_stuck_pending_segments, "cron", minute=40,
+                       id="stuck_pending_retry", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)

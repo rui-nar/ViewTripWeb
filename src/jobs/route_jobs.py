@@ -113,6 +113,27 @@ RAIL_RESOLVER_STRATEGIES = frozenset({
 # the cap is merely conservative, which is the right way round.
 MAX_STALE_RESOLVES_PER_SWEEP = 3
 
+# How long a segment may sit "pending" with no job owing it before
+# :func:`sweep_stuck_pending_segments` takes it back.
+#
+# ``sweep_orphaned_jobs`` recovers a lost *job*; this recovers a lost *segment*,
+# which is a different hole and was open in both directions. A resolve can mark
+# its job done and write no verdict — ``_resolve_route_job`` returns early when
+# the project cannot be loaded, which a rename mid-resolve causes — and the
+# segment is then pending with a terminal job row that no sweep will look at
+# again. And an enqueue that fails after the compare-and-set leaves a pending
+# job that only the *next API restart* recovers. Before this, the only thing
+# that noticed either was the Flutter client's five-minute check, and only if
+# someone happened to reopen the project.
+#
+# 15 minutes, against a worst case measured from the parts: a rail resolve
+# issues four or five Overpass queries at ``_TIMEOUT_HTTP`` = 60s each across
+# two endpoints, so ~5 minutes if every mirror is timing out, plus the queue
+# wait behind other resolves holding the single Overpass slot.
+# Comfortably longer than any resolve that is still alive, comfortably shorter
+# than leaving a tile spinning until someone restarts the API.
+STUCK_PENDING_AFTER_S = 15 * 60
+
 TERMINAL = ("done", "failed")
 
 
@@ -378,6 +399,127 @@ def _requeue_resolve(
     except Exception:  # noqa: BLE001
         _log.exception("could not enqueue %s for seg=%s", reason, seg_id)
         return False
+
+
+def sweep_stuck_pending_segments() -> int:
+    """Re-queue segments left "pending" with nothing owing them. Returns how many.
+
+    :func:`sweep_orphaned_jobs` recovers a job whose row is still non-terminal,
+    and only at API startup, because at startup nothing is in flight and it need
+    not tell a live job from a dead one. Neither property covers a segment whose
+    job row reached a *terminal* status without a verdict ever being written —
+    ``_resolve_route_job`` marks a job done and returns when the project cannot
+    be loaded, which a rename mid-resolve causes. That segment is pending
+    forever: no job owes it, so no sweep looks at it again, and the tile spins
+    until someone edits the segment by hand.
+
+    This closes both directions by asking the opposite question — not "is a job
+    owed?" but "is this segment waiting for something that is never coming?".
+
+    Two conditions, and the second is what makes it safe to run while the API is
+    serving, which :func:`sweep_orphaned_jobs` deliberately is not:
+
+    * the segment has been pending longer than :data:`STUCK_PENDING_AFTER_S`;
+    * and it has no non-terminal job row. A resolve that is genuinely running
+      has one (``mark_running``), so live work is never duplicated — and a job
+      that is merely lost is ``sweep_orphaned_jobs``'s to retry, with its own
+      ``MAX_ATTEMPTS`` budget this must not spend.
+
+    Uncapped per run on purpose, unlike the stale-stamp sweep: a version bump
+    makes every rail segment a candidate at once, whereas being stuck is a
+    per-incident accident. If this ever finds many at once, the queue is the
+    right place for them and the log line says so.
+    """
+    from api.geo import bust_geo_cache
+    from api.segments import _resolve_route_job
+    from src.jobs.queue import QUEUE_RESOLVE, enqueue
+
+    cutoff = datetime.now(timezone.utc).timestamp() - STUCK_PENDING_AFTER_S
+    candidates: list = []
+    try:
+        with get_session() as sess:
+            owed = {
+                (j.project_id, j.segment_id)
+                for j in sess.exec(
+                    select(DBRouteJob).where(DBRouteJob.status.notin_(TERMINAL))
+                ).all()
+            }
+            rows = sess.exec(
+                select(DBProjectItem, DBProject.user_info_id, DBProject.name)
+                .join(DBProject, DBProject.id == DBProjectItem.project_id)
+                .where(DBProjectItem.item_type == "segment")
+            ).all()
+            for row, user_info_id, name in rows:
+                seg = ConnectingSegment.from_dict(json.loads(row.segment_json or "{}"))
+                if seg.route_status != "pending":
+                    continue
+                if (row.project_id, seg.id) in owed:
+                    continue
+                if _started_before(seg.route_started_at, cutoff) is not True:
+                    continue
+                candidates.append((
+                    row.project_id, user_info_id, name, seg.id,
+                    {
+                        "hafas_provider": seg.hafas_provider,
+                        "train_number": seg.train_number,
+                        "date": seg.date,
+                    },
+                ))
+    except Exception:  # noqa: BLE001 — a broken sweep must not take the scheduler down
+        _log.exception("stuck-pending sweep failed to read candidates")
+        return 0
+
+    requeued = 0
+    for project_id, user_info_id, name, seg_id, params in candidates:
+        started_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with get_session() as sess:
+                # Re-stamp the token as well as the status: `_resolve_route_job`
+                # compares `route_started_at` before writing its verdict, so a
+                # retry carrying the old one would be discarded as superseded by
+                # the very row it is trying to rescue.
+                written = _repo.update_segment_fields(
+                    sess, project_id, seg_id,
+                    {"route_status": "pending", "route_started_at": started_at},
+                    expect_status="pending",
+                )
+                sess.commit()
+        except Exception:  # noqa: BLE001
+            _log.exception("could not re-stamp stuck seg=%s", seg_id)
+            continue
+        if not written:
+            continue                      # someone else claimed it meanwhile
+        bust_geo_cache(user_info_id, name)
+        job_id = create_job(user_info_id, project_id, name, seg_id, started_at, params)
+        try:
+            enqueue(QUEUE_RESOLVE, _resolve_route_job,
+                    user_info_id, name, seg_id, params, started_at, job_id)
+            requeued += 1
+        except Exception:  # noqa: BLE001
+            _log.exception("could not enqueue stuck-pending retry for seg=%s", seg_id)
+
+    if requeued:
+        _log.warning("re-queued %d segment(s) stuck pending with no job owing them",
+                     requeued)
+    return requeued
+
+
+def _started_before(started_at: Optional[str], cutoff: float) -> Optional[bool]:
+    """Was *started_at* before *cutoff*? None when it cannot be read.
+
+    An unparseable or missing timestamp returns None rather than True: a segment
+    we cannot date is one we cannot prove is stuck, and re-queueing on a
+    misparse would fight a resolve that is still running.
+    """
+    if not started_at:
+        return None
+    try:
+        stamped = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=timezone.utc)
+    return stamped.timestamp() < cutoff
 
 
 def _safe_to_re_resolve(seg: ConnectingSegment) -> bool:

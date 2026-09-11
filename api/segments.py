@@ -132,14 +132,14 @@ def _compute_segment_geometry(
         return rail.polyline, len(stops), rail.degraded, rail.strategy
 
     if seg.segment_type == "boat":
-        polyline = get_ferry_geometry(
+        polyline, strategy = get_ferry_geometry(
             seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
-        return polyline, 2, False, "ferry"
+        return polyline, 2, False, strategy
 
     if seg.segment_type == "bus":
-        polyline = get_bus_geometry(
+        polyline, strategy = get_bus_geometry(
             seg.start.lat, seg.start.lon, seg.end.lat, seg.end.lon)
-        return polyline, 2, False, "bus"
+        return polyline, 2, False, strategy
 
     raise ValueError("Route resolution only supported for train, boat, and bus segments")
 

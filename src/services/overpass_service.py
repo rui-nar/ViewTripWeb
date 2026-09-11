@@ -1225,13 +1225,17 @@ def _dijkstra(
 # Ferry / bus geometry  (shared Overpass route-relation strategy)
 # ---------------------------------------------------------------------------
 
-def get_ferry_geometry(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
-    """Return [[lon, lat], …] polyline following OSM ferry route geometry."""
+def get_ferry_geometry(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> tuple[list[list[float]], str]:
+    """([[lon, lat], …], strategy) following OSM ferry route geometry."""
     return _get_route_geometry("ferry", lat1, lon1, lat2, lon2)
 
 
-def get_bus_geometry(lat1: float, lon1: float, lat2: float, lon2: float) -> list[list[float]]:
-    """Return [[lon, lat], …] polyline following OSM bus route geometry."""
+def get_bus_geometry(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> tuple[list[list[float]], str]:
+    """([[lon, lat], …], strategy) following OSM bus route geometry."""
     return _get_route_geometry("bus", lat1, lon1, lat2, lon2)
 
 
@@ -1239,8 +1243,18 @@ def _get_route_geometry(
     route_tag: str,
     lat1: float, lon1: float,
     lat2: float, lon2: float,
-) -> list[list[float]]:
+) -> tuple[list[list[float]], str]:
     """
+    Returns (polyline, strategy). The strategy is qualified by mode —
+    ``ferry_relation``, ``bus_way_dijkstra`` — because "relation" alone means
+    something different for each, and the value is stored on the segment as
+    ``route_strategy`` where rail's own names sit beside it.
+
+    It used to be computed here, logged, and dropped, with the segment stamped
+    with the mode instead ("ferry"). That made the one question the stamp
+    exists to answer — which trips did this strategy draw — unanswerable for
+    everything that is not a train (issue #364, adversarial review).
+
     Three strategies tried in order:
       A  Route-relation strategy: query OSM route relations for *route_tag*
          (e.g. "ferry", "bus"), pick the best-fitting one, return trimmed geometry.
@@ -1270,7 +1284,11 @@ def _get_route_geometry(
         raise OverpassError(f"No {route_tag} route found between the two endpoints")
     _log.info("%s geometry resolved: strategy=%s points=%d elapsed=%.1fs",
               route_tag, strategy, len(poly), time.monotonic() - t0)
-    return poly
+    # `ferry_yes_dijkstra` already names its mode; `relation` and `way_dijkstra`
+    # do not, and unqualified they would collide across ferry and bus.
+    qualified = (strategy if strategy.startswith(route_tag)
+                 else f"{route_tag}_{strategy}")
+    return poly, qualified
 
 
 def _via_route_relation_type(

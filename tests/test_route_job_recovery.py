@@ -33,6 +33,7 @@ from src.jobs.route_jobs import (
     sweep_degraded_segments,
     sweep_orphaned_jobs,
     sweep_stale_resolver_segments,
+    sweep_stuck_pending_segments,
 )
 
 
@@ -847,3 +848,109 @@ class TestTheStaleSweepTerminates:
         assert seg["route_strategy"] == "straight"
 
         assert self._run_sweep_and_resolve(monkeypatch) == 0
+
+
+class TestStuckPendingSegments:
+    """Segments waiting on a job that is never coming.
+
+    ``sweep_orphaned_jobs`` asks "is a job owed?" and only at startup, because
+    at startup nothing is in flight and it need not tell a live job from a dead
+    one. That leaves a hole in both directions, and the second half of it is
+    recovered by nothing at all: ``_resolve_route_job`` marks its job **done**
+    and returns without a verdict when the project cannot be loaded — a rename
+    mid-resolve — so the segment is pending with a terminal job row that no
+    sweep will look at again. Raised in adversarial review of #375.
+    """
+
+    @staticmethod
+    def _pending_segment(started_at, **overrides):
+        seg = {
+            "id": "seg-1", "segment_type": "train",
+            "route_status": "pending", "route_started_at": started_at,
+            "route_mode": "rail", "hafas_provider": "db", "date": "2026-08-01",
+        }
+        seg.update(overrides)
+        return seg
+
+    @staticmethod
+    def _long_ago():
+        from datetime import datetime, timedelta, timezone
+        from src.jobs.route_jobs import STUCK_PENDING_AFTER_S
+        return (datetime.now(timezone.utc)
+                - timedelta(seconds=STUCK_PENDING_AFTER_S + 60)).isoformat()
+
+    @staticmethod
+    def _just_now():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_a_segment_whose_job_finished_without_a_verdict_is_recovered(
+            self, stale_env, monkeypatch):
+        """The hole nothing else covers: terminal job, pending segment."""
+        engine, user_id, project_id = stale_env(
+            self._pending_segment(self._long_ago()))
+        mark_done(create_job(user_id, project_id, "Trip", "seg-1", "t", {}))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stuck_pending_segments() == 1
+        assert enqueued[0][:3] == (user_id, "Trip", "seg-1")
+        # Re-stamped, or _resolve_route_job would discard its own verdict as
+        # superseded by the row it is rescuing.
+        assert _seg_json(engine, "seg-1")["route_started_at"] != self._long_ago()
+
+    def test_a_live_resolve_is_never_duplicated(self, stale_env, monkeypatch):
+        """A running job owes the segment; this sweep must keep its hands off,
+        which is what lets it run against a serving API at all."""
+        _engine, user_id, project_id = stale_env(
+            self._pending_segment(self._long_ago()))
+        mark_running(create_job(user_id, project_id, "Trip", "seg-1", "t", {}))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stuck_pending_segments() == 0
+        assert enqueued == []
+
+    def test_a_lost_job_is_left_to_the_startup_sweep(self, stale_env, monkeypatch):
+        """A pending job row has its own MAX_ATTEMPTS budget. Spending it from
+        here would let a poison segment run twice the intended attempts."""
+        _engine, user_id, project_id = stale_env(
+            self._pending_segment(self._long_ago()))
+        create_job(user_id, project_id, "Trip", "seg-1", "t", {})
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stuck_pending_segments() == 0
+        assert enqueued == []
+
+    def test_a_recently_started_resolve_is_left_alone(self, stale_env, monkeypatch):
+        """Even with no job row: the row is written after the segment flips to
+        pending, so a resolve triggered microseconds ago looks exactly like a
+        stuck one until the clock says otherwise."""
+        _engine, _user_id, _project_id = stale_env(
+            self._pending_segment(self._just_now()))
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stuck_pending_segments() == 0
+        assert enqueued == []
+
+    def test_a_resolved_segment_is_never_touched(self, stale_env, monkeypatch):
+        stale_env(_stale_segment())
+        enqueued = _capture_enqueue(monkeypatch)
+
+        assert sweep_stuck_pending_segments() == 0
+        assert enqueued == []
+
+    def test_an_undateable_timestamp_is_not_assumed_stuck(
+            self, stale_env, monkeypatch):
+        """Re-queueing on a misparse would fight a resolve that is still alive."""
+        for stamp in ("", "not-a-date", None):
+            _engine, _user_id, _project_id = stale_env(
+                self._pending_segment(stamp))
+            enqueued = _capture_enqueue(monkeypatch)
+            assert sweep_stuck_pending_segments() == 0, f"stamp={stamp!r}"
+            assert enqueued == []
+
+    def test_a_broken_sweep_does_not_raise(self, stale_env, monkeypatch):
+        stale_env(self._pending_segment(self._long_ago()))
+        monkeypatch.setattr(route_jobs, "get_session",
+                            lambda: (_ for _ in ()).throw(RuntimeError("db gone")))
+
+        assert sweep_stuck_pending_segments() == 0
