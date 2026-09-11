@@ -222,6 +222,25 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     }
   }
 
+  /// Day keys the trip holds content on for *any* member, from the server
+  /// (issue #372) — null when the question could not be answered.
+  ///
+  /// Journal entries are per-user, so the caller's own item list is blind to
+  /// a day another member's journal keeps on screen. A null here must never
+  /// be read as "that day is empty": the caller-local view is exactly the one
+  /// that deletes a still-visible day's shared day-meta.
+  Future<Set<String>?> _fetchContentDays() async {
+    final ref = _notifier.ref;
+    if (ref == null) return null;
+    try {
+      final data =
+          await api.get(ref.path('/content-days')) as Map<String, dynamic>;
+      return (data['days'] as List<dynamic>).cast<String>().toSet();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _save() async {
     setState(() => _saving = true);
 
@@ -229,17 +248,36 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
     if (tripEndStr != null) {
       final n = _notifier;
       // A day is only actually removable when nothing but day-meta puts it
-      // there. Candidates come from the local day-meta copy — which carries
-      // the unsaved edits the notifier has not seen — and the notifier's day
-      // list, which since issue #370 is itself the union of day-meta and
-      // these same content days, so the content days need no separate spread.
+      // there. Candidates union four sources, and the union matters: the
+      // classifier only ever reports days it is handed, so `candidates` must
+      // stay a superset of `daysWithContent` or a pinned day goes unmentioned.
+      //  - the local day-meta copy, which carries edits the notifier hasn't
+      //    seen yet;
+      //  - the notifier's day list, itself the union of day-meta and the
+      //    caller-visible content days since issue #370;
+      //  - that same local extraction, so an unsaved local edit pins its day;
+      //  - the server's answer, which unlike every source above sees *every*
+      //    member's content (issue #372) — journals are per-user server-side,
+      //    so nothing on this client can see a day another member's journal
+      //    keeps on screen. This one is not redundant with orderedDayKeys().
       //
-      // Caveat: journals are per-user server-side, so a day pinned only by
-      // another member's journal is invisible here — see issue #372.
-      final pinned = contentDayKeys(n.activities, n.items);
+      // When the server can't be reached, every candidate counts as pinned:
+      // nothing is deleted and the dialog says why. Falling back to the
+      // caller-local set there is the bug itself.
+      final serverDays = await _fetchContentDays();
+      if (!mounted) return;
+      final unchecked = serverDays == null;
+      final localPinned = contentDayKeys(n.activities, n.items);
+      final candidates = {
+        ..._dayMeta.keys,
+        ...n.orderedDayKeys(),
+        ...localPinned,
+        ...?serverDays,
+      };
       final orphans = classifyTripEndOrphans(
-        dayKeys: {..._dayMeta.keys, ...n.orderedDayKeys()},
-        daysWithContent: pinned,
+        dayKeys: candidates,
+        daysWithContent:
+            serverDays == null ? candidates : {...localPinned, ...serverDays},
         tripEnd: tripEndStr,
       );
       final gone = orphans.removable.length;
@@ -263,9 +301,14 @@ class _ProjectSettingsScreenState extends State<ProjectSettingsScreen> {
             ..write(gone > 0
                 ? '$kept later day${kept == 1 ? '' : 's'} '
                 : '$kept day${kept == 1 ? '' : 's'} after $when ')
-            ..write('still ${kept == 1 ? 'has' : 'have'} trip content on '
-                '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
-                'move or delete that content first.');
+            ..write(unchecked
+                // gone is always 0 here: an unanswered check pins everything.
+                ? 'may hold content from other trip members. That could not '
+                    'be checked just now, so nothing will be deleted — try '
+                    'again once you are back online.'
+                : 'still ${kept == 1 ? 'has' : 'have'} trip content on '
+                    '${kept == 1 ? 'it' : 'them'} and will stay in the trip — '
+                    'move or delete that content first.');
         }
         final confirmed = await showDialog<bool>(
           context: context,

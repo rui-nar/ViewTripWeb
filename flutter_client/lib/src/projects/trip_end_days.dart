@@ -13,12 +13,19 @@ class TripEndOrphans {
   /// entry removes the day.
   final List<String> removable;
 
-  /// Days after the end date that carry trip content. The trip's day list is
-  /// the union of day-meta keys and these content days (see
-  /// [ProjectNotifier.orderedDayKeys]), so these stay visible whatever
-  /// day-meta says. Their day-meta is deliberately left alone: silently
-  /// wiping the notes of a day the user can still see would be worse than
-  /// leaving them.
+  /// Days after the end date that carry trip content — an activity, a memory,
+  /// a journal entry, an encounter or a dated segment, belonging to *any*
+  /// member of the trip. The trip's day list is the union of day-meta keys
+  /// and these content days (see [ProjectNotifier.orderedDayKeys]), so these
+  /// stay visible whatever day-meta says. Their day-meta is deliberately left
+  /// alone: silently wiping the notes of a day the user can still see would
+  /// be worse than leaving them.
+  ///
+  /// Journal entries are per-user server-side, so [contentDayKeys] on its own
+  /// cannot see a day another member's journal keeps on screen (issue #372).
+  /// The caller fills [daysWithContent] from
+  /// GET /api/projects/{name}/content-days, which answers for every member,
+  /// and unions the local extraction in for edits the server hasn't seen yet.
   final List<String> pinned;
 
   const TripEndOrphans({required this.removable, required this.pinned});
@@ -33,6 +40,10 @@ class TripEndOrphans {
 /// dated item's date there, which can never introduce a day key the dated
 /// item did not already contribute — so ignoring that propagation here is
 /// safe for the *set* of days.
+///
+/// Caller-local by construction: [items] never holds another member's journal
+/// entries. See [TripEndOrphans.pinned] for why that is only half the answer
+/// on a shared trip.
 Set<String> contentDayKeys(
   List<Map<String, dynamic>> activities,
   List<Map<String, dynamic>> items,
