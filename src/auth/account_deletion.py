@@ -31,6 +31,7 @@ from models.project_db import (
     DBProjectPendingInvite,
     DBProjectSyncMeta,
     DBActivity,
+    DBActivityGeoPrepared,
     DBShareMemoryContent,
     DBShareVisit,
     DBStravaCache,
@@ -93,6 +94,8 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
     ).all()
     if activity_ids:
         _delete_all(DBProjectItem, DBProjectItem.activity_id.in_(activity_ids))
+        _delete_all(DBActivityGeoPrepared,
+                    DBActivityGeoPrepared.activity_id.in_(activity_ids))
     _delete_all(DBProjectMember, DBProjectMember.user_info_id == user_info_id)
     _delete_all(DBProjectInvite, DBProjectInvite.created_by == user_info_id)
     # Pending invites (issue #110) point at the sender via invited_by, so they

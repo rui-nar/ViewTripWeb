@@ -25,6 +25,7 @@ from models.billing import Subscription, UserUsage  # noqa: F401
 from models.user import LocalUser, StravaToken, UserInfo  # noqa: F401
 from models.project_db import (  # noqa: F401
     DBActivity,
+    DBActivityGeoPrepared,
     DBDeviceKey,
     DBJournalEntry,
     DBMemory,

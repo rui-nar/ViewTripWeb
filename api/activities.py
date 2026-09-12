@@ -43,6 +43,7 @@ from src.models.activity import Activity, parse_activities_or_log
 from src.models.track_edit import points_to_elevation_profile, points_to_polyline, recompute_track_metrics
 from src.project.local_ids import LocalIdExhausted, allocate_local_activity_id, track_fingerprint
 from src.project.project_repo import bump_lock_version
+from src.project.repo_activities import store_prepared_geometry
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -1115,6 +1116,11 @@ def update_activity_fields(
         for field, value in data.items():
             setattr(row, field, value)
         sess.add(row)
+        if "summary_polyline" in data:
+            # Once the polyline is ciphertext the prepared row derived from its
+            # plaintext must go too, or the simplified geo endpoints would keep
+            # serving the track the user just encrypted (issue #369).
+            store_prepared_geometry(sess, row)
         sess.commit()
 
         # Bust the full-res geo cache for every project this activity appears

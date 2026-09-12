@@ -490,9 +490,11 @@ def _load_shared_project(owner_uid: int, name: str):
     in this one it just ages out. What this returns is prepared into a track
     held for 15 minutes — seeding that from a 60-second-stale copy would
     stretch a one-minute staleness window into a quarter-hour one (issue #321).
+
+    Light — the geometry comes from ``activity_geo_prepared`` (issue #369).
     """
     with get_session() as sess:
-        return _repo.get_project(sess, owner_uid, name, include_elevation=False)
+        return _repo.get_project(sess, owner_uid, name, include_heavy=False)
 
 
 @router.get("/{token}/geo/simplified",
