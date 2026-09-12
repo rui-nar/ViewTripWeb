@@ -282,68 +282,48 @@ void main() {
   });
 
   testWidgets('the badge never takes the name down to nothing', (tester) async {
-    // Stated as the invariant rather than at one width: an edited activity's
-    // actions leave the title almost nothing and a Row cannot hand space back,
-    // so wherever the badge shows, the name must still have room — and the Row
-    // must never need more than it is given. Before the guard, 470 px gave the
-    // badge 24 of the title's 43 px and left the name 19; 440 px overflowed
-    // into the actions outright. Sweeping the band beats picking a number next
-    // to the threshold: a few pixels of action-row drift moves the flip, not
-    // the contract.
-    for (final width in [420.0, 440.0, 460.0, 470.0, 475.0, 500.0, 560.0]) {
-      await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
-          size: Size(width, 900));
+    // A Row cannot hand space back, so wherever the badge shows the name must
+    // still have room, and the Row must never need more than it is given.
+    // Before the guard, with the labelled Reset button in a phone bar, 470 px
+    // gave the badge 24 of the title's 43 px and left the name 19; 440 px
+    // overflowed into the actions outright. Stated as the invariant across a
+    // sweep rather than at one width: a few pixels of action-row drift moves
+    // the flip, not the contract.
+    //
+    // Since Reset moved into the overflow menu (#407), a phone at default text
+    // size always leaves the title more than 48 px, so only scaled-up text
+    // reaches the guard. The sweep runs both, and has to be seen to cross the
+    // guard: a sweep that only ever shows the badge cannot notice the guard
+    // going missing.
+    var shown = 0, stoodDown = 0;
+    for (final scale in [1.0, 1.3]) {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      for (final width in [
+        320.0, 340.0, 360.0, 400.0, 420.0, 440.0, 470.0, 500.0, 560.0,
+      ]) {
+        await tester.pumpWidget(const SizedBox());
+        await _pumpPushed(
+            tester,
+            _activity(edited: true)..['source'] = 'gpx',
+            _RecordingNotifier(),
+            size: Size(width, 900));
 
-      final badgeShown =
-          find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isNotEmpty;
-      final nameWidth = tester.getSize(find.textContaining('Test Ride')).width;
-
-      expect(tester.takeException(), isNull,
-          reason: 'the AppBar overflowed at $width px');
-      if (badgeShown) {
+        expect(tester.takeException(), isNull,
+            reason: 'the AppBar overflowed at $width px, text x$scale');
+        if (find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isEmpty) {
+          stoodDown++;
+          continue;
+        }
+        shown++;
         // The guard's own contract: it shows the badge from 48 px of title
         // space, which leaves the name maxWidth - 24. Asserting `>` rather
-        // than `>=` would call the boundary a violation. (Written when the
-        // labelled Reset button still sat in the phone AppBar; since #407 put
-        // it in the overflow menu this band never reaches the guard — the test
-        // below is the one that does.)
-        expect(nameWidth, greaterThanOrEqualTo(24.0),
+        // than `>=` would call the boundary a violation.
+        expect(tester.getSize(find.textContaining('Test Ride')).width,
+            greaterThanOrEqualTo(24.0),
             reason: 'the badge left the name less than its own width '
-                'at $width px');
+                'at $width px, text x$scale');
       }
-    }
-  });
-
-  testWidgets('with large text on a phone the badge still stands down',
-      (tester) async {
-    // Once Reset moved into the overflow menu (#407) a phone at default text
-    // size always leaves the title more than the badge's 48 px, so the guard
-    // is only reached when the text is scaled up. Same invariant as above, and
-    // the sweep must actually cross the guard — otherwise it tests one branch
-    // and says nothing about the other.
-    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
-    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-
-    var shown = 0, stoodDown = 0;
-    for (final width in [320.0, 340.0, 360.0, 400.0, 480.0]) {
-      await tester.pumpWidget(const SizedBox());
-      await _pumpPushed(
-          tester,
-          _activity(edited: true)..['source'] = 'gpx',
-          _RecordingNotifier(),
-          size: Size(width, 900));
-
-      expect(tester.takeException(), isNull,
-          reason: 'the AppBar overflowed at $width px');
-      if (find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isEmpty) {
-        stoodDown++;
-        continue;
-      }
-      shown++;
-      expect(tester.getSize(find.textContaining('Test Ride')).width,
-          greaterThanOrEqualTo(24.0),
-          reason: 'the badge left the name less than its own width '
-              'at $width px');
     }
     expect(stoodDown, greaterThan(0), reason: 'the sweep never hit the guard');
     expect(shown, greaterThan(0), reason: 'the sweep never showed the badge');
