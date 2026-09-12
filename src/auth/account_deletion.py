@@ -31,6 +31,7 @@ from models.project_db import (
     DBProjectPendingInvite,
     DBProjectSyncMeta,
     DBActivity,
+    DBActivityGeoPrepared,
     DBShareMemoryContent,
     DBShareVisit,
     DBStravaCache,
@@ -46,6 +47,7 @@ from models.user import (
     StravaToken,
     UserInfo,
 )
+from src.project.repo_core import bump_lock_version
 from src.admin import storage as _storage_mod
 
 
@@ -85,14 +87,36 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
     authored_journal_ids = sess.exec(
         select(DBJournalEntry.id).where(DBJournalEntry.user_info_id == user_info_id)
     ).all()
-    if authored_journal_ids:
-        _delete_all(DBProjectItem, DBProjectItem.journal_id.in_(authored_journal_ids))
-        _delete_all(DBJournalEntry, DBJournalEntry.id.in_(authored_journal_ids))
     activity_ids = sess.exec(
         select(DBActivity.id).where(DBActivity.user_info_id == user_info_id)
     ).all()
+    # The item rows about to go can belong to *other* users' shared projects
+    # (issue #106). Collect those projects before deleting, so the lock can be
+    # advanced for each: a structural save_project that loaded before this
+    # deletion would otherwise pass its compare-and-swap and re-insert the item
+    # rows from its snapshot, pointing at journal entries and activities that no
+    # longer exist. Same hazard the delete_* endpoints carry (issue #173).
+    touched_project_ids: set[int] = set()
+    for column, ids_ in ((DBProjectItem.journal_id, authored_journal_ids),
+                         (DBProjectItem.activity_id, activity_ids)):
+        if ids_:
+            touched_project_ids.update(sess.exec(
+                select(DBProjectItem.project_id).where(column.in_(ids_))
+            ).all())
+    # Bump before the deletes, not after: bump_lock_version issues a Core
+    # UPDATE, which autoflushes whatever is pending, so bumping last would take
+    # the item rows before the project row — the inverse of save_project's
+    # order, and the lock-order inversion issue #398 documents. Harmless on
+    # SQLite (single writer) but free to get right here.
+    for touched in touched_project_ids:
+        bump_lock_version(sess, touched)
+    if authored_journal_ids:
+        _delete_all(DBProjectItem, DBProjectItem.journal_id.in_(authored_journal_ids))
+        _delete_all(DBJournalEntry, DBJournalEntry.id.in_(authored_journal_ids))
     if activity_ids:
         _delete_all(DBProjectItem, DBProjectItem.activity_id.in_(activity_ids))
+        _delete_all(DBActivityGeoPrepared,
+                    DBActivityGeoPrepared.activity_id.in_(activity_ids))
     _delete_all(DBProjectMember, DBProjectMember.user_info_id == user_info_id)
     _delete_all(DBProjectInvite, DBProjectInvite.created_by == user_info_id)
     # Pending invites (issue #110) point at the sender via invited_by, so they

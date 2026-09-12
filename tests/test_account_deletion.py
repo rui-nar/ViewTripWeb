@@ -202,6 +202,53 @@ class TestCompanionCleanup:
     """Issue #106: deleting a user also removes their footprint in OTHER
     users' projects — membership, journal entries + items, activity items."""
 
+    def test_deleting_a_companion_advances_the_lock_on_the_owner_project(self, engine):
+        """The item rows removed here live in ANOTHER user's trip, so the owner's
+        optimistic lock has to see the deletion. A structural save_project that
+        loaded before it would otherwise pass its compare-and-swap and re-insert
+        those rows from its snapshot, pointing at a journal entry and an activity
+        that no longer exist (issue #173; foreign keys are off in production)."""
+        from src.project.project_repo import ProjectRepo
+        from src.project.repo_core import StaleWriteError
+
+        with Session(engine) as sess:
+            owner = _mk_user(sess, display_name="Owner", email="own2@x.io")
+            companion = _mk_user(sess, display_name="Comp", email="comp2@x.io")
+            oid, cid = owner.id, companion.id
+            ids = _seed_companionship(sess, oid, cid)
+
+        def lock_version():
+            with Session(engine) as sess:
+                return sess.get(DBProject, ids["project_id"]).lock_version
+
+        before = lock_version()
+
+        repo = ProjectRepo()
+        with Session(engine) as sess:
+            # A structural writer on the owner's trip loads it first.
+            stale = repo.get_project(sess, oid, "Shared Trip")
+            assert stale is not None
+
+            with Session(engine) as other:
+                delete_user_and_data(other, cid)
+
+            assert lock_version() == before + 1, (
+                "the companion's deletion did not advance the owner project's lock"
+            )
+            # So the structural save must now be refused rather than rewriting
+            # the item list from its pre-deletion snapshot.
+            with pytest.raises(StaleWriteError):
+                repo.save_project(sess, oid, stale, check_version=True)
+
+        with Session(engine) as sess:
+            resurrected = sess.exec(
+                select(DBProjectItem).where(
+                    DBProjectItem.project_id == ids["project_id"],
+                    DBProjectItem.journal_id == ids["entry_id"],
+                )
+            ).all()
+        assert resurrected == [], "the companion's item row came back"
+
     def test_deleting_companion_cleans_their_rows_in_owner_project(self, engine):
         with Session(engine) as sess:
             owner = _mk_user(sess, display_name="Owner", email="own@x.io")

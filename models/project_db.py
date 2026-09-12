@@ -352,6 +352,34 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     extra_json: str = sqlmodel.Field(default="{}")
 
 
+class DBActivityGeoPrepared(sqlmodel.SQLModel, table=True):
+    """An activity's track prepared for zoom-level-of-detail serving (issue #369).
+
+    A side table rather than a column on ``activity``: that table is read by
+    ``sess.get()`` and by ``include_heavy=False`` loads which already defer two
+    overflow columns, and a third big one would have to be deferred everywhere
+    or it slows ``/meta``. Written by every path that writes
+    ``summary_polyline`` (see ``store_prepared_geometry``), read by the
+    simplified geo endpoints, and absent for an activity the server cannot
+    prepare — one whose polyline is a client-side E2EE envelope, or too short
+    to draw.
+
+    ``version`` is ``PREPARED_GEO_VERSION`` at write time; a row at any other
+    version is treated as missing and rebuilt. ``blob`` is the format described
+    in ``src/models/prepared_geo.py``.
+
+    SQLite does not enforce the foreign key here (``models/db.py`` sets no
+    ``PRAGMA foreign_keys``), so whoever deletes an activity row deletes this
+    one explicitly.
+    """
+
+    __tablename__ = "activity_geo_prepared"
+
+    activity_id: int = sqlmodel.Field(primary_key=True, foreign_key="activity.id")
+    version: int
+    blob: bytes
+
+
 class DBMemory(sqlmodel.SQLModel, table=True):
     """A user-authored memory attached to a project and a specific date."""
 

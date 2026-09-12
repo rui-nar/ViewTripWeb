@@ -74,6 +74,7 @@ from src.billing.entitlements import ensure_project_quota, ensure_trip_days_quot
 from src.models.activity import parse_activities_or_log
 from src.models.project import DEFAULT_SLEEPING_GROUPS, tag_options_with_untagged
 from src.project.project_io import ProjectIO
+from src.project.repo_core import _parse_day_meta_json, bump_lock_version
 from src.project.project_repo import _compute_stats
 from src.utils.logging import get_logger
 
@@ -507,7 +508,7 @@ def get_project_stats(
         # Always derive tag_options live from day_meta_json so they are never
         # stale (cached stats pre-date the tag-save fix and stored [] here).
         stats["tag_options"] = tag_options_with_untagged(
-            dm.get("tags") for dm in json.loads(row.day_meta_json or "{}").values()
+            dm.get("tags") for dm in _parse_day_meta_json(row.day_meta_json)[0].values()
         )
     return stats
 
@@ -557,6 +558,7 @@ def update_project(
         if 'trip_end' in body.model_fields_set:
             row.trip_end = body.trip_end or None
 
+        bump_lock_version(sess, row.id)
         sess.add(row)
         sess.commit()
         result_name = row.name
@@ -588,6 +590,26 @@ class DayMetaUpdateRequest(BaseModel):
     counters: Optional[List[Dict[str, Any]]] = None  # [{name, start}]
 
 
+def _stored_day_meta(existing_json: str | None) -> dict:
+    """The stored day-meta map, or ``{}`` for anything that is not one.
+
+    ``day_meta_json`` is expected to hold a JSON object, but a hand-edited row,
+    a bad migration or an older bug can leave ``"null"``, a list, or a broken
+    blob there. Reading it with a bare ``json.loads(...).items()`` turns that
+    into a 500 on every settings save for that trip, which the client reads as
+    "cannot save at all" — and, since #387, also as "cannot prune days". An
+    unreadable map means nothing to preserve and nothing to protect, so the
+    write proceeds on the caller's data rather than failing outright.
+    """
+    if not existing_json:
+        return {}
+    try:
+        parsed = json.loads(existing_json)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _day_meta_has_content(meta) -> bool:
     """True when a day-meta entry holds anything a user would miss.
 
@@ -598,7 +620,9 @@ def _day_meta_has_content(meta) -> bool:
     review).
     """
     if not isinstance(meta, dict):
-        return bool(meta)
+        # A corrupt entry is not something a user would miss, and protecting it
+        # would pin an unreadable day in place permanently.
+        return False
     return any(value not in (None, "", [], {}) for value in meta.values())
 
 
@@ -622,9 +646,8 @@ def _keep_days_the_caller_cannot_see(
     there was something to lose. Clearing a day you can see still works, an
     empty entry still goes, and a day with no content at all still prunes.
     """
-    existing = json.loads(existing_json) if existing_json else {}
     dropped = {
-        key: meta for key, meta in existing.items()
+        key: meta for key, meta in _stored_day_meta(existing_json).items()
         if key not in incoming and _day_meta_has_content(meta)
     }
     if not dropped:
@@ -650,9 +673,10 @@ def _merge_day_meta_preserve_counters(incoming: dict, existing_json: str | None)
     This protects against a Flutter app saving settings from a session that
     started before an enrichment script added counter values.
     """
-    existing = json.loads(existing_json) if existing_json else {}
     merged = dict(incoming)
-    for date_key, existing_day in existing.items():
+    for date_key, existing_day in _stored_day_meta(existing_json).items():
+        if not isinstance(existing_day, dict):
+            continue
         existing_counters = existing_day.get("counters")
         if existing_counters:
             incoming_day = merged.get(date_key)
@@ -695,6 +719,7 @@ def update_day_meta(
                 for c in body.counters
             ])
         row.updated_at = time.time()
+        bump_lock_version(sess, row.id)
         sess.add(row)
         sess.commit()
     bust_project_cache(owner_id, name)
@@ -771,6 +796,7 @@ def update_track_style(
         if body.type_styles is not None:
             row.type_styles_json = json.dumps(body.type_styles)
         row.updated_at = time.time()
+        bump_lock_version(sess, row.id)
         sess.add(row)
         owner_id = row.user_info_id
         sess.commit()
@@ -794,6 +820,7 @@ def update_languages(
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         row.languages_json = json.dumps(body.languages)
         row.updated_at = time.time()
+        bump_lock_version(sess, row.id)
         sess.add(row)
         owner_id = row.user_info_id
         sess.commit()

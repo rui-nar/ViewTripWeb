@@ -33,6 +33,7 @@ import src.tile_renderer as tile_renderer
 from api.deps import get_current_user
 from api.geo import _geo_cache, _geo_gen, _track_cache, bust_geo_cache
 from api.geo import router as geo_router
+from src.project.repo_activities import store_prepared_geometry
 from api.projects import router as projects_router
 from api.share import router as share_router
 from models.project_db import DBActivity, DBProject, DBProjectItem, DBShareVisit
@@ -168,15 +169,17 @@ def _by_kind(resp, kind: str) -> list[dict]:
 def _mutate(engine, uid, offset: float) -> None:
     """Move the activity's track, exactly as a mutating route would.
 
-    The DB write plus ``bust_geo_cache`` is what every geometry-changing route
-    does; what it deliberately does *not* do is invalidate the share module's
-    per-token project cache, which is invalidated from a worker process and in
-    the API process simply ages out.
+    The DB write — the polyline and, with it, the prepared geometry every
+    polyline writer keeps in step (issue #369) — plus ``bust_geo_cache`` is
+    what every geometry-changing route does; what it deliberately does *not*
+    do is invalidate the share module's per-token project cache, which is
+    invalidated from a worker process and in the API process simply ages out.
     """
     with Session(engine) as sess:
         act = sess.exec(select(DBActivity).where(DBActivity.id == 111)).first()
         act.summary_polyline = polyline_lib.encode(_track(offset))
         sess.add(act)
+        store_prepared_geometry(sess, act)
         sess.commit()
     bust_geo_cache(uid, "Trip")
 
@@ -294,17 +297,18 @@ def test_a_mutation_inside_the_token_cache_window_still_serves_fresh_geometry(en
 def test_a_mutation_busts_every_zoom_level(env):
     client, uid, engine = env
     levels = (8, 12, 17)
+    assert _simplified(client, 8).headers["x-cache"] == "MISS"
     for zoom in levels:
-        assert _simplified(client, zoom).headers["x-cache"] == "MISS"
+        # One prepared trip serves every level (issue #369).
         assert _simplified(client, zoom).headers["x-cache"] == "HIT"
 
     _mutate(engine, uid, offset=10.0)
 
+    assert _simplified(client, 8).headers["x-cache"] == "MISS", "the bust reached the trip"
     for zoom in levels:
         resp = _simplified(client, zoom)
-        assert resp.headers["x-cache"] == "MISS", f"level {zoom} served a stale entry"
         assert _by_kind(resp, "activity")[0]["geometry"]["coordinates"][0][1] \
-            == pytest.approx(55.0, abs=1e-4)
+            == pytest.approx(55.0, abs=1e-4), f"level {zoom} served a stale entry"
 
 
 # ── the auth boundary ────────────────────────────────────────────────────────

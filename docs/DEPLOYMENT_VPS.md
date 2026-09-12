@@ -89,6 +89,17 @@ curl -s "https://dns.google/resolve?name=val.traxjourney.com&type=A"
 any edit. Cert issuance is automatic on first request, provided DNS already
 resolves and 80/443 are open.
 
+**Keep-alive: Caddy must be the side that closes idle upstream connections.**
+Caddy pools its connections to uvicorn and keeps an idle one for 2 minutes by
+default (`transport http { keepalive }`). `entrypoint.sh` therefore runs uvicorn
+with `--timeout-keep-alive 300`; its 5 s default made uvicorn close first, and a
+request that Caddy sent on a pooled connection at that same instant failed
+with a 502 (`journalctl -u caddy`: `"msg":"EOF"` or `read: connection reset by
+peer`, on POST/PUT/DELETE — Go's HTTP client retries GETs by itself). If you
+ever set `keepalive` explicitly in the Caddyfile, keep it below uvicorn's value;
+`tests/test_entrypoint_keepalive.py` pins the entrypoint side, and
+`docs/repro/keepalive_502/` reproduces the race (issue #400).
+
 ## 3. App deployment
 
 `/opt/viewtrip/docker-compose.yml` mirrors the NAS prod compose

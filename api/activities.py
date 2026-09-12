@@ -25,6 +25,7 @@ import polyline as polyline_lib
 from models.db import get_session
 from sqlmodel import select
 
+from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
@@ -54,6 +55,7 @@ from src.models.activity import Activity, parse_activities_or_log
 from src.models.track_edit import points_to_elevation_profile, points_to_polyline, recompute_track_metrics
 from src.project.local_ids import LocalIdExhausted, allocate_local_activity_id, track_fingerprint
 from src.project.project_repo import bump_lock_version
+from src.project.repo_activities import store_prepared_geometry
 from src.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -778,18 +780,35 @@ async def import_gpx_activity(
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                  detail="Could not allocate a unique activity id.")
 
-        ensure_trip_days_quota(sess, project_row_id, owner_id, activity.start_date_local)
-
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    def _add(project) -> None:
+        # Re-checked from scratch on every retry attempt, in its own
+        # short-lived read-only session, against current DB state rather than
+        # a stale snapshot — same reasoning as the bulk Strava import above.
+        with get_session() as qsess:
+            ensure_trip_days_quota(
+                qsess, project_row_id, owner_id, activity.start_date_local)
         project.add_activities([activity])
-        # New activity rows record the IMPORTER (the caller), not the project
-        # owner — see add_activities.
-        _repo.save_project(sess, owner_id, project, activity_user_id=user_info_id)
+
+    # New activity rows record the IMPORTER (the caller), not the project
+    # owner — see add_activities. Goes through save_project_with_retry rather
+    # than a blind save_project: this is a load-mutate-save, and the blind
+    # variant rewrites every field of the row from the snapshot loaded before
+    # the mutation — so a PUT /day-meta (or any other write) committing in
+    # that window was silently overwritten with pre-request values.
+    # In a threadpool: this handler is `async def`, and save_project_with_retry
+    # sleeps between attempts (src/project/repo_retry.py). Up to ~0.3 s of
+    # time.sleep on the event loop under contention would stall every other
+    # request on the worker. The bulk import above is a sync `def`, so Starlette
+    # already gives it a thread; this one awaits the upload, so it hands off
+    # just the blocking part.
+    project = await run_in_threadpool(
+        _repo.save_project_with_retry,
+        owner_id, name, _add,
+        legacy_path=_legacy_path(str(owner_id), name),
+        activity_user_id=user_info_id,
+    )
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
     bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
@@ -1400,6 +1419,11 @@ def update_activity_fields(
         for field, value in data.items():
             setattr(row, field, value)
         sess.add(row)
+        if "summary_polyline" in data:
+            # Once the polyline is ciphertext the prepared row derived from its
+            # plaintext must go too, or the simplified geo endpoints would keep
+            # serving the track the user just encrypted (issue #369).
+            store_prepared_geometry(sess, row)
         sess.commit()
 
         # Bust the full-res geo cache for every project this activity appears
