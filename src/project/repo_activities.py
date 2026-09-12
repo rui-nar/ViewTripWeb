@@ -12,8 +12,10 @@ from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from models.db import get_session
-from models.project_db import DBActivity, DBProjectItem
+from models.project_db import DBActivity, DBActivityGeoPrepared, DBProjectItem
 from src.models.activity import Activity
+from src.models.prepared_geo import prepare_polyline
+from src.models.simplify import PREPARED_GEO_VERSION
 from src.project.local_ids import allocate_local_activity_id
 from src.project.elevation_downsample import downsample_elevation
 from src.project.repo_core import bump_lock_version, check_and_bump_lock_version
@@ -36,6 +38,34 @@ def _low_res_ep_json(ep_json: Optional[str]) -> Optional[str]:
         return json.dumps({"distances_km": dd, "elevations_m": ee})
     except Exception:
         return None
+
+
+def store_prepared_geometry(sess: Session, row: DBActivity) -> None:
+    """Keep ``activity_geo_prepared`` in step with ``row.summary_polyline``.
+
+    Called by every path that writes the polyline — the same way
+    ``elevation_profile_low_res_json`` is re-derived beside every write of the
+    full profile — so the simplified geo endpoints can serve a trip without
+    decoding and simplifying it on the request path (issue #369). Computing
+    here costs ~25 ms of local CPU per activity, once per polyline write.
+
+    A polyline the server cannot prepare — absent, a client-side E2EE envelope,
+    or one that does not even decode — leaves NO row, and removes any it
+    finds: the reader treats a missing row as "prepare on demand", and a row
+    left behind by a previous plaintext value would otherwise be served for a
+    track that has since been encrypted or removed. No commit: the caller's
+    transaction covers the polyline and this together.
+    """
+    try:
+        blob = prepare_polyline(row.summary_polyline)
+    except Exception:  # noqa: BLE001 — a polyline that does not decode is the row's problem, not this write's
+        blob = None
+    if blob is None:
+        sess.execute(delete(DBActivityGeoPrepared).where(
+            DBActivityGeoPrepared.activity_id == row.id))
+        return
+    sess.merge(DBActivityGeoPrepared(
+        activity_id=row.id, version=PREPARED_GEO_VERSION, blob=blob))
 
 
 def _parse_ep(ep_json: Optional[str]):
@@ -92,6 +122,7 @@ class ActivityMixin:
             return
         if summary_polyline is not None and not is_encrypted_envelope(row.summary_polyline):
             row.summary_polyline = summary_polyline
+            store_prepared_geometry(sess, row)
         if elevation_profile_json is not None and not is_encrypted_envelope(row.elevation_profile_json):
             row.elevation_profile_json = elevation_profile_json
             row.elevation_profile_low_res_json = _low_res_ep_json(elevation_profile_json)
@@ -112,7 +143,7 @@ class ActivityMixin:
             return bool(row is not None and row.is_edited)
 
     @staticmethod
-    def _write_track_geometry(row: DBActivity, points: "list") -> None:
+    def _write_track_geometry(sess: Session, row: DBActivity, points: "list") -> None:
         """Re-derive geometry + scalar metrics from *points* onto *row* (no commit).
 
         Snapshots the pre-edit polyline/elevation into the original_* columns on
@@ -161,6 +192,7 @@ class ActivityMixin:
         )
 
         row.summary_polyline = points_to_polyline(points)
+        store_prepared_geometry(sess, row)
         ep = points_to_elevation_profile(points)
         ep_json = (
             json.dumps({"distances_km": ep[0], "elevations_m": ep[1]}) if ep else None
@@ -207,7 +239,7 @@ class ActivityMixin:
             check_and_bump_lock_version(sess, project_id, expected_version)
         else:
             bump_lock_version(sess, project_id)
-        self._write_track_geometry(row, points)
+        self._write_track_geometry(sess, row, points)
         sess.commit()
         return True
 
@@ -263,6 +295,10 @@ class ActivityMixin:
                 DBProjectItem.item_type == "activity",
                 DBProjectItem.activity_id.in_([p.id for p in pieces]),
             )
+        )
+        sess.execute(
+            delete(DBActivityGeoPrepared).where(
+                DBActivityGeoPrepared.activity_id.in_([p.id for p in pieces]))
         )
         for piece in pieces:
             sess.delete(piece)
@@ -327,6 +363,7 @@ class ActivityMixin:
         points = align_points(orig_poly, orig_ep)
 
         row.summary_polyline = orig_poly
+        store_prepared_geometry(sess, row)
         row.elevation_profile_json = orig_ep_json
         row.elevation_profile_low_res_json = _low_res_ep_json(orig_ep_json)
 
@@ -532,7 +569,7 @@ class ActivityMixin:
         sess.add(tail)
 
         # Write head then tail geometry (each snapshots its own original + recomputes).
-        self._write_track_geometry(head, head_points)
+        self._write_track_geometry(sess, head, head_points)
         # The tail begins at the split boundary — i.e. where the head ends. Tracks
         # carry no per-point timestamps, so derive the boundary time as the head's
         # start plus its (now apportioned) elapsed duration. Without this the tail
@@ -550,7 +587,7 @@ class ActivityMixin:
 
         tail.start_date = _shift(head.start_date)
         tail.start_date_local = _shift(head.start_date_local)
-        self._write_track_geometry(tail, tail_points)
+        self._write_track_geometry(sess, tail, tail_points)
         # Re-point the tail's snapshot at its OWN geometry. The seeding above is
         # a time-apportioning device, but _write_track_geometry snapshots whatever
         # sat on the row before the write — for a fresh tail that's the head's
@@ -623,6 +660,10 @@ class ActivityMixin:
                 DBProjectItem.activity_id == activity_id,
             )
         )
+        # SQLite is not enforcing the foreign key (models/db.py sets no
+        # PRAGMA foreign_keys), so the prepared-geometry row goes explicitly.
+        sess.execute(delete(DBActivityGeoPrepared).where(
+            DBActivityGeoPrepared.activity_id == activity_id))
         sess.delete(row)
         # Renumber remaining item positions to stay contiguous.
         remaining = sess.exec(
@@ -721,6 +762,7 @@ class ActivityMixin:
             existing.end_latlng_json = json.dumps(act.end_latlng) if act.end_latlng else None
         if not is_encrypted_envelope(existing.summary_polyline):
             existing.summary_polyline = act.summary_polyline
+            store_prepared_geometry(sess, existing)
         if not is_encrypted_envelope(existing.elevation_profile_json):
             existing.elevation_profile_json = ep_json
             existing.elevation_profile_low_res_json = _low_res_ep_json(ep_json)
@@ -759,6 +801,7 @@ class ActivityMixin:
             # field is encrypted.
             if existing.summary_polyline is None and act.summary_polyline:
                 existing.summary_polyline = act.summary_polyline
+                store_prepared_geometry(sess, existing)
             return
 
         def _iso(dt) -> str:
@@ -818,6 +861,7 @@ class ActivityMixin:
             source_id=act.source_id,
         )
         sess.add(row)
+        store_prepared_geometry(sess, row)
 
     @staticmethod
     def _row_to_activity(row: DBActivity, include_heavy: bool = True,
