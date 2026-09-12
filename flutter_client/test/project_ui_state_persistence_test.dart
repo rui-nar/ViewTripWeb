@@ -11,6 +11,8 @@ import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
+import 'helpers/signed_in.dart';
+
 /// Fixed project payload served by [_FakeProjectService]; load() reads
 /// activities/items/day_meta from it, same shape as the real API.
 class _FakeProjectService extends ProjectService {
@@ -60,7 +62,13 @@ Map<String, dynamic> _details({
     };
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    // UI state is saved per signed-in account; with no account there is
+    // nothing to save it under, and the "not restored" cases below would pass
+    // for the wrong reason.
+    signInAs(3);
+  });
 
   test(
       'selectDay persists and is restored by a fresh notifier loading the '

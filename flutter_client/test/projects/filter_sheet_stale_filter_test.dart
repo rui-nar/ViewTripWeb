@@ -94,13 +94,15 @@ void main() {
     // Sleeping mode comes first on this trip (no tags); Ride is the type.
     expect(chipLabels(), ['Hotel', 'Camping', 'No data', 'Ride']);
 
-    // And a stale 'No data' itself — every night now set — still goes last.
+    // And a stale 'No data' itself — every night now set — still goes last,
+    // even after a stale mode that sorts after it: sorted with the other
+    // stale values it would land before 'Shelter'.
     notifier
       ..dayMeta['2026-06-02'] = {'sleeping': 'Hostel'}
-      ..setFilters(sleeping: {'Camping', 'No data'});
+      ..setFilters(sleeping: {'Shelter', 'No data'});
     await tester.pumpAndSettle();
 
-    expect(chipLabels(), ['Hostel', 'Hotel', 'Camping', 'No data', 'Ride']);
+    expect(chipLabels(), ['Hostel', 'Hotel', 'Shelter', 'No data', 'Ride']);
   });
 
   testWidgets('a transport filter keeps its section on a trip with none left',

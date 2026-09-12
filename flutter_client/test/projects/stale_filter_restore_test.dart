@@ -10,19 +10,29 @@
 /// and not just the pruning seam.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:viewtrip_client/src/api/client.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_data_cache.dart';
 import 'package:viewtrip_client/src/projects/project_filters.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
+import 'package:viewtrip_client/src/shared/shared_project_screen.dart';
 
+import '../helpers/signed_in.dart';
+
+/// The signed-in account for every test unless one says otherwise.
+const _me = 3;
 const _ref = ProjectRef(name: 'Trip');
-const _key = 'project_ui_state_Trip';
+// UI state is keyed by account, owner and trip name (#409 review).
+const _key = 'project_ui_state_$_me:$_me:Trip';
 const _day1 = '2026-06-01';
 const _day2 = '2026-06-02';
 
@@ -58,7 +68,7 @@ class _Service extends ProjectService {
   _Service(this.trip, {this.name = 'Trip', this.callerRole});
 
   final _Trip trip;
-  final String name;
+  String name;
 
   /// What the server says the caller is on this trip. It always sends one;
   /// null here leaves the ref's own role standing.
@@ -66,6 +76,9 @@ class _Service extends ProjectService {
 
   /// Every fetch fails, the way it does with no network.
   bool offline = false;
+
+  /// While set, /meta does not answer until it completes — a slow network.
+  Completer<void>? metaGate;
 
   Map<String, dynamic> _payload() => {
         'name': name,
@@ -91,8 +104,10 @@ class _Service extends ProjectService {
   }
 
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) =>
-      _answer(_payload);
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async {
+    await metaGate?.future;
+    return _answer(_payload);
+  }
 
   @override
   Future<Map<String, dynamic>> getDetails(ProjectRef ref,
@@ -188,6 +203,8 @@ Future<ProjectNotifier> _loaded(_Service service,
 }
 
 void main() {
+  setUp(() => signInAs(_me));
+
   for (final d in _dimensions) {
     group('a saved ${d.name} filter', () {
       test('drops the value the trip no longer holds, in memory and on disk',
@@ -336,94 +353,268 @@ void main() {
       }
     });
   });
-  group('a trip shared with you under the name of one of your own', () {
-    // Trip names are unique per owner, not globally: a companion's copy of the
-    // same holiday is likely to be called the same thing (#106). Keyed by name
-    // alone, opening theirs read your saved state, pruned it against their
-    // data, and wrote the loss back over your own trip's.
+  group('whose saved state a load reads and writes', () {
+    // UI state was keyed on the trip name alone, and neither names nor devices
+    // are unique to one person: a companion's trip is likely to share a name
+    // with yours (#106), a share link's ref is only the trip's name, and one
+    // browser can hold two accounts (#93). Each of those read your state,
+    // pruned it against someone else's data, and wrote the loss back. The
+    // state is set up through the app and checked by reopening your own trip,
+    // so these hold whatever the key looks like.
     const mine = ProjectRef(name: 'Japan');
-    // As AppScreen passes it: ?owner=7 from the URL, role resolved against the
-    // signed-in user, which the server's caller_role then confirms.
+    // As AppScreen passes it: ?owner=7 from the URL, and a role guessed before
+    // /meta answers — "editor" for anyone else's trip.
     const theirs = ProjectRef(name: 'Japan', ownerId: 7, role: 'editor');
-    const ownKey = 'project_ui_state_Japan';
-    final ownState = jsonEncode({
-      'activityTypes': ['hike'],
-      'selectedDay': _day1,
-      'selectedActivityId': '2',
-    });
 
-    _Service myJapan() => _Service(
-        _Trip()
-          ..activities.add({
-            'id': 2,
-            'name': 'Temple hike',
-            'type': 'Hike',
-            'start_date_local': '${_day1}T14:00:00',
-          }),
-        name: 'Japan',
-        callerRole: 'owner');
-    // Theirs has no hikes, so a restore of your state would prune 'hike'.
-    _Service theirJapan() =>
-        _Service(_Trip(), name: 'Japan', callerRole: 'editor');
+    Map<String, dynamic> hike(int id) => {
+          'id': id,
+          'name': 'Temple hike',
+          'type': 'Hike',
+          'start_date_local': '${_day1}T14:00:00',
+        };
+    _Service myJapan() => _Service(_Trip()..activities.add(hike(2)),
+        name: 'Japan', callerRole: 'owner');
+    // Theirs has no hikes, so applying your state to it would prune 'hike'.
+    _Service theirJapan({String callerRole = 'editor'}) =>
+        _Service(_Trip(), name: 'Japan', callerRole: callerRole);
 
-    test('opening theirs leaves your saved filter and selection alone',
+    /// Filters your own "Japan" to hikes and selects the hike, through the app.
+    Future<void> saveMyJapan({ProjectRef ref = mine}) async {
+      final own = await _loaded(myJapan(), ref: ref);
+      own.setFilters(activityTypes: {'hike'});
+      own.selectActivity(2);
+      await pumpEventQueue();
+    }
+
+    /// Reopens your own "Japan" and asserts the state is still there.
+    Future<void> expectMyJapanIntact() async {
+      final own = await _loaded(myJapan(), ref: mine);
+      expect(own.activityTypeFilter, {'hike'},
+          reason: "your own trip's saved filter");
+      expect(own.selectedActivityId, '2',
+          reason: "your own trip's saved selection");
+    }
+
+    setUp(() => SharedPreferences.setMockInitialValues({}));
+
+    test('opening a same-named trip shared with you leaves yours alone',
         () async {
-      SharedPreferences.setMockInitialValues({ownKey: ownState});
+      await saveMyJapan();
 
       final shared = await _loaded(theirJapan(), ref: theirs);
       expect(shared.hasActiveFilter, isFalse,
           reason: 'your filter is not theirs to apply');
-      expect(shared.selectedActivityId, isNull);
 
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString(ownKey), ownState);
-
-      final own = await _loaded(myJapan(), ref: mine);
-      expect(own.activityTypeFilter, {'hike'});
-      expect(own.selectedActivityId, '2');
+      await expectMyJapanIntact();
     });
 
-    test('and theirs keeps state of its own, under its owner', () async {
-      SharedPreferences.setMockInitialValues({ownKey: ownState});
+    test('and theirs keeps state of its own', () async {
       final service = theirJapan();
-
       final shared = await _loaded(service, ref: theirs);
       shared.setFilters(activityTypes: {'ride'});
       shared.selectActivity(1);
       await pumpEventQueue();
-
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString(ownKey), ownState);
-      expect(prefs.getString('project_ui_state_7:Japan'), contains('ride'));
 
       final again = await _loaded(service, ref: theirs);
       expect(again.activityTypeFilter, {'ride'});
       expect(again.selectedActivityId, '1');
     });
 
+    for (final role in ['viewer', 'co-owner']) {
+      test('a $role gets their state back too, though /meta corrects the role',
+          () async {
+        // The role guessed before /meta is "editor"; the server says otherwise.
+        // Restore used to check the load was current against the corrected
+        // ref, so it never ran for a viewer or co-owner, on any open.
+        final service = theirJapan(callerRole: role);
+        final first = await _loaded(service, ref: theirs);
+        first.setFilters(activityTypes: {'ride'});
+        first.selectActivity(1);
+        await pumpEventQueue();
+
+        final again = await _loaded(service, ref: theirs);
+
+        expect(again.ref?.role, role);
+        expect(again.activityTypeFilter, {'ride'});
+        expect(again.selectedActivityId, '1');
+      });
+    }
+
     test('your own trip opened from the projects list is still your own trip',
         () async {
       // The list gives your own entries your id as owner_id, so from there the
-      // trip opens as ?owner=<you>; from a deep link it opens without. Both
-      // must find the state saved under the key own trips have always used.
-      SharedPreferences.setMockInitialValues({ownKey: ownState});
+      // trip opens as ?owner=<you>, and until /meta answers the role is a guess
+      // — "editor" whenever the profile has no id, as a restored session's
+      // does not. A deep link opens the same trip with no owner at all.
+      await saveMyJapan();
 
-      final own = await _loaded(myJapan(),
-          ref: const ProjectRef(name: 'Japan', ownerId: 3));
+      final fromList = await _loaded(myJapan(),
+          ref: const ProjectRef(name: 'Japan', ownerId: _me, role: 'editor'));
 
-      expect(own.activityTypeFilter, {'hike'});
-      expect(own.selectedActivityId, '2');
+      expect(fromList.activityTypeFilter, {'hike'});
+      expect(fromList.selectedActivityId, '2');
     });
 
-    test('state an own trip saved before the key changed still restores',
+    test('a reload that has not heard back from /meta saves nothing over yours',
         () async {
-      SharedPreferences.setMockInitialValues({ownKey: ownState});
+      // The Strava and Polarsteps imports reload with the ref from the URL,
+      // whose role defaults to "owner", and pop straight back to the map. A
+      // tap on a track while /meta is still out selected an activity — and
+      // saved it as your own trip's state.
+      await saveMyJapan();
+      final service = theirJapan();
+      final shared = await _loaded(service, ref: theirs);
 
-      final own = await _loaded(myJapan(), ref: mine);
+      service.metaGate = Completer<void>();
+      final reload = shared.load(const ProjectRef(name: 'Japan', ownerId: 7));
+      shared.selectActivity(1);
+      await pumpEventQueue();
+      service.metaGate!.complete();
+      await reload;
+      await pumpEventQueue();
 
-      expect(own.activityTypeFilter, {'hike'});
-      expect(own.selectedDay, _day1);
-      expect(own.selectedActivityId, '2');
+      await expectMyJapanIntact();
+    });
+
+    group('a share link to a same-named trip', () {
+      // A share link's notifier loads ProjectRef(name: <token>), and once the
+      // public /meta lands its ref is the trip's name with no owner and no
+      // caller_role — to the key, your own trip.
+      http.Client shareServer() {
+        final meta = jsonEncode(theirJapan()._payload()..remove('caller_role'));
+        final geo = jsonEncode(_emptyGeo());
+        return MockClient((req) async {
+          final path = req.url.path;
+          if (path == '/api/share/tok/meta' || path == '/api/share/tok') {
+            return http.Response(meta, 200);
+          }
+          if (path.startsWith('/api/share/tok/geo')) {
+            return http.Response(geo, 200);
+          }
+          return http.Response('{}', 404);
+        });
+      }
+
+      test('neither applies nor rewrites your state when opened', () async {
+        signInAs(_me, httpClient: shareServer());
+        await saveMyJapan();
+
+        final link = SharedProjectNotifier('tok');
+        await link.loadShared();
+        await pumpEventQueue();
+
+        expect(link.ref?.name, 'Japan');
+        expect(link.hasActiveFilter, isFalse);
+        expect(link.selectedActivityId, isNull);
+        await expectMyJapanIntact();
+      });
+
+      test('and a tap in it is not saved as your trip', () async {
+        signInAs(_me, httpClient: shareServer());
+        await saveMyJapan();
+
+        final link = SharedProjectNotifier('tok');
+        await link.loadShared();
+        link.selectActivity(1);
+        await pumpEventQueue();
+
+        await expectMyJapanIntact();
+      });
+    });
+
+    test('another account on this browser neither inherits nor erases yours',
+        () async {
+      await saveMyJapan();
+
+      signInAs(4); // someone else, with an own "Japan" and no hikes in it
+      final theirOwn = await _loaded(
+          _Service(_Trip(), name: 'Japan', callerRole: 'owner'),
+          ref: mine);
+      expect(theirOwn.hasActiveFilter, isFalse);
+      expect(theirOwn.selectedActivityId, isNull);
+      theirOwn.selectDay(_day2);
+      await pumpEventQueue();
+
+      signInAs(_me);
+      await expectMyJapanIntact();
+    });
+
+    test('with no account signed in, nothing is saved or restored', () async {
+      api.clearToken();
+      final notifier = await _loaded(_Service(_Trip()));
+      notifier.setFilters(activityTypes: {'ride'});
+      await pumpEventQueue();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getKeys(), isEmpty);
+    });
+
+    test("switching trips does not carry the last trip's filter", () async {
+      // The manage-mode notifier is app-wide. Filter one trip, open another
+      // that has nothing saved: the filter stayed on with no day selected,
+      // which empties the list — #409's own symptom, on a trip the filter
+      // never belonged to.
+      final service = _Service(_Trip()..activities.add(hike(2)));
+      final notifier = await _loaded(service);
+      notifier.setFilters(activityTypes: {'hike'});
+
+      service.name = 'Other';
+      await notifier.load(const ProjectRef(name: 'Other'));
+      await pumpEventQueue();
+
+      expect(notifier.hasActiveFilter, isFalse);
+      expect(notifier.activityTypeFilter, isEmpty);
+    });
+
+    group('state saved before the key changed', () {
+      const legacyKey = 'project_ui_state_Japan';
+      final legacyState = jsonEncode({
+        'activityTypes': ['hike', 'kayak'], // no kayak left: pruned on load
+        'selectedDay': _day1,
+        'selectedActivityId': '2',
+      });
+
+      test('restores for your own trip, and the old key is never written',
+          () async {
+        SharedPreferences.setMockInitialValues({legacyKey: legacyState});
+
+        final own = await _loaded(myJapan(), ref: mine);
+        expect(own.activityTypeFilter, {'hike'});
+        expect(own.selectedDay, _day1);
+        expect(own.selectedActivityId, '2');
+
+        own.selectDay(_day2);
+        await pumpEventQueue();
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString(legacyKey), legacyState,
+            reason: 'read once for the upgrade, never written');
+
+        // From here on the trip reads its own key, not the old one.
+        final next = await _loaded(myJapan(), ref: mine);
+        expect(next.selectedDay, _day2);
+        expect(next.activityTypeFilter, {'hike'});
+      });
+
+      test('restores when your own trip is opened from the projects list',
+          () async {
+        SharedPreferences.setMockInitialValues({legacyKey: legacyState});
+
+        final own = await _loaded(myJapan(),
+            ref: const ProjectRef(name: 'Japan', ownerId: _me));
+
+        expect(own.activityTypeFilter, {'hike'});
+      });
+
+      test('is not read for a trip shared with you', () async {
+        SharedPreferences.setMockInitialValues({legacyKey: legacyState});
+
+        final shared = await _loaded(
+            _Service(_Trip()..activities.add(hike(2)),
+                name: 'Japan', callerRole: 'editor'),
+            ref: theirs);
+
+        expect(shared.hasActiveFilter, isFalse);
+      });
     });
   });
 

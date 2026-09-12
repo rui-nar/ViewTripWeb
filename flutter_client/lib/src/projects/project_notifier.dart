@@ -712,25 +712,45 @@ class ProjectNotifier extends ChangeNotifier
   // shared_preferences, keyed per project so switching projects on this
   // (singleton, manage-mode) notifier doesn't cross-write between them.
 
-  /// Where [ref]'s UI state lives. Every read and write goes through here.
+  /// Whether this notifier saves and restores selection + filters at all.
   ///
-  /// A trip name is unique per owner, not globally, so a trip shared with you
-  /// can carry the same name as one of your own — likely, for a companion's
-  /// copy of the same holiday (#106). Keyed by name alone, opening theirs
-  /// restored *your* saved filters and selection, pruned them against *their*
-  /// data, and wrote the loss back over your trip's state (#409 review).
+  /// A share link's notifier must not: its trip is addressed by a token, and
+  /// once /meta lands its ref is just the trip's name, with no owner — so it
+  /// would read and write the state of the viewer's own trip of that name.
+  @protected
+  bool get persistsUiState => true;
+
+  /// Where [ref]'s UI state lives, or null when it is not persisted. Every
+  /// read and write goes through here (#409 review).
   ///
-  /// A shared trip is therefore keyed by its owner as well. Your own trips keep
-  /// the name-only key they have always used, so state saved before this
-  /// change still restores. "Own" is decided by the role, not by [ownerId]
-  /// being null: the projects list gives your own entries your id as
-  /// `owner_id`, so your own trip is opened as `?owner=<you>` from there and
-  /// without it from elsewhere, and the role — the server's `caller_role` by
-  /// the time anything is restored — is what says both are the same trip.
-  static String _uiStateKey(ProjectRef ref) =>
-      ref.ownerId == null || ref.isOwner
-          ? 'project_ui_state_${ref.name}'
-          : 'project_ui_state_${ref.ownerId}:${ref.name}';
+  /// `project_ui_state_<you>:<owner>:<name>`, which is unique where the name
+  /// alone never was:
+  ///   * a trip name is unique per owner, not globally, so a companion's trip
+  ///     is likely to share a name with one of yours (#106);
+  ///   * one browser can hold more than one account's sessions (#93).
+  /// Keyed by name alone, opening either of those restored *your* state,
+  /// pruned it against *their* data and wrote the loss back.
+  ///
+  /// "Own" is decided by id, not by role: the owner is the signed-in account
+  /// whether [ProjectRef.ownerId] is null (a deep link) or your own id (the
+  /// projects list opens your trips as `?owner=<you>`), and neither depends on
+  /// a role that is only a guess until /meta answers. Null — nothing saved or
+  /// restored — when no account is signed in to say whose state it is.
+  String? _uiStateKey(ProjectRef ref) {
+    if (!persistsUiState) return null;
+    final self = api.tokenUserId;
+    if (self == null) return null;
+    return 'project_ui_state_$self:${ref.ownerId ?? self}:${ref.name}';
+  }
+
+  /// The name-only key UI state lived under before [_uiStateKey]. Read, never
+  /// written, and only for the signed-in account's own trip, so state saved
+  /// before the upgrade still restores once.
+  String? _legacyUiStateKey(ProjectRef ref) {
+    final self = api.tokenUserId;
+    final own = ref.ownerId == null || ref.ownerId == self;
+    return own ? 'project_ui_state_${ref.name}' : null;
+  }
 
   @override
   void saveUiState() => unawaited(_saveUiState());
@@ -738,8 +758,9 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _saveUiState() async {
     final ref = this.ref;
     if (ref == null) return;
+    final key = _uiStateKey(ref);
+    if (key == null) return;
     try {
-      final key = _uiStateKey(ref);
       final data = <String, dynamic>{
         'selectedDay': selectedDay,
         'selectedActivityId': selectedActivityId?.toString(),
@@ -765,15 +786,25 @@ class ProjectNotifier extends ChangeNotifier
   /// real data (e.g. a deleted activity/segment/memory or a day that's no
   /// longer in [dayMeta]) so a stale selection can't resurrect as a dangling
   /// reference. Silently no-ops on missing/malformed prefs.
-  Future<void> _restoreUiState(int token) async {
+  ///
+  /// [loadRef] is the ref [load] was called with, which is what the load track
+  /// knows it by. [ref] has been replaced since with the server's name and
+  /// `caller_role`, so checking currency against it failed whenever the role
+  /// guessed before /meta was wrong — every viewer and co-owner, on every
+  /// open — and restore silently did nothing (#409 review).
+  Future<void> _restoreUiState(int token, ProjectRef loadRef) async {
     final ref = this.ref;
     if (ref == null) return;
+    final key = _uiStateKey(ref);
+    if (key == null) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       // issue #283: also reject a same-ref load that superseded this one
       // while awaiting prefs, which a bare ref comparison can't detect.
-      if (!_isCurrent(token, ref)) return;
-      final raw = prefs.getString(_uiStateKey(ref));
+      if (!_isCurrent(token, loadRef)) return;
+      final legacyKey = _legacyUiStateKey(ref);
+      final raw = prefs.getString(key) ??
+          (legacyKey == null ? null : prefs.getString(legacyKey));
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
@@ -935,7 +966,17 @@ class ProjectNotifier extends ChangeNotifier
     final name = ref.name;
     _stopPhotoPolling();
     final token = _loadTrack.begin(ref);
+    final previous = this.ref;
     this.ref = ref;
+    // Filters belong to the trip they were set on. This notifier is app-wide,
+    // so without this a trip with nothing saved — or one whose restore is
+    // skipped — kept the previous trip's filter, with selectedDays emptied
+    // below: every day filtered out on a trip the filter never belonged to
+    // (#409 review). A reload of the same trip keeps them; restore re-applies
+    // what was saved either way.
+    if (previous?.name != ref.name || previous?.ownerId != ref.ownerId) {
+      resetFilters();
+    }
     // Zoom refetching is armed only once this load's own geometry lands, and
     // never carries across projects: this notifier is a single app-wide
     // provider, so a bucket left from the previous trip would let a refetch
@@ -1110,7 +1151,7 @@ class ProjectNotifier extends ChangeNotifier
       // dayMeta/activities below for a project the user has since left.
       if (!_isCurrent(token, ref)) return;
       _autoFillDaysToToday();  // fill missing dates in-memory before first render
-      await _restoreUiState(token);  // issue #76 follow-up: reapply persisted selection/filters
+      await _restoreUiState(token, ref);  // issue #76 follow-up: reapply persisted selection/filters
       // Catch Object, not just Exception: retryFetch rethrows whatever the last
       // attempt threw, and a truncated response decodes into an Error
       // (RangeError/TypeError) that would otherwise escape this handler.

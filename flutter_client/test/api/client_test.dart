@@ -11,7 +11,31 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:viewtrip_client/src/api/client.dart';
 
+import '../helpers/signed_in.dart';
+
 void main() {
+  group('ApiClient.tokenUserId', () {
+    // Whose session the device holds, from the token itself: a restored
+    // session's profile has no id to offer (User.restored, and /api/auth/me
+    // echoes a JWT payload that carries `sub` but no `id`).
+    test('is the account named by the token', () {
+      final client = ApiClient()..setToken(fakeJwt(sub: 42));
+
+      expect(client.tokenUserId, 42);
+    });
+
+    test('is null with no token, or one that does not parse', () {
+      final client = ApiClient();
+      expect(client.tokenUserId, isNull);
+
+      client.setToken('not-a-jwt');
+      expect(client.tokenUserId, isNull);
+
+      client.setToken('a.%%%.c');
+      expect(client.tokenUserId, isNull);
+    });
+  });
+
   group('ApiClient.getRaw timeout', () {
     // getRaw() used to have no .timeout() at all (unlike get/post/put/delete),
     // so a stalled binary download could hang forever.
