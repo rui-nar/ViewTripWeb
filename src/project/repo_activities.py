@@ -594,7 +594,35 @@ class ActivityMixin:
         activities are shared across projects and must never be row-deleted here.
         Also renumbers any surviving split-family siblings (see
         ``_renumber_split_family``) so "(i/N)" reflects the new, smaller N.
-        Returns False if the id is not local or the row is absent.
+        Returns False if the id is not local, the row is absent, or the row
+        belongs to a DIFFERENT project than *project_id*.
+
+        That last check is issue #405. The caller's permission check proves you
+        may edit *project_id*, not that the activity is one of its own, so
+        without it ``DELETE /api/projects/<trip B>/activities/<trip A's id>``
+        deleted trip A's activity, bumped trip B's lock_version, and left trip A
+        holding an item pointing at a row that no longer existed.
+
+        **Orphans are deliberately allowed through.** The test is "no OTHER
+        project references this row", not "this project references it", and the
+        difference is not a shortcut — inverting it is a second bug:
+
+        * The timeline path *depends* on it. ``api/project_items.py`` removes
+          and commits the item FIRST and calls this second, so by the time we
+          are reached the row is referenced by nobody. A "must be referenced by
+          this project" test would refuse it, re-orphaning every deleted split
+          tail and bringing back the id-reuse UNIQUE violation that PR #44 and
+          migration ``d5b1c0a2e3f4`` exist to clear up.
+        * Nothing is at risk. An unreferenced local row sits in no one's
+          timeline; ``d5b1c0a2e3f4`` deletes such rows wholesale, so letting a
+          caller delete one grants no reach the pruning migration does not
+          already take. Ids are 53-bit random (``local_ids``), so they cannot be
+          walked either.
+
+        A row referenced by this project *and* another is refused rather than
+        unlinked: local rows are single-owner by construction, so that state is
+        corruption, and destroying the other project's activity is the worse
+        answer to it.
 
         Advances the project's lock_version (issue #173) so a native client's
         on-disk cache — which only ever checks that counter — notices the
@@ -604,6 +632,15 @@ class ActivityMixin:
             return False
         row = sess.get(DBActivity, activity_id)
         if row is None:
+            return False
+        foreign_ref = sess.exec(
+            select(DBProjectItem).where(
+                DBProjectItem.item_type == "activity",
+                DBProjectItem.activity_id == activity_id,
+                DBProjectItem.project_id != project_id,
+            )
+        ).first()
+        if foreign_ref is not None:
             return False
         bump_lock_version(sess, project_id)
         root_id = row.split_root_id
