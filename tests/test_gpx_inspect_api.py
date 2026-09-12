@@ -319,8 +319,9 @@ class TestTheDryRunStaysOffTheEventLoop:
 
         import api.activities as activities_mod
 
-        content = _timed_track(count=20000)   # ~0.56 s of sync work
-        gaps = []
+        content = _timed_track(count=20000)
+        gaps: list[float] = []
+        elapsed: list[float] = []
 
         async def drive():
             async def ticker():
@@ -344,12 +345,14 @@ class TestTheDryRunStaysOffTheEventLoop:
 
             beat = asyncio.create_task(ticker())
             await asyncio.sleep(0.02)
+            started = asyncio.get_event_loop().time()
             await activities_mod.inspect_gpx_file(
                 name="Trip",
                 current_user={"sub": str(self._owner)},
                 file=_Upload(),
                 owner=None,
             )
+            elapsed.append(asyncio.get_event_loop().time() - started)
             # The ticker has to be given a turn AFTER the call to record the gap
             # it just sat through; cancelling straight away loses the evidence.
             await asyncio.sleep(0.02)
@@ -364,13 +367,16 @@ class TestTheDryRunStaysOffTheEventLoop:
         asyncio.run(drive())
 
         assert gaps, "the ticker never ran"
-        # 0.56 s of parsing sits behind this call. Held on the loop the ticker
-        # starves for all of it; handed to a worker thread the gaps stay at the
-        # 5 ms sleep. 0.25 s separates those two worlds with room for a loaded
-        # machine on either side.
-        assert max(gaps) < 0.25, (
-            f"the event loop stalled for {max(gaps):.2f}s during inspect; the "
-            f"synchronous parse must run in a worker thread"
+        # Asserted against the call's OWN duration, not a wall-clock constant.
+        # A constant measures the machine: 0.25 s held on this box and flaked on
+        # a slower CI runner at 0.37 s, which is the mistake this very session
+        # made once already. Held on the loop, the longest gap is the whole
+        # parse; handed to a thread it is a fraction of it. The floor keeps a
+        # very fast machine from comparing against scheduler noise.
+        limit = max(0.15, elapsed[0] * 0.5)
+        assert max(gaps) < limit, (
+            f"the event loop stalled for {max(gaps):.2f}s of a {elapsed[0]:.2f}s "
+            f"call; the synchronous parse must run in a worker thread"
         )
 
 
