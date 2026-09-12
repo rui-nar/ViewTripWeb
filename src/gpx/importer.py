@@ -33,12 +33,20 @@ from src.models.track_edit import TrackPoint
 
 MAX_IMPORT_POINTS = 50000
 
-#: Largest upload accepted, checked BEFORE parsing. gpxpy builds an object tree
-#: many times the size of the XML — a 4.6 MB file measured at 73 MB of heap — so
-#: a point-count limit applied after parsing is a limit that has already let the
-#: damage happen. 20 MB is roughly 200k points, comfortably above the point cap
-#: below and far below what would trouble the box.
-MAX_IMPORT_BYTES = 20 * 1024 * 1024
+#: Largest upload accepted, checked BEFORE parsing. gpxpy builds an object
+#: tree many times the size of the XML, so a point-count limit applied after
+#: parsing is a limit that has already let the damage happen. Measured: a
+#: 4.8 MB file of plain trackpoints peaks at 73 MB of heap, and a 13.2 MB
+#: Garmin-style file carrying <extensions> at 132 MB — about ten to fifteen
+#: times the bytes on the wire.
+#:
+#: 12 MB is chosen from the DENSEST encoding rather than the cheapest. Plain
+#: trackpoints cost ~95 bytes each and Garmin's extensions ~261, so 12 MB is
+#: roughly 130k plain points or 46k rich ones — the latter below the point cap
+#: below, which is the point: a file that passes this guard should not then be
+#: rejected after having already cost 200 MB to parse. An earlier 20 MB let a
+#: rich 80k-point file through to exactly that.
+MAX_IMPORT_BYTES = 12 * 1024 * 1024
 
 #: Below this speed the track is not moving: a stop at a café, a wait at a
 #: junction, a fix drifting while the phone sits on a table. 0.3 m/s is about a

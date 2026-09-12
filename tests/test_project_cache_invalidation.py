@@ -35,6 +35,10 @@ _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 _EXEMPT = {
     # Creates an empty project; nothing can be cached for it yet.
     "create_project": "new project — no cached payload exists",
+    # A POST only because it takes an upload: it reads the file and writes
+    # nothing at all. Busting a cache here would be the giveaway that the dry
+    # run is not dry (issue #260, unit 4).
+    "inspect_gpx_file": "dry run — reads an upload, writes nothing",
     # Sync settings live in /sync-meta, not in the /meta payload.
     "update_sync_meta": "sync config is not part of the /meta payload",
     # Share tokens are read from /share-info, not from /meta.
