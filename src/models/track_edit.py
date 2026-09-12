@@ -716,9 +716,25 @@ def _relief(window: List[float]) -> float:
       1.5     37.2%                  129-197
       ======  =====================  ====================
 
-      Copernicus GLO-30's relative accuracy — about 2 m LE90, so sigma near
-      1.2 — lands on that knee. Which is the single number unit 2 most needs to
-      measure, and it is a property of the tileset, not of this code.
+      Whether a real tileset sits above or below that knee is the single most
+      useful thing unit 2 can establish, and it is a property of the tileset
+      rather than of this code. **It cannot be inferred from the spec sheet**,
+      which is worth spelling out because the arithmetic looks like it works:
+      Copernicus GLO-30 quotes a *relative* vertical accuracy of 2 m LE90, and
+      2 / 1.645 is 1.2, which lands exactly on the knee above. Two reasons not
+      to believe that:
+
+      * That 2 m is for slopes under 20%; above 20% the figure is 4 m. The
+        cross-slope case in this very benchmark is a 20% slope.
+      * "Relative accuracy" is quoted over a baseline, not between one post and
+        its neighbour. Most of the 2 m is structure at scales larger than a
+        post, so the INDEPENDENT per-post component — the one the table above
+        varies — is smaller than 1.2, and partly correlated besides. 1.2 is an
+        upper bound on it, and the upper bound is the pessimistic end.
+
+      So the spec says the honest thing is to measure it: sample real tiles
+      along known-flat ground and read the per-window range directly, which is
+      the quantity this verdict actually depends on.
 
     That is the same structure as the defect this whole issue is about — sensor
     drift is inseparable from terrain exactly when their correlation lengths
