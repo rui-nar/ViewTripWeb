@@ -68,9 +68,14 @@ DEFAULT_ZOOM = 13
 #: Decoded tiles kept in memory. One track touches a handful; a trip a few dozen.
 MEMORY_TILES = 64
 
-#: Retries for a transient failure (5xx or a network error), with exponential
-#: backoff. A 4xx other than 404 is not retried: it will not change.
+#: Retries for a transient failure, with exponential backoff.
 MAX_RETRIES = 3
+
+#: Statuses that mean "not now" rather than "not there". 408 and 429 are
+#: 4xx codes but say nothing about whether the tile exists: an earlier version
+#: stored them as absence, and a single rate limit then blinded the reader to
+#: that tile permanently — the exact failure this module exists to prevent.
+_TRANSIENT_STATUS = frozenset({408, 425, 429})
 
 #: What a fetcher returns, and what the disk cache stores for, a tile that
 #: genuinely does not exist.
@@ -132,10 +137,13 @@ def fetch_terrarium_tile(z: int, x: int, y: int,
                 return resp.content
             if resp.status_code in (403, 404):
                 # S3 answers 403 for a key that is not there when listing is
-                # not allowed, so both mean "no such tile".
+                # not allowed, so both mean "no such tile" — and only these two.
                 return MISSING
-            if resp.status_code < 500:
-                return MISSING
+            if resp.status_code not in _TRANSIENT_STATUS and resp.status_code < 500:
+                # Some other refusal. Not evidence the tile is absent, so it
+                # must not be remembered as absence either.
+                raise TransientTileError(
+                    f"terrarium tile {z}/{x}/{y} refused: HTTP {resp.status_code}")
             last = f"HTTP {resp.status_code}"
         if attempt < MAX_RETRIES - 1:
             time.sleep(2 ** attempt)
@@ -208,6 +216,15 @@ class TerrariumReader:
         """:meth:`elevation` for each ``(lat, lon)`` in *points*, in order."""
         return [self.elevation(lat, lon) for lat, lon in points]
 
+    def tile_grid(self, z: int, x: int, y: int) -> Optional[array]:
+        """One tile's decoded 256 x 256 elevations, row-major, or ``None``.
+
+        For bulk readers that sample many points per tile and would rather not
+        go through :meth:`elevation` one point at a time. Same caching and the
+        same no-data rules.
+        """
+        return self._tile(z, x, y)
+
     # ── Tiles ───────────────────────────────────────────────────────────────
     def _pixel(self, gx: int, gy: int) -> Optional[float]:
         """The decoded value of global pixel ``(gx, gy)``, across tile edges."""
@@ -244,7 +261,13 @@ class TerrariumReader:
                 # other three corners of this read do not each re-fetch it, but
                 # never remembered as absence: not on disk, and not past
                 # ``retry_after_s``.
-                self._unavailable[key] = self._clock()
+                now = self._clock()
+                self._unavailable[key] = now
+                # Drop entries whose window has passed, so a long outage across
+                # many tiles cannot grow this without bound.
+                for stale in [k for k, t in self._unavailable.items()
+                              if now - t >= self._retry_after]:
+                    del self._unavailable[stale]
                 return None
             if raw is None:
                 raw = MISSING

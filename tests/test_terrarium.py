@@ -298,3 +298,59 @@ def test_unreadable_coordinates_are_no_data():
 def test_zoom_outside_the_tileset_is_refused():
     with pytest.raises(ValueError):
         TerrariumReader(zoom=16, fetch=FakeFetch())
+
+
+# ── Statuses that are not absence ────────────────────────────────────────────
+class FakeResponse:
+    def __init__(self, status, content=b""):
+        self.status_code = status
+        self.content = content
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+def test_a_rate_limit_or_timeout_is_never_stored_as_absence(
+        status, tmp_path, monkeypatch):
+    """A 429 is a 4xx, and says nothing about whether the tile exists. An
+    earlier version wrote any non-5xx refusal to disk as "no such tile", so one
+    rate limit blinded the reader to that tile for good — the failure this
+    module's docstring says it prevents."""
+    import tests.elevation_bench.tile_reader as tr
+
+    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    monkeypatch.setattr(tr.requests, "get",
+                        lambda url, timeout: FakeResponse(status))
+    with pytest.raises(tr.TransientTileError):
+        tr.fetch_terrarium_tile(13, 4400, 2688)
+
+    reader = TerrariumReader(str(tmp_path), zoom=0,
+                             fetch=tr.fetch_terrarium_tile, retry_after_s=0.0)
+    assert reader.elevation(1.0, 1.0) is None
+    assert not any(tmp_path.rglob("*.png")), (
+        f"HTTP {status} was persisted as a missing tile")
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_only_403_and_404_mean_the_tile_is_not_there(status, monkeypatch):
+    import tests.elevation_bench.tile_reader as tr
+
+    monkeypatch.setattr(tr.requests, "get",
+                        lambda url, timeout: FakeResponse(status))
+    assert tr.fetch_terrarium_tile(13, 4400, 2688) == MISSING
+
+
+def test_the_back_off_map_does_not_grow_without_bound():
+    """A long outage across many tiles must not keep one entry per tile for
+    ever: entries whose window has passed are dropped."""
+    clock = Clock()
+    failing = {(3, x, y) for x in range(8) for y in range(8)}
+    reader = TerrariumReader(zoom=3, fetch=FakeFetch(transient=failing),
+                             retry_after_s=30.0, clock=clock)
+
+    for x in range(8):
+        for y in range(8):
+            reader._tile(3, x, y)
+            clock.now += 10.0               # each failure 10 s after the last
+
+    assert len(reader._unavailable) <= 3, (
+        f"{len(reader._unavailable)} entries survive a 30 s window")
+
