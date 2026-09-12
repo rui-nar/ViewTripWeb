@@ -2386,7 +2386,8 @@ class FilterSheet extends StatelessWidget {
         final tags       = _withSelected(
             notifier.availableTags, notifier.tagFilter);
         final sleeping   = _withSelected(
-            notifier.availableSleepingModes, notifier.sleepingFilter);
+            notifier.availableSleepingModes, notifier.sleepingFilter,
+            last: 'No data');
         final actTypes   = _withSelected(
             notifier.availableActivityTypes, notifier.activityTypeFilter);
         final transport  = _withSelected(
@@ -2503,10 +2504,18 @@ class FilterSheet extends StatelessWidget {
   }
 
   /// [held] in its own order, then any [selected] value it lacks, sorted — so
-  /// a stale selection trails the live options instead of reshuffling them
-  /// ('No data' stays last among the sleeping modes it belongs to).
-  static List<String> _withSelected(List<String> held, Set<String> selected) =>
-      [...held, ...(selected.difference(held.toSet()).toList()..sort())];
+  /// a stale selection trails the live options instead of reshuffling them.
+  /// [last], when given and present in either, is moved to the very end: the
+  /// sleeping modes close on 'No data', and a stale mode goes before it.
+  static List<String> _withSelected(List<String> held, Set<String> selected,
+      {String? last}) {
+    final options = [
+      ...held,
+      ...(selected.difference(held.toSet()).toList()..sort()),
+    ];
+    if (last != null && options.remove(last)) options.add(last);
+    return options;
+  }
 
   Widget _chips({
     required List<String> options,

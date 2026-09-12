@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:viewtrip_client/src/core/project_ref.dart';
+import 'package:viewtrip_client/src/projects/project_data_cache.dart';
 import 'package:viewtrip_client/src/projects/project_filters.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
@@ -54,12 +55,22 @@ class _Trip {
 }
 
 class _Service extends ProjectService {
-  _Service(this.trip);
+  _Service(this.trip, {this.name = 'Trip', this.callerRole});
 
   final _Trip trip;
+  final String name;
+
+  /// What the server says the caller is on this trip. It always sends one;
+  /// null here leaves the ref's own role standing.
+  final String? callerRole;
+
+  /// Every fetch fails, the way it does with no network.
+  bool offline = false;
 
   Map<String, dynamic> _payload() => {
-        'name': 'Trip',
+        'name': name,
+        'lock_version': 1,
+        if (callerRole != null) 'caller_role': callerRole,
         'activities': [for (final a in trip.activities) {...a}],
         'items': [
           for (final a in trip.activities)
@@ -74,23 +85,28 @@ class _Service extends ProjectService {
         'groups': <dynamic>[],
       };
 
+  Future<T> _answer<T>(T Function() value) async {
+    if (offline) throw Exception('offline');
+    return value();
+  }
+
   @override
-  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) async =>
-      _payload();
+  Future<Map<String, dynamic>> getDetailsMeta(ProjectRef ref) =>
+      _answer(_payload);
 
   @override
   Future<Map<String, dynamic>> getDetails(ProjectRef ref,
-          {bool bypassCache = false}) async =>
-      _payload();
+          {bool bypassCache = false}) =>
+      _answer(_payload);
 
   @override
-  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) async =>
-      _emptyGeo();
+  Future<Map<String, dynamic>> getLowResGeo(ProjectRef ref) =>
+      _answer(_emptyGeo);
 
   @override
   Future<Map<String, dynamic>> getGeo(ProjectRef ref,
-          {bool bypassCache = false}) async =>
-      _emptyGeo();
+          {bool bypassCache = false}) =>
+      _answer(_emptyGeo);
 }
 
 /// One filter dimension: a value the trip holds, one it does not, and how the
@@ -162,9 +178,11 @@ Future<Map<String, dynamic>> _stored() async {
   return jsonDecode(prefs.getString(_key)!) as Map<String, dynamic>;
 }
 
-Future<ProjectNotifier> _loaded(_Service service) async {
-  final notifier = ProjectNotifier(service);
-  await notifier.load(_ref);
+Future<ProjectNotifier> _loaded(_Service service,
+    {ProjectRef ref = _ref}) async {
+  final notifier = ProjectNotifier(service)
+    ..loadRetryBackoff = const [Duration(milliseconds: 1)];
+  await notifier.load(ref);
   await pumpEventQueue();
   return notifier;
 }
@@ -316,6 +334,160 @@ void main() {
         expect(pruned, !matches, reason: tag);
         expect(notifier.selectedDays, probe.selectedDays, reason: tag);
       }
+    });
+  });
+  group('a trip shared with you under the name of one of your own', () {
+    // Trip names are unique per owner, not globally: a companion's copy of the
+    // same holiday is likely to be called the same thing (#106). Keyed by name
+    // alone, opening theirs read your saved state, pruned it against their
+    // data, and wrote the loss back over your own trip's.
+    const mine = ProjectRef(name: 'Japan');
+    // As AppScreen passes it: ?owner=7 from the URL, role resolved against the
+    // signed-in user, which the server's caller_role then confirms.
+    const theirs = ProjectRef(name: 'Japan', ownerId: 7, role: 'editor');
+    const ownKey = 'project_ui_state_Japan';
+    final ownState = jsonEncode({
+      'activityTypes': ['hike'],
+      'selectedDay': _day1,
+      'selectedActivityId': '2',
+    });
+
+    _Service myJapan() => _Service(
+        _Trip()
+          ..activities.add({
+            'id': 2,
+            'name': 'Temple hike',
+            'type': 'Hike',
+            'start_date_local': '${_day1}T14:00:00',
+          }),
+        name: 'Japan',
+        callerRole: 'owner');
+    // Theirs has no hikes, so a restore of your state would prune 'hike'.
+    _Service theirJapan() =>
+        _Service(_Trip(), name: 'Japan', callerRole: 'editor');
+
+    test('opening theirs leaves your saved filter and selection alone',
+        () async {
+      SharedPreferences.setMockInitialValues({ownKey: ownState});
+
+      final shared = await _loaded(theirJapan(), ref: theirs);
+      expect(shared.hasActiveFilter, isFalse,
+          reason: 'your filter is not theirs to apply');
+      expect(shared.selectedActivityId, isNull);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(ownKey), ownState);
+
+      final own = await _loaded(myJapan(), ref: mine);
+      expect(own.activityTypeFilter, {'hike'});
+      expect(own.selectedActivityId, '2');
+    });
+
+    test('and theirs keeps state of its own, under its owner', () async {
+      SharedPreferences.setMockInitialValues({ownKey: ownState});
+      final service = theirJapan();
+
+      final shared = await _loaded(service, ref: theirs);
+      shared.setFilters(activityTypes: {'ride'});
+      shared.selectActivity(1);
+      await pumpEventQueue();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(ownKey), ownState);
+      expect(prefs.getString('project_ui_state_7:Japan'), contains('ride'));
+
+      final again = await _loaded(service, ref: theirs);
+      expect(again.activityTypeFilter, {'ride'});
+      expect(again.selectedActivityId, '1');
+    });
+
+    test('your own trip opened from the projects list is still your own trip',
+        () async {
+      // The list gives your own entries your id as owner_id, so from there the
+      // trip opens as ?owner=<you>; from a deep link it opens without. Both
+      // must find the state saved under the key own trips have always used.
+      SharedPreferences.setMockInitialValues({ownKey: ownState});
+
+      final own = await _loaded(myJapan(),
+          ref: const ProjectRef(name: 'Japan', ownerId: 3));
+
+      expect(own.activityTypeFilter, {'hike'});
+      expect(own.selectedActivityId, '2');
+    });
+
+    test('state an own trip saved before the key changed still restores',
+        () async {
+      SharedPreferences.setMockInitialValues({ownKey: ownState});
+
+      final own = await _loaded(myJapan(), ref: mine);
+
+      expect(own.activityTypeFilter, {'hike'});
+      expect(own.selectedDay, _day1);
+      expect(own.selectedActivityId, '2');
+    });
+  });
+
+  group('an offline load', () {
+    // Offline, the trip is the cached /meta snapshot, which local edits do not
+    // refresh. Set a night to Camping, tick the Camping filter, then open the
+    // trip with no network: the snapshot predates the Camping night, and
+    // pruning against it would delete a filter that is still good.
+    setUp(projectDataCache.resetForTest);
+
+    test('keeps a filter the snapshot does not hold, and never saves the loss',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        _key: jsonEncode({
+          'sleeping': ['Camping'],
+          'selectedDay': _day1,
+        }),
+      });
+      final service = _Service(_Trip()); // the snapshot: no Camping night
+      projectDataCache.onMetaFetched(_ref, service._payload());
+      service.offline = true;
+
+      final notifier = await _loaded(service);
+
+      expect(notifier.offlineFromCache, isTrue);
+      expect(notifier.sleepingFilter, {'Camping'});
+      expect((await _stored())['sleeping'], ['Camping']);
+
+      // The next selection change saves whatever is in memory.
+      notifier.selectDay(_day2);
+      await pumpEventQueue();
+      expect((await _stored())['sleeping'], ['Camping'],
+          reason: 'a pruned in-memory set would be written here');
+
+      // Back online, where the Camping night is.
+      service.offline = false;
+      service.trip.dayMeta[_day2] = {'sleeping': 'Camping'};
+      await notifier.load(_ref);
+      await pumpEventQueue();
+
+      expect(notifier.offlineFromCache, isFalse);
+      expect(notifier.sleepingFilter, {'Camping'});
+      expect(notifier.selectedDays, {_day2});
+    });
+
+    test('and an online load after it still prunes what is really gone',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        _key: jsonEncode({
+          'sleeping': ['Camping'],
+        }),
+      });
+      final service = _Service(_Trip());
+      projectDataCache.onMetaFetched(_ref, service._payload());
+      service.offline = true;
+      final notifier = await _loaded(service);
+      expect(notifier.sleepingFilter, {'Camping'});
+
+      service.offline = false;
+      await notifier.load(_ref);
+      await pumpEventQueue();
+
+      expect(notifier.sleepingFilter, isEmpty);
+      expect((await _stored())['sleeping'], isEmpty);
     });
   });
 }

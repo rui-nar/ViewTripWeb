@@ -78,6 +78,31 @@ void main() {
     await _untick(tester, notifier, section: 'Sleeping mode', chip: 'Camping');
   });
 
+  testWidgets("a stale sleeping mode goes before 'No data', which stays last",
+      (tester) async {
+    List<String?> chipLabels() => tester
+        .widgetList<FilterChip>(find.byType(FilterChip))
+        .map((c) => (c.label as Text).data)
+        .toList();
+
+    // One hotel night and one unset: the trip offers [Hotel, No data].
+    final notifier = _notifier()
+      ..dayMeta['2026-06-02'] = <String, dynamic>{}
+      ..setFilters(sleeping: {'Camping'});
+    await _pumpSheet(tester, notifier);
+
+    // Sleeping mode comes first on this trip (no tags); Ride is the type.
+    expect(chipLabels(), ['Hotel', 'Camping', 'No data', 'Ride']);
+
+    // And a stale 'No data' itself — every night now set — still goes last.
+    notifier
+      ..dayMeta['2026-06-02'] = {'sleeping': 'Hostel'}
+      ..setFilters(sleeping: {'Camping', 'No data'});
+    await tester.pumpAndSettle();
+
+    expect(chipLabels(), ['Hostel', 'Hotel', 'Camping', 'No data', 'Ride']);
+  });
+
   testWidgets('a transport filter keeps its section on a trip with none left',
       (tester) async {
     // The trip holds no segments at all, so the section used to vanish whole.
@@ -99,6 +124,10 @@ void main() {
       (tester) async {
     await _pumpSheet(tester, _notifier());
 
+    // The sheet did build: what the trip holds is on screen.
+    expect(find.text('Filter'), findsOneWidget);
+    expect(find.text('Sleeping mode'), findsOneWidget);
+    expect(find.text('Activity type'), findsOneWidget);
     expect(find.text('Tags'), findsNothing);
     expect(find.text('Transportation'), findsNothing);
   });

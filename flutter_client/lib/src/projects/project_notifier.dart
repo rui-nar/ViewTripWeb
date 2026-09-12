@@ -712,15 +712,34 @@ class ProjectNotifier extends ChangeNotifier
   // shared_preferences, keyed per project so switching projects on this
   // (singleton, manage-mode) notifier doesn't cross-write between them.
 
-  static String _uiStateKey(String projectName) => 'project_ui_state_$projectName';
+  /// Where [ref]'s UI state lives. Every read and write goes through here.
+  ///
+  /// A trip name is unique per owner, not globally, so a trip shared with you
+  /// can carry the same name as one of your own — likely, for a companion's
+  /// copy of the same holiday (#106). Keyed by name alone, opening theirs
+  /// restored *your* saved filters and selection, pruned them against *their*
+  /// data, and wrote the loss back over your trip's state (#409 review).
+  ///
+  /// A shared trip is therefore keyed by its owner as well. Your own trips keep
+  /// the name-only key they have always used, so state saved before this
+  /// change still restores. "Own" is decided by the role, not by [ownerId]
+  /// being null: the projects list gives your own entries your id as
+  /// `owner_id`, so your own trip is opened as `?owner=<you>` from there and
+  /// without it from elsewhere, and the role — the server's `caller_role` by
+  /// the time anything is restored — is what says both are the same trip.
+  static String _uiStateKey(ProjectRef ref) =>
+      ref.ownerId == null || ref.isOwner
+          ? 'project_ui_state_${ref.name}'
+          : 'project_ui_state_${ref.ownerId}:${ref.name}';
 
   @override
   void saveUiState() => unawaited(_saveUiState());
 
   Future<void> _saveUiState() async {
-    final name = projectName;
-    if (name == null) return;
+    final ref = this.ref;
+    if (ref == null) return;
     try {
+      final key = _uiStateKey(ref);
       final data = <String, dynamic>{
         'selectedDay': selectedDay,
         'selectedActivityId': selectedActivityId?.toString(),
@@ -733,7 +752,7 @@ class ProjectNotifier extends ChangeNotifier
         'sources': filters.sources.toList(),
       };
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_uiStateKey(name), jsonEncode(data));
+      await prefs.setString(key, jsonEncode(data));
     } catch (_) {
       // Best-effort only — this is fire-and-forget from every selection/filter
       // mutator, so a plugin/storage failure here must never surface as an
@@ -749,17 +768,16 @@ class ProjectNotifier extends ChangeNotifier
   Future<void> _restoreUiState(int token) async {
     final ref = this.ref;
     if (ref == null) return;
-    final name = ref.name;
     try {
       final prefs = await SharedPreferences.getInstance();
       // issue #283: also reject a same-ref load that superseded this one
       // while awaiting prefs, which a bare ref comparison can't detect.
       if (!_isCurrent(token, ref)) return;
-      final raw = prefs.getString(_uiStateKey(name));
+      final raw = prefs.getString(_uiStateKey(ref));
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
-      final pruned = restoreFilters(ProjectFilters(
+      final saved = ProjectFilters(
         tags: (data['tags'] as List?)?.cast<String>().toSet() ?? const {},
         sleeping:
             (data['sleeping'] as List?)?.cast<String>().toSet() ?? const {},
@@ -770,7 +788,15 @@ class ProjectNotifier extends ChangeNotifier
         // Absent from state saved before the source filter existed, which the
         // ?? handles: an older payload restores with no source constraint.
         sources: (data['sources'] as List?)?.cast<String>().toSet() ?? const {},
-      ));
+      );
+      // Offline, the trip is a cached /meta snapshot that local edits do not
+      // refresh (saveDayMeta never touches it), so "the trip no longer holds
+      // it" cannot be told from "the snapshot predates it". Pruning against it
+      // would drop a filter that is still good, and not only for this session:
+      // skipping just the write-back is not enough, because the next selection
+      // change saves the pruned in-memory set anyway. A stale value restored
+      // here still has its chip in the sheet, and the next online load prunes.
+      final pruned = restoreFilters(saved, prune: !offlineFromCache);
 
       final savedDay = data['selectedDay'] as String?;
       if (savedDay != null && dayMeta.containsKey(savedDay)) {

@@ -163,7 +163,16 @@ mixin ProjectFilterMixin on ChangeNotifier {
   /// Returns true when it dropped something from [restored], so the caller can
   /// write the pruned set back: left on disk, a stale value re-applies itself
   /// the next time the trip gains matching data again.
-  bool restoreFilters(ProjectFilters restored) {
+  ///
+  /// [prune] false applies [restored] verbatim and returns false — for data
+  /// that cannot be trusted to say what the trip holds (an offline snapshot).
+  bool restoreFilters(ProjectFilters restored, {bool prune = true}) {
+    if (!prune) {
+      _filters = restored;
+      _recomputeSelectedDays();
+      return false;
+    }
+
     // A value the trip no longer holds is dropped rather than applied, in every
     // dimension. Filter a trip to hikes and delete the last hike: the saved
     // 'hike' would match no day and empty the list, and the sheet, which
