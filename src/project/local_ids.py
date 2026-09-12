@@ -27,14 +27,27 @@ from sqlmodel import Session
 
 from models.project_db import DBActivity
 
-#: Bits of randomness in a local id. 62 keeps the value inside a signed 64-bit
-#: column with room to negate, and makes a collision between two independently
-#: generated ids about as likely as a hash collision — which is the property the
-#: decrementing scheme lacked once ids travelled between deployments.
-_LOCAL_ID_BITS = 62
+#: Bits of randomness in a local id. The ceiling is not the database column —
+#: that would take 62 — it is JavaScript. The web client is compiled with
+#: dart2js, where Dart's ``int`` IS an IEEE-754 double, so an id beyond
+#: 2^53 is silently rounded the moment ``jsonDecode`` sees it. The client then
+#: sends the rounded value back on every edit, split and delete, and the server
+#: answers 404 for an activity that plainly exists on screen.
+#:
+#: 53 bits keeps every id inside ``Number.MAX_SAFE_INTEGER`` (2^53 - 1), and
+#: still leaves the collision probability negligible: n ids collide with odds
+#: about n^2 / 2^54, which is one in eighteen million at a million local
+#: activities — against the decrementing scheme it replaces, which handed out
+#: -1, -2, -3 in every deployment and so collided with certainty once a
+#: ``.viewtrip`` crossed between two.
+#:
+#: Android and iOS carry real 64-bit ints and would not have noticed. The web
+#: client is where this bites, and GPX import has been drawing 62-bit ids since
+#: it shipped — so this is a fix, not only a precaution.
+_LOCAL_ID_BITS = 53
 
 #: How many times to re-draw before giving up. Each attempt is an independent
-#: 1-in-2^62 shot at an existing row, so exhausting five means something is
+#: 1-in-2^53 shot at an existing row, so exhausting five means something is
 #: wrong with the session, not with luck.
 _ALLOCATION_ATTEMPTS = 5
 
@@ -74,6 +87,13 @@ def track_fingerprint(points: Iterable[Tuple[float, float]],
     one is known. Geometry alone would call two laps of the same loop the same
     activity; the start time separates them while still matching the same file
     imported twice.
+
+    That start time is whatever the importer was given, which today is typed by
+    the user — so the same file imported twice with a mistyped time is NOT
+    recognised, and lands as a second activity. Deliberate: the alternative,
+    ignoring time, merges a planned route genuinely ridden on two days. Unit 3
+    takes the time from the file where it has one, which narrows the gap to
+    files that carry none.
 
     Elevation is deliberately excluded. It is the part of a track most likely to
     be rewritten after import — by an edit, or by the dropout repair in

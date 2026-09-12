@@ -66,9 +66,22 @@ class TestAllocateLocalActivityId:
         with pytest.raises(LocalIdExhausted):
             allocate_local_activity_id(sess)
 
-    def test_stays_inside_a_signed_64_bit_column(self, sess):
-        for _ in range(50):
-            assert allocate_local_activity_id(sess) > -(2 ** 63)
+    def test_stays_inside_javascript_safe_integer_range(self, sess):
+        """The binding constraint is not the database column, it is dart2js.
+
+        Dart's ``int`` compiles to an IEEE-754 double on web, so an id past
+        2^53 is rounded by ``jsonDecode`` before the client ever sees it. The
+        client sends that rounded value back on every edit, split and delete,
+        and the server 404s an activity the user is looking at. A 62-bit draw
+        lands outside the safe range about 998 times in 1000.
+        """
+        safe = 2 ** 53 - 1                      # Number.MAX_SAFE_INTEGER
+        for _ in range(200):
+            activity_id = allocate_local_activity_id(sess)
+            assert abs(activity_id) <= safe
+            assert int(float(activity_id)) == activity_id, (
+                "id does not survive a round trip through a double"
+            )
 
 
 class TestTrackFingerprint:
