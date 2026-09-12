@@ -380,8 +380,14 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     return Scaffold(
       appBar: AppBar(
         title: LayoutBuilder(builder: (context, constraints) {
+          final name = '${widget.activity['name'] ?? 'Activity'}';
           final title = Text(
-            'Edit — ${widget.activity['name'] ?? 'Activity'}',
+            // On a phone "Edit — " spent much of the little room there is on
+            // what Save, the point handles and the hint below already say; the
+            // name is what tells one track from another (#407). A screen reader
+            // still hears the whole title.
+            compact ? name : 'Edit — $name',
+            semanticsLabel: 'Edit — $name',
             style: theme.textTheme.titleMedium,
             overflow: TextOverflow.ellipsis,
           );

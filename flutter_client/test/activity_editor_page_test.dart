@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -276,7 +277,7 @@ void main() {
 
       final badgeShown =
           find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isNotEmpty;
-      final nameWidth = tester.getSize(find.textContaining('Edit —')).width;
+      final nameWidth = tester.getSize(find.textContaining('Test Ride')).width;
 
       expect(tester.takeException(), isNull,
           reason: 'the AppBar overflowed at $width px');
@@ -487,6 +488,56 @@ void main() {
         expect(tester.getSize(title).width, greaterThanOrEqualTo(2 * glyph),
             reason: 'the title was squeezed out at $width px (id $id)');
       }
+    }
+  });
+
+  testWidgets('on a phone the title spends its room on the name',
+      (tester) async {
+    // Room for the title is not room for the name: at 320 px the title got
+    // 55 px once Reset moved out, and "Edit — " in front of the name took all
+    // of it. So the name's share is the title's width less whatever text sits
+    // in front of the name, measured at its natural width in the same style:
+    // chrome counts against the title, not for it.
+    final semantics = tester.ensureSemantics();
+
+    for (final width in phoneWidths) {
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(tester, _activity(edited: true)..['name'] = longName,
+          _RecordingNotifier(),
+          size: Size(width, 900));
+
+      final title = find.textContaining(longName);
+      final para = tester.renderObject<RenderParagraph>(
+          find.descendant(of: title, matching: find.byType(RichText)));
+      final text = para.text.toPlainText();
+      final before = TextPainter(
+        text: TextSpan(
+            text: text.substring(0, text.indexOf(longName)),
+            style: para.text.style),
+        textDirection: TextDirection.ltr,
+        textScaler: para.textScaler,
+      )..layout();
+      final nameRoom = para.size.width - before.width;
+      before.dispose();
+      final glyph = tester.widget<Text>(title).style!.fontSize!;
+      expect(nameRoom, greaterThanOrEqualTo(2 * glyph),
+          reason: 'the name itself got no room at $width px');
+      // What the eye loses, the ear keeps.
+      expect(find.bySemanticsLabel('Edit — $longName'), findsOneWidget,
+          reason: 'at $width px');
+    }
+
+    semantics.dispose();
+  });
+
+  testWidgets('from 720 px the title still reads "Edit — name"',
+      (tester) async {
+    for (final width in [720.0, 1200.0]) {
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(tester, _activity(edited: true), _RecordingNotifier(),
+          size: Size(width, 900));
+      expect(find.text('Edit — Test Ride'), findsOneWidget,
+          reason: 'at $width px');
     }
   });
 
