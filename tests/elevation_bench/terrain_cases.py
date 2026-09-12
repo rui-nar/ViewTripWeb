@@ -210,26 +210,29 @@ WATCH = [
         "terrain-watch-model-err-corr", "flat, model error 1 m over 500 m",
         ter.flat_plain, {"post_sigma_m": 1.0, "error_length_m": 500.0},
         note="give the model its own error and the verdict stops being "
-             "reliable: across the five seeds the flat group reaches 6.39 m of "
-             "apparent relief and the relief group falls to 4.38, so they "
-             "overlap and no threshold orders them"),
+             "reliable -- see the table on _relief. At this size and length "
+             "the flat side is still clean (0.0% of windows misread) but the "
+             "relief side is not: a drag's no-op survives 20 of 40 seeds"),
     TerrainCase(
         "terrain-watch-model-err-window-scale", "drag, model error at 300 m",
         ter.steady_grade, {"post_sigma_m": 1.0, "error_length_m": 300.0},
-        note="where the RELIEF verdict fails: a drag's no-op survives 40/40 "
-             "seeds with a perfect model, 32/40 at 100 m, 26/40 at 300 m, "
-             "34/40 at 500 m, 40/40 by 1500 m. Error near the window's own "
-             "scale is a slope that cancels the terrain's. (The earlier note "
-             "said 200 m and quoted 5 seeds; at 40 it is 300 m)"),
+        note="where the RELIEF verdict fails hardest: a drag's no-op "
+             "survives 40/40 seeds with a perfect model, 8/40 at 100 m, 7/40 "
+             "here, 20/40 at 500 m, 40/40 by 1500 m. Error correlated near the "
+             "window's own scale is a slope that cancels the terrain's. (Two "
+             "earlier versions of this note put the trough at 200 m and quoted "
+             "26/40 -- the first from five seeds, the second through an error "
+             "field damped to 0.66 of its nominal amplitude)"),
     TerrainCase(
         "terrain-watch-model-err-indep", "flat, INDEPENDENT 1.5 m per post",
         ter.flat_plain, {"post_sigma_m": 1.5},
         note="where the FLAT verdict fails. A range cannot average error "
              "away — more excursions inside a window push its max and min "
              "further apart — so short-correlation error inflates flat "
-             "ground's reading to 5.62 m. 13-18 of 40 windows then read "
-             "relief on level ground and the oracle leaves 135-170 m of the "
-             "285 m it should have removed"),
+             "ground's reading. 32-37 of 40 windows read relief on level "
+             "ground (82.9% over 40 seeds) and the oracle leaves 244-268 m of "
+             "the 285 it should have removed. Even at sigma 1.0 it is 25%, "
+             "and 9-12 windows, leaving 118-141 m"),
     TerrainCase(
         "terrain-watch-subthreshold-rollers", "4 m/300 m rollers, sparse white",
         lambda: ter.rollers(300.0, 2.0),
@@ -238,12 +241,13 @@ WATCH = [
              "and the model's own series reports 194-199 of it -- but under "
              "the 5 m threshold per window, so the model is substituted and "
              "then SMOOTHED AND BANDED with the recording's, which steps "
-             "carrying no sensor error deserve neither. The span is the larger "
-             "term: 2.95 m of sigma at 40 m spacing caps it at 240 m, and a "
-             "240 m mean over a 300 m wave removes ~88% before the band sees "
-             "anything. Reports 0. And on gentler terrain it is WORSE than "
-             "what ships -- 6 m/4000 m rollers: ships 17, oracle 0 -- so this "
-             "is a regression, not only a missed opportunity. #412"),
+             "carrying no sensor error deserve neither. BOTH terms are "
+             "individually fatal, which is why the fix is not one of them: of "
+             "the model's own 194-199, the recording's 240 m span alone leaves "
+             "19-26, and its 5.5 m band alone leaves 0. Reports 0. And on "
+             "gentler terrain it is WORSE than what ships -- 6 m/4000 m "
+             "rollers: ships 7-29, oracle 0 on every seed -- so this is a "
+             "regression, not only a missed opportunity. #412"),
 ]
 
 ALL = FIXED + NO_OP + WATCH

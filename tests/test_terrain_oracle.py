@@ -237,3 +237,56 @@ def test_distances_are_optional():
     assert got < elevation_gain(track.recorded), (
         "even without a distance axis the phantom climb must come down"
     )
+
+
+def test_the_model_error_field_is_reproducible():
+    """Golden values, because a fixture that redraws itself is not a fixture.
+
+    `terrain_model`'s error was once keyed on ``hash(("phase", seed))``. Any
+    hash of a value containing a str takes Python's PER-PROCESS salt, so the
+    same seed drew a different field on every run: nothing failed, no test
+    flaked — the WATCH rows are printed rather than asserted — and every figure
+    measured from it went into a docstring as though it were reproducible. It
+    took an outside reviewer running `python -m tests.elevation_bench` twice to
+    notice.
+
+    These constants are that bug's tripwire. If they move, either the field's
+    construction changed deliberately — in which case re-derive every figure in
+    `_relief`'s docstring and in the WATCH notes, because they all come from
+    this field — or a salted hash has crept back in.
+    """
+    correlated = ter.track_over(
+        ter.flat_plain(), seed=3, post_sigma_m=1.0, error_length_m=500.0)
+    independent = ter.track_over(ter.flat_plain(), seed=3, post_sigma_m=1.5)
+
+    assert [round(v, 6) for v in (correlated.terrain[0],
+                                  correlated.terrain[1000],
+                                  correlated.terrain[3999])] == [
+        101.010753, 100.626776, 101.220474]
+    assert [round(v, 6) for v in (independent.terrain[0],
+                                  independent.terrain[1000])] == [
+        98.453429, 101.215555]
+
+
+def test_the_error_amplitude_means_the_same_thing_in_every_row():
+    """`post_sigma_m` is what the TRACK sees, not a nominal knot deviation.
+
+    The model is read bilinearly from four posts, and the blend damps the error
+    by an amount that depends on how correlated those posts are — independent
+    error lost about a quarter of its amplitude, error correlated over hundreds
+    of metres lost none. A correlation-length sweep at a fixed nominal sigma was
+    therefore partly an amplitude sweep, and read as a bigger effect than it is.
+    """
+    for kwargs in ({"post_sigma_m": 1.0},
+                   {"post_sigma_m": 1.0, "error_length_m": 45.0},
+                   {"post_sigma_m": 1.0, "error_length_m": 300.0},
+                   {"post_sigma_m": 1.0, "error_length_m": 1500.0}):
+        track = ter.track_over(ter.flat_plain(), seed=3, **kwargs)
+        mean = sum(track.terrain) / len(track.terrain)
+        deviation = (sum((v - mean) ** 2 for v in track.terrain)
+                     / len(track.terrain)) ** 0.5
+
+        assert deviation == pytest.approx(1.0, abs=0.02), (
+            f"{kwargs} gives the track {deviation:.3f} m of model error where "
+            f"1.0 was asked for"
+        )

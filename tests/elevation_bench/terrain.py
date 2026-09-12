@@ -200,21 +200,39 @@ def terrain_model(surface: Surface, post_m: float = MODEL_POST_M,
         # bilinearly: an error field that varies over that distance instead of
         # per post.
         #
-        # Offset by a per-seed fraction of a cell. Without it the field's knots
-        # sit at exact multiples of ``error_length_m`` from x=0 and so do the
-        # oracle's windows, so at error_length_m == window_m every window is
-        # exactly one linear ramp of error — an alignment no real tileset has,
-        # and one that would decide a correlation-length sweep on its own.
+        # Offset by a per-seed fraction of a cell, INDEPENDENTLY in x and y.
+        # Without it the field's knots sit at exact multiples of
+        # ``error_length_m`` from x=0 and so do the oracle's windows, so at
+        # error_length_m == window_m every window is exactly one linear ramp of
+        # error — an alignment no real tileset has, and one that decides a
+        # correlation-length sweep on its own.
+        #
+        # The key is ints only. ``hash`` of anything containing a str takes
+        # Python's per-process salt, so keying this on ``("phase", seed)`` made
+        # the whole fixture non-deterministic BETWEEN RUNS: the same seed drew a
+        # different field each time, and every figure measured from it was one
+        # draw of a salt nobody recorded.
         cells = error_length_m / post_m
-        phase = ((hash(("phase", seed)) & 0xFFFF) + 0.5) / 65536.0
-        gx, gy = ix / cells + phase, iy / cells + phase
+        phase_x = ((hash((seed, 0x5F3A)) & 0xFFFF) + 0.5) / 65536.0
+        phase_y = ((hash((seed, 0xA77B)) & 0xFFFF) + 0.5) / 65536.0
+        gx, gy = ix / cells + phase_x, iy / cells + phase_y
         cx, cy = math.floor(gx), math.floor(gy)
         fx, fy = gx - cx, gy - cy
-        return post_sigma_m * (
-            _draw(cx, cy) * (1 - fx) * (1 - fy)
-            + _draw(cx + 1, cy) * fx * (1 - fy)
-            + _draw(cx, cy + 1) * (1 - fx) * fy
-            + _draw(cx + 1, cy + 1) * fx * fy)
+        weights = ((1 - fx) * (1 - fy), fx * (1 - fy),
+                   (1 - fx) * fy, fx * fy)
+        # Normalise by the weight norm. Bilinear read-back of independent knots
+        # has variance sum(w^2), which swings between 1 (on a knot) and 0.25
+        # (dead centre) — so without this, "sigma 1 m" means a different
+        # amplitude at every sample, each row of a correlation-length sweep is
+        # measured at a different effective sigma, and the rows are not
+        # comparable. Measured along-track before this: 0.64-0.67 against a
+        # nominal 1.0.
+        norm = math.sqrt(sum(w * w for w in weights)) or 1.0
+        return post_sigma_m / norm * (
+            _draw(cx, cy) * weights[0]
+            + _draw(cx + 1, cy) * weights[1]
+            + _draw(cx, cy + 1) * weights[2]
+            + _draw(cx + 1, cy + 1) * weights[3])
 
     def read(x: float, y: float) -> float:
         gx, gy = x / post_m, y / post_m
@@ -308,8 +326,11 @@ def track_over(
     ys_noisy = [y + d for y, d in zip(ys_true, north)]
     xs_path, ys_path = smooth_path(xs_noisy, ys_noisy, path_smooth_m, spacing_m)
 
-    model = terrain_model(surface, post_sigma_m=post_sigma_m, seed=seed + 7,
-                          error_length_m=error_length_m)
+    model = terrain_model(
+        surface, seed=seed + 7, error_length_m=error_length_m,
+        post_sigma_m=_calibrated_post_sigma(
+            surface, post_sigma_m, error_length_m, seed + 7,
+            list(zip(xs_path, ys_path))))
     terrain = [model(x, y) for x, y in zip(xs_path, ys_path)]
     ceiling_series = [model(x, y) for x, y in zip(xs_true, ys_true)]
 
@@ -397,6 +418,42 @@ def track_over_segments(
         true_gain=positive_sum(z_true),
         model_ceiling=elevation_gain(ceiling, distances_km),
     )
+
+
+def _calibrated_post_sigma(
+    surface: Surface, target_m: float, error_length_m: float, seed: int,
+    points: List[Tuple[float, float]],
+) -> float:
+    """Scale the post error so the track SEES ``target_m`` of deviation.
+
+    Without this the table's sigma axis means a different thing in every row.
+    The model is read bilinearly from four posts, and what that does to the
+    error's amplitude depends on how correlated the posts are: independent post
+    error is damped by the blend to about 0.72 of its nominal size, while error
+    correlated over hundreds of metres passes through undamped because the four
+    posts carry nearly the same value. Rows measured at a nominal sigma are then
+    measured at different real amplitudes, and the correlation-length sweep
+    reads partly as an amplitude sweep.
+
+    So calibrate empirically rather than analytically: the exact factor depends
+    on the correlation length, and the two closed forms (sqrt(sum w^2) and 1)
+    are only the limits. Build the field once at unit sigma, measure what the
+    track actually sees, and scale. The axis then means the quantity unit 2 will
+    measure on real tiles — the deviation along the path, not a spec sheet's.
+    """
+    if target_m <= 0.0:
+        return 0.0
+    probe = terrain_model(surface, post_sigma_m=1.0, seed=seed,
+                          error_length_m=error_length_m)
+    clean = terrain_model(surface, post_sigma_m=0.0, seed=seed,
+                          error_length_m=error_length_m)
+    # Along the path the track actually reads, not the true line: a smoothed
+    # noisy path wanders across posts, and for independent post error that
+    # changes the amplitude it sees by over a tenth.
+    errors = [probe(x, y) - clean(x, y) for x, y in points]
+    mean = sum(errors) / len(errors)
+    measured = math.sqrt(sum((e - mean) ** 2 for e in errors) / len(errors))
+    return target_m / measured if measured > 1e-9 else target_m
 
 
 def _ar1_from(start: Optional[float], count: int, sigma: float,

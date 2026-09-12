@@ -667,83 +667,66 @@ def _relief(window: List[float]) -> float:
     shallow valley   1.85 - 2.08
     ===============  ==============     ==========  ===========
 
-    **Give the model its own error and no threshold separates them.** At sigma
-    1 m correlated over 500 m the flat group reaches 6.39 (the valley) while the
-    relief group falls to 4.38 (the drag) — they overlap, so the verdict is
-    unreliable in both directions. This is not a threshold that wants retuning;
-    the groups are not ordered.
+    **Give the model its own error and the verdict stops being reliable.** Both
+    verdicts degrade, on BOTH axes — the error's size and its correlation length
+    — so this is one 2-D surface and not two stories. 40 seeds; sigma is what
+    the TRACK sees along the path it reads, calibrated per row, because the
+    bilinear read damps independent error by about a quarter and correlated
+    error not at all (a sweep at fixed nominal sigma is otherwise partly an
+    amplitude sweep, which is how an earlier version of this table came to
+    understate the flat column by 3x):
 
-    What governs it is the error's **correlation length against the window**,
-    and the two verdicts fail at opposite ends of it. Neither failure shows up
-    in the other's metric, which is why both columns are here. Sigma 1 m, 40
-    seeds, phase-offset error field:
+    ==============  ==================  ====================
+                    drag's no-op holds  flat windows reading
+    correlation     (of 40 seeds)       relief wrongly
+    --------------  ------------------  --------------------
+    length          s0.5  s1.0  s1.5    s0.5   s1.0    s1.5
+    ==============  ==================  ====================
+    perfect model     40    40    40    0.0%   0.0%    0.0%
+    independent       40    40    40    0.0%  25.0%   82.9%
+    45 m              40    37    38    0.0%   6.1%   59.6%
+    100 m             40     8     3    0.0%   1.2%   25.2%
+    300 m             39     7     0    0.0%   0.1%    4.1%
+    500 m             40    20     2    0.0%   0.0%    1.0%
+    1500 m            40    40    37    0.0%   0.0%    0.0%
+    ==============  ==================  ====================
 
-    ==============  ==============  ===============
-    correlation     drag's no-op    flat ground's
-    length          survives        worst reading
-    ==============  ==============  ===============
-    perfect model   40/40           0.00
-    independent     40/40           5.62  <- flat verdict lost
-    45 m            40/40           4.82
-    100 m           32/40           4.42
-    300 m           **26/40**       4.99  <- relief verdict lost
-    500 m           34/40           4.88
-    1500 m          40/40           1.18
-    3000 m          40/40           0.59  <- both hold
-    ==============  ==============  ===============
+    Read it as one surface:
 
-    The two verdicts fail on **independent axes**, which is what makes this
-    measurable rather than merely worrying:
+    * **At sigma 0.5 everything holds** — 39-40 of 40 and 0.0% in every cell.
+      **That is the tolerance this design has, and it is the number that
+      matters.**
+    * **By sigma 1.0 both verdicts are in trouble, at opposite ends.** The
+      relief verdict collapses where the error correlates near the window — 8 of
+      40 at 100 m, 7 at 300 m — because a correlated slope inside a window
+      cancels the terrain's. The flat verdict fails at the short end instead,
+      25% of windows misreading under independent error: a range cannot average
+      excursions away, so the more a window holds the further apart its extremes.
+    * Only error correlated over several times the window is benign both ways,
+      because within one window that is a constant offset a range subtracts out.
 
-    * The **relief** verdict is governed by correlation LENGTH, as above. Error
-      near the window's own scale is a slope that adds to or cancels the
-      terrain's; the trough is broad, roughly half to one window, and only error
-      correlated over several times the window is benign, because inside one
-      window that is a constant offset a range subtracts out. A range cannot
-      average anything away — the more excursions a window holds, the further
-      apart its extremes — so nothing is gained at the short end either.
-    * The **flat** verdict is governed by the error's SIZE, and it has a knee.
-      Windows that wrongly read relief on genuinely flat ground, over 40 seeds
-      (1600 windows), with independent per-post error:
+    Neither axis "governs" a verdict: the relief column moves 40 -> 8 -> 3 with
+    sigma alone at 100 m, and the flat column moves 82.9% -> 4.1% -> 0.0% with
+    length alone at sigma 1.5. Earlier versions of this docstring told a tidier
+    story three times running — a 0.2 m margin from one seed, then "correlated
+    error mostly cancels", then "independent axes" — and each was a
+    simplification the data did not support.
 
-      ======  =====================  ====================
-      sigma   windows misreading     oracle's figure on
-              flat ground            flat ground (true 0)
-      ======  =====================  ====================
-      0       0.0%                   0
-      1.0     0.7%                   37-62
-      1.2     8.1%                   57-109
-      1.5     37.2%                  129-197
-      ======  =====================  ====================
+    So the number to measure is the **effective within-window error of a real
+    tileset over known-flat ground**, against a tolerance of about 0.5 m. It
+    cannot be inferred from the spec sheet, which is worth spelling out because
+    the arithmetic looks like it works: Copernicus GLO-30 quotes a *relative*
+    vertical accuracy of 2 m LE90, and 2 / 1.645 is 1.2. Two reasons not to
+    believe that figure here — it is for slopes under 20% (4 m above, and the
+    cross-slope case in this benchmark is a 20% slope), and "relative accuracy"
+    is quoted over a baseline rather than between neighbouring posts, so most of
+    it is structure larger than a post and the within-window component is
+    smaller. 1.2 is an upper bound, and an upper bound is the pessimistic end.
 
-      Whether a real tileset sits above or below that knee is the single most
-      useful thing unit 2 can establish, and it is a property of the tileset
-      rather than of this code. **It cannot be inferred from the spec sheet**,
-      which is worth spelling out because the arithmetic looks like it works:
-      Copernicus GLO-30 quotes a *relative* vertical accuracy of 2 m LE90, and
-      2 / 1.645 is 1.2, which lands exactly on the knee above. Two reasons not
-      to believe that:
-
-      * That 2 m is for slopes under 20%; above 20% the figure is 4 m. The
-        cross-slope case in this very benchmark is a 20% slope.
-      * "Relative accuracy" is quoted over a baseline, not between one post and
-        its neighbour. Most of the 2 m is structure at scales larger than a
-        post, so the INDEPENDENT per-post component — the one the table above
-        varies — is smaller than 1.2, and partly correlated besides. 1.2 is an
-        upper bound on it, and the upper bound is the pessimistic end.
-
-      So the spec says the honest thing is to measure it: sample real tiles
-      along known-flat ground and read the per-window range directly, which is
-      the quantity this verdict actually depends on.
-
-    That is the same structure as the defect this whole issue is about — sensor
-    drift is inseparable from terrain exactly when their correlation lengths
-    match — reappearing one level up.
-
-    The window length is the obvious free parameter, but it is not a free fix:
-    lengthening it to save the drag (at 750 m the no-op holds everywhere)
-    enlarges what the "should read flat" cases show too, and the valley and
-    cross-slope then cross 5 m instead. Any change to it has to move the
+    The window length is the obvious free parameter, and it is not a free fix:
+    lengthening it to save the relief verdict (at 750 m the drag holds
+    everywhere) enlarges what the "should read flat" cases show too, and the
+    valley and cross-slope cross 5 m instead. Any change has to move the
     threshold with it, and both have to be re-measured against the table above.
 
     No statistic tried does better once model error is present: a trimmed range,
