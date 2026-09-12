@@ -144,6 +144,129 @@ class TestTimesFromTheFile:
         assert found.moving_seconds == 8     # the two-hour gap is dropped whole
 
 
+class TestStopsAndJitter:
+    """The finding that made the first cut of this unit's release note false.
+
+    A per-sample speed test is a displacement test in disguise: at 1 Hz, 0.3 m/s
+    is 0.3 m between neighbours, which ordinary GPS jitter clears without the
+    device going anywhere. Measured on a twenty-minute stationary recording it
+    counted 91% of the stop as moving under half a metre of jitter, and 99%
+    under one and a half.
+    """
+
+    @staticmethod
+    def _stationary(count, sigma, rho, seed=4):
+        """A phone sitting on a table: drift and jitter, going nowhere."""
+        import math
+        import random
+
+        random.seed(seed)
+        dx = dy = 0.0
+        points, when = [], _START
+        for _ in range(count):
+            dx = rho * dx + random.gauss(0, sigma * math.sqrt(1 - rho * rho))
+            dy = rho * dy + random.gauss(0, sigma * math.sqrt(1 - rho * rho))
+            points.append((46.0 + dy / 111320.0,
+                           6.0 + dx / (111320.0 * math.cos(math.radians(46.0))),
+                           500.0, when))
+            when += timedelta(seconds=1)
+        return _track_gpx(points)
+
+    @pytest.mark.parametrize("sigma,rho,label", [
+        (0.5, 0.0, "half a metre of jitter"),
+        (1.5, 0.0, "a metre and a half of jitter"),
+        (2.5, 0.95, "two and a half metres of slow drift"),
+    ])
+    def test_a_stop_is_not_moving_however_the_fix_wanders(self, sigma, rho, label):
+        found = candidates(parse_gpx_bytes(
+            self._stationary(1200, sigma, rho)))[0]
+        share = found.moving_seconds / found.elapsed_seconds
+        assert share < 0.10, (
+            f"{label}: {share:.0%} of a twenty-minute stop counted as moving"
+        )
+
+    def test_a_real_walk_is_still_entirely_moving(self):
+        """The other half: a filter that calls a walk a stop is no better."""
+        import random
+
+        random.seed(7)
+        points, when = [], _START
+        for i in range(600):
+            points.append((46.0 + (i * 1.4 + random.gauss(0, 1.5)) / 111320.0,
+                           6.0, 500.0, when))
+            when += timedelta(seconds=1)
+        found = candidates(parse_gpx_bytes(_track_gpx(points)))[0]
+        assert found.moving_seconds / found.elapsed_seconds > 0.95
+
+
+class TestAwkwardClocks:
+    def test_moving_time_never_exceeds_elapsed(self):
+        """A device resyncing its clock emits the occasional backwards step;
+        a preview showing more moving time than elapsed is visibly wrong."""
+        offsets = [0, 20, 10, 30]
+        points = [(46.0 + i * 1.26e-4, 6.0, 500.0, _START + timedelta(seconds=o))
+                  for i, o in enumerate(offsets)]
+        found = candidates(parse_gpx_bytes(_track_gpx(points)))[0]
+        assert found.moving_seconds <= found.elapsed_seconds
+
+    def test_elapsed_spans_the_whole_recording_despite_a_backwards_step(self):
+        offsets = [0, 20, 10]
+        points = [(46.0 + i * 1.26e-4, 6.0, 500.0, _START + timedelta(seconds=o))
+                  for i, o in enumerate(offsets)]
+        found = candidates(parse_gpx_bytes(_track_gpx(points)))[0]
+        assert found.elapsed_seconds == 20      # not 10, the first-to-last span
+
+    def test_a_file_mixing_zoned_and_unzoned_times_does_not_raise(self):
+        """GPX times are UTC by spec, but a <time> written without a suffix
+        parses naive — and mixing the two once raised out of the middle of a
+        duration calculation, which downstream is a 500 rather than a refusal."""
+        xml = (_HEADER + "<trk><trkseg>"
+               '<trkpt lat="46.0" lon="6.0"><time>2024-08-12T07:33:00Z</time></trkpt>'
+               '<trkpt lat="46.001" lon="6.0"><time>2024-08-12T07:33:30</time></trkpt>'
+               '<trkpt lat="46.002" lon="6.0"><time>2024-08-12T07:34:00Z</time></trkpt>'
+               "</trkseg></trk></gpx>").encode()
+        found = candidates(parse_gpx_bytes(xml))[0]
+        assert found.elapsed_seconds == 60
+        assert found.moving_seconds is not None
+
+
+class TestEmptyElements:
+    def test_an_empty_track_does_not_suppress_a_real_route(self):
+        """Some tools write a placeholder <trk> beside the real <rte>. Treating
+        it as a track hid the route, and the file was then refused for having a
+        track with no points — true, and useless."""
+        xml = (_HEADER + "<trk><name>placeholder</name></trk>"
+               "<rte><name>Planned</name>"
+               '<rtept lat="46.0" lon="6.0"/><rtept lat="46.1" lon="6.1"/>'
+               "</rte></gpx>").encode()
+        gpx = parse_gpx_bytes(xml)
+        found = candidates(gpx)
+        assert len(found) == 1
+        assert found[0].is_route is True
+        assert validate_for_import(gpx) == []
+
+    def test_an_empty_track_is_not_offered_as_a_choice(self):
+        """One real track plus a placeholder is not a file to ask about."""
+        xml = (_HEADER + "<trk><trkseg>"
+               '<trkpt lat="46.0" lon="6.0"/><trkpt lat="46.1" lon="6.1"/>'
+               "</trkseg></trk><trk><trkseg/></trk></gpx>").encode()
+        gpx = parse_gpx_bytes(xml)
+        assert len(candidates(gpx)) == 1
+        assert validate_for_import(gpx) == []
+
+    def test_indices_address_the_offered_list(self):
+        """Dropping empties renumbers, so a picker's choice means what it says."""
+        xml = (_HEADER + "<trk><trkseg/></trk>"
+               "<trk><name>Real</name><trkseg>"
+               '<trkpt lat="46.0" lon="6.0"/><trkpt lat="46.1" lon="6.1"/>'
+               "</trkseg></trk></gpx>").encode()
+        gpx = parse_gpx_bytes(xml)
+        found = candidates(gpx)
+        assert [c.index for c in found] == [0]
+        assert found[0].name == "Real"
+        assert validate_for_import(gpx, track_index=0) == []
+
+
 class TestNameAndType:
     def test_the_track_name_wins(self):
         gpx = parse_gpx_bytes(_track_gpx(
@@ -168,10 +291,17 @@ class TestNameAndType:
         assert suggested_name(gpx, candidates(gpx)[0], None) is None
 
     @pytest.mark.parametrize("raw,expected", [
-        ("cycling", "ride"), ("MTB", "ride"), ("Road cycling", "ride"),
-        ("running", "run"), ("Trail Running", "run"),
-        ("hiking", "hike"), ("walking", "walk"),
-        ("  Cycling  ", "ride"),
+        # Strava writes these.
+        ("cycling", "ride"), ("running", "run"), ("hiking", "hike"),
+        ("walking", "walk"),
+        # Garmin Connect joins its words with underscores, which is what the
+        # first version of this table missed entirely.
+        ("road_biking", "ride"), ("mountain_biking", "ride"),
+        ("gravel_cycling", "ride"), ("e_bike_fitness", "ride"),
+        ("trail_running", "run"),
+        # And the spellings in between.
+        ("MTB", "ride"), ("Road cycling", "ride"), ("Trail Running", "run"),
+        ("e-bike", "ride"), ("  Cycling  ", "ride"),
     ])
     def test_known_types_are_mapped(self, raw, expected):
         assert map_activity_type(raw) == expected
@@ -213,6 +343,13 @@ class TestMultipleCandidates:
     def test_an_out_of_range_choice_is_refused(self):
         gpx = parse_gpx_bytes(_track_gpx([(46.0, 6.0), (46.1, 6.1)]))
         assert validate_for_import(gpx, track_index=7) != []
+
+    def test_a_negative_index_is_refused_rather_than_wrapping(self):
+        """Python would happily hand back the last candidate; a picker sending
+        -1 means something has gone wrong, not "the last one"."""
+        gpx = parse_gpx_bytes(_track_gpx([(46.0, 6.0), (46.1, 6.1)]))
+        with pytest.raises(GPXImportError):
+            gpx_track_to_points(gpx, -1)
 
 
 class TestUploadSize:

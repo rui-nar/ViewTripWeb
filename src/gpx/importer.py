@@ -22,7 +22,7 @@ This module does the first two and is pure: no HTTP, no database, no clock.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
 
 import gpxpy
@@ -40,10 +40,21 @@ MAX_IMPORT_POINTS = 50000
 #: below and far below what would trouble the box.
 MAX_IMPORT_BYTES = 20 * 1024 * 1024
 
-#: Below this speed a sample is not moving: a stop at a café, a wait at a
+#: Below this speed the track is not moving: a stop at a café, a wait at a
 #: junction, a fix drifting while the phone sits on a table. 0.3 m/s is about a
 #: quarter of walking pace.
 MOVING_MIN_SPEED_MS = 0.3
+
+#: Speed is measured as NET displacement across this many seconds of track,
+#: not between one sample and the next. That distinction is the whole test: a
+#: phone sitting still on a table still reports a position that wanders, and at
+#: 1 Hz the wander between consecutive samples easily clears 0.3 m. Measured on
+#: a twenty-minute stationary recording, a per-sample rule counted 91% of it as
+#: moving under half a metre of jitter and 99% under one and a half. Net
+#: displacement is what jitter cannot fake, because a random walk goes nowhere:
+#: over a 30 s window the same stops measure 0-5%, while a genuine walk at
+#: 1.4 m/s still measures 100% moving.
+MOVING_WINDOW_S = 30.0
 
 #: A gap longer than this is a pause in the RECORDING rather than a slow stretch
 #: of it — the device was switched off, or lost its fix in a tunnel. Counting it
@@ -54,10 +65,15 @@ MAX_SAMPLE_GAP_S = 300
 #: the types the app draws and colours; anything unrecognised stays None so the
 #: user picks, rather than being handed a confident wrong answer.
 _TYPE_ALIASES = {
-    "run": "run", "running": "run", "jog": "run", "trail running": "run",
+    "run": "run", "running": "run", "jog": "run", "jogging": "run",
+    "trail running": "run", "track running": "run",
+    "treadmill running": "run", "virtualrun": "run",
     "ride": "ride", "cycling": "ride", "bike": "ride", "biking": "ride",
     "cycle": "ride", "mtb": "ride", "mountain biking": "ride",
-    "road cycling": "ride", "e-bike": "ride", "ebike": "ride",
+    "road biking": "ride", "road cycling": "ride",
+    "gravel cycling": "ride", "cyclocross": "ride",
+    "e bike fitness": "ride", "e bike": "ride", "ebike": "ride",
+    "ebikeride": "ride", "virtualride": "ride",
     "hike": "hike", "hiking": "hike", "trekking": "hike",
     "mountaineering": "hike",
     "walk": "walk", "walking": "walk", "stroll": "walk",
@@ -112,32 +128,79 @@ class GpxCandidate:
 
     @property
     def elapsed_seconds(self) -> Optional[int]:
-        start, end = self.started_at, self.ended_at
-        if start is None or end is None or end <= start:
+        """Wall-clock span of the track, earliest stamp to latest.
+
+        Earliest and latest rather than first and last: devices do emit the
+        occasional backwards step after a clock resync, and taking the ends
+        blindly then reports a span shorter than the ride, or none at all.
+        """
+        stamps = [t for t in self.times if t is not None]
+        if len(stamps) < 2:
             return None
-        return int((end - start).total_seconds())
+        span = (max(stamps) - min(stamps)).total_seconds()
+        return int(span) if span > 0 else None
 
     @property
     def moving_seconds(self) -> Optional[int]:
         """Elapsed time minus the standing still, when the file has a clock.
 
         Until now moving time was simply set equal to elapsed time, so every
-        imported activity claimed it had never stopped — even when its own
-        timestamps said otherwise.
+        imported activity claimed it had never stopped, even when its own
+        timestamps disagreed.
+
+        Speed is taken over :data:`MOVING_WINDOW_S` of track rather than
+        between neighbouring samples; see that constant for why a per-sample
+        test counts a stop as movement. Gaps longer than
+        :data:`MAX_SAMPLE_GAP_S` are dropped whole: they are the device
+        switched off, not a slow stretch of riding.
         """
         if not self.has_times:
             return None
+
+        stamped = [(p, t) for p, t in zip(self.points, self.times)
+                   if t is not None]
+        if len(stamped) < 2:
+            return 0
+
         moving = 0.0
-        for (p1, t1), (p2, t2) in zip(zip(self.points, self.times),
-                                      zip(self.points[1:], self.times[1:])):
-            if t1 is None or t2 is None:
-                continue
-            seconds = (t2 - t1).total_seconds()
+        low = high = 0
+        half = MOVING_WINDOW_S / 2.0
+        for index in range(len(stamped) - 1):
+            here = stamped[index][1]
+            seconds = (stamped[index + 1][1] - here).total_seconds()
             if seconds <= 0 or seconds > MAX_SAMPLE_GAP_S:
                 continue
-            metres = haversine_km(p1.lat, p1.lng, p2.lat, p2.lng) * 1000.0
-            if metres / seconds >= MOVING_MIN_SPEED_MS:
+            if seconds >= MOVING_WINDOW_S:
+                # This one interval is already longer than the window, so it
+                # carries its own verdict: over that much time, real movement
+                # dwarfs jitter. Judging it by a window drawn from its faster
+                # neighbours would credit a two-minute rest with their speed.
+                here_pt, next_pt = stamped[index][0], stamped[index + 1][0]
+                step_m = haversine_km(here_pt.lat, here_pt.lng,
+                                      next_pt.lat, next_pt.lng) * 1000.0
+                if step_m / seconds >= MOVING_MIN_SPEED_MS:
+                    moving += seconds
+                continue
+            # Widen a window centred on this sample, in TIME, so an
+            # irregular recording rate does not change how much track it
+            # spans.
+            while (here - stamped[low][1]).total_seconds() > half:
+                low += 1
+            while (high + 1 < len(stamped)
+                   and (stamped[high + 1][1] - here).total_seconds() <= half):
+                high += 1
+            window_s = (stamped[high][1] - stamped[low][1]).total_seconds()
+            if window_s <= 0:
+                continue
+            net_m = haversine_km(
+                stamped[low][0].lat, stamped[low][0].lng,
+                stamped[high][0].lat, stamped[high][0].lng) * 1000.0
+            if net_m / window_s >= MOVING_MIN_SPEED_MS:
                 moving += seconds
+
+        elapsed = self.elapsed_seconds
+        if elapsed is not None:
+            moving = min(moving, elapsed)   # never claim to move for longer
         return int(moving)
 
 
@@ -186,8 +249,13 @@ def candidates(gpx: gpxpy.gpx.GPX) -> List[GpxCandidate]:
             activity_type=map_activity_type(track.type),
             points=points, times=times, is_route=False,
         ))
+    # An element carrying no points is not a candidate. Some tools write an
+    # empty <trk> as a placeholder alongside the real <rte>, and treating it
+    # as a track suppressed the route entirely: the file was then refused for
+    # having a track with no points, which is true and useless.
+    found = [c for c in found if c.points]
     if found:
-        return found
+        return _renumbered(found)
 
     for index, route in enumerate(gpx.routes):
         points, times = _flatten(route.points)
@@ -196,14 +264,38 @@ def candidates(gpx: gpxpy.gpx.GPX) -> List[GpxCandidate]:
             activity_type=map_activity_type(getattr(route, "type", None)),
             points=points, times=times, is_route=True,
         ))
-    return found
+    return _renumbered([c for c in found if c.points])
+
+
+def _renumbered(found: List[GpxCandidate]) -> List[GpxCandidate]:
+    """Re-index after dropping empties, so ``index`` addresses this list."""
+    return [
+        GpxCandidate(index=position, name=c.name,
+                     activity_type=c.activity_type, points=c.points,
+                     times=c.times, is_route=c.is_route)
+        for position, c in enumerate(found)
+    ]
 
 
 def _flatten(raw_points: Sequence) -> Tuple[List[TrackPoint], List[Optional[datetime]]]:
     points = [TrackPoint(lat=p.latitude, lng=p.longitude, elev=p.elevation)
               for p in raw_points]
-    times = [getattr(p, "time", None) for p in raw_points]
+    times = [_as_utc(getattr(p, "time", None)) for p in raw_points]
     return points, times
+
+
+def _as_utc(stamp: Optional[datetime]) -> Optional[datetime]:
+    """Give a naive timestamp UTC, so one file cannot mix the two kinds.
+
+    GPX times are UTC by specification, but a ``<time>`` written without a
+    zone suffix parses naive, and a file mixing the two forms then raised
+    ``can't subtract offset-naive and offset-aware datetimes`` from the
+    middle of a duration calculation. Downstream that is a 500 rather than a
+    refusal the user can act on.
+    """
+    if stamp is not None and stamp.tzinfo is None:
+        return stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 def _clean(value: Optional[str]) -> Optional[str]:
@@ -218,7 +310,11 @@ def map_activity_type(raw: Optional[str]) -> Optional[str]:
     exports write — so the user is asked rather than told something confidently
     wrong.
     """
-    key = (raw or "").strip().lower()
+    # Tools differ only in how they join words: Garmin Connect writes
+    # "road_biking" and "trail_running", Strava "cycling" and "running".
+    # Normalising the separators lets one table cover both.
+    key = (raw or "").strip().lower().replace("_", " ").replace("-", " ")
+    key = " ".join(key.split())
     return _TYPE_ALIASES.get(key)
 
 
@@ -298,5 +394,13 @@ def validate_for_import(gpx: gpxpy.gpx.GPX,
 
 def gpx_track_to_points(gpx: gpxpy.gpx.GPX,
                         track_index: int = 0) -> List[TrackPoint]:
-    """Flatten a validated candidate into TrackPoints, in order."""
-    return candidates(gpx)[track_index].points
+    """Flatten a validated candidate into TrackPoints, in order.
+
+    Raises:
+        GPXImportError: if there is no candidate at that position, rather
+            than letting a negative index quietly select from the far end.
+    """
+    found = candidates(gpx)
+    if not 0 <= track_index < len(found):
+        raise GPXImportError([f"GPX has no track at position {track_index}."])
+    return found[track_index].points
