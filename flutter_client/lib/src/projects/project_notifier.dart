@@ -730,6 +730,7 @@ class ProjectNotifier extends ChangeNotifier
         'sleeping': filters.sleeping.toList(),
         'activityTypes': filters.activityTypes.toList(),
         'transport': filters.transport.toList(),
+        'sources': filters.sources.toList(),
       };
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_uiStateKey(name), jsonEncode(data));
@@ -758,7 +759,7 @@ class ProjectNotifier extends ChangeNotifier
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
-      restoreFilters(ProjectFilters(
+      final pruned = restoreFilters(ProjectFilters(
         tags: (data['tags'] as List?)?.cast<String>().toSet() ?? const {},
         sleeping:
             (data['sleeping'] as List?)?.cast<String>().toSet() ?? const {},
@@ -766,6 +767,9 @@ class ProjectNotifier extends ChangeNotifier
             (data['activityTypes'] as List?)?.cast<String>().toSet() ?? const {},
         transport:
             (data['transport'] as List?)?.cast<String>().toSet() ?? const {},
+        // Absent from state saved before the source filter existed, which the
+        // ?? handles: an older payload restores with no source constraint.
+        sources: (data['sources'] as List?)?.cast<String>().toSet() ?? const {},
       ));
 
       final savedDay = data['selectedDay'] as String?;
@@ -804,6 +808,18 @@ class ProjectNotifier extends ChangeNotifier
           selectedMemoryId = savedMemoryId;
         }
       }
+
+      // A source dropped above is dropped in memory only. Left in storage it
+      // comes back to life the next time the trip gains an activity from that
+      // source: the list narrows and the badge lights up for a filter the user
+      // never re-ticked.
+      //
+      // This has to run LAST. _saveUiState builds its payload synchronously
+      // before its first await, and load() nulls the four selection fields
+      // before fetching — so saving here from anywhere above would persist
+      // those nulls and destroy the saved day/activity/segment/memory that the
+      // restores just above are in the middle of reading back.
+      if (pruned) saveUiState();
     } catch (_) {
       // Malformed/missing prefs — restore is best-effort only.
     }

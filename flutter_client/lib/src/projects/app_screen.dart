@@ -628,10 +628,12 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
             onPressed: () async {
               messenger.hideCurrentSnackBar();
               // The snackbar outlives the screen, and the delete goes through
-              // whichever trip the notifier is pointed at when it is tapped —
-              // which the server does not cross-check against the activity.
-              // Opening another trip inside the six seconds and tapping Undo
-              // would have deleted this row out from under this one.
+              // whichever trip the notifier is pointed at when it is tapped.
+              // The server now refuses a cross-trip delete outright (#405), so
+              // this guard is no longer what keeps the other trip's activity
+              // safe — it keeps the six-second window from turning Undo into
+              // "Could not undo the import." for someone who only changed
+              // trips, and whose import is still sitting where they left it.
               if (notifier.ref != widget.projectRef) return;
               try {
                 await notifier.deleteLocalActivity(imported.activityId);

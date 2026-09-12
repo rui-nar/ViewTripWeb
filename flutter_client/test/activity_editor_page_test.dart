@@ -183,8 +183,9 @@ Future<void> _pointMenu(WidgetTester tester, int index, String label) async {
   await tester.pumpAndSettle();
 }
 
-Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity) async {
-  tester.view.physicalSize = const Size(1200, 1000);
+Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity,
+    {Size size = const Size(1200, 1000)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -237,6 +238,64 @@ void main() {
     await tester.tap(find.text('Add points'));
     await tester.pump();
     expect(find.textContaining('Tap the map to insert'), findsOneWidget);
+  });
+
+  // ── Provenance follows the activity into the editor (issue #260, unit 6) ──
+  //
+  // The list drew a source badge, the editor said nothing: open a track and you
+  // could no longer tell whether its shape came from a Strava sync (where Reset
+  // fetches the original back) or from a file you imported (where nothing
+  // remote exists to fetch).
+  testWidgets('an imported track says so in the editor, out loud',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+
+    await _pump(tester, _activity()..['source'] = 'gpx');
+
+    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('Imported from a GPX file')),
+        findsAtLeastNWidgets(1));
+    expect(find.byTooltip('Imported from a GPX file'), findsOneWidget);
+
+    semantics.dispose();
+  });
+
+  testWidgets('the badge never takes the name down to nothing', (tester) async {
+    // Stated as the invariant rather than at one width: an edited activity's
+    // actions leave the title almost nothing and a Row cannot hand space back,
+    // so wherever the badge shows, the name must still have room — and the Row
+    // must never need more than it is given. Before the guard, 470 px gave the
+    // badge 24 of the title's 43 px and left the name 19; 440 px overflowed
+    // into the actions outright. Sweeping the band beats picking a number next
+    // to the threshold: a few pixels of action-row drift moves the flip, not
+    // the contract.
+    for (final width in [420.0, 440.0, 460.0, 470.0, 475.0, 500.0, 560.0]) {
+      await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
+          size: Size(width, 900));
+
+      final badgeShown =
+          find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isNotEmpty;
+      final nameWidth = tester.getSize(find.textContaining('Edit —')).width;
+
+      expect(tester.takeException(), isNull,
+          reason: 'the AppBar overflowed at $width px');
+      if (badgeShown) {
+        // The guard's own contract: it shows the badge from 48 px of title
+        // space, which leaves the name maxWidth - 24. Asserting `>` rather
+        // than `>=` would call the boundary a violation — unreachable today
+        // only because the actions row measures 426.9 px, so every integer
+        // window width lands on x.1.
+        expect(nameWidth, greaterThanOrEqualTo(24.0),
+            reason: 'the badge left the name less than its own width '
+                'at $width px');
+      }
+    }
+  });
+
+  testWidgets('a synced track carries no badge in the editor', (tester) async {
+    await _pump(tester, _activity());
+
+    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsNothing);
   });
 
   testWidgets('Reset to Strava only shows for an edited activity',

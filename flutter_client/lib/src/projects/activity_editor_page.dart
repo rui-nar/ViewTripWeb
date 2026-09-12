@@ -74,6 +74,14 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// reset only undoes edits made since the piece was created (issue #131).
   bool get _isLocal => _activityId < 0;
 
+  /// True when this track came out of a GPX file rather than from Strava.
+  ///
+  /// Worth saying HERE in particular: this is the screen where the geometry is
+  /// changed, and what "Reset" restores depends on where the track came from.
+  /// The activity panel has shown a badge since GPX import shipped, but the
+  /// editor gave no hint at all.
+  bool get _isGpxImport => widget.activity['source'] == 'gpx';
+
   /// How many pieces resetting this activity would destroy.
   ///
   /// Reset restores the track this activity held before its last edit, which on
@@ -364,10 +372,38 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          'Edit — ${widget.activity['name'] ?? 'Activity'}',
-          style: theme.textTheme.titleMedium,
-        ),
+        title: LayoutBuilder(builder: (context, constraints) {
+          final title = Text(
+            'Edit — ${widget.activity['name'] ?? 'Activity'}',
+            style: theme.textTheme.titleMedium,
+            overflow: TextOverflow.ellipsis,
+          );
+          // The AppBar gives the title whatever the actions leave it, and on a
+          // phone showing Reset that is sometimes less than the badge's own
+          // 24 px. A Row cannot hand space back, so below the point where the
+          // name would get any at all the badge stands down instead of
+          // overflowing into the actions.
+          if (!_isGpxImport || constraints.maxWidth < 48) return title;
+          return Row(
+            // The AppBar centres the title on iOS when centerTitle is left to
+            // the platform; a max-width Row would silently left-align it.
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(child: title),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'Imported from a GPX file',
+                child: Semantics(
+                  label: 'Imported from a GPX file',
+                  child: Icon(Icons.route,
+                      key: const ValueKey('gpx_editor_badge'),
+                      size: 16,
+                      color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ),
+            ],
+          );
+        }),
         actions: [
           if (_isEdited)
             TextButton.icon(
