@@ -771,11 +771,6 @@ class ProjectNotifier extends ChangeNotifier
         // ?? handles: an older payload restores with no source constraint.
         sources: (data['sources'] as List?)?.cast<String>().toSet() ?? const {},
       ));
-      // A source dropped above is dropped in memory only. Left in storage it
-      // comes back to life the next time the trip gains an activity from that
-      // source: the list narrows and the badge lights up for a filter the user
-      // never re-ticked.
-      if (pruned) saveUiState();
 
       final savedDay = data['selectedDay'] as String?;
       if (savedDay != null && dayMeta.containsKey(savedDay)) {
@@ -813,6 +808,18 @@ class ProjectNotifier extends ChangeNotifier
           selectedMemoryId = savedMemoryId;
         }
       }
+
+      // A source dropped above is dropped in memory only. Left in storage it
+      // comes back to life the next time the trip gains an activity from that
+      // source: the list narrows and the badge lights up for a filter the user
+      // never re-ticked.
+      //
+      // This has to run LAST. _saveUiState builds its payload synchronously
+      // before its first await, and load() nulls the four selection fields
+      // before fetching — so saving here from anywhere above would persist
+      // those nulls and destroy the saved day/activity/segment/memory that the
+      // restores just above are in the middle of reading back.
+      if (pruned) saveUiState();
     } catch (_) {
       // Malformed/missing prefs — restore is best-effort only.
     }

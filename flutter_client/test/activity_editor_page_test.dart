@@ -260,28 +260,30 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('the badge gives the name back the slot it was taking',
-      (tester) async {
-    // An edited activity's actions leave the title 43 px at this width, and a
-    // Row cannot hand space back: the badge took 24 of them and the name was
-    // painted in the remaining 19. Measured, not guessed — at 470 px the name
-    // gets 43.1 px with the guard and 19.1 px without it.
-    await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
-        size: const Size(470, 900));
+  testWidgets('the badge never takes the name down to nothing', (tester) async {
+    // Stated as the invariant rather than at one width: an edited activity's
+    // actions leave the title almost nothing and a Row cannot hand space back,
+    // so wherever the badge shows, the name must still have room — and the Row
+    // must never need more than it is given. Before the guard, 470 px gave the
+    // badge 24 of the title's 43 px and left the name 19; 440 px overflowed
+    // into the actions outright. Sweeping the band beats picking a number next
+    // to the threshold: a few pixels of action-row drift moves the flip, not
+    // the contract.
+    for (final width in [420.0, 440.0, 460.0, 470.0, 475.0, 500.0, 560.0]) {
+      await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
+          size: Size(width, 900));
 
-    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsNothing);
-    expect(tester.getSize(find.textContaining('Edit —')).width,
-        greaterThan(24.0),
-        reason: 'the name must get the pixels the badge was taking');
-  });
+      final badgeShown =
+          find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isNotEmpty;
+      final nameWidth = tester.getSize(find.textContaining('Edit —')).width;
 
-  testWidgets('and stands down before the AppBar overflows', (tester) async {
-    // 30 px narrower the Row could not fit its own children and overflowed
-    // into the actions.
-    await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
-        size: const Size(440, 900));
-
-    expect(tester.takeException(), isNull);
+      expect(tester.takeException(), isNull,
+          reason: 'the AppBar overflowed at $width px');
+      if (badgeShown) {
+        expect(nameWidth, greaterThan(24.0),
+            reason: 'the badge crowded out the name at $width px');
+      }
+    }
   });
 
   testWidgets('a synced track carries no badge in the editor', (tester) async {

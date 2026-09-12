@@ -73,8 +73,15 @@ Map<String, dynamic> _activity({required int id, String? source}) => {
 
 void main() {
   test('the stale source is dropped AND taken out of storage', () async {
-    SharedPreferences.setMockInitialValues(
-        {_key: '{"sources":["gpx"],"tags":[]}'});
+    // The fixture carries a selection too. load() nulls the selection fields
+    // before fetching and _saveUiState builds its payload synchronously, so a
+    // write-back that fires before the restores below have read them back
+    // persists those nulls and destroys the saved selection — the pruning load
+    // would take the day and activity down with the stale filter.
+    SharedPreferences.setMockInitialValues({
+      _key: '{"sources":["gpx"],"tags":[],'
+          '"selectedDay":"2026-06-01","selectedActivityId":"1"}'
+    });
     final service = _Service([_activity(id: 1)]); // Strava only: the import is gone
     final notifier = ProjectNotifier(service);
 
@@ -83,10 +90,36 @@ void main() {
 
     expect(notifier.sourceFilter, isEmpty);
     expect(notifier.hasActiveFilter, isFalse);
+    expect(notifier.selectedDay, '2026-06-01');
 
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString(_key), isNot(contains('gpx')),
+    final saved = prefs.getString(_key);
+    expect(saved, isNot(contains('gpx')),
         reason: 'a filter dropped in memory only comes back on the next import');
+    expect(saved, contains('"selectedDay":"2026-06-01"'),
+        reason: 'pruning a filter must not cost the user their selection');
+    expect(saved, contains('"selectedActivityId":"1"'));
+  });
+
+  test('and the selection is still there on the load after that', () async {
+    SharedPreferences.setMockInitialValues({
+      _key: '{"sources":["gpx"],"tags":[],'
+          '"selectedDay":"2026-06-01","selectedActivityId":"1"}'
+    });
+    final service = _Service([_activity(id: 1)]);
+    final notifier = ProjectNotifier(service);
+
+    await notifier.load(_ref);
+    await pumpEventQueue();
+    // Switch away and back, with nothing touched in between.
+    await ProjectNotifier(service).load(_ref);
+    await pumpEventQueue();
+    final second = ProjectNotifier(service);
+    await second.load(_ref);
+    await pumpEventQueue();
+
+    expect(second.selectedDay, '2026-06-01');
+    expect(second.selectedActivityId, '1');
   });
 
   test('and so does not re-apply itself when a new import arrives', () async {
