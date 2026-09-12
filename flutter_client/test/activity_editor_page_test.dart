@@ -151,9 +151,10 @@ _RecordingNotifier _chainNotifier() => _RecordingNotifier()
 Future<void> _pumpPushed(
   WidgetTester tester,
   Map<String, dynamic> activity,
-  ProjectNotifier notifier,
-) async {
-  tester.view.physicalSize = const Size(1200, 1000);
+  ProjectNotifier notifier, {
+  Size size = const Size(1200, 1000),
+}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -282,14 +283,50 @@ void main() {
       if (badgeShown) {
         // The guard's own contract: it shows the badge from 48 px of title
         // space, which leaves the name maxWidth - 24. Asserting `>` rather
-        // than `>=` would call the boundary a violation — unreachable today
-        // only because the actions row measures 426.9 px, so every integer
-        // window width lands on x.1.
+        // than `>=` would call the boundary a violation. (Written when the
+        // labelled Reset button still sat in the phone AppBar; since #407 put
+        // it in the overflow menu this band never reaches the guard — the test
+        // below is the one that does.)
         expect(nameWidth, greaterThanOrEqualTo(24.0),
             reason: 'the badge left the name less than its own width '
                 'at $width px');
       }
     }
+  });
+
+  testWidgets('with large text on a phone the badge still stands down',
+      (tester) async {
+    // Once Reset moved into the overflow menu (#407) a phone at default text
+    // size always leaves the title more than the badge's 48 px, so the guard
+    // is only reached when the text is scaled up. Same invariant as above, and
+    // the sweep must actually cross the guard — otherwise it tests one branch
+    // and says nothing about the other.
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+    var shown = 0, stoodDown = 0;
+    for (final width in [320.0, 340.0, 360.0, 400.0, 480.0]) {
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(
+          tester,
+          _activity(edited: true)..['source'] = 'gpx',
+          _RecordingNotifier(),
+          size: Size(width, 900));
+
+      expect(tester.takeException(), isNull,
+          reason: 'the AppBar overflowed at $width px');
+      if (find.byKey(const ValueKey('gpx_editor_badge')).evaluate().isEmpty) {
+        stoodDown++;
+        continue;
+      }
+      shown++;
+      expect(tester.getSize(find.textContaining('Test Ride')).width,
+          greaterThanOrEqualTo(24.0),
+          reason: 'the badge left the name less than its own width '
+              'at $width px');
+    }
+    expect(stoodDown, greaterThan(0), reason: 'the sweep never hit the guard');
+    expect(shown, greaterThan(0), reason: 'the sweep never showed the badge');
   });
 
   testWidgets('a synced track carries no badge in the editor', (tester) async {
@@ -412,6 +449,136 @@ void main() {
 
     expect(find.byType(AlertDialog), findsNothing);
     expect(notifier.resets, [111]);
+  });
+
+  // ── The name keeps its place in the AppBar on a phone (issue #407) ────────
+  //
+  // On an edited activity the labelled Reset button left the title 0 px at
+  // every width from 320 to 480, and the actions row overflowed by 75 px at 320
+  // and 35 px at 360: open a track you had edited and the AppBar did not say
+  // which. Measured, like the issue, on a pushed route (back button present).
+
+  const longName = 'Long afternoon ride around the lake and back';
+  // Every phone and small-tablet width below the 720 px breakpoint, stated as an
+  // invariant across the band rather than at one width next to the flip.
+  const phoneWidths = [
+    320.0, 340.0, 360.0, 375.0, 390.0, 412.0, 430.0, 480.0, 540.0, 600.0,
+    680.0, 719.0,
+  ];
+
+  testWidgets('Reset leaves the title room on every phone width',
+      (tester) async {
+    // Both labels: "Reset to Strava" is the longer, "Reset track" the local one.
+    for (final id in [111, -1]) {
+      for (final width in phoneWidths) {
+        await tester.pumpWidget(const SizedBox()); // a fresh navigator each time
+        await _pumpPushed(
+            tester,
+            _activity(edited: true, id: id)..['name'] = longName,
+            _RecordingNotifier(),
+            size: Size(width, 900));
+
+        expect(tester.takeException(), isNull,
+            reason: 'the AppBar overflowed at $width px (id $id)');
+        final title = find.textContaining(longName);
+        final glyph = tester.widget<Text>(title).style!.fontSize!;
+        // Two glyphs is a floor, not a target: past it the text is more than
+        // an ellipsis, and the old layout gave it nothing at all.
+        expect(tester.getSize(title).width, greaterThanOrEqualTo(2 * glyph),
+            reason: 'the title was squeezed out at $width px (id $id)');
+      }
+    }
+  });
+
+  testWidgets('on a phone Reset sits in the overflow menu, labelled',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+
+    for (final (id, label) in [(111, 'Reset to Strava'), (-1, 'Reset track')]) {
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(tester, _activity(edited: true, id: id),
+          _RecordingNotifier(),
+          size: const Size(360, 800));
+
+      // Not in the bar any more, but the menu that holds it is named for a
+      // screen reader and a long-press, like every other AppBar icon: a button
+      // whose tooltip is what TalkBack and VoiceOver read out.
+      expect(find.text(label), findsNothing);
+      expect(find.byTooltip('More options'), findsOneWidget);
+      expect(
+          tester.getSemantics(find.byTooltip('More options')),
+          isSemantics(
+              tooltip: 'More options', isButton: true, hasTapAction: true));
+
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+      expect(find.text(label), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(label)), findsAtLeastNWidgets(1));
+    }
+
+    semantics.dispose();
+  });
+
+  testWidgets('on a phone an unedited activity has no overflow menu',
+      (tester) async {
+    // The menu exists only to hold Reset; an empty one would be a dead end.
+    await _pumpPushed(tester, _activity(), _RecordingNotifier(),
+        size: const Size(360, 800));
+    expect(find.byTooltip('More options'), findsNothing);
+  });
+
+  testWidgets('on a phone, resetting a split root from the menu still warns',
+      (tester) async {
+    final notifier = _familyNotifier(1);
+    await _pumpPushed(tester, _activity(edited: true), notifier,
+        size: const Size(360, 800));
+
+    Future<void> chooseReset() async {
+      await tester.tap(find.byTooltip('More options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reset to Strava'));
+      await tester.pumpAndSettle();
+    }
+
+    await chooseReset();
+    expect(find.textContaining('The piece cut out of it'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(notifier.resets, isEmpty);
+
+    await chooseReset();
+    await tester.tap(find.widgetWithText(FilledButton, 'Reset'));
+    await tester.pumpAndSettle();
+    expect(notifier.resets, [111]);
+  });
+
+  testWidgets('on a phone, resetting an unsplit activity from the menu does '
+      'not warn', (tester) async {
+    final notifier = _familyNotifier(0);
+    await _pumpPushed(tester, _activity(edited: true), notifier,
+        size: const Size(360, 800));
+
+    await tester.tap(find.byTooltip('More options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reset to Strava'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(notifier.resets, [111]);
+  });
+
+  testWidgets('from 720 px Reset stays a labelled button in the AppBar',
+      (tester) async {
+    for (final width in [720.0, 1200.0]) {
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(tester, _activity(edited: true), _RecordingNotifier(),
+          size: Size(width, 900));
+
+      expect(find.widgetWithText(TextButton, 'Reset to Strava'), findsOneWidget,
+          reason: 'at $width px');
+      expect(find.byTooltip('More options'), findsNothing,
+          reason: 'at $width px');
+    }
   });
 
   testWidgets('an edit via the controller enables Save', (tester) async {

@@ -39,6 +39,9 @@ TrackEditModel modelForActivity(Map<String, dynamic> activity) {
   return TrackEditModel.fromEncoded(poly, pairs);
 }
 
+/// What the editor's AppBar folds into its overflow menu on a phone.
+enum _EditorMenuAction { reset }
+
 class ActivityEditorPage extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> activity;
@@ -369,6 +372,10 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final pts = _c.points;
+    // The app's phone/wide breakpoint (app_screen, day_carousel, the add FAB).
+    // The editor is a full-screen route, so the screen's width is the AppBar's.
+    final compact = MediaQuery.sizeOf(context).width < 720;
+    final resetLabel = _isLocal ? 'Reset track' : 'Reset to Strava';
 
     return Scaffold(
       appBar: AppBar(
@@ -379,7 +386,7 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
             overflow: TextOverflow.ellipsis,
           );
           // The AppBar gives the title whatever the actions leave it, and on a
-          // phone showing Reset that is sometimes less than the badge's own
+          // phone with large text that is sometimes less than the badge's own
           // 24 px. A Row cannot hand space back, so below the point where the
           // name would get any at all the badge stands down instead of
           // overflowing into the actions.
@@ -405,11 +412,11 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
           );
         }),
         actions: [
-          if (_isEdited)
+          if (_isEdited && !compact)
             TextButton.icon(
               onPressed: _saving ? null : _reset,
               icon: const Icon(Icons.restore, size: 18),
-              label: Text(_isLocal ? 'Reset track' : 'Reset to Strava'),
+              label: Text(resetLabel),
               style: TextButton.styleFrom(
                 foregroundColor: theme.colorScheme.onSurfaceVariant,
               ),
@@ -422,6 +429,35 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
               onPressed: _save,
             ),
           ),
+          // On a phone the labelled Reset button took the whole title slot —
+          // 0 px left for the name from 320 to 480 px, and the actions row
+          // overflowing outright below 400 (#407). There Reset moves behind the
+          // overflow menu rather than shrinking to a bare icon: it throws the
+          // edits away and closes the editor, without asking unless pieces go
+          // with it, so the tap that commits to it should land on its label and
+          // not on an unlabelled glyph sitting next to Save.
+          if (_isEdited && compact)
+            PopupMenuButton<_EditorMenuAction>(
+              icon: const Icon(Icons.more_vert),
+              tooltip: 'More options',
+              enabled: !_saving,
+              onSelected: (action) {
+                switch (action) {
+                  case _EditorMenuAction.reset:
+                    _reset();
+                }
+              },
+              itemBuilder: (_) => [
+                PopupMenuItem(
+                  value: _EditorMenuAction.reset,
+                  child: ListTile(
+                    leading: const Icon(Icons.restore),
+                    title: Text(resetLabel),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
       body: Column(
