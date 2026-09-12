@@ -313,7 +313,15 @@ class ProjectCoreMixin:
         else:
             # Blind overwrite — advance the counter so concurrent version-checked
             # savers can still detect that a write happened.
-            row.lock_version = (getattr(row, "lock_version", 0) or 0) + 1
+            #
+            # In SQL, never `row.lock_version = loaded + 1`: that computes the
+            # new value from whatever this session loaded, so it *erases* a bump
+            # another writer committed in between (counter 5 -> 6 instead of 7)
+            # whenever the caller still holds the row — which every endpoint
+            # does. The CAS is then blind to one of the two writes. Same defect
+            # the four direct writers in api/projects.py were fixed for.
+            bump_lock_version(sess, row.id)
+            sess.refresh(row)
             project.lock_version = row.lock_version
 
         row.version = project.version

@@ -24,6 +24,7 @@ from sqlmodel import select
 from api.deps import get_current_user
 from api.project_access import OwnerParam, assert_project_access, resolve_project
 from api.project_shared import bust_project_payloads, project_cache_ref
+from src.project.project_repo import bump_lock_version
 from models.project_db import DBEncounter, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -182,6 +183,11 @@ def delete_group(
         for m in sess.exec(select(DBPerson).where(DBPerson.group_id == group_id)).all():
             m.group_id = None
             sess.add(m)
+        # Make this delete visible to the optimistic lock too: a structural
+        # rewrite that loaded before it would otherwise pass the CAS and
+        # re-insert the item row from its snapshot, leaving a row pointing at
+        # content that no longer exists (issue #173; foreign keys are off).
+        bump_lock_version(sess, row.project_id)
         cache_ref = project_cache_ref(sess, row.project_id)
         sess.delete(row)
         sess.commit()

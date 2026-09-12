@@ -387,21 +387,32 @@ def create_segment(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_row_id = row.id
+
+    def _insert(project) -> None:
         # Plan limit on trip length (issue #121) — a segment dated outside the
-        # trip's current span stretches it.
-        ensure_trip_days_quota(sess, row.id, owner_id, body.date)
+        # trip's current span stretches it. Re-checked per attempt, in its own
+        # read-only session, against current state rather than a stale snapshot.
+        with get_session() as qsess:
+            ensure_trip_days_quota(qsess, project_row_id, owner_id, body.date)
         # insert_after_index is an index into the caller's *visible* item list
         # (other users' journal items are hidden) — translate it (issue #106).
+        # Recomputed per attempt: a retry reloads the item list, and an index
+        # translated against the previous attempt's list would land elsewhere.
         visible = journal_visible_positions(project.items, user_info_id, owner_id)
         insert_at = translate_insert_after(visible, body.insert_after_index, len(project.items))
         project.items.insert(insert_at, item)
-        _repo.save_project(sess, owner_id, project, check_version=True)
+
+    # save_project_with_retry, not a bare check_version=True save: this is a
+    # load-mutate-save, and a single attempt turns any bump landing inside the
+    # request — the user's own resolve job finishing, a companion adding a
+    # memory — into a 409 the client shows as "this trip changed elsewhere".
+    # repo_retry owns the policy for exactly this (issues #172/#173).
+    if _repo.save_project_with_retry(
+        owner_id, name, _insert,
+        legacy_path=_legacy_path(str(owner_id), name),
+    ) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
     queue_share_tiles_refresh(background_tasks, owner_id, name)
@@ -422,15 +433,17 @@ def update_segment(
     with get_session() as sess:
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         owner_id = row.user_info_id
-        project = _repo.get_project(
-            sess, owner_id, name,
-            legacy_path=_legacy_path(str(owner_id), name),
-        )
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        project_row_id = row.id
+
+    found = {"ok": False}
+
+    def _update(project) -> None:
         for item in project.items:
             if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
-                ensure_trip_days_quota(sess, row.id, owner_id, body.date)
+                # Re-checked per attempt against current state, in its own
+                # read-only session, rather than a stale snapshot.
+                with get_session() as qsess:
+                    ensure_trip_days_quota(qsess, project_row_id, owner_id, body.date)
                 seg = item.segment
                 coords_changed = (
                     seg.start.lat != body.start_lat or seg.start.lon != body.start_lon or
@@ -448,12 +461,24 @@ def update_segment(
                     seg.route_polyline = None
                 elif body.route_mode == "rail":
                     seg.route_mode = "rail"
-                _repo.save_project(sess, owner_id, project, check_version=True)
-                bust_geo_cache(owner_id, name)
-                queue_stats_refresh(background_tasks, owner_id, name)
-                queue_share_tiles_refresh(background_tasks, owner_id, name)
+                found["ok"] = True
                 return
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+
+    # save_project_with_retry rather than a single check_version=True save —
+    # see create_segment above. The mutation re-runs against the reloaded item
+    # list on each attempt, which is also why the segment is looked up inside
+    # the callback rather than once outside it.
+    if _repo.save_project_with_retry(
+        owner_id, name, _update,
+        legacy_path=_legacy_path(str(owner_id), name),
+    ) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if not found["ok"]:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
+    bust_geo_cache(owner_id, name)
+    queue_stats_refresh(background_tasks, owner_id, name)
+    queue_share_tiles_refresh(background_tasks, owner_id, name)
+    return
 
 
 # Ceiling on the point count of a manually edited segment track.
