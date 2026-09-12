@@ -599,14 +599,45 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
 
   Future<void> _openGpxImportDialog(BuildContext context) async {
     final notifier = context.read<ProjectNotifier>();
-    final imported = await showDialog<bool>(
+    final messenger = ScaffoldMessenger.of(context);
+    final imported = await showDialog<GpxImportResult>(
       context: context,
       useRootNavigator: true,
-      builder: (_) => GpxImportDialog(projectRef: widget.projectRef),
+      builder: (_) => GpxImportDialog(
+        projectRef: widget.projectRef,
+        // So the date picker opens on the trip rather than on today, and a date
+        // outside it is flagged before it silently extends the trip.
+        tripStart: notifier.tripStart,
+        tripEnd: notifier.tripEnd,
+      ),
     );
-    if (imported == true && mounted) {
-      notifier.load(widget.projectRef);
-    }
+    if (imported == null || !mounted) return;
+
+    await notifier.load(widget.projectRef);
+    if (!mounted) return;
+    // An import is never a one-way door: View goes to what was just added,
+    // Undo deletes it. Both are cheap here because a GPX activity is local.
+    // A SnackBar carries one action, and this needs two — so Undo sits in the
+    // content beside the message and View stays the primary.
+    messenger.showSnackBar(SnackBar(
+      duration: const Duration(seconds: 6),
+      content: Row(
+        children: [
+          Expanded(child: Text('Imported "${imported.name}"')),
+          TextButton(
+            onPressed: () async {
+              messenger.hideCurrentSnackBar();
+              await notifier.deleteLocalActivity(imported.activityId);
+            },
+            child: const Text('Undo'),
+          ),
+        ],
+      ),
+      action: SnackBarAction(
+        label: 'View',
+        onPressed: () => notifier.selectActivity(imported.activityId),
+      ),
+    ));
   }
 
   void _showFilterSheet(BuildContext context, ProjectNotifier notifier,

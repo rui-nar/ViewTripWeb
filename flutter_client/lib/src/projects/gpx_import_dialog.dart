@@ -1,10 +1,23 @@
-/// Dialog to import activities from a single GPX file (issue: GPX import).
+/// Import an activity from a GPX file: pick, review, confirm (issue #260).
 ///
-/// Unlike the Strava/Polarsteps imports there is no OAuth round-trip, so this
-/// is a self-contained `showDialog` modal rather than a routed screen.
+/// The first version of this dialog asked for a date, a start time, an end time
+/// and an activity type up front, then uploaded and only then said whether the
+/// file was acceptable at all. A user filled in four fields for a ride they did
+/// three weeks ago and learned afterwards that the file had two tracks in it.
+///
+/// So the file speaks first. Picking it inspects it — a dry run that writes
+/// nothing — and everything the file knows arrives already filled in: its name,
+/// its type, when it happened, how far it went, how much it climbed, drawn as a
+/// thumbnail so "wrong file" is obvious before it becomes an activity someone
+/// has to delete. The user confirms rather than transcribes, and every field is
+/// still editable, because the file is not always right.
+///
+/// Unlike the Strava and Polarsteps imports there is no OAuth round-trip, so
+/// this stays a `showDialog` modal rather than a routed screen.
 library;
 
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
@@ -15,48 +28,89 @@ import '../api/client.dart';
 import '../core/design_tokens.dart';
 import '../core/picked_file_bytes.dart';
 import '../core/project_ref.dart';
+import '../map/geo_point.dart';
+import 'gpx_import_model.dart';
 
-/// (value, label) pairs for the activity-type selector — concrete lowercase
-/// type strings this app already recognises (see activity_panel.dart's
-/// `_ActivityIconBox._icon()`), one representative per icon/colour bucket.
+/// (value, label) pairs for the activity-type selector — the concrete lowercase
+/// type strings this app recognises, one per icon/colour bucket, plus the
+/// catch-all. "Other" is what a kayak or a ski tour honestly is here; without it
+/// they could only be imported as mislabelled hikes.
 const _kActivityTypes = [
   ('run', 'Run'),
   ('ride', 'Ride'),
   ('hike', 'Hike'),
   ('walk', 'Walk'),
+  ('Workout', 'Other'),
 ];
 
 IconData _typeIcon(String type) => switch (type) {
       'run' => Icons.directions_run,
       'ride' => Icons.directions_bike,
       'walk' => Icons.directions_walk,
-      _ => Icons.hiking,
+      'hike' => Icons.hiking,
+      _ => Icons.map_outlined,
     };
 
+/// What the dialog hands back on success, so the caller can offer to open the
+/// new activity or undo it rather than only reloading the trip.
+class GpxImportResult {
+  const GpxImportResult({required this.activityId, required this.name});
+
+  final int activityId;
+  final String name;
+}
+
 class GpxImportDialog extends StatefulWidget {
+  const GpxImportDialog({
+    super.key,
+    required this.projectRef,
+    this.httpClient,
+    this.tripStart,
+    this.tripEnd,
+  });
+
   final ProjectRef projectRef;
 
   /// Injectable so tests can supply one backed by a MockClient — mirrors
   /// ApiClient's own constructor-injection pattern. `http.MultipartRequest`'s
-  /// own `.send()` always spins up a fresh, un-mockable client, so this
-  /// dialog routes through [httpClient] explicitly instead.
+  /// own `.send()` always spins up a fresh, un-mockable client, so this dialog
+  /// routes through [httpClient] explicitly instead.
   final http.Client? httpClient;
 
-  const GpxImportDialog({super.key, required this.projectRef, this.httpClient});
+  /// The trip's own dates, as `YYYY-MM-DD`. Used to aim the date picker at the
+  /// trip rather than at today, and to warn when a chosen date falls outside it
+  /// — which silently extends the trip, and costs a billing day.
+  final String? tripStart;
+  final String? tripEnd;
 
   @override
   State<GpxImportDialog> createState() => _GpxImportDialogState();
 }
 
+enum _Stage { pick, reading, choose, review, submitting }
+
 class _GpxImportDialogState extends State<GpxImportDialog> {
   late final http.Client _client = widget.httpClient ?? http.Client();
+
+  _Stage _stage = _Stage.pick;
   Uint8List? _fileBytes;
   String? _fileName;
+  GpxInspection? _inspection;
+  GpxCandidate? _chosen;
+
+  final _nameController = TextEditingController();
+  String? _activityType;
   DateTime? _date;
   TimeOfDay? _startTime;
   TimeOfDay? _endTime;
-  String _activityType = _kActivityTypes.first.$1;
-  bool _submitting = false;
+
+  /// True while the form still holds exactly what the file said, so the import
+  /// can omit the times and let the server read them from the file — where they
+  /// carry seconds, which `HH:MM` would throw away. Echoing the truncated
+  /// minute back is what gave one file two fingerprints and let a second copy
+  /// slip past the duplicate check.
+  bool _timesUntouched = true;
+
   List<String>? _serverErrors;
   String? _genericError;
 
@@ -64,99 +118,243 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
-  static String _fmtDate(DateTime d) => '${_months[d.month - 1]} ${d.day}, ${d.year}';
+
+  static String _fmtDate(DateTime d) =>
+      '${_months[d.month - 1]} ${d.day}, ${d.year}';
   static String _toIso(DateTime d) =>
-      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
   static String _fmtTime(TimeOfDay t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+      '${t.hour.toString().padLeft(2, '0')}:'
+      '${t.minute.toString().padLeft(2, '0')}';
+
+  static String _fmtDuration(int seconds) {
+    final hours = seconds ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    return hours > 0
+        ? '${hours}h${minutes.toString().padLeft(2, '0')}'
+        : '${minutes}m';
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  DateTime? get _tripStart => DateTime.tryParse(widget.tripStart ?? '');
+  DateTime? get _tripEnd => DateTime.tryParse(widget.tripEnd ?? '');
+
+  /// True when the chosen date sits outside the trip. Not an error — importing
+  /// a ride from the day before a trip is legitimate — but worth saying,
+  /// because it stretches the trip and the user may simply have mistyped.
+  bool get _outsideTrip {
+    final date = _date;
+    final start = _tripStart;
+    final end = _tripEnd;
+    if (date == null || start == null || end == null) return false;
+    final day = DateTime(date.year, date.month, date.day);
+    return day.isBefore(DateTime(start.year, start.month, start.day)) ||
+        day.isAfter(DateTime(end.year, end.month, end.day));
+  }
 
   Future<void> _pickFile() async {
-    final picked = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: ['gpx'],
-    );
+    // FileType.any, not FileType.custom: custom greys out files whose UTI iOS
+    // does not recognise, and .gpx arriving from Mail or iCloud commonly is
+    // one. The server is the only thing that can really judge a GPX anyway.
+    final picked = await FilePicker.pickFile(type: FileType.any);
     if (picked == null) return;
     final bytes = await picked.readAsBytesOrNull();
     if (bytes == null) return;
     setState(() {
       _fileBytes = bytes;
       _fileName = picked.name;
+      _serverErrors = null;
+      _genericError = null;
+    });
+    await _inspect();
+  }
+
+  Future<void> _inspect() async {
+    setState(() => _stage = _Stage.reading);
+    final response = await _send('/activities/gpx/inspect', const {});
+    if (response == null || !mounted) return;
+
+    if (response.statusCode != 200) {
+      setState(() {
+        _stage = _Stage.pick;
+        _applyErrorBody(response);
+      });
+      return;
+    }
+
+    final inspection = GpxInspection.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
+    if (inspection.candidates.isEmpty) {
+      setState(() {
+        _stage = _Stage.pick;
+        _serverErrors = inspection.errors.isEmpty
+            ? const ['The file was rejected.']
+            : inspection.errors;
+      });
+      return;
+    }
+
+    setState(() {
+      _inspection = inspection;
+      if (inspection.needsAChoice) {
+        _stage = _Stage.choose;
+      } else {
+        _choose(inspection.candidates.firstWhere((c) => c.isImportable,
+            orElse: () => inspection.candidates.first));
+      }
     });
   }
 
-  bool get _timeValid {
-    if (_startTime == null || _endTime == null) return true;
-    final start = _startTime!.hour * 60 + _startTime!.minute;
-    final end = _endTime!.hour * 60 + _endTime!.minute;
-    return end > start;
+  /// Move to the review step with every field prefilled from the file.
+  void _choose(GpxCandidate candidate) {
+    _chosen = candidate;
+    _stage = _Stage.review;
+    _nameController.text = candidate.name ?? _inspection?.suggestedName ?? '';
+    _activityType = candidate.activityType;
+    final started = candidate.startedAt;
+    if (started != null) {
+      _date = started;
+      _startTime = TimeOfDay.fromDateTime(started);
+      final ended = candidate.endedAt;
+      _endTime = ended != null ? TimeOfDay.fromDateTime(ended) : null;
+      _timesUntouched = true;
+    } else {
+      // A planned route has no clock, so these have to be asked for. Leaving
+      // them empty and marked required is the honest version of that.
+      _date = null;
+      _startTime = null;
+      _endTime = null;
+      _timesUntouched = false;
+    }
+  }
+
+  bool get _timesComplete =>
+      _date != null && _startTime != null && _endTime != null;
+
+  bool get _timeOrderValid {
+    final start = _startTime;
+    final end = _endTime;
+    if (start == null || end == null) return true;
+    return end.hour * 60 + end.minute > start.hour * 60 + start.minute;
   }
 
   bool get _canSubmit =>
-      _fileBytes != null &&
-      _date != null &&
-      _startTime != null &&
-      _endTime != null &&
-      _timeValid &&
-      !_submitting;
+      (_stage == _Stage.review) &&
+      (_chosen?.isImportable ?? false) &&
+      _timesComplete &&
+      _timeOrderValid &&
+      _activityType != null &&
+      _nameController.text.trim().isNotEmpty;
+
+  Future<http.Response?> _send(String path, Map<String, String> fields) async {
+    final bytes = _fileBytes;
+    if (bytes == null) return null;
+    try {
+      final token = api.tokenForUpload;
+      final request = http.MultipartRequest(
+          'POST', Uri.parse('${api.baseUrl}${widget.projectRef.path(path)}'))
+        ..fields.addAll(fields)
+        ..files.add(http.MultipartFile.fromBytes('file', bytes,
+            filename: _fileName ?? 'track.gpx'));
+      if (token != null) request.headers['Authorization'] = 'Bearer $token';
+      final streamed = await _client.send(request);
+      return await http.Response.fromStream(streamed);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _stage = _fileBytes == null ? _Stage.pick : _stage;
+          _genericError = 'Could not reach the server: '
+              '${e.toString().replaceFirst('Exception: ', '')}';
+        });
+      }
+      return null;
+    }
+  }
+
+  void _applyErrorBody(http.Response response) {
+    if (response.statusCode == 403) {
+      _genericError =
+          "You don't have permission to add activities to this trip.";
+      return;
+    }
+    try {
+      final detail = (jsonDecode(response.body) as Map)['detail'];
+      final errors = (detail is Map ? detail['errors'] : null) as List?;
+      if (errors != null && errors.isNotEmpty) {
+        _serverErrors = errors.map((e) => e.toString()).toList();
+        return;
+      }
+    } on Object {
+      // fall through to the generic message
+    }
+    _genericError = 'The file could not be read (${response.statusCode}).';
+  }
 
   Future<void> _submit() async {
     if (!_canSubmit) return;
     setState(() {
-      _submitting = true;
+      _stage = _Stage.submitting;
       _serverErrors = null;
       _genericError = null;
     });
-    try {
-      final token = api.tokenForUpload;
-      final uri = Uri.parse(
-          '${api.baseUrl}${widget.projectRef.path('/activities/import-gpx')}');
-      final request = http.MultipartRequest('POST', uri)
-        ..fields['date'] = _toIso(_date!)
-        ..fields['start_time'] = _fmtTime(_startTime!)
-        ..fields['end_time'] = _fmtTime(_endTime!)
-        ..fields['activity_type'] = _activityType
-        ..files.add(http.MultipartFile.fromBytes(
-            'file', _fileBytes!, filename: _fileName ?? 'track.gpx'));
-      if (token != null) request.headers['Authorization'] = 'Bearer $token';
 
-      final streamed = await _client.send(request);
-      final res = await http.Response.fromStream(streamed);
-
-      if (res.statusCode == 200) {
-        if (mounted) Navigator.of(context).pop(true);
-        return;
-      }
-      if (res.statusCode == 422) {
-        final body = jsonDecode(res.body) as Map<String, dynamic>;
-        final errors =
-            (body['detail'] as Map?)?['errors'] as List?;
-        setState(() => _serverErrors =
-            errors?.cast<String>() ?? ['The GPX file was rejected.']);
-        return;
-      }
-      if (res.statusCode == 403) {
-        setState(() => _genericError =
-            "You don't have permission to add activities to this trip.");
-        return;
-      }
-      setState(() => _genericError = 'Import failed (${res.statusCode}).');
-    } catch (e) {
-      setState(() => _genericError =
-          'Import failed: ${e.toString().replaceFirst('Exception: ', '')}');
-    } finally {
-      if (mounted) setState(() => _submitting = false);
+    final fields = <String, String>{
+      'activity_name': _nameController.text.trim(),
+      'activity_type': _activityType!,
+      'track_index': '${_chosen!.index}',
+    };
+    // Only send times the user actually set. Sending the file's own back,
+    // truncated to the minute, changes the fingerprint the server dedupes on
+    // and a re-import would not be recognised.
+    if (!_timesUntouched) {
+      fields['date'] = _toIso(_date!);
+      fields['start_time'] = _fmtTime(_startTime!);
+      fields['end_time'] = _fmtTime(_endTime!);
     }
+
+    final response = await _send('/activities/import-gpx', fields);
+    if (response == null || !mounted) return;
+
+    if (response.statusCode == 200) {
+      final id = (jsonDecode(response.body) as Map)['activity_id'];
+      Navigator.of(context).pop(GpxImportResult(
+          activityId: (id as num).toInt(),
+          name: _nameController.text.trim()));
+      return;
+    }
+    setState(() {
+      _stage = _Stage.review;
+      _applyErrorBody(response);
+    });
   }
 
   Future<void> _pickDate() async {
+    final tripStart = _tripStart;
+    final tripEnd = _tripEnd;
     final picked = await showDatePicker(
       context: context,
       useRootNavigator: true,
-      initialDate: _date ?? DateTime.now(),
+      // Aimed at the trip, not at today: a trip edited in February may well be
+      // last summer's, and "today" is then never the answer.
+      initialDate: _date ?? tripStart ?? DateTime.now(),
       firstDate: DateTime(2000),
       lastDate: DateTime(2100),
+      helpText: tripStart != null && tripEnd != null
+          ? 'Trip runs ${_fmtDate(tripStart)} – ${_fmtDate(tripEnd)}'
+          : null,
     );
-    if (picked != null) setState(() => _date = picked);
+    if (picked != null) {
+      setState(() {
+        _date = picked;
+        _timesUntouched = false;
+      });
+    }
   }
 
   Future<void> _pickTime({required bool isStart}) async {
@@ -164,7 +362,7 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
     final picked = await showTimePicker(
       context: context,
       useRootNavigator: true,
-      initialTime: current ?? TimeOfDay.now(),
+      initialTime: current ?? const TimeOfDay(hour: 9, minute: 0),
     );
     if (picked == null) return;
     setState(() {
@@ -173,156 +371,35 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
       } else {
         _endTime = picked;
       }
+      _timesUntouched = false;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final dark = theme.brightness == Brightness.dark;
-
+    // A fixed 420 clipped the dialog on a narrow phone.
+    final width = MediaQuery.sizeOf(context).width;
     return AlertDialog(
-      title: const Text('Import GPX file'),
+      title: Text(switch (_stage) {
+        _Stage.choose => 'Which track?',
+        _Stage.review || _Stage.submitting => 'Import this track?',
+        _ => 'Import a GPX file',
+      }),
       content: SizedBox(
-        width: 420,
+        width: width < 460 ? width - 80 : 420,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              OutlinedButton.icon(
-                icon: const Icon(Icons.attach_file, size: 18),
-                label: Text(
-                  _fileName ?? 'Choose .gpx file…',
-                  overflow: TextOverflow.ellipsis,
-                ),
-                onPressed: _submitting ? null : _pickFile,
-              ),
-              const SizedBox(height: 16),
-              Text('Date *', style: theme.textTheme.labelMedium),
-              const SizedBox(height: 4),
-              InkWell(
-                borderRadius: BorderRadius.circular(8),
-                onTap: _submitting ? null : _pickDate,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  child: Row(
-                    children: [
-                      Icon(Icons.calendar_today,
-                          size: 18, color: theme.colorScheme.onSurfaceVariant),
-                      const SizedBox(width: 12),
-                      Text(
-                        _date == null ? 'Select date…' : _fmtDate(_date!),
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: _date == null ? theme.colorScheme.error : null,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _TimeField(
-                      label: 'Start time *',
-                      value: _startTime,
-                      enabled: !_submitting,
-                      onTap: () => _pickTime(isStart: true),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _TimeField(
-                      label: 'End time *',
-                      value: _endTime,
-                      enabled: !_submitting,
-                      onTap: () => _pickTime(isStart: false),
-                    ),
-                  ),
-                ],
-              ),
-              if (!_timeValid) ...[
-                const SizedBox(height: 6),
-                Text(
-                  'End time must be after start time.',
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.error),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Text('Activity type', style: theme.textTheme.labelMedium),
-              const SizedBox(height: 6),
-              DropdownButtonFormField<String>(
-                initialValue: _activityType,
-                items: [
-                  for (final (value, label) in _kActivityTypes)
-                    DropdownMenuItem(
-                      value: value,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            _typeIcon(value),
-                            size: 16,
-                            color: iconBoxFg(
-                              resolveTypeStyle(activityTypeBucket(value),
-                                      isSegment: false)
-                                  .color,
-                              dark: dark,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(label),
-                        ],
-                      ),
-                    ),
-                ],
-                onChanged: _submitting
-                    ? null
-                    : (v) {
-                        if (v != null) setState(() => _activityType = v);
-                      },
-              ),
-              if (_serverErrors != null) ...[
-                const SizedBox(height: 12),
-                Container(
-                  width: double.infinity,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.errorContainer,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      for (final e in _serverErrors!)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(Icons.error_outline,
-                                  size: 16,
-                                  color: theme.colorScheme.onErrorContainer),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  e,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.onErrorContainer),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
+              ...switch (_stage) {
+                _Stage.pick => _pickStep(theme),
+                _Stage.reading => _readingStep(theme),
+                _Stage.choose => _chooseStep(theme),
+                _Stage.review || _Stage.submitting => _reviewStep(theme),
+              },
+              if (_serverErrors != null) _errorBox(theme, _serverErrors!),
               if (_genericError != null) ...[
                 const SizedBox(height: 12),
                 Text(_genericError!,
@@ -332,67 +409,399 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
           ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
+      actions: _actions(),
+    );
+  }
+
+  List<Widget> _actions() {
+    final busy = _stage == _Stage.reading || _stage == _Stage.submitting;
+    return [
+      TextButton(
+        onPressed: busy ? null : () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      if (_stage == _Stage.review || _stage == _Stage.submitting)
         ElevatedButton(
+          key: const ValueKey('gpx_import_confirm'),
           style: ElevatedButton.styleFrom(minimumSize: const Size(80, 44)),
-          onPressed: _canSubmit ? _submit : null,
-          child: _submitting
+          onPressed: _canSubmit && !busy ? _submit : null,
+          child: _stage == _Stage.submitting
               ? const SizedBox(
                   width: 18,
                   height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2))
               : const Text('Import'),
         ),
-      ],
-    );
+    ];
   }
-}
 
-class _TimeField extends StatelessWidget {
-  final String label;
-  final TimeOfDay? value;
-  final bool enabled;
-  final VoidCallback onTap;
+  List<Widget> _pickStep(ThemeData theme) => [
+        InkWell(
+          key: const ValueKey('gpx_pick_file'),
+          borderRadius: BorderRadius.circular(10),
+          onTap: _pickFile,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 26, horizontal: 16),
+            decoration: BoxDecoration(
+              border: Border.all(color: theme.colorScheme.outlineVariant),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              children: [
+                Icon(Icons.upload_file, color: theme.colorScheme.primary),
+                const SizedBox(height: 8),
+                Text('Choose a .gpx file', style: theme.textTheme.titleSmall),
+                const SizedBox(height: 4),
+                Text('From Komoot, Garmin, RideWithGPS, Strava…',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ),
+      ];
 
-  const _TimeField({
-    required this.label,
-    required this.value,
-    required this.enabled,
-    required this.onTap,
-  });
-
-  static String _fmt(TimeOfDay t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return InkWell(
-      borderRadius: BorderRadius.circular(8),
-      onTap: enabled ? onTap : null,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
+  List<Widget> _readingStep(ThemeData theme) => [
+        Row(
           children: [
-            Icon(Icons.access_time,
-                size: 18, color: theme.colorScheme.onSurfaceVariant),
-            const SizedBox(width: 8),
+            const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                value == null ? label : _fmt(value!),
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: value == null ? theme.colorScheme.error : null,
-                ),
+                child: Text('Reading ${_fileName ?? 'the file'}…',
+                    style: theme.textTheme.bodyMedium)),
+          ],
+        ),
+      ];
+
+  List<Widget> _chooseStep(ThemeData theme) => [
+        Text(
+            'This file holds ${_inspection!.candidates.length} tracks. '
+            'Pick the one to import.',
+            style: theme.textTheme.bodyMedium),
+        const SizedBox(height: 8),
+        for (final candidate in _inspection!.candidates)
+          ListTile(
+            key: ValueKey('gpx_candidate_${candidate.index}'),
+            dense: true,
+            enabled: candidate.isImportable,
+            leading: candidate.outline.isEmpty
+                ? const Icon(Icons.route)
+                : SizedBox(
+                    width: 44,
+                    height: 32,
+                    child: CustomPaint(
+                        painter: TrackOutlinePainter(
+                            candidate.outline, theme.colorScheme.primary))),
+            title: Text(candidate.name ?? 'Track ${candidate.index + 1}'),
+            subtitle: Text(candidate.isImportable
+                ? _factsLine(candidate)
+                : candidate.errors.first),
+            onTap: candidate.isImportable
+                ? () => setState(() => _choose(candidate))
+                : null,
+          ),
+      ];
+
+  String _factsLine(GpxCandidate candidate) {
+    final parts = <String>[
+      '${(candidate.distanceM / 1000).toStringAsFixed(1)} km'
+    ];
+    if (candidate.elevationGainM != null) {
+      parts.add('${candidate.elevationGainM!.round()} m ↑');
+    }
+    final moving = candidate.movingSeconds;
+    if (moving != null && moving > 0) parts.add(_fmtDuration(moving));
+    parts.add('${candidate.pointCount} pts');
+    return parts.join('  ·  ');
+  }
+
+  List<Widget> _reviewStep(ThemeData theme) {
+    final candidate = _chosen!;
+    final duplicate = _inspection?.duplicateOf;
+    final dark = theme.brightness == Brightness.dark;
+    return [
+      if (candidate.outline.isNotEmpty)
+        Container(
+          height: 96,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: CustomPaint(
+            painter: TrackOutlinePainter(
+                candidate.outline, theme.colorScheme.primary),
+          ),
+        ),
+      const SizedBox(height: 10),
+      Text(_factsLine(candidate),
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      if (candidate.elevationGainM != null) ...[
+        const SizedBox(height: 2),
+        Text('Climb is estimated from the file’s elevation.',
+            key: const ValueKey('gpx_climb_estimated'),
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ],
+      if (duplicate != null) ...[
+        const SizedBox(height: 10),
+        _notice(theme, Icons.info_outline, kWarning,
+            'This trip already has “${duplicate.name}” from the same track.',
+            key: const ValueKey('gpx_duplicate_notice')),
+      ],
+      if (candidate.isRoute) ...[
+        const SizedBox(height: 10),
+        _notice(theme, Icons.event_outlined, theme.colorScheme.primary,
+            'A planned route, so it carries no date or times — please set them.',
+            key: const ValueKey('gpx_route_notice')),
+      ],
+      const SizedBox(height: 14),
+      TextField(
+        key: const ValueKey('gpx_name_field'),
+        controller: _nameController,
+        decoration: const InputDecoration(
+            labelText: 'Name', isDense: true, border: OutlineInputBorder()),
+        onChanged: (_) => setState(() {}),
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        key: const ValueKey('gpx_type_field'),
+        initialValue: _activityType,
+        decoration: const InputDecoration(
+            labelText: 'Activity type',
+            isDense: true,
+            border: OutlineInputBorder()),
+        items: [
+          for (final (value, label) in _kActivityTypes)
+            DropdownMenuItem(
+              value: value,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_typeIcon(value),
+                      size: 16,
+                      color: iconBoxFg(
+                          resolveTypeStyle(activityTypeBucket(value),
+                                  isSegment: false)
+                              .color,
+                          dark: dark)),
+                  const SizedBox(width: 8),
+                  Text(label),
+                ],
               ),
             ),
+        ],
+        onChanged: (v) => setState(() => _activityType = v),
+      ),
+      const SizedBox(height: 12),
+      _field(theme, 'Date', _date == null ? null : _fmtDate(_date!),
+          Icons.calendar_today, _pickDate,
+          key: const ValueKey('gpx_date_field')),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          Expanded(
+            child: _field(
+                theme,
+                'Start',
+                _startTime == null ? null : _fmtTime(_startTime!),
+                Icons.access_time,
+                () => _pickTime(isStart: true),
+                key: const ValueKey('gpx_start_field')),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: _field(
+                theme,
+                'End',
+                _endTime == null ? null : _fmtTime(_endTime!),
+                Icons.access_time,
+                () => _pickTime(isStart: false),
+                key: const ValueKey('gpx_end_field')),
+          ),
+        ],
+      ),
+      if (!_timeOrderValid) ...[
+        const SizedBox(height: 6),
+        Text('End time must be after start time.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.error)),
+      ],
+      if (candidate.hasTimes && _timesUntouched) ...[
+        const SizedBox(height: 6),
+        Text('Read from the file — edit any of them.',
+            key: const ValueKey('gpx_from_file_note'),
+            style: theme.textTheme.bodySmall?.copyWith(color: kSuccess)),
+      ],
+      if (_outsideTrip) ...[
+        const SizedBox(height: 10),
+        _notice(theme, Icons.warning_amber_outlined, kWarning,
+            'That date is outside this trip, which will extend it.',
+            key: const ValueKey('gpx_outside_trip_notice')),
+      ],
+    ];
+  }
+
+  Widget _field(ThemeData theme, String label, String? value, IconData icon,
+      VoidCallback onTap,
+      {Key? key}) {
+    return InkWell(
+      key: key,
+      borderRadius: BorderRadius.circular(8),
+      onTap: _stage == _Stage.submitting ? null : onTap,
+      child: InputDecorator(
+        decoration: InputDecoration(
+          labelText: label,
+          isDense: true,
+          border: const OutlineInputBorder(),
+          errorText: value == null ? 'Required' : null,
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+            const SizedBox(width: 8),
+            Expanded(
+                child: Text(value ?? '—',
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium)),
           ],
         ),
       ),
     );
   }
+
+  Widget _notice(ThemeData theme, IconData icon, Color colour, String message,
+          {Key? key}) =>
+      Container(
+        key: key,
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: colour.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 16, color: colour),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message, style: theme.textTheme.bodySmall)),
+          ],
+        ),
+      );
+
+  Widget _errorBox(ThemeData theme, List<String> errors) => Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.errorContainer,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final message in errors)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.error_outline,
+                          size: 16, color: theme.colorScheme.onErrorContainer),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(message,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onErrorContainer)),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+}
+
+/// Draws a track outline scaled to fit, with its start and end marked.
+///
+/// A thumbnail, not a map: no tiles, no projection library, no interaction. Its
+/// only job is to make "wrong file" obvious while that still costs nothing.
+class TrackOutlinePainter extends CustomPainter {
+  TrackOutlinePainter(this.points, this.colour);
+
+  final List<GeoPoint> points;
+  final Color colour;
+
+  static const _pad = 8.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.length < 2) return;
+
+    var minLat = points.first.lat, maxLat = points.first.lat;
+    var minLon = points.first.lon, maxLon = points.first.lon;
+    for (final p in points) {
+      minLat = math.min(minLat, p.lat);
+      maxLat = math.max(maxLat, p.lat);
+      minLon = math.min(minLon, p.lon);
+      maxLon = math.max(maxLon, p.lon);
+    }
+
+    // Longitude degrees are narrower than latitude ones by cos(lat); ignoring
+    // that makes a north-south track look wider than it is. One factor for the
+    // whole thumbnail is plenty — it spans a ride, not a hemisphere.
+    final squeeze = math.cos((minLat + maxLat) / 2 * math.pi / 180).abs();
+    final spanLat = maxLat - minLat;
+    final spanLon = (maxLon - minLon) * squeeze;
+
+    final usableWidth = size.width - 2 * _pad;
+    final usableHeight = size.height - 2 * _pad;
+    if (usableWidth <= 0 || usableHeight <= 0) return;
+    if (spanLat <= 0 && spanLon <= 0) return;    // a single place, not a track
+
+    final scale = math.min(
+      spanLon > 0 ? usableWidth / spanLon : double.infinity,
+      spanLat > 0 ? usableHeight / spanLat : double.infinity,
+    );
+    final offsetX = _pad + (usableWidth - spanLon * scale) / 2;
+    final offsetY = _pad + (usableHeight - spanLat * scale) / 2;
+
+    Offset project(GeoPoint p) => Offset(
+          offsetX + (p.lon - minLon) * squeeze * scale,
+          offsetY + (maxLat - p.lat) * scale,
+        );
+
+    final path = Path();
+    final first = project(points.first);
+    path.moveTo(first.dx, first.dy);
+    for (final p in points.skip(1)) {
+      final o = project(p);
+      path.lineTo(o.dx, o.dy);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round
+        ..color = colour,
+    );
+    canvas.drawCircle(first, 3, Paint()..color = kSuccess);
+    canvas.drawCircle(project(points.last), 3, Paint()..color = kAccent);
+  }
+
+  @override
+  bool shouldRepaint(TrackOutlinePainter old) =>
+      old.points != points || old.colour != colour;
 }
