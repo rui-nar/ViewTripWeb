@@ -28,7 +28,12 @@ from sqlmodel import select
 from api.deps import get_current_user
 from api.project_access import OwnerParam, resolve_project
 from src.models.great_circle import great_circle_points
-from src.models.prepared_geo import COORD_SCALE, prepare_polyline, unpack_prepared_line
+from src.models.prepared_geo import (
+    COORD_SCALE,
+    prepare_polyline,
+    store_prepared_if_unchanged,
+    unpack_prepared_line,
+)
 from src.models.simplify import (
     MIN_POINTS,
     PREPARED_GEO_VERSION,
@@ -894,35 +899,12 @@ def _prepared_lines(project: Project) -> List[_PreparedLine]:
         with get_session() as sess:
             try:
                 for activity_id, blob in prepared.items():
-                    # Compare-and-swap on the polyline this blob was built from.
-                    #
-                    # The read path may write, and between the SELECT above and
-                    # this statement lie seconds of preparation. A writer landing
-                    # in that window has already stored its own geometry (or
-                    # deleted the row); an unguarded upsert would overwrite it
-                    # with what this request read *before* the write, at the
-                    # current version — so it looks fresh and is served on every
-                    # later cold open until the next polyline write. Worse for an
-                    # activity encrypted in that window: the encrypt path deletes
-                    # the row, and an unguarded insert would put the *plaintext*
-                    # geometry back for a track the server is no longer supposed
-                    # to be able to read, and the share route would serve it.
-                    #
-                    # One statement, so the check and the write cannot be split.
-                    # `IS` rather than `=` so a NULL polyline compares correctly
-                    # instead of silently failing the guard.
-                    sess.exec(text(
-                        "INSERT INTO activity_geo_prepared (activity_id, version, blob) "
-                        "SELECT :id, :version, :blob "
-                        "WHERE (SELECT summary_polyline FROM activity WHERE id = :id) IS :poly "
-                        "ON CONFLICT(activity_id) DO UPDATE SET "
-                        "  version = excluded.version, blob = excluded.blob"
-                    ).bindparams(
-                        id=activity_id,
-                        version=PREPARED_GEO_VERSION,
-                        blob=blob,
-                        poly=polylines[activity_id],
-                    ))
+                    # Guarded on the polyline this blob was built from: a
+                    # writer can land during the seconds of preparation above.
+                    # See store_prepared_if_unchanged for what goes wrong
+                    # without it.
+                    store_prepared_if_unchanged(
+                        sess, activity_id, polylines[activity_id], blob)
                 sess.commit()
             except Exception:  # noqa: BLE001
                 # Two cold requests preparing the same rows at once, or a
