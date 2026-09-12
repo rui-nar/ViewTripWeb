@@ -692,23 +692,43 @@ def _relief(window: List[float]) -> float:
     3000 m          40/40           0.59  <- both hold
     ==============  ==============  ===============
 
-    A range cannot average anything away: the more independent excursions a
-    window holds, the further apart its maximum and minimum. So error much
-    SHORTER than the window inflates every window's reading, flat ones
-    included — the drag's no-op survives at that end only because *everything*
-    reads relief, and that is the same run in which 13-18 of 40 flat windows
-    keep their phantom climb. Error near the window's own scale is a slope that
-    adds to or cancels the terrain's, which is where the relief verdict goes
-    (worst at 300 m, about 0.6x the window). Only error correlated over several
-    times the window is benign both ways, because inside one window it is then
-    a constant offset a range subtracts out.
+    The two verdicts fail on **independent axes**, which is what makes this
+    measurable rather than merely worrying:
+
+    * The **relief** verdict is governed by correlation LENGTH, as above. Error
+      near the window's own scale is a slope that adds to or cancels the
+      terrain's; the trough is broad, roughly half to one window, and only error
+      correlated over several times the window is benign, because inside one
+      window that is a constant offset a range subtracts out. A range cannot
+      average anything away — the more excursions a window holds, the further
+      apart its extremes — so nothing is gained at the short end either.
+    * The **flat** verdict is governed by the error's SIZE, and it has a knee.
+      Windows that wrongly read relief on genuinely flat ground, over 40 seeds
+      (1600 windows), with independent per-post error:
+
+      ======  =====================  ====================
+      sigma   windows misreading     oracle's figure on
+              flat ground            flat ground (true 0)
+      ======  =====================  ====================
+      0       0.0%                   0
+      1.0     0.7%                   37-62
+      1.2     8.1%                   57-109
+      1.5     37.2%                  129-197
+      ======  =====================  ====================
+
+      Copernicus GLO-30's relative accuracy — about 2 m LE90, so sigma near
+      1.2 — lands on that knee. Which is the single number unit 2 most needs to
+      measure, and it is a property of the tileset, not of this code.
 
     That is the same structure as the defect this whole issue is about — sensor
     drift is inseparable from terrain exactly when their correlation lengths
-    match — reappearing one level up. And it gives unit 2 something to aim at
-    rather than only something to fear: the window length is the free parameter
-    here, and it wants to be SHORT relative to whatever correlation length the
-    real tileset turns out to have.
+    match — reappearing one level up.
+
+    The window length is the obvious free parameter, but it is not a free fix:
+    lengthening it to save the drag (at 750 m the no-op holds everywhere)
+    enlarges what the "should read flat" cases show too, and the valley and
+    cross-slope then cross 5 m instead. Any change to it has to move the
+    threshold with it, and both have to be re-measured against the table above.
 
     No statistic tried does better once model error is present: a trimmed range,
     p95-p5, IQR, 2.5 sigma, median-filtered and boxcar ranges at 30-120 m, and
