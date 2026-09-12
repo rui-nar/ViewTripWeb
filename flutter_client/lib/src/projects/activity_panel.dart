@@ -2383,6 +2383,13 @@ class FilterSheet extends StatelessWidget {
         final actTypes   = notifier.availableActivityTypes;
         final transport  = notifier.availableTransportationMeans;
         final sources    = notifier.availableSources;
+        // What the trip holds, plus anything already filtered on. A source
+        // whose last activity has since been deleted has to keep the chip that
+        // turns it off: without it the list stays empty and nothing in this
+        // sheet says why.
+        final sourceOptions = <String>{...sources, ...notifier.sourceFilter}
+            .toList()
+          ..sort();
         final hasAny     = notifier.hasActiveFilter;
 
         return SingleChildScrollView(
@@ -2448,14 +2455,14 @@ class FilterSheet extends StatelessWidget {
               ],
 
               // ── Source ────────────────────────────────────────────────────
-              // Only worth asking once a trip actually holds more than one
-              // source; on a Strava-only trip the question has one answer.
-              if (sources.length > 1) ...[
+              // Only worth asking once there is more than one answer; on a
+              // Strava-only trip with no source filter on, there isn't.
+              if (sourceOptions.length > 1) ...[
                 const SizedBox(height: 16),
                 Text('Source', style: theme.textTheme.labelMedium),
                 const SizedBox(height: 8),
                 _chips(
-                  options:  sources,
+                  options:  sourceOptions,
                   selected: notifier.sourceFilter,
                   label:    (s) => _sourceLabels[s] ?? _capitalize(s),
                   onToggle: (next) => notifier.setFilters(sources: next),

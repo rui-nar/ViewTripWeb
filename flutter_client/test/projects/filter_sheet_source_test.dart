@@ -85,6 +85,28 @@ void main() {
     expect(notifier.hasActiveFilter, isFalse);
   });
 
+  testWidgets('a filter already on keeps the chip that turns it off',
+      (tester) async {
+    // Filter a trip to its imported activities, then delete the last one. The
+    // section hides itself at one remaining source, so it would have taken the
+    // only way to clear the filter with it: every day filtered out, and
+    // nothing in the sheet to explain it or undo it.
+    final notifier = _notifierWith([_activity(id: 1)]);
+    notifier.setFilters(sources: {'gpx'});
+
+    await _pumpSheet(tester, notifier);
+
+    expect(find.text('Source'), findsOneWidget);
+    final chip = find.widgetWithText(FilterChip, 'GPX file');
+    expect(tester.widget<FilterChip>(chip).selected, isTrue);
+
+    await tester.tap(chip);
+    await tester.pumpAndSettle();
+
+    expect(notifier.sourceFilter, isEmpty);
+    expect(notifier.hasActiveFilter, isFalse);
+  });
+
   testWidgets('a shared trip can read the section but not use it',
       (tester) async {
     await _pumpSheet(

@@ -157,6 +157,44 @@ void main() {
       expect(notifier.selectedDays, isEmpty);
     });
 
+    test('a saved source the trip no longer holds is dropped on restore', () {
+      // Import a track, filter the trip to it, then delete it: the saved
+      // 'gpx' would come back on the next load, match nothing, and empty the
+      // whole list — with the sheet's Source section gone, because the trip is
+      // down to one source again.
+      final notifier = _notifierWith([_activity(day: '2024-06-01')]);
+
+      notifier.restoreFilters(const ProjectFilters(sources: {'gpx'}));
+
+      expect(notifier.sourceFilter, isEmpty);
+      expect(notifier.hasActiveFilter, isFalse);
+      expect(notifier.selectedDays, isEmpty);
+    });
+
+    test('a saved source the trip does hold is applied', () {
+      final notifier = _notifierWith([
+        _activity(day: '2024-06-01'),
+        _activity(day: '2024-06-02', source: 'gpx'),
+      ]);
+
+      notifier.restoreFilters(const ProjectFilters(sources: {'gpx'}));
+
+      expect(notifier.sourceFilter, {'gpx'});
+      expect(notifier.selectedDays, {'2024-06-02'});
+    });
+
+    test('the guard is the source dimension only, not a general scrub', () {
+      // Tags restore as saved, stale or not — that is pre-existing behaviour
+      // and not what this change is about.
+      final notifier = _notifierWith([_activity(day: '2024-06-01')]);
+
+      notifier.restoreFilters(
+          const ProjectFilters(tags: {'beach'}, sources: {'gpx'}));
+
+      expect(notifier.tagFilter, {'beach'});
+      expect(notifier.sourceFilter, isEmpty);
+    });
+
     test('clearing every filter clears the source too', () {
       final notifier = _notifierWith([_activity(day: '2024-06-01', source: 'gpx')]);
       notifier.setFilters(sources: {'gpx'});

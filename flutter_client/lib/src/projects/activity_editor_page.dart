@@ -372,16 +372,21 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Row(
-          children: [
-            Flexible(
-              child: Text(
-                'Edit — ${widget.activity['name'] ?? 'Activity'}',
-                style: theme.textTheme.titleMedium,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (_isGpxImport) ...[
+        title: LayoutBuilder(builder: (context, constraints) {
+          final title = Text(
+            'Edit — ${widget.activity['name'] ?? 'Activity'}',
+            style: theme.textTheme.titleMedium,
+            overflow: TextOverflow.ellipsis,
+          );
+          // The AppBar gives the title whatever the actions leave it, and on a
+          // phone showing Reset that is sometimes less than the badge's own
+          // 24 px. A Row cannot hand space back, so below the point where the
+          // name would get any at all the badge stands down instead of
+          // overflowing into the actions.
+          if (!_isGpxImport || constraints.maxWidth < 48) return title;
+          return Row(
+            children: [
+              Flexible(child: title),
               const SizedBox(width: 8),
               Tooltip(
                 message: 'Imported from a GPX file',
@@ -394,8 +399,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
                 ),
               ),
             ],
-          ],
-        ),
+          );
+        }),
         actions: [
           if (_isEdited)
             TextButton.icon(

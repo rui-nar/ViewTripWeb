@@ -161,7 +161,16 @@ mixin ProjectFilterMixin on ChangeNotifier {
   /// follow-up) without the selection-clearing side effect [setFilters] has —
   /// restore needs to apply filters and selections independently.
   void restoreFilters(ProjectFilters restored) {
-    _filters = restored;
+    // A source the trip no longer holds is dropped rather than applied. The
+    // sheet stops offering the Source section once a trip is down to one
+    // source, so a restored 'gpx' on a trip whose only import has since been
+    // deleted would filter every day out of the list with no chip left to
+    // untick and nothing on screen saying why. Same reasoning as the stale
+    // day/activity references _restoreUiState already drops.
+    _filters = restored.sources.isEmpty
+        ? restored
+        : restored.copyWith(
+            sources: restored.sources.where(availableSources.contains).toSet());
     _recomputeSelectedDays();
   }
 

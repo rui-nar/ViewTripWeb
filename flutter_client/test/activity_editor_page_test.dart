@@ -183,8 +183,9 @@ Future<void> _pointMenu(WidgetTester tester, int index, String label) async {
   await tester.pumpAndSettle();
 }
 
-Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity) async {
-  tester.view.physicalSize = const Size(1200, 1000);
+Future<void> _pump(WidgetTester tester, Map<String, dynamic> activity,
+    {Size size = const Size(1200, 1000)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -257,6 +258,18 @@ void main() {
     expect(find.byTooltip('Imported from a GPX file'), findsOneWidget);
 
     semantics.dispose();
+  });
+
+  testWidgets('on a phone the badge gives the title slot back to the name',
+      (tester) async {
+    // An edited activity's actions leave the title almost nothing, and a Row
+    // cannot hand space back — so the badge took what little there was and the
+    // title slot showed a route icon and no name at all.
+    await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
+        size: const Size(400, 900));
+
+    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsNothing);
+    expect(find.textContaining('Edit —'), findsOneWidget);
   });
 
   testWidgets('a synced track carries no badge in the editor', (tester) async {
