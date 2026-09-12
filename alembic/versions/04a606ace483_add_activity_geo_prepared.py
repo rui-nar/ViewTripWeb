@@ -15,7 +15,7 @@ No backfill here — rows are written lazily on first read and by the sweep of
 stage B2, so the upgrade itself is instant on any database.
 
 Revision ID: 04a606ace483
-Revises: c4a9e1f70b38
+Revises: e3c8a1d5b742
 Create Date: 2026-09-11
 
 """
@@ -25,7 +25,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = '04a606ace483'
-down_revision: Union[str, Sequence[str], None] = 'c4a9e1f70b38'
+down_revision: Union[str, Sequence[str], None] = 'e3c8a1d5b742'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

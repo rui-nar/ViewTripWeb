@@ -712,7 +712,7 @@ def test_the_cold_build_is_logged_with_its_phases(env, caplog):
 # ── the migration ────────────────────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_PREVIOUS_HEAD = "c4a9e1f70b38"
+_PREVIOUS_HEAD = "e3c8a1d5b742"
 
 
 def _alembic_config(db_path: Path) -> Config:

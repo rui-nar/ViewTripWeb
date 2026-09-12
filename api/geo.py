@@ -22,6 +22,7 @@ from models.db import get_session
 from models.project_db import DBActivity, DBActivityGeoPrepared
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
+from sqlalchemy import text
 from sqlmodel import select
 
 from api.deps import get_current_user
@@ -846,21 +847,58 @@ def _prepared_lines(project: Project) -> List[_PreparedLine]:
                     select(DBActivity.id, DBActivity.summary_polyline)
                     .where(DBActivity.id.in_(missing))
                 ).all())
-                for activity_id, poly in polylines.items():
-                    blob = prepare_polyline(poly)
-                    if blob is None:
-                        continue
-                    blobs[activity_id] = blob
-                    sess.merge(DBActivityGeoPrepared(
-                        activity_id=activity_id, version=PREPARED_GEO_VERSION, blob=blob))
-                try:
-                    sess.commit()
-                except Exception:  # noqa: BLE001
-                    # Two cold requests preparing the same rows at once, or a
-                    # locked database. The trip is served from memory either
-                    # way; the rows are simply prepared again on the next miss.
-                    sess.rollback()
-                    _log.warning("could not write back prepared geometry for %r", project.name)
+
+    # Preparing is seconds of CPU for a whole trip, and deliberately outside the
+    # session above: holding a connection across it serialises other writers
+    # against a read, and on SQLite that is how a cold open starts timing out
+    # unrelated requests.
+    prepared: Dict[int, bytes] = {}
+    for activity_id, poly in polylines.items():
+        blob = prepare_polyline(poly)
+        if blob is not None:
+            prepared[activity_id] = blob
+    blobs.update(prepared)
+
+    if prepared:
+        with get_session() as sess:
+            try:
+                for activity_id, blob in prepared.items():
+                    # Compare-and-swap on the polyline this blob was built from.
+                    #
+                    # The read path may write, and between the SELECT above and
+                    # this statement lie seconds of preparation. A writer landing
+                    # in that window has already stored its own geometry (or
+                    # deleted the row); an unguarded upsert would overwrite it
+                    # with what this request read *before* the write, at the
+                    # current version — so it looks fresh and is served on every
+                    # later cold open until the next polyline write. Worse for an
+                    # activity encrypted in that window: the encrypt path deletes
+                    # the row, and an unguarded insert would put the *plaintext*
+                    # geometry back for a track the server is no longer supposed
+                    # to be able to read, and the share route would serve it.
+                    #
+                    # One statement, so the check and the write cannot be split.
+                    # `IS` rather than `=` so a NULL polyline compares correctly
+                    # instead of silently failing the guard.
+                    sess.exec(text(
+                        "INSERT INTO activity_geo_prepared (activity_id, version, blob) "
+                        "SELECT :id, :version, :blob "
+                        "WHERE (SELECT summary_polyline FROM activity WHERE id = :id) IS :poly "
+                        "ON CONFLICT(activity_id) DO UPDATE SET "
+                        "  version = excluded.version, blob = excluded.blob"
+                    ).bindparams(
+                        id=activity_id,
+                        version=PREPARED_GEO_VERSION,
+                        blob=blob,
+                        poly=polylines[activity_id],
+                    ))
+                sess.commit()
+            except Exception:  # noqa: BLE001
+                # Two cold requests preparing the same rows at once, or a
+                # locked database. The trip is served from memory either
+                # way; the rows are simply prepared again on the next miss.
+                sess.rollback()
+                _log.warning("could not write back prepared geometry for %r", project.name)
 
     lines: List[_PreparedLine] = []
     for item in project.items:
