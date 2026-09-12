@@ -287,9 +287,9 @@ void main() {
     // still have room, and the Row must never need more than it is given.
     // Before the guard, with the labelled Reset button in a phone bar, 470 px
     // gave the badge 24 of the title's 43 px and left the name 19; 440 px
-    // overflowed into the actions outright. Stated as the invariant across a
-    // sweep rather than at one width: a few pixels of action-row drift moves
-    // the flip, not the contract.
+    // overflowed into the actions outright (test font). Stated as the invariant
+    // across a sweep rather than at one width: a few pixels of action-row drift
+    // moves the flip, not the contract.
     //
     // Since Reset moved into the overflow menu (#407), a phone at default text
     // size always leaves the title more than 48 px, so only scaled-up text
