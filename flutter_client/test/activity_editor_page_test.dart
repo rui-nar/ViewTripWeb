@@ -453,10 +453,12 @@ void main() {
 
   // ── The name keeps its place in the AppBar on a phone (issue #407) ────────
   //
-  // On an edited activity the labelled Reset button left the title 0 px at
-  // every width from 320 to 480, and the actions row overflowed by 75 px at 320
-  // and 35 px at 360: open a track you had edited and the AppBar did not say
-  // which. Measured, like the issue, on a pushed route (back button present).
+  // On an edited activity the labelled Reset button left the title 0 px at 320
+  // and 18 px at 360 in Roboto, most of that spent on "Edit — ": open a track
+  // you had edited and the AppBar did not say which. These tests run in the
+  // test font, whose glyphs are all 1 em wide, which is harsher: there the title
+  // got 0 px from 320 to 480 and the actions row overflowed by 75 px at 320 and
+  // 35 px at 360. Measured, like the issue, on a pushed route (back button).
 
   const longName = 'Long afternoon ride around the lake and back';
   // Every phone and small-tablet width below the 720 px breakpoint, stated as an
@@ -492,11 +494,11 @@ void main() {
 
   testWidgets('on a phone the title spends its room on the name',
       (tester) async {
-    // Room for the title is not room for the name: at 320 px the title got
-    // 55 px once Reset moved out, and "Edit — " in front of the name took all
-    // of it. So the name's share is the title's width less whatever text sits
-    // in front of the name, measured at its natural width in the same style:
-    // chrome counts against the title, not for it.
+    // Room for the title is not room for the name: at 320 px, once Reset moved
+    // out, the title got 80 px in Roboto and "Edit — " took 49 of them (in the
+    // test font: 55 px, all of it). So the name's share is the title's width
+    // less whatever text sits in front of the name, measured at its natural
+    // width in the same style: chrome counts against the title, not for it.
     final semantics = tester.ensureSemantics();
 
     for (final width in phoneWidths) {

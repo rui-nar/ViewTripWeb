@@ -453,10 +453,10 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         title: LayoutBuilder(builder: (context, constraints) {
           final name = '${widget.activity['name'] ?? 'Activity'}';
           final title = Text(
-            // On a phone "Edit — " spent much of the little room there is on
-            // what Save, the point handles and the hint below already say; the
-            // name is what tells one track from another (#407). A screen reader
-            // still hears the whole title.
+            // On a phone "Edit — " took 49 of the title's 120 px at 360 px
+            // (measured in Roboto) to say what Save, the point handles and the
+            // hint below already say; the name is what tells one track from
+            // another (#407). A screen reader still hears the whole title.
             compact ? name : 'Edit — $name',
             semanticsLabel: 'Edit — $name',
             style: theme.textTheme.titleMedium,
@@ -506,13 +506,14 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
               onPressed: _save,
             ),
           ),
-          // On a phone the labelled Reset button took the whole title slot —
-          // 0 px left for the name from 320 to 480 px, and the actions row
-          // overflowing outright below 400 (#407). There Reset moves behind the
-          // overflow menu rather than shrinking to a bare icon: it throws the
-          // edits away and closes the editor, without asking unless pieces go
-          // with it, so the tap that commits to it should land on its label and
-          // not on an unlabelled glyph sitting next to Save.
+          // On a phone the labelled Reset button took nearly all of the title
+          // slot (#407): measured in Roboto with a back button, the title got
+          // 0 px at 320, 18 at 360 and 70 at 412, and "Edit — " alone is 49.
+          // There Reset moves behind the overflow menu rather than shrinking
+          // to a bare icon: it throws the edits away and closes the editor,
+          // without asking unless pieces go with it, so the tap that commits
+          // to it should land on its label and not on an unlabelled glyph
+          // sitting next to Save.
           if (_isEdited && compact)
             Builder(
               builder: (buttonContext) => IconButton(
