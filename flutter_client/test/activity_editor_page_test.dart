@@ -12,6 +12,7 @@ import 'package:viewtrip_client/src/projects/activity_editor_page.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 import 'package:viewtrip_client/src/projects/track_editor_controller.dart';
+import 'package:viewtrip_client/src/projects/track_map_editor.dart';
 
 /// Minimal Google-polyline encoder for test fixtures.
 String _encode(List<GeoPoint> pts) {
@@ -734,10 +735,11 @@ void main() {
     expect(find.text('open editor'), findsOneWidget);
   });
 
-  testWidgets('a split confirmed while a save is in flight sends nothing',
+  testWidgets('while a save is in flight the point menu offers no split or cut',
       (tester) async {
-    // The map stays live while Save spins, so the point menu can start a split
-    // over a save that has not landed yet.
+    // The map stays live while Save spins, so the point menu still opens. A
+    // split or cut confirmed there could not go out beside the save, so it is
+    // not offered at all rather than accepted and then dropped.
     final notifier = _SlowSaveNotifier();
     await _pumpPushed(tester, _longActivity(), notifier);
     _controllerOf(tester).removeSelected(1);
@@ -747,16 +749,50 @@ void main() {
 
     await tester.longPress(find.byKey(const ValueKey('vertex_2')));
     await settleFrames(tester);
-    await tester.tap(find.text('Split here'));
+    for (final label in ['Split here', 'Cut & add transport']) {
+      final item = tester.widget<PopupMenuItem<int>>(find.ancestor(
+          of: find.text(label), matching: find.byType(PopupMenuItem<int>)));
+      expect(item.enabled, isFalse, reason: '"$label" offered during a save');
+    }
+    await tester.tap(find.text('Split here'), warnIfMissed: false);
     await settleFrames(tester);
-    await tester.tap(find.widgetWithText(FilledButton, 'Split'));
-    await settleFrames(tester);
-    expect(notifier.splits, isEmpty,
-        reason: 'a split went out beside the save already in flight');
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(notifier.splits, isEmpty);
 
     notifier.saveDone.complete();
     await tester.pumpAndSettle();
     expect(find.byType(ActivityEditorPage), findsNothing);
+  });
+
+  testWidgets('a split or cut confirmed once a write has started says why '
+      'nothing happened', (tester) async {
+    // The backstop behind the disabled entries. No real tap reaches Save
+    // through the confirmation's barrier, so this calls Save's callback while
+    // the dialog is up: whatever gets a write going there, the action the user
+    // confirmed must not vanish without a word.
+    for (final (entry, confirm) in [
+      ('Split here', 'Split'),
+      ('Cut & add transport', 'Cut'),
+    ]) {
+      final notifier = _SlowSaveNotifier();
+      await tester.pumpWidget(const SizedBox());
+      await _pumpPushed(tester, _longActivity(), notifier);
+      _controllerOf(tester).removeSelected(1);
+      await tester.pump();
+
+      await _pointMenu(tester, 2, entry);
+      tester
+          .widget<TrackEditorSaveButton>(find.byType(TrackEditorSaveButton))
+          .onPressed();
+      await settleFrames(tester);
+      await tester.tap(find.widgetWithText(FilledButton, confirm));
+      await settleFrames(tester);
+
+      expect(notifier.saves, 1);
+      expect(notifier.splits, isEmpty, reason: '$confirm went out mid-save');
+      expect(find.textContaining('Wait for the save to finish'), findsOneWidget,
+          reason: '$confirm was dropped without a word');
+    }
   });
 
   testWidgets('Reset from a menu opened on a phone still works once the '

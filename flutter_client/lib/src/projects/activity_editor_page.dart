@@ -160,13 +160,14 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
       PointMenuAction(
         label: 'Split here',
         icon: Icons.call_split,
-        enabled: _c.canSplitAt(index),
+        // Not while another write is in flight: it could not go out beside it.
+        enabled: !_saving && _c.canSplitAt(index),
         onSelected: (ctx, i) => _confirmSplit(i),
       ),
       PointMenuAction(
         label: 'Cut & add transport',
         icon: Icons.alt_route,
-        enabled: _c.canCutForTransport(index),
+        enabled: !_saving && _c.canCutForTransport(index),
         onSelected: (ctx, i) => _confirmCutForTransport(i),
       ),
       PointMenuAction(
@@ -366,9 +367,15 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         ],
       ),
     );
-    // The map stays live while another write is in flight, so a split can be
-    // confirmed over it; that one has to land first.
-    if (ok != true || !mounted || _saving) return;
+    if (ok != true || !mounted) return;
+    // Backstop for the entry disabled in _actionsForPoint: a write that got
+    // going while this was being confirmed has to land first, and the user
+    // confirmed this, so say why nothing happens rather than drop it.
+    if (_saving) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Wait for the save to finish, then try again.')));
+      return;
+    }
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
@@ -415,9 +422,15 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         ],
       ),
     );
-    // The map stays live while another write is in flight, so a split can be
-    // confirmed over it; that one has to land first.
-    if (ok != true || !mounted || _saving) return;
+    if (ok != true || !mounted) return;
+    // Backstop for the entry disabled in _actionsForPoint: a write that got
+    // going while this was being confirmed has to land first, and the user
+    // confirmed this, so say why nothing happens rather than drop it.
+    if (_saving) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Wait for the save to finish, then try again.')));
+      return;
+    }
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
