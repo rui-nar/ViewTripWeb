@@ -447,7 +447,10 @@ def _noise_threshold(sigma: float, stride: int, window: float) -> float:
 
 
 def elevation_gain(
-    elevations: List[float], distances_km: Optional[List[float]] = None
+    elevations: List[float],
+    distances_km: Optional[List[float]] = None,
+    *,
+    noise: Optional[Tuple[float, int]] = None,
 ) -> float:
     """Total ascent in metres over an ordered elevation series.
 
@@ -480,10 +483,16 @@ def elevation_gain(
     Strava-synced activities never reach here — their ``total_elevation_gain``
     arrives already processed. This is the figure for tracks we derive
     ourselves: hand-edited pieces, splits, and GPX imports.
+
+    ``noise`` overrides the measurement with a caller's own ``(sigma, stride)``.
+    Only :func:`terrain_corrected_gain` passes it, and it has to: the series it
+    hands over is part recording and part noise-free terrain model, so measuring
+    that mixture reads the model's calm as the sensor's and leaves the
+    recording's own stretches neither smoothed nor banded.
     """
     if len(elevations) < 2:
         return 0.0
-    sigma, stride = _noise_estimate(elevations)
+    sigma, stride = noise if noise is not None else _noise_estimate(elevations)
     smoothed, window = _smooth_elevations(
         elevations, distances_km, sigma, stride)
     threshold = _noise_threshold(sigma, stride, window)
@@ -496,6 +505,317 @@ def elevation_gain(
         elif ref - value >= threshold:
             ref = value
     return gain
+
+
+# ── Terrain-model gain: the flatness oracle (issue #386) ──────────────────────
+#
+# Everything above works on one series of elevations over distance, and that is
+# why the phantom climb on a phone recording cannot be removed there. Correlated
+# sensor drift and gentle terrain have the SAME SPECTRUM on the distance axis:
+# they are not separable, which was established by sweeping every span x
+# threshold pair, and by PR #389 measuring the marginal sigma correctly and
+# erasing up to 100% of a real 1000 m day for it. The time axis does not rescue
+# it either — at roughly constant speed time and distance are one axis up to a
+# scale factor.
+#
+# So this does not try. It brings in a SECOND, INDEPENDENT measurement — the
+# elevation a terrain model reports along the same path — and uses it for the one
+# question it can answer without ambiguity: *is there any relief here at all?*
+#
+# Where the terrain model says there is none, every metre the sensor reported is
+# invented, and the terrain model's own steps replace it. Where the terrain model
+# sees relief, the recording stands untouched -- and the justification for that
+# is "it changes nothing", not "the recording is better".
+#
+# Worth being exact about why, because the obvious story is wrong. On a 10 m/200 m
+# roller field the recording reports 858 m against a true 999 and the model 704,
+# so the recording does look better. But that is a coincidence of two errors
+# pointing opposite ways, not information the recording has and the model lacks.
+# Measured on the clean surface with no sensor at all: the 30 m GRID loses only 3%
+# of that roller field (999 -> 967), while running this same gain pipeline over
+# the PERFECT analytic surface loses 20% (999 -> 800), because its own 60 m
+# smoothing floor cannot see a 200 m wave either. At 100 m wavelength the split is
+# starker: the grid loses 17% (1998 -> 1660) and the pipeline 57% (1998 -> 850).
+# The dominant term is this module's smoothing, not the model's resolution. So the
+# recording's 858 is 800 of pipeline-limited terrain plus phantom climb that
+# happens to back-fill what the smoothing removed.
+#
+# Which means substitution's ceiling is a limit of THIS CODE more than of the
+# data, and it would move if the smoothing floor did. Keeping the recording where
+# there is relief is defensible because it is a no-op, and that is the whole of
+# the argument.
+
+#: Length of path over which the relief question is asked, in metres.
+#:
+#: Per-activity is too coarse — a walk half along a flat promenade and half up a
+#: hill has to keep its hill, and one verdict for the whole track cannot do that
+#: (measured: 452 m reported against a true 300; windowed, 309).
+TERRAIN_WINDOW_M = 500.0
+
+#: How much relief a window must show before the recording is trusted, in metres.
+#:
+#: Measured per 500 m window over every window of all five benchmark seeds, so
+#: these ranges are reproducible from the committed fixtures: flat ground reads
+#: 0.00, a smoothed path wandering across a 20% slope 0.71-4.20 (pure artefact),
+#: a shallow river valley 1.85-2.08, a 1.5% drag 6.95-7.78, and 10 m rollers
+#: 8.95-9.98.
+#:
+#: The valley and the cross-slope artefact OVERLAP, so no threshold separates
+#: them. 5 m puts both on the flat side, which is right for the artefact and, as
+#: it happens, near-right for the valley too (38.6 m reported against a true 40)
+#: because a terrain model is accurate on relief that shallow. Dropping to 2 m to
+#: "save" the valley instead lets the artefact back in: 131-190 m across those
+#: seeds, against 27-36 m at 5 m.
+#:
+#: The artefact's 4.20 is closer to this threshold than is comfortable. It is the
+#: horizontal-into-vertical coupling term and it grows with the fix quality --
+#: at 10 m of horizontal error the artefact alone reports about 114 m.
+TERRAIN_RELIEF_M = 5.0
+
+
+
+def terrain_corrected_gain(
+    recorded: List[float],
+    terrain: List[float],
+    distances_km: Optional[List[float]] = None,
+    *,
+    window_m: float = TERRAIN_WINDOW_M,
+    relief_m: float = TERRAIN_RELIEF_M,
+) -> float:
+    """Ascent over a recording, with flat stretches taken from the terrain model.
+
+    ``terrain`` is the terrain-model elevation at each of ``recorded``'s points,
+    sampled along a path already smoothed in plan view — smoothing the PATH is
+    legitimate in a way smoothing the elevation is not, because a road's plan
+    geometry is smooth at a scale far above GPS horizontal error. The two lists
+    must be the same length; ``distances_km`` is as :func:`elevation_gain` takes
+    it.
+
+    Falls back to :func:`elevation_gain` on the recording alone when no terrain
+    is available, which is a normal state and not an error: the tile source has
+    no SLA, and an end-to-end encrypted activity's geometry cannot be read by
+    the server at all.
+
+    **Why the windows splice deltas rather than sum their own gains.** Summing a
+    per-window :func:`elevation_gain` resets the hysteresis reference and
+    re-smooths the series at every boundary, which read 766 m where the recording
+    reads 858 m on 200 m rollers — a 92 m loss on exactly the case this is meant
+    to leave alone. Composing the steps into one series and accumulating ONCE
+    makes the all-relief case bit-identical to the recording, which is the
+    property that makes this safe. Splicing steps rather than elevations also
+    disposes of the offset between the two sources for free: barometric drift
+    puts them at different levels, and only their steps are ever used.
+    """
+    if not terrain or len(terrain) != len(recorded):
+        return elevation_gain(recorded, distances_km)
+    if len(recorded) < 3:
+        return elevation_gain(recorded, distances_km)
+
+    series = [recorded[0]]
+    for lo, hi in _terrain_windows(distances_km, len(recorded), window_m):
+        # ``hi`` is one sample PAST the window's own end, so consecutive windows
+        # share a boundary sample and every step in the track is contributed
+        # exactly once. Ending at the window's last sample instead drops the
+        # step across each boundary — 40 of them on a 20 km track at this window
+        # size — which is enough on its own to stop the all-relief case being
+        # the exact no-op the docstring above claims.
+        verdict = terrain[
+            _relief_span(lo, hi, len(recorded), window_m, distances_km)]
+        flat = len(verdict) >= 3 and _relief(verdict) < relief_m
+        source = terrain if flat else recorded
+        for previous, current in zip(source[lo:hi], source[lo + 1:hi]):
+            series.append(series[-1] + (current - previous))
+
+    # The noise measurement comes from the RECORDING, never from the series
+    # built above. That series is part recording and part terrain model, and the
+    # model has no sensor error at all: on a track that is more than about half
+    # flat the median k-th difference becomes a model sample, sigma collapses to
+    # zero, and the smoothing span and hysteresis band both drop to their floors
+    # — so the recording's noise in the windows that KEPT the recording is
+    # neither smoothed nor banded. Measured on a 40 m-spacing track with 3 m of
+    # white noise, half flat then a 300 m hill: 454-544 m reported against a
+    # true 300, where the recording alone gives 287-297 and the model 300. The
+    # mixture was worse than either source it was spliced from.
+    return elevation_gain(series, distances_km, noise=_noise_estimate(recorded))
+
+
+def _relief(window: List[float]) -> float:
+    """How much the terrain model rises and falls across *window*, in metres.
+
+    A plain range, and the plainness is a measured choice rather than the
+    obvious one. Two alternatives were tried against the benchmark and both are
+    worse:
+
+    * **Trimming the extreme sample at each end** is wrong on monotonic ground,
+      where the extremes ARE the signal: it read a 368 m stretch of a 1.5% drag
+      as 4.999 m and called it flat.
+    * **Smoothing the model first** was introduced to stop one bad post
+      deciding a window, and it blinds the verdict at its own wavelength — 60 m
+      of smoothing took a 10 m/100 m roller field from 8.05 m of relief to 3.81
+      and substituted the model over real hills. The same trap as the 60 m
+      elevation smoothing this whole issue is about.
+
+    Against a PERFECT model the range separates the cases cleanly, and that is
+    what the gates assert. Relief per 500 m window, over every window of all
+    five benchmark seeds:
+
+    ===============  ==============     ==========  ===========
+    should read flat                    should read relief
+    ------------------------------     -------------------------
+    flat ground      0.00               1.5% drag   6.95 - 7.78
+    cross-slope      0.71 - 4.20        rollers     8.95 - 9.98
+    shallow valley   1.85 - 2.08
+    ===============  ==============     ==========  ===========
+
+    **Give the model its own error and the verdict stops being reliable.** Both
+    verdicts degrade, on BOTH axes — the error's size and its correlation length
+    — so this is one 2-D surface and not two stories. 40 seeds; sigma is what
+    the TRACK sees along the path it reads, calibrated per row, because the
+    bilinear read damps independent error by about a quarter and correlated
+    error not at all (a sweep at fixed nominal sigma is otherwise partly an
+    amplitude sweep, which is how an earlier version of this table came to
+    understate the flat column by 3x):
+
+    ==============  ==================  ====================
+                    drag's no-op holds  flat windows reading
+    correlation     (of 40 seeds)       relief wrongly
+    --------------  ------------------  --------------------
+    length          s0.5  s1.0  s1.5    s0.5   s1.0    s1.5
+    ==============  ==================  ====================
+    perfect model     40    40    40    0.0%   0.0%    0.0%
+    independent       40    40    40    0.0%  25.0%   82.9%
+    45 m              40    37    38    0.0%   6.1%   59.6%
+    100 m             40     8     3    0.0%   1.2%   25.2%
+    300 m             39     7     0    0.0%   0.1%    4.1%
+    500 m             40    20     2    0.0%   0.0%    1.0%
+    1500 m            40    40    37    0.0%   0.0%    0.0%
+    ==============  ==================  ====================
+
+    Read it as one surface:
+
+    * **At sigma 0.5 everything holds** — 39-40 of 40 and 0.0% in every cell.
+      **That is the tolerance this design has, and it is the number that
+      matters.**
+    * **By sigma 1.0 both verdicts are in trouble, at opposite ends.** The
+      relief verdict collapses where the error correlates near the window — 8 of
+      40 at 100 m, 7 at 300 m — because a correlated slope inside a window
+      cancels the terrain's. The flat verdict fails at the short end instead,
+      25% of windows misreading under independent error: a range cannot average
+      excursions away, so the more a window holds the further apart its extremes.
+    * Only error correlated over several times the window is benign both ways,
+      because within one window that is a constant offset a range subtracts out.
+
+    Neither axis "governs" a verdict: the relief column moves 40 -> 8 -> 3 with
+    sigma alone at 100 m, and the flat column moves 82.9% -> 4.1% -> 0.0% with
+    length alone at sigma 1.5. Earlier versions of this docstring told a tidier
+    story three times running — a 0.2 m margin from one seed, then "correlated
+    error mostly cancels", then "independent axes" — and each was a
+    simplification the data did not support.
+
+    So the number to measure is the **effective within-window error of a real
+    tileset over known-flat ground**, against a tolerance of about 0.5 m. It
+    cannot be inferred from the spec sheet, which is worth spelling out because
+    the arithmetic looks like it works: Copernicus GLO-30 quotes a *relative*
+    vertical accuracy of 2 m LE90, and 2 / 1.645 is 1.2. Two reasons not to
+    believe that figure here — it is for slopes under 20% (4 m above, and the
+    cross-slope case in this benchmark is a 20% slope), and "relative accuracy"
+    is quoted over a baseline rather than between neighbouring posts, so most of
+    it is structure larger than a post and the within-window component is
+    smaller. 1.2 is an upper bound, and an upper bound is the pessimistic end.
+
+    The window length is the obvious free parameter, and it is not a free fix:
+    lengthening it to save the relief verdict (at 750 m the drag holds
+    everywhere) enlarges what the "should read flat" cases show too, and the
+    valley and cross-slope cross 5 m instead. Any change has to move the
+    threshold with it, and both have to be re-measured against the table above.
+
+    No statistic tried does better once model error is present: a trimmed range,
+    p95-p5, IQR, 2.5 sigma, median-filtered and boxcar ranges at 30-120 m, and
+    the summed absolute 30 m step were all measured and none separates the
+    groups. Smoothing additionally blinds the verdict at its own wavelength —
+    60 m of it took a 10 m/100 m roller field from 8.95 m of relief to 3.99 and
+    substituted the model over real hills, the same trap as the 60 m elevation
+    smoothing this issue is about. So the plain range ships as the simplest
+    thing that is no worse.
+
+    **This is why nothing here is wired to an activity yet.** Unit 2 has to
+    measure a real tileset's error correlation at the 500 m scale against known
+    terrain; if it sits near the window, this verdict needs rethinking rather
+    than retuning, and the window length is the first thing to reconsider. The
+    sensitivity is printed by ``python -m tests.elevation_bench`` across all
+    five seeds rather than gated — gating a number nobody has measured on real
+    tiles would only encode a guess, and quoting one seed of it is how the
+    previous version of this docstring came to claim a 0.2 m margin that three
+    seeds out of five do not have.
+    """
+    return max(window) - min(window)
+
+
+def _terrain_windows(
+    distances_km: Optional[List[float]], count: int, window_m: float
+):
+    """Walk the track in *window_m* steps of GROUND, yielding ``(lo, hi)``.
+
+    ``hi`` is exclusive of the window but one past its last sample, so windows
+    overlap by one and every step belongs to exactly one window.
+
+    Derived by walking the distance axis, not by dividing by a mean spacing.
+    Mean spacing lies on any recording whose rate varies against the ground it
+    covers: one 1 Hz phone carried for 5 km on foot and ridden for 15 km has a
+    mean of 5.4 m and actual spacings of 1.4 m and 8 m, so a fixed sample count
+    asks the relief question over 190 m in the walk and 1088 m in the ride. That
+    is the #376 mistake — a window that means different things on different
+    parts of the same track — and it cost 60 m on a steady drag that should have
+    been left alone entirely. A stop is the same trap in the limit: 4000
+    stationary samples make every later window a kilometre wide.
+    """
+    if not distances_km or len(distances_km) != count:
+        # No distance axis: two windows, which is the most that can be said.
+        step = max(3, count // 2)
+        for lo in range(0, count - 1, step):
+            yield lo, min(count, lo + step + 1)
+        return
+
+    lo = 0
+    while lo < count - 1:
+        limit = distances_km[lo] + window_m / 1000.0
+        hi = lo + 1
+        while hi < count and distances_km[hi] < limit:
+            hi += 1
+        # At least three samples to a verdict, and always one past the end.
+        hi = min(count, max(hi, lo + 3) + 1)
+        yield lo, hi
+        lo = hi - 1
+
+
+def _relief_span(
+    lo: int, hi: int, count: int, window_m: float,
+    distances_km: Optional[List[float]],
+) -> slice:
+    """Which samples the relief question is asked over for window ``[lo, hi)``.
+
+    Normally the window itself. The exception is the tail: a track whose length
+    is not a whole number of windows ends in a stub, and a stub answers the
+    relief question over whatever ground it happens to cover. Three samples
+    span 10 m, where "no relief" means nothing — that flipped an otherwise
+    exact no-op by up to 3 m. A 368 m stub of a 1.5% drag is subtler and worse:
+    its real relief is 5.5 m, close enough to the threshold that the verdict
+    turns on rounding, and it read flat.
+
+    So any window that does not span a full ``window_m`` of ground is judged
+    over the last full window of ground instead, while still contributing only
+    its own steps. A threshold in metres only means something against a fixed
+    length of ground.
+    """
+    if distances_km and len(distances_km) == count and hi - lo >= 2:
+        spanned_m = (distances_km[hi - 1] - distances_km[lo]) * 1000.0
+        if spanned_m < window_m:
+            back = lo
+            floor = distances_km[hi - 1] - window_m / 1000.0
+            while back > 0 and distances_km[back] > floor:
+                back -= 1
+            return slice(back, hi)
+    return slice(lo, hi)
 
 
 @dataclass
