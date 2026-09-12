@@ -8,12 +8,13 @@ from __future__ import annotations
 import json
 from typing import List, Optional
 
-from sqlalchemy import delete, func
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from models.db import get_session
 from models.project_db import DBActivity, DBProjectItem
 from src.models.activity import Activity
+from src.project.local_ids import allocate_local_activity_id
 from src.project.elevation_downsample import downsample_elevation
 from src.project.repo_core import bump_lock_version, check_and_bump_lock_version
 from src.utils.encryption_check import is_encrypted_envelope
@@ -472,16 +473,15 @@ class ActivityMixin:
         head_points = points[: split_index + 1]
         tail_points = points[min_tail_start:]
 
-        # Allocate the next free negative id. activity.id is a GLOBAL primary key,
-        # and split tails are LOCAL rows keyed by negative id. Scanning only this
-        # project's timeline items is unsafe: a previously-split tail whose item
-        # was removed from the timeline leaves the activity row orphaned (see
-        # delete_item / remove_item — they unlink the item but do not delete the
-        # row), so this project's items no longer reference it and the id gets
-        # reused → INSERT collides (UNIQUE constraint failed: activity.id). Derive
-        # the next id from the activity table itself, which sees orphans too.
-        global_min = sess.exec(select(func.min(DBActivity.id))).one()
-        tail_id = min(0, global_min or 0) - 1
+        # A tail is an activity the app creates, so it takes a local (negative)
+        # id from the shared allocator — the same one GPX import uses, rather
+        # than the decrementing scheme this used to have. That scheme handed out
+        # -1, -2, -3 in every deployment, which collides the moment a .viewtrip
+        # exported from one is imported into another. The allocator also keeps
+        # the property that mattered here: it checks the activity TABLE, not
+        # this project's timeline, because a tail whose item was removed leaves
+        # the row behind and reusing its id would collide on INSERT.
+        tail_id = allocate_local_activity_id(sess)
 
         # Resolve the family root: the very first piece ever split, regardless
         # of how deep this split is in the chain (splitting an already-split
@@ -815,6 +815,7 @@ class ActivityMixin:
             elevation_profile_json=_ep_json,
             elevation_profile_low_res_json=_low_res_ep_json(_ep_json),
             source=act.source,
+            source_id=act.source_id,
         )
         sess.add(row)
 
@@ -926,6 +927,7 @@ class ActivityMixin:
             refresh_started_at=getattr(row, "refresh_started_at", None),
             refresh_error=getattr(row, "refresh_error", None),
             source=getattr(row, "source", None),
+            source_id=getattr(row, "source_id", None),
             start_latlng_enc=start_latlng_enc,
             end_latlng_enc=end_latlng_enc,
             # Prefer the full profile's ciphertext; fall back to the low-res

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import secrets
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional
@@ -42,6 +41,7 @@ from src.exceptions.errors import RateLimitError
 from src.gpx.importer import GPXImportError, gpx_track_to_points, parse_gpx_bytes, validate_for_import
 from src.models.activity import Activity, parse_activities_or_log
 from src.models.track_edit import points_to_elevation_profile, points_to_polyline, recompute_track_metrics
+from src.project.local_ids import LocalIdExhausted, allocate_local_activity_id, track_fingerprint
 from src.project.project_repo import bump_lock_version
 from src.utils.logging import get_logger
 
@@ -404,6 +404,8 @@ async def import_gpx_activity(
 
     points = gpx_track_to_points(gpx)
     metrics = recompute_track_metrics(points)
+    fingerprint = track_fingerprint(
+        ((p.lat, p.lng) for p in points), start_dt.isoformat())
 
     raw_fname = os.path.basename(file.filename or "")
     base_name, _ext = os.path.splitext(raw_fname)
@@ -443,19 +445,36 @@ async def import_gpx_activity(
         summary_polyline=points_to_polyline(points),
         elevation_profile=points_to_elevation_profile(points),
         source="gpx",
+        source_id=fingerprint,
     )
 
     with get_session() as sess:
-        candidate_id = None
-        for _ in range(5):
-            cid = -secrets.randbits(62)
-            if sess.get(DBActivity, cid) is None:
-                candidate_id = cid
-                break
-        if candidate_id is None:
+        # Refuse a file this trip already holds. The same track legitimately
+        # belongs to two different trips, so the check is scoped to this one's
+        # timeline rather than to the global activity table.
+        duplicate = sess.exec(
+            select(DBActivity)
+            .join(DBProjectItem, DBProjectItem.activity_id == DBActivity.id)
+            .where(DBProjectItem.project_id == project_row_id)
+            .where(DBActivity.source_id == fingerprint)
+        ).first()
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "errors": [
+                        f'This trip already has "{duplicate.name}" from the same '
+                        f"track."
+                    ],
+                    "activity_id": duplicate.id,
+                },
+            )
+
+        try:
+            activity.id = allocate_local_activity_id(sess)
+        except LocalIdExhausted:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                  detail="Could not allocate a unique activity id.")
-        activity.id = candidate_id
 
     def _add(project) -> None:
         # Re-checked from scratch on every retry attempt, in its own

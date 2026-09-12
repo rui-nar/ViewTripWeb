@@ -360,7 +360,11 @@ def test_split_across_projects_allocates_distinct_ids(env):
     activity.id is a global PK. Allocating the negative tail id from only the
     current project's items reused -1 in a second project and hit
     'UNIQUE constraint failed: activity.id' on insert. The second split must
-    now get a distinct id (-2), not collide.
+    get a distinct id, not collide.
+
+    The ids themselves are drawn at random now (issue #260, unit 2) rather than
+    counting down from -1, so this asserts the property — negative, and distinct
+    — instead of the particular values the old allocator happened to produce.
     """
     client, engine = env
     with Session(engine) as sess:
@@ -370,13 +374,13 @@ def test_split_across_projects_allocates_distinct_ids(env):
     r1 = client.post("/api/projects/My Trip/activities/111/split", json={"split_index": 2})
     assert r1.status_code == 200, r1.text
     tail1 = next(i for i in (a["id"] for a in r1.json()["activities"]) if i < 0)
-    assert tail1 == -1
+    assert tail1 < 0
 
     r2 = client.post("/api/projects/Trip Two/activities/222/split", json={"split_index": 2})
     assert r2.status_code == 200, r2.text
     tail2 = next(i for i in (a["id"] for a in r2.json()["activities"]) if i < 0)
-    assert tail2 == -2                       # distinct global id, no collision
-    assert tail2 != tail1
+    assert tail2 < 0
+    assert tail2 != tail1                    # distinct global id, no collision
 
 
 def test_resplit_renumbers_whole_family(env):
