@@ -343,6 +343,10 @@ class DBActivity(sqlmodel.SQLModel, table=True):
     # Import origin. NULL = from Strava (today's implicit default), "gpx" = imported
     # from a GPX file.
     source: Optional[str] = sqlmodel.Field(default=None)
+    #: Fingerprint of what was imported, so re-importing the same file is
+    #: recognised instead of silently becoming a second overlapping activity.
+    #: Indexed because it is looked up on every import (issue #260, unit 2).
+    source_id: Optional[str] = sqlmodel.Field(default=None, index=True)
 
     # Safety valve: unmapped Strava fields that may arrive in the future
     extra_json: str = sqlmodel.Field(default="{}")

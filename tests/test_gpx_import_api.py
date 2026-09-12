@@ -38,6 +38,11 @@ _TRACK = [(48.0, 2.0, 100.0), (48.001, 2.001, 110.0), (48.002, 2.002, 105.0)]
 _SINGLE_TRACK_GPX = _gpx_xml([[_TRACK]]).encode("utf-8")
 _MULTI_TRACK_GPX = _gpx_xml([[_TRACK], [_TRACK]]).encode("utf-8")
 
+#: Different geometry, so importing it is a second activity rather than a
+#: duplicate of _SINGLE_TRACK_GPX.
+_OTHER_TRACK = [(45.0, 6.0, 500.0), (45.001, 6.001, 520.0), (45.002, 6.002, 515.0)]
+_SECOND_TRACK_GPX = _gpx_xml([[_OTHER_TRACK]]).encode("utf-8")
+
 
 @pytest.fixture
 def env(monkeypatch):
@@ -77,14 +82,14 @@ def env(monkeypatch):
 
 def _post_import(client, *, filename="track.gpx", content=_SINGLE_TRACK_GPX,
                   date="2024-06-01", start_time="09:00", end_time="10:00",
-                  activity_type="Hike", owner=None):
+                  activity_type="Hike", owner=None, project="Trip"):
     data = {
         "date": date, "start_time": start_time, "end_time": end_time,
         "activity_type": activity_type,
     }
     params = {"owner": owner} if owner is not None else {}
     return client.post(
-        "/api/projects/Trip/activities/import-gpx",
+        f"/api/projects/{project}/activities/import-gpx",
         params=params,
         files={"file": (filename, content, "application/gpx+xml")},
         data=data,
@@ -157,9 +162,50 @@ def test_viewer_role_forbidden(env):
 
 
 def test_synthetic_ids_do_not_collide(env):
+    """Two DIFFERENT tracks get two different local ids.
+
+    The same track twice is now a duplicate rather than a second activity, so
+    this has to import distinct geometry to still be testing id allocation —
+    which is what it was always about.
+    """
     client, *_ = env
     r1 = _post_import(client, filename="a.gpx")
     assert r1.status_code == 200, r1.text
-    r2 = _post_import(client, filename="b.gpx")
+    r2 = _post_import(client, filename="b.gpx", content=_SECOND_TRACK_GPX)
     assert r2.status_code == 200, r2.text
     assert r1.json()["activity_id"] != r2.json()["activity_id"]
+
+
+def test_reimporting_the_same_file_is_refused(env):
+    """Importing a file twice used to make two overlapping activities, doubling
+    the trip's distance and climb with nothing to notice it by (issue #260)."""
+    client, *_rest = env
+    first = _post_import(client, filename="ride.gpx")
+    assert first.status_code == 200, first.text
+
+    again = _post_import(client, filename="ride-copy.gpx")
+
+    assert again.status_code == 409, again.text
+    detail = again.json()["detail"]
+    assert detail["activity_id"] == first.json()["activity_id"], (
+        "the refusal must name the activity already holding this track, so the "
+        "client can offer to open it"
+    )
+    assert "already has" in detail["errors"][0]
+
+
+def test_the_same_track_may_be_imported_into_another_trip(env):
+    """A commute ridden on a tour belongs to both trips. Duplicate detection is
+    a question about one timeline, not about the whole activity table."""
+    client, engine, ids, _ = env
+    with Session(engine) as sess:
+        sess.add(DBProject(user_info_id=ids["owner"], name="Other Trip"))
+        sess.commit()
+
+    first = _post_import(client, filename="ride.gpx")
+    assert first.status_code == 200, first.text
+
+    other = _post_import(client, filename="ride.gpx", project="Other Trip")
+
+    assert other.status_code == 200, other.text
+    assert other.json()["activity_id"] != first.json()["activity_id"]
