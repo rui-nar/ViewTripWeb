@@ -1,0 +1,300 @@
+"""The terrarium tile reader (issue #386, unit 2).
+
+No network: every tile here is synthesised in memory with known values, so each
+test can say exactly what the right answer is. What these pin is not whether
+the tileset is accurate — that is a measurement, recorded with the gate it
+feeds — but that the reader returns the tileset's own value, in the right place,
+the same way every time.
+"""
+from __future__ import annotations
+
+import io
+import math
+
+import pytest
+from PIL import Image
+
+from tests.elevation_bench.tile_reader import (
+    MISSING,
+    TILE_SIZE,
+    TerrariumReader,
+    TransientTileError,
+    decode_terrarium,
+    lonlat_to_pixel,
+    sample_along,
+)
+
+
+# ── Synthetic tiles ──────────────────────────────────────────────────────────
+def encode(elevation: float):
+    """The terrarium RGB for an elevation — the inverse of decode_terrarium."""
+    v = elevation + 32768.0
+    r = int(v // 256)
+    g = int(v - r * 256)
+    b = int(round((v - r * 256 - g) * 256))
+    if b == 256:
+        g, b = g + 1, 0
+    return r, g, b
+
+
+def tile_png(value_at) -> bytes:
+    """A 256x256 terrarium PNG whose pixel (px, py) decodes to value_at(px, py)."""
+    image = Image.new("RGB", (TILE_SIZE, TILE_SIZE))
+    image.putdata([encode(value_at(px, py))
+                   for py in range(TILE_SIZE) for px in range(TILE_SIZE)])
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class FakeFetch:
+    """Serves synthetic tiles and records every request."""
+
+    def __init__(self, tiles=None, missing=(), transient=()):
+        self.tiles = dict(tiles or {})
+        self.missing = set(missing)
+        self.transient = set(transient)
+        self.calls = []
+
+    def __call__(self, z, x, y):
+        self.calls.append((z, x, y))
+        if (z, x, y) in self.transient:
+            raise TransientTileError(f"{z}/{x}/{y} is having a moment")
+        if (z, x, y) in self.missing:
+            return MISSING
+        return self.tiles.get((z, x, y), MISSING)
+
+
+def lon_at_global_px(gx: float, zoom: int) -> float:
+    return gx / (TILE_SIZE * (1 << zoom)) * 360.0 - 180.0
+
+
+def lat_at_global_py(gy: float, zoom: int) -> float:
+    n = math.pi - 2.0 * math.pi * gy / (TILE_SIZE * (1 << zoom))
+    return math.degrees(math.atan(math.sinh(n)))
+
+
+# ── Decoding and projection ──────────────────────────────────────────────────
+def test_decode_matches_the_terrarium_formula():
+    assert decode_terrarium(128, 0, 0) == 0.0
+    assert decode_terrarium(128, 100, 128) == pytest.approx(100.5)
+    assert decode_terrarium(127, 255, 0) == -1.0
+    for elevation in (-411.0, 0.0, 37.25, 8848.75):
+        assert decode_terrarium(*encode(elevation)) == pytest.approx(
+            elevation, abs=1 / 256)
+
+
+def test_projection_places_the_world_on_the_expected_pixels():
+    assert lonlat_to_pixel(0.0, 0.0, 0) == pytest.approx((128.0, 128.0))
+    x, y = lonlat_to_pixel(-180.0, 85.05112878, 0)
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(0.0, abs=1e-6)
+    # One zoom deeper doubles every coordinate.
+    x1, y1 = lonlat_to_pixel(13.405, 52.52, 13)
+    x2, y2 = lonlat_to_pixel(13.405, 52.52, 14)
+    assert (x2, y2) == pytest.approx((2 * x1, 2 * y1))
+
+
+def test_latitudes_beyond_mercator_are_clamped_not_nan():
+    x, y = lonlat_to_pixel(0.0, 89.9, 2)
+    assert math.isfinite(y)
+    assert y == pytest.approx(lonlat_to_pixel(0.0, 85.05112878, 2)[1])
+
+
+# ── The half pixel ───────────────────────────────────────────────────────────
+def test_a_pixel_s_value_sits_at_its_centre_not_its_corner():
+    """Half a pixel is about 6 m at zoom 13 and 52 degrees north.
+
+    Tile whose pixel value is its own column number. At global x = i + 0.5 — the
+    CENTRE of pixel i — the answer must be exactly i. A reader interpolating
+    between pixel corners returns i + 0.5 there instead, shifting every sample
+    by half a pixel: a bias that is invisible until it is compared against
+    anything else.
+    """
+    zoom = 0
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: float(px))})
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+    lat = lat_at_global_py(100.5, zoom)
+
+    for column in (40, 41, 200):
+        centre = reader.elevation(lat, lon_at_global_px(column + 0.5, zoom))
+        corner = reader.elevation(lat, lon_at_global_px(float(column), zoom))
+        assert centre == pytest.approx(column, abs=1e-3)
+        assert corner == pytest.approx(column - 0.5, abs=1e-3)
+
+
+def test_interpolation_is_bilinear_between_the_four_centres():
+    zoom = 0
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 10.0 * px + py)})
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+
+    # A quarter of the way from centre (50, 60) toward (51, 61) on each axis.
+    got = reader.elevation(lat_at_global_py(60.5 + 0.25, zoom),
+                           lon_at_global_px(50.5 + 0.25, zoom))
+
+    assert got == pytest.approx(10.0 * 50.25 + 60.25, abs=0.02)
+
+
+# ── Tile edges ───────────────────────────────────────────────────────────────
+def test_a_read_straddling_two_tiles_is_continuous():
+    """The four samples of one bilinear read can live in two tiles.
+
+    Two tiles holding one continuous eastward ramp. Reading just either side of
+    their shared edge must give the ramp's own values, not a clamp at the edge
+    of one tile and not an index past it.
+    """
+    zoom = 1
+    fetch = FakeFetch({
+        (1, 0, 0): tile_png(lambda px, py: float(px)),
+        (1, 1, 0): tile_png(lambda px, py: float(TILE_SIZE + px)),
+    })
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+    lat = lat_at_global_py(100.5, zoom)
+
+    for gx in (TILE_SIZE - 0.75, TILE_SIZE - 0.5, TILE_SIZE, TILE_SIZE + 0.25):
+        got = reader.elevation(lat, lon_at_global_px(gx, zoom))
+        assert got == pytest.approx(gx - 0.5, abs=1e-3), (
+            f"global x {gx}: expected the ramp's {gx - 0.5}, got {got}")
+
+
+def test_longitude_wraps_across_the_antimeridian():
+    zoom = 1
+    fetch = FakeFetch({
+        (1, 0, 0): tile_png(lambda px, py: 5.0),
+        (1, 1, 0): tile_png(lambda px, py: 5.0),
+    })
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+
+    assert reader.elevation(lat_at_global_py(100.5, zoom), 179.99) == (
+        pytest.approx(5.0))
+
+
+# ── No data, and not-now ─────────────────────────────────────────────────────
+def test_a_missing_corner_gives_none_not_a_three_corner_guess():
+    """Ocean, or the edge of the tileset. An interpolation that silently leans
+    on three corners — or on a zero for the fourth — is a wrong number that
+    looks like a right one."""
+    zoom = 1
+    fetch = FakeFetch({(1, 0, 0): tile_png(lambda px, py: 100.0)},
+                      missing={(1, 1, 0)})
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+    lat = lat_at_global_py(100.5, zoom)
+
+    assert reader.elevation(lat, lon_at_global_px(100.5, zoom)) == (
+        pytest.approx(100.0))
+    assert reader.elevation(lat, lon_at_global_px(TILE_SIZE - 0.25, zoom)) is None
+
+
+def test_an_absent_tile_is_remembered_so_it_is_not_asked_for_again():
+    fetch = FakeFetch(missing={(0, 0, 0)})
+    reader = TerrariumReader(zoom=0, fetch=fetch)
+
+    assert reader.elevation(10.0, 10.0) is None
+    assert reader.elevation(11.0, 11.0) is None
+    assert fetch.calls == [(0, 0, 0)]
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_transient_failure_is_never_remembered_as_absent(tmp_path):
+    """Remembering a 5xx as "no tile" blinds the reader to that tile for good
+    because the bucket hiccupped once. Neither disk nor the retry window may
+    keep it."""
+    clock = Clock()
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 42.0)},
+                      transient={(0, 0, 0)})
+    reader = TerrariumReader(str(tmp_path), zoom=0, fetch=fetch,
+                             retry_after_s=30.0, clock=clock)
+
+    assert reader.elevation(10.0, 10.0) is None
+    assert not any(tmp_path.rglob("*.png")), "a failure was written to disk"
+
+    fetch.transient.clear()                 # the bucket recovers
+    clock.now += 31.0                       # ...and the window has passed
+    assert reader.elevation(10.0, 10.0) == pytest.approx(42.0)
+    assert len(fetch.calls) == 2, "the tile was not asked for again"
+
+
+def test_a_failing_tile_is_fetched_once_per_read_not_once_per_corner():
+    """One bilinear read touches four pixels, here all in one tile. Without a
+    short back-off the failing tile was re-fetched for each corner — each with
+    its own backed-off retries — so a 4000-point track during a bucket outage
+    would have spent hours asleep before returning "no data"."""
+    clock = Clock()
+    fetch = FakeFetch(transient={(0, 0, 0)})
+    reader = TerrariumReader(zoom=0, fetch=fetch, retry_after_s=30.0,
+                             clock=clock)
+
+    for lat, lon in [(10.0, 10.0), (10.1, 10.1), (10.2, 10.2)]:
+        assert reader.elevation(lat, lon) is None
+
+    assert len(fetch.calls) == 1, (
+        f"{len(fetch.calls)} fetches for three points in one failing tile")
+
+
+# ── The disk cache ───────────────────────────────────────────────────────────
+def test_a_second_reader_serves_from_disk_without_the_network(tmp_path):
+    first = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+    TerrariumReader(str(tmp_path), zoom=0, fetch=first).elevation(1.0, 1.0)
+
+    offline = FakeFetch()                   # would answer "missing" for anything
+    second = TerrariumReader(str(tmp_path), zoom=0, fetch=offline)
+
+    assert second.elevation(1.0, 1.0) == pytest.approx(7.0)
+    assert offline.calls == []
+
+
+def test_absence_is_remembered_on_disk_too(tmp_path):
+    first = FakeFetch(missing={(0, 0, 0)})
+    TerrariumReader(str(tmp_path), zoom=0, fetch=first).elevation(1.0, 1.0)
+
+    later = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+    assert TerrariumReader(
+        str(tmp_path), zoom=0, fetch=later).elevation(1.0, 1.0) is None
+    assert later.calls == []
+
+
+def test_the_memory_cache_is_bounded():
+    fetch = FakeFetch({(2, x, y): tile_png(lambda px, py: 1.0)
+                       for x in range(4) for y in range(4)})
+    reader = TerrariumReader(zoom=2, fetch=fetch, memory_tiles=3)
+
+    for tx in range(4):
+        reader.elevation(lat_at_global_py(TILE_SIZE * 1.5, 2),
+                         lon_at_global_px(TILE_SIZE * tx + 128.5, 2))
+
+    assert len(reader._memory) <= 3
+
+
+# ── Along a track ────────────────────────────────────────────────────────────
+def test_sampling_a_track_is_all_or_nothing():
+    """terrain_corrected_gain refuses a terrain series whose length does not
+    match the recording, so a hole must mean "no terrain" — which falls back to
+    the recording — rather than a patched-in value."""
+    zoom = 1
+    fetch = FakeFetch({(1, 0, 0): tile_png(lambda px, py: 50.0)},
+                      missing={(1, 1, 0)})
+    reader = TerrariumReader(zoom=zoom, fetch=fetch)
+    lat = lat_at_global_py(100.5, zoom)
+    inside = [(lat, lon_at_global_px(g, zoom)) for g in (50.5, 60.5, 70.5)]
+    crossing = inside + [(lat, lon_at_global_px(TILE_SIZE + 40.5, zoom))]
+
+    assert sample_along(reader, inside) == pytest.approx([50.0, 50.0, 50.0])
+    assert sample_along(reader, crossing) is None
+
+
+def test_unreadable_coordinates_are_no_data():
+    reader = TerrariumReader(zoom=0, fetch=FakeFetch())
+    assert reader.elevation(float("nan"), 0.0) is None
+    assert reader.elevation(0.0, float("inf")) is None
+
+
+def test_zoom_outside_the_tileset_is_refused():
+    with pytest.raises(ValueError):
+        TerrariumReader(zoom=16, fetch=FakeFetch())
