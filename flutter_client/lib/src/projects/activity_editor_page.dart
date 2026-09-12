@@ -385,6 +385,9 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
           // overflowing into the actions.
           if (!_isGpxImport || constraints.maxWidth < 48) return title;
           return Row(
+            // The AppBar centres the title on iOS when centerTitle is left to
+            // the platform; a max-width Row would silently left-align it.
+            mainAxisSize: MainAxisSize.min,
             children: [
               Flexible(child: title),
               const SizedBox(width: 8),

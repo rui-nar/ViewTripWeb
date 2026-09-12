@@ -107,6 +107,27 @@ void main() {
     expect(notifier.hasActiveFilter, isFalse);
   });
 
+  testWidgets("a filter naming the trip's only source keeps its chip too",
+      (tester) async {
+    // The other way into the same trap: tick Strava on a mixed trip, then
+    // delete the import. The union is one option, so a length test alone hid
+    // the section on a filter that was still on and still counted — and only
+    // "Clear all", which drops the tags and types too, could get it back off.
+    final notifier = _notifierWith([_activity(id: 1)]);
+    notifier.setFilters(sources: {'strava'});
+
+    await _pumpSheet(tester, notifier);
+
+    expect(find.text('Source'), findsOneWidget);
+    final chip = find.widgetWithText(FilterChip, 'Strava');
+    expect(tester.widget<FilterChip>(chip).selected, isTrue);
+
+    await tester.tap(chip);
+    await tester.pumpAndSettle();
+
+    expect(notifier.hasActiveFilter, isFalse);
+  });
+
   testWidgets('a shared trip can read the section but not use it',
       (tester) async {
     await _pumpSheet(

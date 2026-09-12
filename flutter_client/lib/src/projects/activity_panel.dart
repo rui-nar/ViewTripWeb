@@ -2456,8 +2456,13 @@ class FilterSheet extends StatelessWidget {
 
               // ── Source ────────────────────────────────────────────────────
               // Only worth asking once there is more than one answer; on a
-              // Strava-only trip with no source filter on, there isn't.
-              if (sourceOptions.length > 1) ...[
+              // Strava-only trip with no source filter on, there isn't. The
+              // second arm is not redundant: a filter naming the trip's ONLY
+              // source (tick Strava on a mixed trip, then delete the import)
+              // is a live, counted filter whose union is one option, and
+              // without this it would sit on with no chip to untick.
+              if (sourceOptions.length > 1 ||
+                  notifier.sourceFilter.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 Text('Source', style: theme.textTheme.labelMedium),
                 const SizedBox(height: 8),

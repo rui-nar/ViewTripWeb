@@ -160,7 +160,10 @@ mixin ProjectFilterMixin on ChangeNotifier {
   /// Applies a filter set restored from shared_preferences (issue #76
   /// follow-up) without the selection-clearing side effect [setFilters] has —
   /// restore needs to apply filters and selections independently.
-  void restoreFilters(ProjectFilters restored) {
+  /// Returns true when it dropped something from [restored], so the caller can
+  /// write the pruned set back: left on disk, a stale source re-applies itself
+  /// the next time the trip gains an activity from that source again.
+  bool restoreFilters(ProjectFilters restored) {
     // A source the trip no longer holds is dropped rather than applied. The
     // sheet stops offering the Source section once a trip is down to one
     // source, so a restored 'gpx' on a trip whose only import has since been
@@ -172,6 +175,7 @@ mixin ProjectFilterMixin on ChangeNotifier {
         : restored.copyWith(
             sources: restored.sources.where(availableSources.contains).toSet());
     _recomputeSelectedDays();
+    return _filters.sources.length != restored.sources.length;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

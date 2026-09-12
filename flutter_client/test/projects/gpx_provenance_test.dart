@@ -183,9 +183,12 @@ void main() {
       expect(notifier.selectedDays, {'2024-06-02'});
     });
 
-    test('the guard is the source dimension only, not a general scrub', () {
-      // Tags restore as saved, stale or not — that is pre-existing behaviour
-      // and not what this change is about.
+    test('the guard reaches the source dimension and no further, for now', () {
+      // Tags restore as saved, stale or not. That is the same trap one
+      // dimension over, not intended design: tags match on *effective* tags,
+      // so intersecting them with availableTags could drop a filter that does
+      // match, and it needs its own look — issue #409. This asserts where the
+      // line currently falls, so moving it is a deliberate act.
       final notifier = _notifierWith([_activity(day: '2024-06-01')]);
 
       notifier.restoreFilters(

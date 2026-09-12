@@ -260,16 +260,28 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('on a phone the badge gives the title slot back to the name',
+  testWidgets('the badge gives the name back the slot it was taking',
       (tester) async {
-    // An edited activity's actions leave the title almost nothing, and a Row
-    // cannot hand space back — so the badge took what little there was and the
-    // title slot showed a route icon and no name at all.
+    // An edited activity's actions leave the title 43 px at this width, and a
+    // Row cannot hand space back: the badge took 24 of them and the name was
+    // painted in the remaining 19. Measured, not guessed — at 470 px the name
+    // gets 43.1 px with the guard and 19.1 px without it.
     await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
-        size: const Size(400, 900));
+        size: const Size(470, 900));
 
     expect(find.byKey(const ValueKey('gpx_editor_badge')), findsNothing);
-    expect(find.textContaining('Edit —'), findsOneWidget);
+    expect(tester.getSize(find.textContaining('Edit —')).width,
+        greaterThan(24.0),
+        reason: 'the name must get the pixels the badge was taking');
+  });
+
+  testWidgets('and stands down before the AppBar overflows', (tester) async {
+    // 30 px narrower the Row could not fit its own children and overflowed
+    // into the actions.
+    await _pump(tester, _activity(edited: true)..['source'] = 'gpx',
+        size: const Size(440, 900));
+
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a synced track carries no badge in the editor', (tester) async {

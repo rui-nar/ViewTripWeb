@@ -759,7 +759,7 @@ class ProjectNotifier extends ChangeNotifier
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
-      restoreFilters(ProjectFilters(
+      final pruned = restoreFilters(ProjectFilters(
         tags: (data['tags'] as List?)?.cast<String>().toSet() ?? const {},
         sleeping:
             (data['sleeping'] as List?)?.cast<String>().toSet() ?? const {},
@@ -771,6 +771,11 @@ class ProjectNotifier extends ChangeNotifier
         // ?? handles: an older payload restores with no source constraint.
         sources: (data['sources'] as List?)?.cast<String>().toSet() ?? const {},
       ));
+      // A source dropped above is dropped in memory only. Left in storage it
+      // comes back to life the next time the trip gains an activity from that
+      // source: the list narrows and the badge lights up for a filter the user
+      // never re-ticked.
+      if (pruned) saveUiState();
 
       final savedDay = data['selectedDay'] as String?;
       if (savedDay != null && dayMeta.containsKey(savedDay)) {
