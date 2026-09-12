@@ -18,7 +18,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
@@ -76,6 +76,13 @@ class ActivitiesAddedOut(BaseModel):
     pending_enrichment: int = Field(description="Activities queued for GPS stream enrichment in background")
 
 
+#: Points kept in a preview outline. A thumbnail a few centimetres across
+#: cannot show more, and the whole payload has to survive being held in a
+#: dialog's state on a phone: a 50k-point track encodes to about 250 KB, this
+#: to about 1.
+PREVIEW_POINTS = 200
+
+
 class GPXCandidateOut(BaseModel):
     """One importable thing in an inspected file, and what it would become."""
     index: int = Field(description="Position to pass back as track_index")
@@ -97,6 +104,13 @@ class GPXCandidateOut(BaseModel):
                     "app measures it itself rather than being told, so it is "
                     "labelled as such wherever it is shown")
     elevation_gain_estimated: bool = True
+    polyline: Optional[str] = Field(
+        default=None,
+        description="Encoded outline of the track, thinned to at most "
+                    "PREVIEW_POINTS points. For drawing a thumbnail so the "
+                    "user can see what they picked before committing to it — "
+                    "not geometry of record, which the import derives from the "
+                    "file itself")
     errors: List[str] = Field(
         default_factory=list,
         description="Why this one cannot be imported; empty means it can")
@@ -505,9 +519,15 @@ def _resolve_times(candidate, date, start_time, end_time):
         )
     start_dt = datetime.combine(day, start_clock, tzinfo=timezone.utc)
     end_dt = datetime.combine(day, end_clock, tzinfo=timezone.utc)
-    if end_dt <= start_dt:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                             detail={"errors": ["End time must be after start time."]})
+    if end_dt < start_dt:
+        # An end before the start means the activity ran past midnight: a
+        # night ride leaving at 23:30 and back at 00:30. Refusing it made
+        # every such ride unimportable, since the form carries one date.
+        end_dt += timedelta(days=1)
+    if end_dt == start_dt:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"errors": ["Start and end cannot be the same time."]})
     return start_dt, end_dt
 
 
@@ -598,9 +618,32 @@ def _describe_candidates(found):
             "elevation_gain_m": (metrics.total_elevation_gain if metrics
                                  else None),
             "elevation_gain_estimated": True,
+            "polyline": _preview_polyline(candidate.points) if not errors else None,
             "errors": errors,
         })
     return out
+
+
+def _preview_polyline(points) -> Optional[str]:
+    """An outline of the track, thinned to at most :data:`PREVIEW_POINTS`.
+
+    Thinned by stride rather than by Douglas-Peucker: this is a thumbnail, so
+    what matters is a predictable point count and one pass over the list, not
+    the minimal set of points within a tolerance. The first and last points are
+    always kept, because a preview that does not start and end where the track
+    does looks wrong in a way a user notices.
+    """
+    if len(points) < 2:
+        return None
+    # Ceiling division: floor let 399 points through a cap of 200, because
+    # 399 // 200 is a stride of 1.
+    stride = -(-len(points) // PREVIEW_POINTS)
+    kept = points[::stride]
+    if len(points) % stride != 1:
+        # The stride missed the final point, and a preview that does not end
+        # where the track does looks wrong in a way users notice.
+        kept.append(points[-1])
+    return polyline_lib.encode([(p.lat, p.lng) for p in kept])
 
 
 

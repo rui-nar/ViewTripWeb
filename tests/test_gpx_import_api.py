@@ -146,12 +146,32 @@ def test_multi_track_gpx_rejected(env):
     assert any("choose which one" in e.lower() for e in errors)
 
 
-def test_end_time_before_start_time_rejected(env):
+def test_an_end_before_the_start_runs_past_midnight(env):
+    """This used to be a 422, which made every night ride unimportable.
+
+    The form carries one date, so a ride leaving at 22:30 and back at 01:10 can
+    only say so by putting the earlier clock time last. Refusing it was reading
+    the ordinary shape of a night ride as a mistake.
+    """
+    client, engine, *_ = env
+    resp = _post_import(client, date="2024-06-01",
+                        start_time="22:30", end_time="01:10")
+
+    assert resp.status_code == 200, resp.text
+    with Session(engine) as sess:
+        row = sess.get(DBActivity, resp.json()["activity_id"])
+    assert row.start_date.startswith("2024-06-01T22:30")
+    assert row.elapsed_time == 160 * 60      # two hours forty, over midnight
+
+
+def test_identical_start_and_end_rejected(env):
+    """A zero-length activity is the case that really is nonsense."""
     client, *_ = env
-    resp = _post_import(client, start_time="10:00", end_time="09:00")
+    resp = _post_import(client, start_time="09:00", end_time="09:00")
+
     assert resp.status_code == 422
     errors = resp.json()["detail"]["errors"]
-    assert any("end time" in e.lower() for e in errors)
+    assert any("same time" in e.lower() for e in errors)
 
 
 def test_viewer_role_forbidden(env):
