@@ -161,21 +161,37 @@ mixin ProjectFilterMixin on ChangeNotifier {
   /// follow-up) without the selection-clearing side effect [setFilters] has —
   /// restore needs to apply filters and selections independently.
   /// Returns true when it dropped something from [restored], so the caller can
-  /// write the pruned set back: left on disk, a stale source re-applies itself
-  /// the next time the trip gains an activity from that source again.
+  /// write the pruned set back: left on disk, a stale value re-applies itself
+  /// the next time the trip gains matching data again.
   bool restoreFilters(ProjectFilters restored) {
-    // A source the trip no longer holds is dropped rather than applied. The
-    // sheet stops offering the Source section once a trip is down to one
-    // source, so a restored 'gpx' on a trip whose only import has since been
-    // deleted would filter every day out of the list with no chip left to
-    // untick and nothing on screen saying why. Same reasoning as the stale
-    // day/activity references _restoreUiState already drops.
-    _filters = restored.sources.isEmpty
-        ? restored
-        : restored.copyWith(
-            sources: restored.sources.where(availableSources.contains).toSet());
+    // A value the trip no longer holds is dropped rather than applied, in every
+    // dimension. Filter a trip to hikes and delete the last hike: the saved
+    // 'hike' would match no day and empty the list, and the sheet, which
+    // offers what the trip holds, would have no chip to untick it. Same
+    // reasoning as the stale day/activity references _restoreUiState already
+    // drops (#260, #409).
+    //
+    // Pruning against the available* getters never drops a value that still
+    // matches a day: each is what the sheet offers as chips, derived from the
+    // same fields _recomputeSelectedDays compares with the same normalisation
+    // (lower-cased types, 'No data' for an unset sleeping mode). Tags are
+    // the one that needs an argument, because they match on *effective* tags —
+    // but an inherited tag is always some earlier day's own tag, and a day's
+    // own tags are its effective tags, so the effective tags across the trip
+    // are exactly availableTags. The restore tests pin that equivalence.
+    Set<String> held(Set<String> saved, List<String> available) =>
+        saved.where(available.contains).toSet();
+
+    _filters = restored.copyWith(
+      tags: held(restored.tags, availableTags),
+      sleeping: held(restored.sleeping, availableSleepingModes),
+      activityTypes: held(restored.activityTypes, availableActivityTypes),
+      transport: held(restored.transport, availableTransportationMeans),
+      sources: held(restored.sources, availableSources),
+    );
     _recomputeSelectedDays();
-    return _filters.sources.length != restored.sources.length;
+    // Every dimension only ever shrinks, so the count moves iff something went.
+    return _filters.activeCount != restored.activeCount;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

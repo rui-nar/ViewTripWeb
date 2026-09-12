@@ -2378,10 +2378,19 @@ class FilterSheet extends StatelessWidget {
       listenable: notifier,
       builder: (context, _) {
         final theme = Theme.of(context);
-        final tags       = notifier.availableTags;
-        final sleeping   = notifier.availableSleepingModes;
-        final actTypes   = notifier.availableActivityTypes;
-        final transport  = notifier.availableTransportationMeans;
+        // Each section offers what the trip holds plus anything already
+        // filtered on (#409): delete the last hike while filtered to hikes and
+        // the live 'hike' filter still needs its chip, or the list stays
+        // narrowed with nothing here to untick. A non-empty filter also keeps
+        // its section on screen when the trip holds nothing else in it.
+        final tags       = _withSelected(
+            notifier.availableTags, notifier.tagFilter);
+        final sleeping   = _withSelected(
+            notifier.availableSleepingModes, notifier.sleepingFilter);
+        final actTypes   = _withSelected(
+            notifier.availableActivityTypes, notifier.activityTypeFilter);
+        final transport  = _withSelected(
+            notifier.availableTransportationMeans, notifier.transportFilter);
         final sources    = notifier.availableSources;
         // What the trip holds, plus anything already filtered on. A source
         // whose last activity has since been deleted has to keep the chip that
@@ -2492,6 +2501,12 @@ class FilterSheet extends StatelessWidget {
       },
     );
   }
+
+  /// [held] in its own order, then any [selected] value it lacks, sorted — so
+  /// a stale selection trails the live options instead of reshuffling them
+  /// ('No data' stays last among the sleeping modes it belongs to).
+  static List<String> _withSelected(List<String> held, Set<String> selected) =>
+      [...held, ...(selected.difference(held.toSet()).toList()..sort())];
 
   Widget _chips({
     required List<String> options,

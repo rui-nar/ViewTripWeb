@@ -809,10 +809,10 @@ class ProjectNotifier extends ChangeNotifier
         }
       }
 
-      // A source dropped above is dropped in memory only. Left in storage it
-      // comes back to life the next time the trip gains an activity from that
-      // source: the list narrows and the badge lights up for a filter the user
-      // never re-ticked.
+      // A filter value dropped above is dropped in memory only. Left in storage
+      // it comes back to life the next time the trip gains matching data (a
+      // new import, another hike, a re-added tag): the list narrows and the
+      // badge lights up for a filter the user never re-ticked.
       //
       // This has to run LAST. _saveUiState builds its payload synchronously
       // before its first await, and load() nulls the four selection fields
