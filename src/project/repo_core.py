@@ -15,6 +15,7 @@ from sqlalchemy import func, update
 from sqlalchemy.orm import defer as _sa_defer
 from sqlmodel import Session, select
 
+from src.utils.logging import get_logger
 from models.project_db import DBActivity, DBEncounter, DBJournalEntry, DBMemory, DBMemoryComment, DBMemoryLike, DBPerson, DBPersonGroup, DBProject, DBProjectItem
 from src.models.activity import Activity
 from src.models.journal import JournalEntry
@@ -35,10 +36,32 @@ from src.models.project import (
 from src.project.project_io import ProjectIO
 
 
+_log = get_logger(__name__)
+
+
 class StaleWriteError(Exception):
     """Raised by save_project when another writer committed since this project
     was loaded (optimistic-lock conflict). Callers should reload and retry, or
     surface a 409 to the client."""
+
+
+def _parse_day_meta_json(raw: str | None) -> tuple[dict, str]:
+    """Parse a stored day-meta blob, tolerating rubble.
+
+    Returns ``(map, reason)`` — *reason* empty when nothing was dropped, so the
+    caller can log the lossy cases. ``day_meta_json`` should hold an object of
+    objects; a hand-edited row, a partial write or an older bug can leave
+    ``"null"``, a list, a truncated blob, or one bad day inside a good map.
+    """
+    try:
+        parsed = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}, "not valid JSON"
+    if not isinstance(parsed, dict):
+        return {}, f"not an object ({type(parsed).__name__})"
+    good = {dk: v for dk, v in parsed.items() if isinstance(v, dict)}
+    bad = sorted(set(parsed) - set(good))
+    return good, (f"non-object entries for {bad}" if bad else "")
 
 
 def bump_lock_version(sess: Session, project_id: int) -> None:
@@ -575,7 +598,21 @@ class ProjectCoreMixin:
                 seg = self._json_to_segment(ir.segment_json or "{}")
                 items.append(ProjectItem(item_type="segment", segment=seg, uid=ir.uid))
 
-        raw_dm = json.loads(getattr(row, 'day_meta_json', None) or "{}")
+        # Tolerate a stored blob that isn't an object, and days inside it that
+        # aren't either. api/projects.py guards the *write* the same way; if the
+        # loader still raised, a single bad row would 500 every project GET and
+        # every importer for that trip — the user would have no settings screen
+        # to save the repair from.
+        raw_dm, dropped = _parse_day_meta_json(getattr(row, 'day_meta_json', None))
+        if dropped:
+            # Loud, because this is lossy: the next structural save rewrites
+            # day_meta_json from what was loaded here, so whatever could not be
+            # parsed is gone for good. Raising instead (the old behaviour) kept
+            # the bytes but 500'd every GET and every importer for the trip,
+            # leaving the user no screen to repair it from.
+            _log.warning(
+                "project id=%s: discarded unreadable day-meta (%s); it will be "
+                "overwritten by the next save", getattr(row, 'id', None), dropped)
         day_meta = {
             dk: DayMeta(
                 difficulty=v.get("difficulty"),

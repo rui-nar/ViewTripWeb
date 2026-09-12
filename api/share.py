@@ -78,6 +78,7 @@ from models.project_db import (
     DBMemory, DBMemoryComment, DBMemoryLike, DBProject, DBShareMemoryContent, DBShareVisit,
 )
 from models.user import UserInfo
+from src.project.repo_core import _parse_day_meta_json
 from src.utils.encryption_check import is_encrypted_envelope
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -554,7 +555,7 @@ def shared_project_stats(
             row = sess.exec(select(DBProject).where(DBProject.id == project_id)).first()
         stats = json.loads(row.stats_json or "{}")
         stats["tag_options"] = tag_options_with_untagged(
-            dm.get("tags") for dm in json.loads(row.day_meta_json or "{}").values()
+            dm.get("tags") for dm in _parse_day_meta_json(row.day_meta_json)[0].values()
         )
     return stats
 
