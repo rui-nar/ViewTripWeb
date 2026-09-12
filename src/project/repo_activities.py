@@ -143,7 +143,9 @@ class ActivityMixin:
             return bool(row is not None and row.is_edited)
 
     @staticmethod
-    def _write_track_geometry(sess: Session, row: DBActivity, points: "list") -> None:
+    def _write_track_geometry(
+        row: DBActivity, points: "list", *, sess: Session | None = None,
+    ) -> None:
         """Re-derive geometry + scalar metrics from *points* onto *row* (no commit).
 
         Snapshots the pre-edit polyline/elevation into the original_* columns on
@@ -192,7 +194,13 @@ class ActivityMixin:
         )
 
         row.summary_polyline = points_to_polyline(points)
-        store_prepared_geometry(sess, row)
+        if sess is not None:
+            # Optional so this stays callable without a database: it is mostly
+            # metric arithmetic, and the gain-apportioning tests exercise that
+            # on a bare row. Every production path passes a session — the three
+            # callers below, and the "each writer leaves a prepared row" tests
+            # in test_prepared_geo.py are what hold them to it.
+            store_prepared_geometry(sess, row)
         ep = points_to_elevation_profile(points)
         ep_json = (
             json.dumps({"distances_km": ep[0], "elevations_m": ep[1]}) if ep else None
@@ -239,7 +247,7 @@ class ActivityMixin:
             check_and_bump_lock_version(sess, project_id, expected_version)
         else:
             bump_lock_version(sess, project_id)
-        self._write_track_geometry(sess, row, points)
+        self._write_track_geometry(row, points, sess=sess)
         sess.commit()
         return True
 
@@ -569,7 +577,7 @@ class ActivityMixin:
         sess.add(tail)
 
         # Write head then tail geometry (each snapshots its own original + recomputes).
-        self._write_track_geometry(sess, head, head_points)
+        self._write_track_geometry(head, head_points, sess=sess)
         # The tail begins at the split boundary — i.e. where the head ends. Tracks
         # carry no per-point timestamps, so derive the boundary time as the head's
         # start plus its (now apportioned) elapsed duration. Without this the tail
@@ -587,7 +595,7 @@ class ActivityMixin:
 
         tail.start_date = _shift(head.start_date)
         tail.start_date_local = _shift(head.start_date_local)
-        self._write_track_geometry(sess, tail, tail_points)
+        self._write_track_geometry(tail, tail_points, sess=sess)
         # Re-point the tail's snapshot at its OWN geometry. The seeding above is
         # a time-apportioning device, but _write_track_geometry snapshots whatever
         # sat on the row before the write — for a fresh tail that's the head's
