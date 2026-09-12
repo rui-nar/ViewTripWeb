@@ -33,12 +33,20 @@ from src.models.track_edit import TrackPoint
 
 MAX_IMPORT_POINTS = 50000
 
-#: Largest upload accepted, checked BEFORE parsing. gpxpy builds an object tree
-#: many times the size of the XML — a 4.6 MB file measured at 73 MB of heap — so
-#: a point-count limit applied after parsing is a limit that has already let the
-#: damage happen. 20 MB is roughly 200k points, comfortably above the point cap
-#: below and far below what would trouble the box.
-MAX_IMPORT_BYTES = 20 * 1024 * 1024
+#: Largest upload accepted, checked BEFORE parsing. gpxpy builds an object
+#: tree many times the size of the XML, so a point-count limit applied after
+#: parsing is a limit that has already let the damage happen. Measured: a
+#: 4.8 MB file of plain trackpoints peaks at 73 MB of heap, and a 13.2 MB
+#: Garmin-style file carrying <extensions> at 132 MB — about ten to fifteen
+#: times the bytes on the wire.
+#:
+#: 12 MB is chosen from the DENSEST encoding rather than the cheapest. Plain
+#: trackpoints cost ~95 bytes each and Garmin's extensions ~261, so 12 MB is
+#: roughly 130k plain points or 46k rich ones — the latter below the point cap
+#: below, which is the point: a file that passes this guard should not then be
+#: rejected after having already cost 200 MB to parse. An earlier 20 MB let a
+#: rich 80k-point file through to exactly that.
+MAX_IMPORT_BYTES = 12 * 1024 * 1024
 
 #: Below this speed the track is not moving: a stop at a café, a wait at a
 #: junction, a fix drifting while the phone sits on a table. 0.3 m/s is about a
@@ -127,18 +135,29 @@ class GpxCandidate:
         return next((t for t in reversed(self.times) if t is not None), None)
 
     @property
-    def elapsed_seconds(self) -> Optional[int]:
-        """Wall-clock span of the track, earliest stamp to latest.
+    def time_span(self) -> Optional[Tuple[datetime, datetime]]:
+        """Earliest and latest stamp, or None if the track has no usable clock.
 
         Earliest and latest rather than first and last: devices do emit the
         occasional backwards step after a clock resync, and taking the ends
-        blindly then reports a span shorter than the ride, or none at all.
+        blindly reports a span shorter than the ride, or none at all.
+
+        Everything that needs the track's own times goes through this, so
+        the preview and the import cannot disagree about whether a file has
+        a usable clock — a disagreement the user meets as a form that
+        prefills happily and then refuses to submit.
         """
         stamps = [t for t in self.times if t is not None]
         if len(stamps) < 2:
             return None
-        span = (max(stamps) - min(stamps)).total_seconds()
-        return int(span) if span > 0 else None
+        first, last = min(stamps), max(stamps)
+        return (first, last) if last > first else None
+
+    @property
+    def elapsed_seconds(self) -> Optional[int]:
+        """Wall-clock span of the track in seconds."""
+        span = self.time_span
+        return int((span[1] - span[0]).total_seconds()) if span else None
 
     @property
     def moving_seconds(self) -> Optional[int]:
@@ -204,17 +223,34 @@ class GpxCandidate:
         return int(moving)
 
 
+def guard_declared_size(size: int) -> None:
+    """Reject an upload by its DECLARED size, before reading a byte of it.
+
+    A multipart upload announces its length, so an oversized body can be
+    refused without being pulled into memory at all. Reading first and
+    measuring afterwards — which is what this used to do — grew the process by
+    the whole file before deciding it was too big.
+
+    A declaration is a claim, so :func:`guard_upload_size` still checks the
+    bytes that actually arrived.
+
+    Raises:
+        GPXImportError: if *size* exceeds :data:`MAX_IMPORT_BYTES`.
+    """
+    if size > MAX_IMPORT_BYTES:
+        raise GPXImportError([
+            f"File is {size / 1_048_576:.1f} MB; the limit is "
+            f"{MAX_IMPORT_BYTES // 1_048_576} MB."
+        ])
+
+
 def guard_upload_size(data: bytes) -> None:
     """Reject an oversized upload before it is parsed.
 
     Raises:
         GPXImportError: if the payload exceeds :data:`MAX_IMPORT_BYTES`.
     """
-    if len(data) > MAX_IMPORT_BYTES:
-        raise GPXImportError([
-            f"File is {len(data) / 1_048_576:.1f} MB; the limit is "
-            f"{MAX_IMPORT_BYTES // 1_048_576} MB."
-        ])
+    guard_declared_size(len(data))
 
 
 def parse_gpx_bytes(data: bytes) -> gpxpy.gpx.GPX:

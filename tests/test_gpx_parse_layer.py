@@ -362,4 +362,4 @@ class TestUploadSize:
         is a cap that has already let the damage happen."""
         with pytest.raises(GPXImportError) as excinfo:
             guard_upload_size(b"x" * (MAX_IMPORT_BYTES + 1))
-        assert "limit is 20 MB" in excinfo.value.errors[0]
+        assert "limit is 12 MB" in excinfo.value.errors[0]
