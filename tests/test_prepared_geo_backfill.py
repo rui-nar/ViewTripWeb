@@ -45,7 +45,7 @@ def db(monkeypatch):
     monkeypatch.setattr(db_module, "engine", engine)
     # The resume cursor is module state; a test that inherited another's would
     # start mid-range and silently skip rows.
-    monkeypatch.setattr(jobs, "_resume_after_id", 0)
+    monkeypatch.setattr(jobs, "_resume_after_id", None)
     return engine
 
 
@@ -204,7 +204,7 @@ def test_the_cursor_wraps_so_a_later_pass_starts_over(db):
 
     assert jobs.sweep_unprepared_geometry(limit=2) == 2  # full batch: resumes after
     assert jobs.sweep_unprepared_geometry(limit=2) == 1  # short batch: wraps
-    assert jobs._resume_after_id == 0
+    assert jobs._resume_after_id is None
 
 
 def test_an_encrypted_envelope_is_never_read(db, monkeypatch):
@@ -236,3 +236,97 @@ def test_the_envelope_filter_cannot_exclude_a_real_polyline():
         encoded = polyline_lib.encode(pts)
         assert not encoded.lower().startswith("v1."), encoded
         assert "1" not in encoded and "." not in encoded
+
+
+def test_app_created_activities_with_negative_ids_are_reached(db):
+    """Blocking finding from the re-review of the cursor fix.
+
+    Activities the app creates itself — GPX imports and split tails — take
+    negative ids (src/project/local_ids.py). The first version of the cursor
+    started and wrapped at 0 and filtered `id > cursor`, so it never saw any of
+    them, silently, even though they are exactly the legacy rows this sweep
+    exists for. The version before the cursor did reach them; the fix had
+    regressed it.
+    """
+    _add(db, -4503599627370495, _encoded(11))  # a GPX import's id range
+    _add(db, -7, _encoded(12))                  # a split tail's dense range
+    _add(db, 5, _encoded(13))                   # a Strava activity
+
+    for _ in range(3):
+        jobs.sweep_unprepared_geometry(limit=2)
+
+    assert set(_rows(db)) == {-4503599627370495, -7, 5}
+
+
+def test_a_real_track_beginning_with_v_is_not_mistaken_for_an_envelope(db):
+    """The SQL filter must be exactly as wide as claimed, and no wider.
+
+    `NOT LIKE 'v1.%'` is safe only because no encoded polyline can begin with
+    "v1.". But a filter widened to `v%` would still pass a test that only checks
+    envelopes are excluded — and about 3% of real encoded tracks begin with "v".
+    This pins the other side: a genuine track starting with "v" is prepared.
+    """
+    pts = [(-26.45004, -9.77305), (5.66769, -95.63986), (0.26578, 109.52882)]
+    encoded = polyline_lib.encode(pts)
+    assert encoded.startswith("v"), "fixture no longer exercises the case"
+    _add(db, 900, encoded)
+
+    assert jobs.sweep_unprepared_geometry() == 1
+    assert set(_rows(db)) == {900}
+
+
+def test_a_full_batch_does_not_refetch_its_last_row(db, monkeypatch):
+    """The cursor is exclusive: `id > cursor`, not `>=`.
+
+    An inclusive cursor still makes progress, which is why nothing else catches
+    it — but it re-reads the boundary row on every pass.
+    """
+    for i in range(4):
+        _add(db, 5000 + i, polyline_lib.encode([(45.0, 7.0)]))  # unpreparable
+    seen: list[int] = []
+    real = jobs._candidates
+
+    def recording(sess, limit, after_id):
+        rows = real(sess, limit, after_id)
+        seen.extend(r[0] for r in rows)
+        return rows
+
+    monkeypatch.setattr(jobs, "_candidates", recording)
+    jobs.sweep_unprepared_geometry(limit=2)
+    jobs.sweep_unprepared_geometry(limit=2)
+
+    assert seen == [5000, 5001, 5002, 5003]
+
+
+def test_a_zero_limit_is_a_no_op_rather_than_a_crash(db):
+    _add(db, 6000, _encoded(14))
+    assert jobs.sweep_unprepared_geometry(limit=0) == 0
+    assert _rows(db) == {}
+
+
+def test_the_cursor_starts_from_the_whole_id_range():
+    """The module default must be None — deliberately NOT using the `db` fixture.
+
+    The fixture resets the cursor before every test, which is right for isolation
+    but hides a wrong *default*: with it in place, a cursor initialised to 0 is
+    overwritten before any test can see it, and the negative-id test above still
+    passes. Production has no fixture. Checked on its own for that reason.
+    """
+    assert jobs._resume_after_id is None
+
+
+def test_negative_ids_are_reached_after_the_cursor_wraps(db):
+    """A pass that has moved past every negative id must reach them on the next.
+
+    Sets the cursor where an in-progress pass would leave it — above the negative
+    range — so the only way back to row -7 is through the wrap. A wrap to 0
+    instead of None skips the whole negative range on every pass after the first.
+    """
+    _add(db, -7, _encoded(15))
+    _add(db, 10, _encoded(16))
+    jobs._resume_after_id = 5  # mid-pass, already beyond the negative ids
+
+    jobs.sweep_unprepared_geometry(limit=2)  # finds only 10: short batch, wraps
+    jobs.sweep_unprepared_geometry(limit=2)  # must start over and find -7
+
+    assert set(_rows(db)) == {-7, 10}

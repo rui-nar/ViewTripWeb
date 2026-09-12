@@ -43,11 +43,20 @@ MAX_PREPARE_PER_SWEEP = 200
 # Process-local on purpose. Losing it on restart costs one pass that re-reads
 # rows it has already seen, which is cheap; persisting it would be a table for a
 # cursor over a backlog that only ever shrinks.
-_resume_after_id = 0
+#
+# None means "from the start of the id range", and it must not be 0. Activities
+# the app creates itself — GPX imports and split tails — take NEGATIVE ids
+# (src/project/local_ids.py), so a cursor starting and wrapping at 0 never sees
+# any of them. They are exactly the legacy rows this job exists to reach, and
+# the first version of this cursor silently excluded every one.
+_resume_after_id: int | None = None
 
 
-def _candidates(sess: Session, limit: int, after_id: int) -> list[tuple[int, str]]:
+def _candidates(sess: Session, limit: int,
+                after_id: int | None) -> list[tuple[int, str]]:
     """Activities after *after_id* with a polyline and no current-version row.
+
+    *after_id* of None means no lower bound — see ``_resume_after_id``.
 
     E2EE envelopes are excluded here rather than skipped after reading. They are
     the common unpreparable case, and filtering in SQL means they never occupy a
@@ -62,26 +71,29 @@ def _candidates(sess: Session, limit: int, after_id: int) -> list[tuple[int, str
     """
     prepared = select(DBActivityGeoPrepared.activity_id).where(
         DBActivityGeoPrepared.version == PREPARED_GEO_VERSION)
-    return list(sess.exec(
+    query = (
         select(DBActivity.id, DBActivity.summary_polyline)
         .where(DBActivity.summary_polyline.is_not(None),
                DBActivity.summary_polyline.not_like("v1.%"),
-               DBActivity.id > after_id,
                DBActivity.id.not_in(prepared))
-        .order_by(DBActivity.id)
-        .limit(limit)
-    ).all())
+    )
+    if after_id is not None:
+        query = query.where(DBActivity.id > after_id)
+    return list(sess.exec(query.order_by(DBActivity.id).limit(limit)).all())
 
 
 def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
     """Prepare up to *limit* activities that have no current row. Returns the count.
 
-    Encrypted and undecodable polylines are skipped by ``prepare_polyline``
-    returning None. They are skipped *every* run, which is intentional and cheap
-    — the alternative is a marker row whose only purpose is to say "do not look
-    at this", and the query that finds them is indexed.
+    E2EE envelopes never reach here — the candidate query excludes them. What
+    does reach here and cannot be prepared (a single-fix track, or a polyline
+    that does not decode) gets no row, so it is read again each time the cursor
+    comes back round to it. That is a few bytes per such row per pass, and far
+    cheaper than a marker row whose only job would be to say "skip this".
     """
     global _resume_after_id
+    if limit <= 0:
+        return 0
     try:
         with get_session() as sess:
             candidates = _candidates(sess, limit, _resume_after_id)
@@ -92,7 +104,7 @@ def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
     # A short batch means the end of the id range was reached, so the next run
     # starts over from the beginning; a full one resumes after its last row.
     # Advanced whether or not those rows prepared, which is the whole point.
-    _resume_after_id = candidates[-1][0] if len(candidates) == limit else 0
+    _resume_after_id = candidates[-1][0] if len(candidates) == limit else None
 
     if not candidates:
         return 0
@@ -118,20 +130,26 @@ def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
         except Exception:  # noqa: BLE001 — one bad row must not cost the batch
             _log.exception("could not prepare geometry for activity %s", activity_id)
 
-    with get_session() as sess:
-        remaining = sess.exec(text(
-            "SELECT COUNT(*) FROM activity WHERE summary_polyline IS NOT NULL "
-            "AND summary_polyline NOT LIKE 'v1.%' "
-            "AND id NOT IN (SELECT activity_id FROM activity_geo_prepared "
-            "               WHERE version = :version)"
-        ).bindparams(version=PREPARED_GEO_VERSION)).scalar_one()
     if prepared:
-        _log.info("prepared geometry for %d activities, %d left", prepared, remaining)
+        # Only reported when there was progress to report. With the cursor, a
+        # run that prepares nothing is no longer a sign of a stuck sweep: once
+        # the backlog is drained it is the normal state of any database holding
+        # a few unpreparable rows, and logging it would print the same line
+        # every five minutes forever, making a healthy sweep indistinguishable
+        # from a broken one. Genuine lack of progress shows as "left" not
+        # falling across runs.
+        try:
+            with get_session() as sess:
+                remaining = sess.exec(text(
+                    "SELECT COUNT(*) FROM activity WHERE summary_polyline IS NOT NULL "
+                    "AND summary_polyline NOT LIKE 'v1.%' "
+                    "AND id NOT IN (SELECT activity_id FROM activity_geo_prepared "
+                    "               WHERE version = :version)"
+                ).bindparams(version=PREPARED_GEO_VERSION)).scalar_one()
+            _log.info("prepared geometry for %d activities, %d left "
+                      "(including any that can never be prepared)", prepared, remaining)
+        except Exception:  # noqa: BLE001 — the work is done; a failed count must not undo that
+            _log.info("prepared geometry for %d activities", prepared)
     else:
-        # Logged, not silent: a run that read candidates and prepared none of
-        # them is exactly what a stuck sweep looks like from outside, and the
-        # original version of this job produced it forever without a word.
-        _log.info("prepared-geometry sweep read %d candidates and prepared none "
-                  "(%d unprepared remain, some may never be preparable)",
-                  len(candidates), remaining)
+        _log.debug("prepared-geometry sweep: %d candidates, none preparable", len(candidates))
     return prepared
