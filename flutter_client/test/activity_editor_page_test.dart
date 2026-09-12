@@ -690,6 +690,25 @@ void main() {
     expect(notifier.resets, isEmpty);
   });
 
+  testWidgets('Reset tapped in the same frame as Save sends nothing',
+      (tester) async {
+    // The wide bar's labelled button: no menu in between to re-check, so this
+    // is _reset()'s own guard on its own.
+    final notifier = _SlowSaveNotifier();
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+    _controllerOf(tester).removeSelected(0);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.tap(find.text('Reset to Strava'));
+    await settleFrames(tester);
+    expect(notifier.saves, 1);
+    expect(notifier.resets, isEmpty);
+
+    notifier.saveDone.complete();
+    await tester.pumpAndSettle();
+    expect(notifier.resets, isEmpty);
+  });
+
   testWidgets('a save that lands under the open menu closes the editor',
       (tester) async {
     final notifier = _SlowSaveNotifier();
@@ -755,6 +774,30 @@ void main() {
 
     notifier.saveDone.complete();
     await tester.pumpAndSettle();
+    expect(find.byType(ActivityEditorPage), findsNothing);
+  });
+
+  testWidgets('Reset from a menu opened on a phone still works once the '
+      'window is widened past 720 px', (tester) async {
+    // Landscape rotation, split screen, a browser resize: the bar swaps ⋮ for
+    // the labelled button while the menu is still up, and the item must not
+    // turn into a dead tap.
+    final notifier = _familyNotifier(0);
+    await _pumpPushed(tester, _activity(edited: true), notifier,
+        size: const Size(700, 900));
+    await tester.tap(find.byTooltip('More options'));
+    await tester.pumpAndSettle();
+
+    tester.view.physicalSize = const Size(900, 900);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('More options'), findsNothing);
+    final item = find.descendant(
+        of: find.byType(ListTile), matching: find.text('Reset to Strava'));
+    expect(item, findsOneWidget);
+
+    await tester.tap(item);
+    await tester.pumpAndSettle();
+    expect(notifier.resets, [111]);
     expect(find.byType(ActivityEditorPage), findsNothing);
   });
 

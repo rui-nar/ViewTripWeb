@@ -77,6 +77,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// reset only undoes edits made since the piece was created (issue #131).
   bool get _isLocal => _activityId < 0;
 
+  String get _resetLabel => _isLocal ? 'Reset track' : 'Reset to Strava';
+
   /// True when this track came out of a GPX file rather than from Strava.
   ///
   /// Worth saying HERE in particular: this is the screen where the geometry is
@@ -296,6 +298,46 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     }
   }
 
+  /// The phone AppBar's overflow menu, opened and awaited by the page itself.
+  ///
+  /// Not a PopupMenuButton: the button leaves the bar when the window widens
+  /// past 720 px, and a PopupMenuButton that has gone drops whatever is picked
+  /// in the menu it left open, so Reset became a dead tap (#407 review). This
+  /// State outlives the button, and looks again for a write that started while
+  /// the menu was up — Save tapped in the same frame as ⋮ still opens it.
+  Future<void> _openMoreOptions(BuildContext buttonContext) async {
+    final button = buttonContext.findRenderObject()! as RenderBox;
+    final overlay = Navigator.of(buttonContext).overlay!.context
+        .findRenderObject()! as RenderBox;
+    final action = await showMenu<_EditorMenuAction>(
+      context: context,
+      // Over the button, as PopupMenuButton places it by default.
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(
+          button.localToGlobal(Offset.zero, ancestor: overlay),
+          button.localToGlobal(button.size.bottomRight(Offset.zero),
+              ancestor: overlay),
+        ),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: _EditorMenuAction.reset,
+          child: ListTile(
+            leading: const Icon(Icons.restore),
+            title: Text(_resetLabel),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ],
+    );
+    if (!mounted || action == null || _saving) return;
+    switch (action) {
+      case _EditorMenuAction.reset:
+        _reset();
+    }
+  }
+
   /// Note appended to the Split / Cut confirmations when the editor holds
   /// unsaved changes: those points are what gets cut (#127), so say so rather
   /// than let the user assume the stored track is being split.
@@ -405,7 +447,6 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     // The app's phone/wide breakpoint (app_screen, day_carousel, the add FAB).
     // The editor is a full-screen route, so the screen's width is the AppBar's.
     final compact = MediaQuery.sizeOf(context).width < 720;
-    final resetLabel = _isLocal ? 'Reset track' : 'Reset to Strava';
 
     return Scaffold(
       appBar: AppBar(
@@ -452,7 +493,7 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
             TextButton.icon(
               onPressed: _saving ? null : _reset,
               icon: const Icon(Icons.restore, size: 18),
-              label: Text(resetLabel),
+              label: Text(_resetLabel),
               style: TextButton.styleFrom(
                 foregroundColor: theme.colorScheme.onSurfaceVariant,
               ),
@@ -473,26 +514,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
           // with it, so the tap that commits to it should land on its label and
           // not on an unlabelled glyph sitting next to Save.
           if (_isEdited && compact)
-            PopupMenuButton<_EditorMenuAction>(
-              icon: const Icon(Icons.more_vert),
-              tooltip: 'More options',
-              enabled: !_saving,
-              onSelected: (action) {
-                switch (action) {
-                  case _EditorMenuAction.reset:
-                    _reset();
-                }
-              },
-              itemBuilder: (_) => [
-                PopupMenuItem(
-                  value: _EditorMenuAction.reset,
-                  child: ListTile(
-                    leading: const Icon(Icons.restore),
-                    title: Text(resetLabel),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                ),
-              ],
+            Builder(
+              builder: (buttonContext) => IconButton(
+                icon: const Icon(Icons.more_vert),
+                tooltip: 'More options',
+                onPressed:
+                    _saving ? null : () => _openMoreOptions(buttonContext),
+              ),
             ),
         ],
       ),
