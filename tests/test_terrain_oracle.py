@@ -10,9 +10,9 @@ shipped, and then turned out to have wrecked a class nobody had generated. PR
 day for it.
 
 So the gate that matters most here is not accuracy — it is the **no-op**:
-wherever the terrain model sees relief, the figure must be exactly what the
-recording alone produces. That is the only thing that makes introducing a second
-measurement safe, and it is asserted as equality rather than as a bound.
+wherever the terrain model sees relief, the figure must be what the recording
+alone produces, to within floating point. That is the only thing that makes
+introducing a second measurement safe.
 """
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ import pytest
 
 from src.models.track_edit import (
     TERRAIN_RELIEF_M,
+    TERRAIN_WINDOW_M,
+    _terrain_windows,
     elevation_gain,
     terrain_corrected_gain,
 )
@@ -53,14 +55,21 @@ def test_the_oracle_removes_the_phantom(case, seed):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("case", NO_OP, ids=lambda c: c.key)
 def test_the_oracle_is_invisible_where_there_is_terrain(case, seed):
-    """Bit-identical, not merely close.
+    """Equal to within floating point, which is the strongest available claim.
+
+    Not literally bit-identical: the splice rebuilds the series by accumulating
+    steps from ``recorded[0]``, and ``x + (y - x) == y`` is exact only while
+    consecutive elevations are within a factor of two of each other. On rollers
+    around 100 m it is exact on every seed; move the same rollers to sea level
+    and 27 of 50 seeds drift, by about 8e-13 m. Hence the 1e-9 bound rather
+    than ``==``.
 
     Every window has relief, so every window contributes the recording's own
-    steps and the spliced series must BE the recording. Any difference means a
-    boundary sample was dropped or a verdict misfired — and the first version of
-    this code did slice ``[lo:hi]``, silently dropping the step across each
-    window boundary (39 of them on a 20 km track), which read 766 m where the
-    recording read 858 m. A loss on exactly the class this protects.
+    steps and the spliced series must be the recording. Any difference beyond
+    that drift means a boundary sample was dropped or a verdict misfired — and
+    the first version of this code did slice ``[lo:hi]``, dropping the step
+    across each window boundary (40 of them on a 20 km track), which read 764 m
+    where the recording read 858 m. A loss on exactly the class this protects.
     """
     track = case.build(seed)
     got = terrain_corrected_gain(track.recorded, track.terrain, track.distances_km)
@@ -180,26 +189,42 @@ def test_the_relief_threshold_is_what_decides_a_window():
     assert TERRAIN_RELIEF_M > 0.0
 
 
-def test_the_window_is_measured_in_distance_not_samples():
-    """A sparse route and a 1 Hz walk must ask over the same length of ground.
+def test_every_window_covers_the_same_ground_within_one_track():
+    """Asserted through the oracle, not through the helper.
 
-    Counting samples instead is the mistake that erased planned routes in #376:
-    a window fixed at N points spans 60 m of a dense recording and 4 km of a
-    route sampled every 100 m.
+    A window derived from the track's MEAN spacing means different lengths of
+    ground in different places: one 1 Hz phone carried 5 km on foot at 1.4 m/s
+    and ridden 15 km at 8 m/s has a mean of 5.4 m, so a fixed sample count asks
+    the relief question over 190 m in the walk and 1088 m in the ride. That
+    called 27 of 41 windows flat on a steady 1.5% drag and took 60 m off a
+    figure that should not have moved at all.
+
+    This test exists in this form because the version that checked the helper's
+    arithmetic passed with the window count hard-coded to 100 — the distance
+    claim was never exercised through the code that uses it.
     """
-    dense = ter.track_over(ter.flat_plain(), spacing_m=5.0)
-    sparse = ter.track_over(ter.flat_plain(), spacing_m=50.0)
+    track = ter.track_over_segments(
+        ter.steady_grade(), [(5.0, 1.4, 1.4), (15.0, 8.0, 8.0)])
+    spans = [
+        (track.distances_km[hi - 1] - track.distances_km[lo]) * 1000.0
+        for lo, hi in _terrain_windows(
+            track.distances_km, len(track.recorded), TERRAIN_WINDOW_M)
+    ]
 
-    from src.models.track_edit import TERRAIN_WINDOW_M, _terrain_window_samples
+    # Every window but the last covers a window's worth of ground, whatever the
+    # recording rate was doing there.
+    for spanned in spans[:-1]:
+        assert spanned == pytest.approx(TERRAIN_WINDOW_M, rel=0.15), (
+            f"windows span {min(spans[:-1]):.0f}-{max(spans[:-1]):.0f} m of "
+            f"ground on one track"
+        )
 
-    dense_samples = _terrain_window_samples(
-        dense.distances_km, len(dense.recorded), TERRAIN_WINDOW_M)
-    sparse_samples = _terrain_window_samples(
-        sparse.distances_km, len(sparse.recorded), TERRAIN_WINDOW_M)
-
-    assert dense_samples == pytest.approx(TERRAIN_WINDOW_M / 5.0, rel=0.05)
-    assert sparse_samples == pytest.approx(TERRAIN_WINDOW_M / 50.0, abs=1)
-    assert sparse_samples >= 3, "never fewer than three points to a verdict"
+    # And the consequence: relief everywhere on a steady drag, so the oracle is
+    # the exact no-op it claims to be even though the spacing changes 6x.
+    assert terrain_corrected_gain(
+        track.recorded, track.terrain, track.distances_km
+    ) == pytest.approx(
+        elevation_gain(track.recorded, track.distances_km), abs=1e-9)
 
 
 def test_distances_are_optional():

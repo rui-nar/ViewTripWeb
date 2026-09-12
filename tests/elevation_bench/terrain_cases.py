@@ -15,11 +15,18 @@ Two columns matter, and they are different questions:
     that because it interpolates the same posts.
 
 ``model_ceiling``
-    What the gain pipeline reports from the model along a PERFECT path. The
-    ceiling this approach can actually reach — and the number pure substitution
-    would produce. Quoting ``true_gain`` alone would make the approach look
-    broken; quoting the ceiling alone would let the model's own smoothing hide
-    inside the baseline, which is exactly how PR #389's numbers looked good.
+    What the gain pipeline reports from the model along a PERFECT path — the
+    ceiling this approach can actually reach. Quoting ``true_gain`` alone would
+    make the approach look broken; quoting the ceiling alone would let the
+    pipeline's own smoothing hide inside the baseline, which is exactly how PR
+    #389's numbers looked good.
+
+    Two things it is not. It is not what pure substitution would report in
+    production, which samples along the noisy smoothed path and so pays a
+    coupling term the true path never shows (28.5 m on a cross-slope against a
+    ceiling of 0.0). And most of its gap from ``true_gain`` is
+    :func:`elevation_gain`'s 60 m smoothing floor rather than the 30 m grid: on
+    a 10 m/100 m roller field the grid costs 17% and the pipeline 57%.
 
 The cases split into three kinds, and the middle one is the point:
 
@@ -107,6 +114,17 @@ FIXED = [
         low=270.0, high=340.0,
         note="452 m ships; the case that forces a windowed verdict, since one "
              "verdict for the whole track must lose either the flat or the hill"),
+    TerrainCase(
+        "terrain-sparse-mixed", "40 m spacing, white noise, half flat",
+        ter.half_flat_half_hill,
+        {"spacing_m": 40.0, "speed_ms": 5.0, "vertical_kind": "white"},
+        low=250.0, high=340.0,
+        note="the review's finding: the SPLICED series is part noise-free "
+             "model, so measuring noise on it read the model's calm as the "
+             "sensor's and left the recording's own windows unsmoothed and "
+             "unbanded — 454-544 m against a true 300, worse than either "
+             "source. Sparse and white is the only fixture where the span and "
+             "band are not already pinned at their floors"),
 ]
 
 
@@ -128,8 +146,11 @@ NO_OP = [
         "terrain-noop-rollers-100", "rollers 10 m/100 m under a phone",
         lambda: ter.rollers(100.0),
         no_op=True,
-        note="the model sees 594 of a true 1999 at this wavelength — near its "
-             "own Nyquist. Substituting here would be a 31% loss"),
+        note="594 of a true 1999 through the pipeline here, of which the 30 m "
+             "grid costs 17% and elevation_gain's own 60 m smoothing the rest. "
+             "Substituting would be a 31% loss against the recording — but the "
+             "recording's 907 is 850 of pipeline-limited terrain plus phantom, "
+             "not extra information it has and the model lacks"),
     TerrainCase(
         "terrain-noop-big-rollers", "rollers 20 m/600 m under a phone",
         lambda: ter.rollers(600.0, 10.0),
@@ -142,6 +163,18 @@ NO_OP = [
         no_op=True,
         note="see WATCH: a no-op the oracle arguably should not be, but "
              "changing it needs a second threshold on the same pass"),
+    TerrainCase(
+        "terrain-noop-odd-length", "gentle drag, length not a whole window",
+        ter.steady_grade,
+        {"length_km": 20.30},
+        no_op=True,
+        note="the tail, and this length is chosen not arbitrary: 20.30 km "
+             "leaves a 295 m stub whose relief reads 4.26 m, under the 5 m "
+             "threshold purely because it is a partial window of real relief. "
+             "A threshold in metres only means anything against a fixed length "
+             "of ground, so the tail is judged over the last FULL window "
+             "instead. Rejecting only stubs under half a window (250 m) leaves "
+             "exactly this band broken"),
 ]
 
 
@@ -168,6 +201,31 @@ WATCH = [
         ter.cross_slope, {"sigma_h": 10.0},
         note="the coupling term at twice the horizontal noise; how far the "
              "artefact grows with a worse fix"),
+
+    # The model's OWN error, which every gate above assumes away. Measured, not
+    # gated: which of these two models real tiles follow decides whether the
+    # relief verdict fires at all, and a synthetic surface cannot answer it.
+    # Unit 2 must, against real tiles over known terrain, before this is wired.
+    TerrainCase(
+        "terrain-watch-model-err-corr-1", "flat, model error 1 m over 500 m",
+        ter.flat_plain, {"post_sigma_m": 1.0, "error_length_m": 500.0},
+        note="the realistic case: error correlated over hundreds of metres "
+             "mostly cancels in a range, so flat ground still reads 2.2 m of "
+             "relief against the 5 m threshold and the oracle still fires"),
+    TerrainCase(
+        "terrain-watch-model-err-corr-2", "flat, model error 2 m over 500 m",
+        ter.flat_plain, {"post_sigma_m": 2.0, "error_length_m": 500.0},
+        note="twice that and the margin is gone: flat reads 4.5, a shallow "
+             "valley 6.4, and a 1.5% drag falls to 3.0 -- the drag's no-op "
+             "breaks and the valley stops being corrected"),
+    TerrainCase(
+        "terrain-watch-model-err-indep", "flat, INDEPENDENT 1.5 m per post",
+        ter.flat_plain, {"post_sigma_m": 1.5},
+        note="the pessimistic bound, and it defeats the statistic outright: "
+             "flat ground reads 6.1 m of apparent relief while a 10 m/100 m "
+             "roller field reads 5.9, so the two cannot even be ORDERED. If "
+             "real tiles look like this, the verdict needs rethinking rather "
+             "than retuning -- which is why this is printed, not gated"),
 ]
 
 ALL = FIXED + NO_OP + WATCH
