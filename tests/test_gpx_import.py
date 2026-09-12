@@ -83,13 +83,16 @@ class TestValidateForImport:
         gpx = gpxpy.gpx.GPX()
         errors = validate_for_import(gpx)
         assert errors != []
-        assert any("no tracks" in e.lower() for e in errors)
+        assert any("no route or track" in e.lower() for e in errors)
 
     def test_two_tracks_rejected(self):
         gpx = _make_gpx(n_tracks=2, n_segments=1, n_points=3)
         errors = validate_for_import(gpx)
         assert errors != []
-        assert any("only a single track" in e.lower() for e in errors)
+        # The file is still refused — picking one for the user would be
+        # guessing which ride they meant — but the message now says a choice
+        # exists rather than that the file is unsupported (issue #260, unit 3).
+        assert any("choose which one" in e.lower() for e in errors)
 
     def test_two_tracks_message_mentions_count(self):
         gpx = _make_gpx(n_tracks=2, n_segments=1, n_points=3)
