@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -105,6 +107,20 @@ class _RecordingNotifier extends ProjectNotifier {
   }
 }
 
+/// A notifier whose save hangs until the test lets it land, so a second action
+/// can be attempted while the first write is still in flight.
+class _SlowSaveNotifier extends _RecordingNotifier {
+  final Completer<void> saveDone = Completer<void>();
+  int saves = 0;
+
+  @override
+  Future<void> saveActivityTrack(int activityId, Map<String, dynamic> payload,
+      {int? lockVersion}) {
+    saves++;
+    return saveDone.future;
+  }
+}
+
 /// A notifier whose saveActivityTrack/splitActivity always fail with the 409
 /// the server returns on a stale lock_version (issue #31) — for exercising
 /// ActivityEditorPage's conflict handling without a real server round trip.
@@ -154,6 +170,7 @@ Future<void> _pumpPushed(
   Map<String, dynamic> activity,
   ProjectNotifier notifier, {
   Size size = const Size(1200, 1000),
+  void Function(Object? result)? onPopped,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -164,10 +181,12 @@ Future<void> _pumpPushed(
     home: Scaffold(
       body: Builder(
         builder: (ctx) => TextButton(
-          onPressed: () => Navigator.of(ctx).push(MaterialPageRoute(
-            builder: (_) =>
-                ActivityEditorPage(notifier: notifier, activity: activity),
-          )),
+          onPressed: () => Navigator.of(ctx)
+              .push(MaterialPageRoute(
+                builder: (_) =>
+                    ActivityEditorPage(notifier: notifier, activity: activity),
+              ))
+              .then((result) => onPopped?.call(result)),
           child: const Text('open editor'),
         ),
       ),
@@ -630,6 +649,113 @@ void main() {
       expect(find.byTooltip('More options'), findsNothing,
           reason: 'at $width px');
     }
+  });
+
+  // ── A write in flight owns the editor (review of #407) ────────────────────
+  //
+  // Save disables ⋮ only on the next rebuild, so a tap on Save and one on ⋮ in
+  // the same frame both land. Nothing may then start a second write, and when
+  // the save lands it has to close the editor, not whatever sits on top of it.
+  // Save's spinner never settles, so these pump fixed frames, not to idle.
+
+  Future<void> settleFrames(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  }
+
+  /// Make an edit so Save is live, then tap Save and ⋮ with no frame between.
+  Future<void> saveThenOpenMenu(WidgetTester tester) async {
+    _controllerOf(tester).removeSelected(0);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.tap(find.byTooltip('More options'));
+    await settleFrames(tester);
+  }
+
+  testWidgets('Reset chosen while a save is in flight sends nothing',
+      (tester) async {
+    final notifier = _SlowSaveNotifier();
+    await _pumpPushed(tester, _activity(edited: true), notifier,
+        size: const Size(360, 800));
+    await saveThenOpenMenu(tester);
+    expect(notifier.saves, 1);
+
+    await tester.tap(find.text('Reset to Strava'));
+    await settleFrames(tester);
+    expect(notifier.resets, isEmpty,
+        reason: 'a reset went out beside the save already in flight');
+
+    notifier.saveDone.complete();
+    await tester.pumpAndSettle();
+    expect(notifier.resets, isEmpty);
+  });
+
+  testWidgets('a save that lands under the open menu closes the editor',
+      (tester) async {
+    final notifier = _SlowSaveNotifier();
+    Object? popped = 'still open';
+    await _pumpPushed(tester, _activity(edited: true), notifier,
+        size: const Size(360, 800), onPopped: (r) => popped = r);
+    await saveThenOpenMenu(tester);
+    expect(find.text('Reset to Strava'), findsOneWidget); // the menu is up
+
+    notifier.saveDone.complete();
+    await tester.pumpAndSettle();
+
+    // Popping the top route would close the menu instead, and handing it the
+    // editor's bool result throws — which the save's catch reported as a
+    // failed save, over a save that had succeeded.
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('Save failed'), findsNothing);
+    expect(find.byType(ActivityEditorPage), findsNothing);
+    expect(popped, isTrue);
+  });
+
+  testWidgets('a save that lands as the editor is leaving closes nothing else',
+      (tester) async {
+    // Back pressed while Save spins: the editor is on its way out but still
+    // mounted when the save lands. Closing "the editor" then must not pop the
+    // screen underneath in its place.
+    final notifier = _SlowSaveNotifier();
+    await _pumpPushed(tester, _activity(edited: true), notifier);
+    _controllerOf(tester).removeSelected(0);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pump(const Duration(milliseconds: 50)); // mid-transition
+    expect(find.byType(ActivityEditorPage), findsOneWidget);
+
+    notifier.saveDone.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('open editor'), findsOneWidget);
+  });
+
+  testWidgets('a split confirmed while a save is in flight sends nothing',
+      (tester) async {
+    // The map stays live while Save spins, so the point menu can start a split
+    // over a save that has not landed yet.
+    final notifier = _SlowSaveNotifier();
+    await _pumpPushed(tester, _longActivity(), notifier);
+    _controllerOf(tester).removeSelected(1);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await settleFrames(tester);
+
+    await tester.longPress(find.byKey(const ValueKey('vertex_2')));
+    await settleFrames(tester);
+    await tester.tap(find.text('Split here'));
+    await settleFrames(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Split'));
+    await settleFrames(tester);
+    expect(notifier.splits, isEmpty,
+        reason: 'a split went out beside the save already in flight');
+
+    notifier.saveDone.complete();
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityEditorPage), findsNothing);
   });
 
   testWidgets('an edit via the controller enables Save', (tester) async {

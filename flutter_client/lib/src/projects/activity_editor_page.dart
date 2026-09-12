@@ -185,6 +185,24 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// SplitRequest.lock_version mismatched.
   bool _isStaleVersionConflict(Object e) => e is ApiException && e.statusCode == 409;
 
+  /// Close this editor with [result], whatever has been opened over it since
+  /// the write started.
+  ///
+  /// A save, reset or split can land while a menu or dialog is up — Save and ⋮
+  /// tapped in the same frame both go through, and the map stays live while
+  /// Save spins. A bare pop would close that instead and hand it the editor's
+  /// result, which it cannot take; the save's catch then reported a save that
+  /// had succeeded as failed and left the editor open (#407 review). [route]
+  /// is the editor's own, captured before the await. If it is already leaving
+  /// the navigator there is nothing to close, and popping anyway would take
+  /// the screen under it with it.
+  void _closeEditor(
+      NavigatorState navigator, ModalRoute<Object?>? route, Object? result) {
+    if (route == null || !route.isActive) return;
+    navigator.popUntil((r) => r == route);
+    navigator.pop(result);
+  }
+
   /// Tell the user their edit was rejected because the activity changed
   /// elsewhere, and close the editor: it's holding a now-stale copy, and
   /// reopening it (activity_panel.dart always re-fetches on open) is the only
@@ -193,12 +211,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// project_segment_crud_mixin.dart).
   void _handleStaleVersionConflict(
     ScaffoldMessengerState messenger, NavigatorState navigator,
+    ModalRoute<Object?>? route,
   ) {
     messenger.showSnackBar(const SnackBar(
       content: Text('This activity changed elsewhere. Close and reopen the '
           'editor to see the latest version, then try again.'),
     ));
-    navigator.pop(false);
+    _closeEditor(navigator, route, false);
   }
 
   Future<void> _save() async {
@@ -206,16 +225,17 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.saveActivityTrack(
           _activityId, _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Save failed: $e')));
@@ -255,16 +275,20 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   }
 
   Future<void> _reset() async {
+    // Disabling Reset only takes effect on the next rebuild; a tap in the same
+    // frame as Save still arrives here, and must not send a second write.
+    if (_saving) return;
     final pieces = _splitPiecesRemovedByReset;
     if (pieces > 0 && !await _confirmResetRemovesPieces(pieces)) return;
     if (!mounted) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.resetActivityTrack(_activityId);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -300,20 +324,23 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    // The map stays live while another write is in flight, so a split can be
+    // confirmed over it; that one has to land first.
+    if (ok != true || !mounted || _saving) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.splitActivity(_activityId, index,
           payload: _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Split failed: $e')));
@@ -346,22 +373,25 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    // The map stays live while another write is in flight, so a split can be
+    // confirmed over it; that one has to land first.
+    if (ok != true || !mounted || _saving) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.splitActivity(_activityId, index,
           dropBoundary: true,
           payload: _c.toSavePayload(),
           lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop({'openSegmentFor': _activityId});
+      _closeEditor(navigator, route, {'openSegmentFor': _activityId});
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Cut failed: $e')));
