@@ -490,6 +490,11 @@ def delete_memory(
         for item_row in item_rows:
             sess.delete(item_row)
 
+        # Make this delete visible to the optimistic lock too: a structural
+        # rewrite that loaded before it would otherwise pass the CAS and
+        # re-insert the item row from its snapshot, leaving a row pointing at
+        # content that no longer exists (issue #173; foreign keys are off).
+        bump_lock_version(sess, mem_row.project_id)
         cache_ref = project_cache_ref(sess, mem_row.project_id)
         sess.delete(mem_row)
         sess.commit()
