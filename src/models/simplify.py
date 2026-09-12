@@ -425,6 +425,15 @@ def vertex_levels(poly: list) -> bytes:
         # Unlike simplify_lonlat there is no tolerance to compare against and
         # so no pruning: every interior vertex becomes the split of some
         # subrange exactly once, and every one gets a deviation.
+        #
+        # Except a collinear run, where every interior vertex is at distance
+        # zero. No positive tolerance keeps any of them, so they are all
+        # NEVER_KEPT whichever is split first — and splitting at the first one
+        # again and again walks the run one vertex at a time, which is O(n^2):
+        # measured 0.98 s for a 4,000-point straight line against 18 ms for a
+        # wiggly one. Their deviation is already 0.0, so leave them.
+        if worst <= 0.0:
+            continue
         clamped = min(worst, parent)
         deviation[at] = clamped
         stack.append((i, at, clamped))
