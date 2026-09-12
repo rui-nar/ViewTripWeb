@@ -143,7 +143,7 @@ def test_multi_track_gpx_rejected(env):
     resp = _post_import(client, content=_MULTI_TRACK_GPX)
     assert resp.status_code == 422
     errors = resp.json()["detail"]["errors"]
-    assert any("single track" in e.lower() for e in errors)
+    assert any("choose which one" in e.lower() for e in errors)
 
 
 def test_end_time_before_start_time_rejected(env):
