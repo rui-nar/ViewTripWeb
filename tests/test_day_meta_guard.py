@@ -345,10 +345,15 @@ def test_a_malformed_day_meta_row_does_not_break_loading_the_project(env, blob):
 @pytest.mark.parametrize("blob", ['"null"', "null", "[]", "not json",
                                   '{"2026-07-04": "rubble"}'])
 def test_a_malformed_day_meta_row_does_not_break_the_stats_endpoint(env, blob):
-    """The client fires GET /stats in parallel with the project load. Making
-    only the loader and the save path tolerant left this one returning 500, so
-    a trip with one bad row still looked broken while the user was on the very
-    screen that would repair it."""
+    """Making only the loader and the save path tolerant left this endpoint
+    returning 500 for a trip with one bad row.
+
+    Scope, stated precisely because an earlier version of this docstring
+    overstated it: the only caller is ProjectStatsScreen._load, reached from
+    the Statistics button, plus the public /share/{token}/stats route. Opening
+    a project is GET /{name}, which has been tolerant since the loader fix, so
+    a bad row never blocked opening or repairing the trip — it broke the
+    Statistics screen and the public share stats."""
     client, engine, _, _ = env
     with Session(engine) as sess:
         row = sess.exec(select(DBProject).where(DBProject.name == "Trip")).one()
