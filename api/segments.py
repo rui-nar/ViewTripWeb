@@ -435,8 +435,6 @@ def update_segment(
         owner_id = row.user_info_id
         project_row_id = row.id
 
-    found = {"ok": False}
-
     def _update(project) -> None:
         for item in project.items:
             if item.item_type == "segment" and item.segment and item.segment.id == seg_id:
@@ -461,8 +459,18 @@ def update_segment(
                     seg.route_polyline = None
                 elif body.route_mode == "rail":
                     seg.route_mode = "rail"
-                found["ok"] = True
                 return
+        # Raise from inside the callback, not through a flag checked after the
+        # wrapper returns. save_project_with_retry only swallows
+        # StaleWriteError, so this escapes *before* the save — which matters
+        # twice: a PUT for an already-deleted segment no longer performs a full
+        # project rewrite (bumping the lock and forcing every concurrent
+        # structural writer into a needless retry) before answering 404, and a
+        # retry whose reloaded list no longer holds the segment answers 404
+        # instead of reporting success for an edit it did not apply. A flag set
+        # on the first attempt cannot express that: it survives the retry.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Segment not found")
 
     # save_project_with_retry rather than a single check_version=True save —
     # see create_segment above. The mutation re-runs against the reloaded item
@@ -473,8 +481,6 @@ def update_segment(
         legacy_path=_legacy_path(str(owner_id), name),
     ) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    if not found["ok"]:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Segment not found")
     bust_geo_cache(owner_id, name)
     queue_stats_refresh(background_tasks, owner_id, name)
     queue_share_tiles_refresh(background_tasks, owner_id, name)

@@ -28,8 +28,17 @@ import models.db as db_module
 from api.deps import get_current_user
 from api.encounters import router as encounters_router
 from api.journal import router as journal_router
+from api.groups import router as groups_router
 from api.memories import router as memories_router
-from models.project_db import DBProject, DBProjectItem
+from api.people import router as people_router
+from models.project_db import (
+    DBEncounter,
+    DBPersonGroup,
+    DBMemory,
+    DBPerson,
+    DBProject,
+    DBProjectItem,
+)
 from models.user import UserInfo
 from src.project.project_repo import ProjectRepo, bump_lock_version
 from src.project.repo_core import StaleWriteError
@@ -60,6 +69,8 @@ def env(monkeypatch, tmp_path):
     app.include_router(journal_router)
     app.include_router(memories_router)
     app.include_router(encounters_router)
+    app.include_router(people_router)
+    app.include_router(groups_router)
     return TestClient(app), engine, ids
 
 
@@ -187,4 +198,149 @@ def test_creating_a_segment_retries_a_concurrent_bump_instead_of_409ing(env, mon
     assert fired["done"], "the concurrent bump never ran"
     assert r.status_code in (200, 201), (
         f"expected the retry wrapper to absorb the conflict, got {r.status_code}: {r.text}"
+    )
+
+
+def _seed(engine, project_id, kind):
+    """Insert a content row plus its timeline item directly.
+
+    Going through each create endpoint would mean four different payloads,
+    quota checks and avatar handling; what these tests need is only that the
+    item row exists so the DELETE route has something to remove.
+    Returns (url_to_delete, item_filter).
+    """
+    with Session(engine) as sess:
+        if kind == "memory":
+            row = DBMemory(project_id=project_id, date="2024-06-01")
+            sess.add(row); sess.commit(); sess.refresh(row)
+            sess.add(DBProjectItem(project_id=project_id, position=0,
+                                   item_type="memory", memory_id=row.id))
+            sess.commit()
+            return f"/api/memories/{row.id}", ("memory_id", row.id)
+        if kind == "encounter":
+            person = DBPerson(project_id=project_id, name="Ada")
+            sess.add(person); sess.commit(); sess.refresh(person)
+            row = DBEncounter(project_id=project_id, date="2024-06-01",
+                              person_id=person.id)
+            sess.add(row); sess.commit(); sess.refresh(row)
+            sess.add(DBProjectItem(project_id=project_id, position=0,
+                                   item_type="encounter", encounter_id=row.id))
+            sess.commit()
+            return f"/api/encounters/{row.id}", ("encounter_id", row.id)
+        if kind == "person":
+            person = DBPerson(project_id=project_id, name="Ada")
+            sess.add(person); sess.commit(); sess.refresh(person)
+            enc = DBEncounter(project_id=project_id, date="2024-06-01",
+                              person_id=person.id)
+            sess.add(enc); sess.commit(); sess.refresh(enc)
+            sess.add(DBProjectItem(project_id=project_id, position=0,
+                                   item_type="encounter", encounter_id=enc.id))
+            sess.commit()
+            return f"/api/people/{person.id}", ("encounter_id", enc.id)
+        group = DBPersonGroup(project_id=project_id, name="The crew")
+        sess.add(group); sess.commit(); sess.refresh(group)
+        enc = DBEncounter(project_id=project_id, date="2024-06-01",
+                          group_id=group.id)
+        sess.add(enc); sess.commit(); sess.refresh(enc)
+        sess.add(DBProjectItem(project_id=project_id, position=0,
+                               item_type="encounter", encounter_id=enc.id))
+        sess.commit()
+        return f"/api/groups/{group.id}", ("encounter_id", enc.id)
+
+
+@pytest.mark.parametrize("kind", ["memory", "encounter", "person", "group"])
+def test_every_item_delete_advances_the_lock(env, kind):
+    """One test per handler, because the first cut of this file covered only
+    delete_journal — reverting the other four bumps left the whole suite green.
+    person/group delete by cascading over their encounters' item rows.
+    """
+    client, engine, ids = env
+    url, (col, row_id) = _seed(engine, ids["project"], kind)
+    before = _lock_version(engine)
+
+    r = client.delete(url)
+    assert r.status_code in (200, 204), r.text
+
+    with Session(engine) as sess:
+        left = sess.exec(
+            select(DBProjectItem).where(getattr(DBProjectItem, col) == row_id)
+        ).all()
+    assert left == [], f"{kind}: the item row was not deleted"
+    assert _lock_version(engine) == before + 1, (
+        f"{kind}: the delete did not advance the lock; a structural save that "
+        "loaded before it would pass the CAS and resurrect the item row"
+    )
+
+
+def _make_segment(client):
+    r = client.post("/api/projects/Trip/segments", json={
+        "segment_type": "train", "label": "TGV", "date": "2024-06-01",
+        "start_lat": 48.0, "start_lon": 2.0, "end_lat": 49.0, "end_lon": 3.0,
+        "insert_after_index": -1,
+    })
+    assert r.status_code in (200, 201), r.text
+    return r.json()["id"]
+
+
+def _put_segment(client, seg_id, label="TGV 2"):
+    return client.put(f"/api/projects/Trip/segments/{seg_id}", json={
+        "segment_type": "train", "label": label, "date": "2024-06-01",
+        "start_lat": 48.0, "start_lon": 2.0, "end_lat": 49.0, "end_lon": 3.0,
+        "route_mode": "great_circle",
+    })
+
+
+def test_updating_a_segment_deleted_mid_retry_reports_404_not_success(env, monkeypatch):
+    """Moving the lookup into the retry callback made "found" a flag set on the
+    first attempt. It survived the retry, so when the reloaded list no longer
+    held the segment the endpoint returned 204 for an edit it never applied,
+    and the client kept a local copy of a segment the server had dropped.
+    """
+    import api.segments as segments_mod
+    from api.segments import router as segments_router
+
+    client, engine, ids = env
+    client.app.include_router(segments_router)
+    seg_id = _make_segment(client)
+
+    # The segment is deleted between the wrapper's load and its save; that
+    # delete bumps the lock, so the CAS fails and a retry reloads without it.
+    fired = {"done": False}
+    real_quota = segments_mod.ensure_trip_days_quota
+
+    def _quota_then_delete(*a, **k):
+        result = real_quota(*a, **k)
+        if not fired["done"]:
+            fired["done"] = True
+            with Session(engine) as other:
+                ProjectRepo().delete_segment_row(other, ids["project"], seg_id)
+                other.commit()
+        return result
+
+    monkeypatch.setattr(segments_mod, "ensure_trip_days_quota", _quota_then_delete)
+
+    r = _put_segment(client, seg_id)
+    assert fired["done"], "the concurrent delete never ran"
+    assert r.status_code == 404, (
+        f"expected 404 for a segment that no longer exists, got {r.status_code}: {r.text}"
+    )
+
+
+def test_updating_a_missing_segment_writes_nothing_before_its_404(env):
+    """The 404 used to be raised after the wrapper returned, so the save had
+    already run: it bumped the lock and rewrote updated_at for a request that
+    changed nothing, forcing every concurrent structural writer into a
+    needless retry. A PUT on an already-deleted segment is routine, given the
+    client's delayed-delete flow."""
+    from api.segments import router as segments_router
+
+    client, engine, ids = env
+    client.app.include_router(segments_router)
+    before = _lock_version(engine)
+
+    r = _put_segment(client, "00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404, r.text
+
+    assert _lock_version(engine) == before, (
+        "the 404 path performed a full project save before answering"
     )
