@@ -280,8 +280,14 @@ void main() {
       expect(tester.takeException(), isNull,
           reason: 'the AppBar overflowed at $width px');
       if (badgeShown) {
-        expect(nameWidth, greaterThan(24.0),
-            reason: 'the badge crowded out the name at $width px');
+        // The guard's own contract: it shows the badge from 48 px of title
+        // space, which leaves the name maxWidth - 24. Asserting `>` rather
+        // than `>=` would call the boundary a violation — unreachable today
+        // only because the actions row measures 426.9 px, so every integer
+        // window width lands on x.1.
+        expect(nameWidth, greaterThanOrEqualTo(24.0),
+            reason: 'the badge left the name less than its own width '
+                'at $width px');
       }
     }
   });
