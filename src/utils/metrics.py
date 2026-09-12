@@ -117,6 +117,23 @@ JOB_LAST_SUCCESS = Gauge(
     ["job"],
 )
 
+# The backfill sweep for prepared geometry (issue #369). A gauge rather than a
+# log line, because the failure it exists to expose — a sweep that runs, reports
+# success, and makes no progress — is invisible to JOB_RUNS and JOB_LAST_SUCCESS,
+# and every log-based signal for it either spams once the backlog is drained or
+# goes silent exactly when it matters. A flat non-zero line here is the signal.
+PREPARED_GEOMETRY_BACKLOG = Gauge(
+    "viewtrip_prepared_geometry_backlog",
+    "Activities with a polyline and no current prepared row, including any that "
+    "can never be prepared. Should fall to a small constant and stay there.",
+)
+
+PREPARED_GEOMETRY_OUTCOMES = Counter(
+    "viewtrip_prepared_geometry_outcomes_total",
+    "Rows the backfill sweep examined, by outcome.",
+    ["outcome"],  # prepared | unpreparable | error
+)
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 DB_QUERIES = Counter(
