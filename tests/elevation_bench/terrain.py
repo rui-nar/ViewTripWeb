@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Callable, List, NamedTuple, Sequence, Tuple
+from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple
 
 from src.models.track_edit import elevation_gain
 
@@ -199,8 +199,15 @@ def terrain_model(surface: Surface, post_m: float = MODEL_POST_M,
         # Independent draws on a coarse grid of ``error_length_m``, read back
         # bilinearly: an error field that varies over that distance instead of
         # per post.
+        #
+        # Offset by a per-seed fraction of a cell. Without it the field's knots
+        # sit at exact multiples of ``error_length_m`` from x=0 and so do the
+        # oracle's windows, so at error_length_m == window_m every window is
+        # exactly one linear ramp of error — an alignment no real tileset has,
+        # and one that would decide a correlation-length sweep on its own.
         cells = error_length_m / post_m
-        gx, gy = ix / cells, iy / cells
+        phase = ((hash(("phase", seed)) & 0xFFFF) + 0.5) / 65536.0
+        gx, gy = ix / cells + phase, iy / cells + phase
         cx, cy = math.floor(gx), math.floor(gy)
         fx, fy = gx - cx, gy - cy
         return post_sigma_m * (
@@ -348,9 +355,12 @@ def track_over_segments(
     # tau in samples changes with the segment, so build the noise per segment
     # at the rate that segment was recorded at.
     # Each segment's AR(1) starts from a fresh draw, so joining them naively
-    # steps the error by up to 9 m between two samples 8 m apart — a cliff the
-    # fixture invented, which any bound measured on it would inherit. Carry the
-    # previous segment's last value across the seam instead.
+    # steps the error by up to 12 m between two samples 8 m apart — a cliff the
+    # fixture invented, which any bound measured on it would inherit. Continue
+    # the recursion from the previous segment's last value instead, at the new
+    # segment's own rate: that is the exact conditional AR(1), so the seam gets
+    # a real innovation rather than a duplicated sample, and the marginal sigma
+    # and lag-1 autocorrelation are unchanged either side of it.
     vertical: List[float] = []
     east: List[float] = []
     north: List[float] = []
@@ -361,12 +371,9 @@ def track_over_segments(
         for series, sigma, key in ((vertical, sigma_v, 0),
                                    (east, sigma_h, 1),
                                    (north, sigma_h, 2)):
-            drawn = _ar1(steps, sigma, tau_samples, seed + offset + key)
-            if series:
-                shift = series[-1] - drawn[0]
-                decay = math.exp(-1.0 / max(1e-9, tau_samples))
-                drawn = [d + shift * decay ** i for i, d in enumerate(drawn)]
-            series.extend(drawn)
+            series.extend(_ar1_from(
+                series[-1] if series else None,
+                steps, sigma, tau_samples, seed + offset + key))
         offset += 3 + index
     vertical, east, north = vertical[:count], east[:count], north[:count]
 
@@ -390,6 +397,30 @@ def track_over_segments(
         true_gain=positive_sum(z_true),
         model_ceiling=elevation_gain(ceiling, distances_km),
     )
+
+
+def _ar1_from(start: Optional[float], count: int, sigma: float,
+              tau_samples: float, seed: int) -> List[float]:
+    """:func:`_ar1`, continued from *start* instead of from a fresh draw.
+
+    ``None`` starts it the ordinary way. Given a value, the recursion carries on
+    from it — the exact conditional distribution — so two segments joined this
+    way are statistically one series with a rate change in the middle, not two
+    series with a cliff between them.
+    """
+    if start is None:
+        return _ar1(count, sigma, tau_samples, seed)
+    random.seed(seed)
+    if tau_samples <= 0:
+        return [random.gauss(0, sigma) for _ in range(count)]
+    phi = math.exp(-1.0 / tau_samples)
+    innovation = sigma * math.sqrt(max(0.0, 1 - phi * phi))
+    value = start
+    out = []
+    for _ in range(count):
+        value = phi * value + random.gauss(0, innovation)
+        out.append(value)
+    return out
 
 
 def _smooth_path_by_distance(

@@ -214,19 +214,22 @@ WATCH = [
              "apparent relief and the relief group falls to 4.38, so they "
              "overlap and no threshold orders them"),
     TerrainCase(
-        "terrain-watch-model-err-window-scale", "drag, model error at 200 m",
-        ter.steady_grade, {"post_sigma_m": 1.0, "error_length_m": 200.0},
-        note="the worst correlation length, and not the longest: a drag's "
-             "no-op holds on 5/5 seeds with a perfect model and at 60 m, 4/5 "
-             "at 100 m, 1/5 at 200 m, 2/5 at 500 m, 5/5 independent. Error at "
-             "the WINDOW's own scale is a slope that adds to the terrain's; "
-             "shorter averages out, longer cancels in a range"),
+        "terrain-watch-model-err-window-scale", "drag, model error at 300 m",
+        ter.steady_grade, {"post_sigma_m": 1.0, "error_length_m": 300.0},
+        note="where the RELIEF verdict fails: a drag's no-op survives 40/40 "
+             "seeds with a perfect model, 32/40 at 100 m, 26/40 at 300 m, "
+             "34/40 at 500 m, 40/40 by 1500 m. Error near the window's own "
+             "scale is a slope that cancels the terrain's. (The earlier note "
+             "said 200 m and quoted 5 seeds; at 40 it is 300 m)"),
     TerrainCase(
         "terrain-watch-model-err-indep", "flat, INDEPENDENT 1.5 m per post",
         ter.flat_plain, {"post_sigma_m": 1.5},
-        note="the pessimistic bound: 22-27 of 40 windows read relief on "
-             "ground that is flat, and the oracle reports 135-170 m of the "
-             "285 it should remove"),
+        note="where the FLAT verdict fails. A range cannot average error "
+             "away — more excursions inside a window push its max and min "
+             "further apart — so short-correlation error inflates flat "
+             "ground's reading to 5.62 m. 13-18 of 40 windows then read "
+             "relief on level ground and the oracle leaves 135-170 m of the "
+             "285 m it should have removed"),
     TerrainCase(
         "terrain-watch-subthreshold-rollers", "4 m/300 m rollers, sparse white",
         lambda: ter.rollers(300.0, 2.0),
@@ -234,11 +237,13 @@ WATCH = [
         note="the mirror of the noise fix. Relief here is real -- 259 m true, "
              "and the model's own series reports 194-199 of it -- but under "
              "the 5 m threshold per window, so the model is substituted and "
-             "then banded with the RECORDING's noise threshold, which steps "
-             "carrying no sensor error do not deserve. Reports 0. Not a "
-             "regression against what ships (0-13, the recording's own "
-             "hysteresis erases it too) but the model knew the answer and the "
-             "single-band pass threw it away. Per-source banding is #412"),
+             "then SMOOTHED AND BANDED with the recording's, which steps "
+             "carrying no sensor error deserve neither. The span is the larger "
+             "term: 2.95 m of sigma at 40 m spacing caps it at 240 m, and a "
+             "240 m mean over a 300 m wave removes ~88% before the band sees "
+             "anything. Reports 0. And on gentler terrain it is WORSE than "
+             "what ships -- 6 m/4000 m rollers: ships 17, oracle 0 -- so this "
+             "is a regression, not only a missed opportunity. #412"),
 ]
 
 ALL = FIXED + NO_OP + WATCH

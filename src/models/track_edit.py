@@ -674,15 +674,41 @@ def _relief(window: List[float]) -> float:
     the groups are not ordered.
 
     What governs it is the error's **correlation length against the window**,
-    and the relationship is not monotonic. The drag's no-op survives on 5 of 5
-    seeds with a perfect model, 5 of 5 at 60 m, 4 of 5 at 100 m, **1 of 5 at
-    200 m**, 2 of 5 at 500 m, and 5 of 5 with independent per-post error. Error
-    much shorter than the window averages out inside it; error much longer is a
-    constant offset a range cancels; error at the window's own scale is a slope
-    that adds to or subtracts from the terrain's. That is the same structure as
-    the defect this whole issue is about — sensor drift is inseparable from
-    terrain exactly when their correlation lengths match — reappearing one level
-    up, which is worth knowing before choosing a window length.
+    and the two verdicts fail at opposite ends of it. Neither failure shows up
+    in the other's metric, which is why both columns are here. Sigma 1 m, 40
+    seeds, phase-offset error field:
+
+    ==============  ==============  ===============
+    correlation     drag's no-op    flat ground's
+    length          survives        worst reading
+    ==============  ==============  ===============
+    perfect model   40/40           0.00
+    independent     40/40           5.62  <- flat verdict lost
+    45 m            40/40           4.82
+    100 m           32/40           4.42
+    300 m           **26/40**       4.99  <- relief verdict lost
+    500 m           34/40           4.88
+    1500 m          40/40           1.18
+    3000 m          40/40           0.59  <- both hold
+    ==============  ==============  ===============
+
+    A range cannot average anything away: the more independent excursions a
+    window holds, the further apart its maximum and minimum. So error much
+    SHORTER than the window inflates every window's reading, flat ones
+    included — the drag's no-op survives at that end only because *everything*
+    reads relief, and that is the same run in which 13-18 of 40 flat windows
+    keep their phantom climb. Error near the window's own scale is a slope that
+    adds to or cancels the terrain's, which is where the relief verdict goes
+    (worst at 300 m, about 0.6x the window). Only error correlated over several
+    times the window is benign both ways, because inside one window it is then
+    a constant offset a range subtracts out.
+
+    That is the same structure as the defect this whole issue is about — sensor
+    drift is inseparable from terrain exactly when their correlation lengths
+    match — reappearing one level up. And it gives unit 2 something to aim at
+    rather than only something to fear: the window length is the free parameter
+    here, and it wants to be SHORT relative to whatever correlation length the
+    real tileset turns out to have.
 
     No statistic tried does better once model error is present: a trimmed range,
     p95-p5, IQR, 2.5 sigma, median-filtered and boxcar ranges at 30-120 m, and
