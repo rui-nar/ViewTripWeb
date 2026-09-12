@@ -108,6 +108,11 @@ class _ActivityIconBox extends StatelessWidget {
   /// True when this activity was imported from a GPX file rather than
   /// synced from Strava — shows a small corner badge to flag the source.
   final bool manualImport;
+
+  /// What the badge means, in words. A 9 px glyph with no accessible
+  /// name is decoration: a screen reader announced nothing at all, and
+  /// a sighted user had no way to find out what it meant either.
+  static const importedLabel = 'Imported from a GPX file';
   const _ActivityIconBox({this.type, this.typeStyles, this.manualImport = false});
 
   static IconData _icon(String? t) => switch (t?.toLowerCase()) {
@@ -132,28 +137,37 @@ class _ActivityIconBox extends StatelessWidget {
       child: Icon(_icon(type), size: 17, color: iconBoxFg(c, dark: dark)),
     );
     if (!manualImport) return box;
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        box,
-        Positioned(
-          right: -2,
-          bottom: -2,
-          child: Container(
-            width: 13,
-            height: 13,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Theme.of(context).colorScheme.surface,
-              border: Border.all(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                width: 1,
+    return Tooltip(
+      message: importedLabel,
+      child: Semantics(
+        label: importedLabel,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            box,
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: Container(
+                key: const ValueKey('gpx_source_badge'),
+                width: 13,
+                height: 13,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Theme.of(context).colorScheme.surface,
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                    width: 1,
+                  ),
+                ),
+                child: Icon(Icons.route,
+                    size: 9,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
               ),
             ),
-            child: Icon(Icons.route, size: 9, color: Theme.of(context).colorScheme.onSurfaceVariant),
-          ),
+          ],
         ),
-      ],
+      ),
     );
   }
 }
@@ -2336,6 +2350,13 @@ class _BulkTagDialogState extends State<_BulkTagDialog> {
 
 // ── Filter sheet ─────────────────────────────────────────────────────────────
 
+/// The word for each provenance, in the user's vocabulary rather than the
+/// column's: nobody calls a synced activity "null".
+const _sourceLabels = {
+  'strava': 'Strava',
+  'gpx': 'GPX file',
+};
+
 const _transportLabels = {
   'flight': 'Flight',
   'train':  'Train',
@@ -2361,6 +2382,7 @@ class FilterSheet extends StatelessWidget {
         final sleeping   = notifier.availableSleepingModes;
         final actTypes   = notifier.availableActivityTypes;
         final transport  = notifier.availableTransportationMeans;
+        final sources    = notifier.availableSources;
         final hasAny     = notifier.hasActiveFilter;
 
         return SingleChildScrollView(
@@ -2422,6 +2444,21 @@ class FilterSheet extends StatelessWidget {
                   selected: notifier.activityTypeFilter,
                   label:    _capitalize,
                   onToggle: (next) => notifier.setFilters(activityTypes: next),
+                ),
+              ],
+
+              // ── Source ────────────────────────────────────────────────────
+              // Only worth asking once a trip actually holds more than one
+              // source; on a Strava-only trip the question has one answer.
+              if (sources.length > 1) ...[
+                const SizedBox(height: 16),
+                Text('Source', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                _chips(
+                  options:  sources,
+                  selected: notifier.sourceFilter,
+                  label:    (s) => _sourceLabels[s] ?? _capitalize(s),
+                  onToggle: (next) => notifier.setFilters(sources: next),
                 ),
               ],
 

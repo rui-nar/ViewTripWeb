@@ -61,4 +61,38 @@ void main() {
 
     expect(find.byIcon(Icons.route), findsOneWidget);
   });
+
+  testWidgets('the badge says what it means, for a reader and a screen reader',
+      (tester) async {
+    // A 9 px glyph with no accessible name is decoration: a screen reader
+    // announced nothing at all, and a sighted user had no way to find out what
+    // it meant either (issue #260, unit 6).
+    // Semantics only exist while a handle is held, and the handle has to be
+    // released inside the test body: the framework checks for leaked handles
+    // before tearDowns run.
+    final semantics = tester.ensureSemantics();
+
+    await pumpPanel(tester, notifierWith(activityId: -7, source: 'gpx'));
+
+    expect(find.byKey(const ValueKey('gpx_source_badge')), findsOneWidget);
+    // The row is a ListTile, which merges its children into one node, so the
+    // announcement is the row's label with the badge's phrase inside it.
+    expect(find.bySemanticsLabel(RegExp('Imported from a GPX file')),
+        findsAtLeastNWidgets(1));
+    expect(find.byTooltip('Imported from a GPX file'), findsOneWidget);
+
+    semantics.dispose();
+  });
+
+  testWidgets('a synced activity says nothing about a source', (tester) async {
+    final semantics = tester.ensureSemantics();
+
+    await pumpPanel(tester, notifierWith(activityId: 4242));
+
+    expect(find.byKey(const ValueKey('gpx_source_badge')), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('Imported from a GPX file')),
+        findsNothing);
+
+    semantics.dispose();
+  });
 }

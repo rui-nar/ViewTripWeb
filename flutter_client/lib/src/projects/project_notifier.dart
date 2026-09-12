@@ -730,6 +730,7 @@ class ProjectNotifier extends ChangeNotifier
         'sleeping': filters.sleeping.toList(),
         'activityTypes': filters.activityTypes.toList(),
         'transport': filters.transport.toList(),
+        'sources': filters.sources.toList(),
       };
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_uiStateKey(name), jsonEncode(data));
@@ -766,6 +767,9 @@ class ProjectNotifier extends ChangeNotifier
             (data['activityTypes'] as List?)?.cast<String>().toSet() ?? const {},
         transport:
             (data['transport'] as List?)?.cast<String>().toSet() ?? const {},
+        // Absent from state saved before the source filter existed, which the
+        // ?? handles: an older payload restores with no source constraint.
+        sources: (data['sources'] as List?)?.cast<String>().toSet() ?? const {},
       ));
 
       final savedDay = data['selectedDay'] as String?;

@@ -41,6 +41,7 @@ mixin ProjectFilterMixin on ChangeNotifier {
   Set<String> get tagFilter          => _filters.tags;
   Set<String> get sleepingFilter     => _filters.sleeping;
   Set<String> get activityTypeFilter => _filters.activityTypes;
+  Set<String> get sourceFilter       => _filters.sources;
   Set<String> get transportFilter    => _filters.transport;
   int  get activeFilterCount         => _filters.activeCount;
   bool get hasActiveFilter           => _filters.hasActive;
@@ -97,6 +98,21 @@ mixin ProjectFilterMixin on ChangeNotifier {
     return s.toList()..sort();
   }
 
+  /// The sources this trip's activities actually came from.
+  ///
+  /// An activity with no `source` is a Strava sync — the column arrived with
+  /// GPX import and was left NULL for everything already there, so absence is
+  /// the answer rather than missing data. Returns a single entry for a trip
+  /// that came from one place, which is how the filter sheet knows not to ask.
+  List<String> get availableSources {
+    final s = <String>{};
+    for (final a in activities) {
+      final source = a['source'] as String?;
+      s.add(source == null || source.isEmpty ? 'strava' : source);
+    }
+    return s.toList()..sort();
+  }
+
   List<String> get availableTransportationMeans {
     final s = <String>{};
     for (final item in items) {
@@ -114,12 +130,14 @@ mixin ProjectFilterMixin on ChangeNotifier {
     Set<String>? sleeping,
     Set<String>? activityTypes,
     Set<String>? transport,
+    Set<String>? sources,
   }) {
     _filters = _filters.copyWith(
       tags: tags,
       sleeping: sleeping,
       activityTypes: activityTypes,
       transport: transport,
+      sources: sources,
     );
     _recomputeSelectedDays();
     selectedDay = null;
@@ -130,8 +148,8 @@ mixin ProjectFilterMixin on ChangeNotifier {
     notifyListeners();
   }
 
-  void clearAllFilters() =>
-      setFilters(tags: {}, sleeping: {}, activityTypes: {}, transport: {});
+  void clearAllFilters() => setFilters(
+      tags: {}, sleeping: {}, activityTypes: {}, transport: {}, sources: {});
 
   /// Resets filter state to empty. Called by ProjectNotifier.clear().
   void resetFilters() {
@@ -160,6 +178,19 @@ mixin ProjectFilterMixin on ChangeNotifier {
       final d = (a['start_date_local'] as String?)?.substring(0, 10);
       final t = (a['type'] as String? ?? '').toLowerCase();
       if (d != null && t.isNotEmpty) (actByDay[d] ??= {}).add(t);
+    }
+
+    // Where the day's activities came from. An activity with no `source`
+    // is a Strava sync: that column was added by GPX import and left NULL
+    // for everything that already existed, so absence is the answer
+    // rather than missing data.
+    final srcByDay = <String, Set<String>>{};
+    for (final a in activities) {
+      final d = (a['start_date_local'] as String?)?.substring(0, 10);
+      if (d == null) continue;
+      final source = a['source'] as String?;
+      (srcByDay[d] ??= {}).add(
+          source == null || source.isEmpty ? 'strava' : source);
     }
 
     final trByDay = <String, Set<String>>{};
@@ -191,6 +222,10 @@ mixin ProjectFilterMixin on ChangeNotifier {
       if (_filters.transport.isNotEmpty) {
         final types = trByDay[dk] ?? const {};
         if (!types.any(_filters.transport.contains)) continue;
+      }
+      if (_filters.sources.isNotEmpty) {
+        final sources = srcByDay[dk] ?? const {};
+        if (!sources.any(_filters.sources.contains)) continue;
       }
       matching.add(dk);
     }

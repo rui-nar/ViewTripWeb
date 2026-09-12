@@ -239,6 +239,32 @@ void main() {
     expect(find.textContaining('Tap the map to insert'), findsOneWidget);
   });
 
+  // ── Provenance follows the activity into the editor (issue #260, unit 6) ──
+  //
+  // The list drew a source badge, the editor said nothing: open a track and you
+  // could no longer tell whether its shape came from a Strava sync (where Reset
+  // fetches the original back) or from a file you imported (where nothing
+  // remote exists to fetch).
+  testWidgets('an imported track says so in the editor, out loud',
+      (tester) async {
+    final semantics = tester.ensureSemantics();
+
+    await _pump(tester, _activity()..['source'] = 'gpx');
+
+    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('Imported from a GPX file')),
+        findsAtLeastNWidgets(1));
+    expect(find.byTooltip('Imported from a GPX file'), findsOneWidget);
+
+    semantics.dispose();
+  });
+
+  testWidgets('a synced track carries no badge in the editor', (tester) async {
+    await _pump(tester, _activity());
+
+    expect(find.byKey(const ValueKey('gpx_editor_badge')), findsNothing);
+  });
+
   testWidgets('Reset to Strava only shows for an edited activity',
       (tester) async {
     await _pump(tester, _activity(edited: false));
