@@ -498,6 +498,122 @@ def elevation_gain(
     return gain
 
 
+# ── Terrain-model gain: the flatness oracle (issue #386) ──────────────────────
+#
+# Everything above works on one series of elevations over distance, and that is
+# why the phantom climb on a phone recording cannot be removed there. Correlated
+# sensor drift and gentle terrain have the SAME SPECTRUM on the distance axis:
+# they are not separable, which was established by sweeping every span x
+# threshold pair, and by PR #389 measuring the marginal sigma correctly and
+# erasing up to 100% of a real 1000 m day for it. The time axis does not rescue
+# it either — at roughly constant speed time and distance are one axis up to a
+# scale factor.
+#
+# So this does not try. It brings in a SECOND, INDEPENDENT measurement — the
+# elevation a terrain model reports along the same path — and uses it for the one
+# question it can answer without ambiguity: *is there any relief here at all?*
+#
+# Where the terrain model says there is none, every metre the sensor reported is
+# invented, and the terrain model's own steps replace it. Where the terrain model
+# sees relief, the recording stands untouched: it is the better of the two there
+# (within 14% on 200 m rollers, where a 30 m terrain model is 29% low), and
+# leaving it alone is what makes this safe to ship.
+
+#: Length of path over which the relief question is asked, in metres.
+#:
+#: Per-activity is too coarse — a walk half along a flat promenade and half up a
+#: hill has to keep its hill, and one verdict for the whole track cannot do that
+#: (measured: 452 m reported against a true 300; windowed, 309).
+TERRAIN_WINDOW_M = 500.0
+
+#: How much relief a window must show before the recording is trusted, in metres.
+#:
+#: Measured per 500 m window: flat ground reads 0.00, a smoothed path wandering
+#: across a 20% slope reads 0.74-3.62 (pure artefact), a shallow river valley
+#: 1.84-2.06, a 1.5% urban drag 6.88-7.71, and 10 m rollers 8.95-9.98.
+#:
+#: The valley and the cross-slope artefact OVERLAP, so no threshold separates
+#: them. 5 m puts both on the flat side, which is right for the artefact and, as
+#: it happens, near-right for the valley too (38.6 m reported against a true 40)
+#: because a terrain model is accurate on relief that shallow. Dropping to 2 m to
+#: "save" the valley instead lets 115 m of cross-slope artefact back in.
+TERRAIN_RELIEF_M = 5.0
+
+
+def terrain_corrected_gain(
+    recorded: List[float],
+    terrain: List[float],
+    distances_km: Optional[List[float]] = None,
+    *,
+    window_m: float = TERRAIN_WINDOW_M,
+    relief_m: float = TERRAIN_RELIEF_M,
+) -> float:
+    """Ascent over a recording, with flat stretches taken from the terrain model.
+
+    ``terrain`` is the terrain-model elevation at each of ``recorded``'s points,
+    sampled along a path already smoothed in plan view — smoothing the PATH is
+    legitimate in a way smoothing the elevation is not, because a road's plan
+    geometry is smooth at a scale far above GPS horizontal error. The two lists
+    must be the same length; ``distances_km`` is as :func:`elevation_gain` takes
+    it.
+
+    Falls back to :func:`elevation_gain` on the recording alone when no terrain
+    is available, which is a normal state and not an error: the tile source has
+    no SLA, and an end-to-end encrypted activity's geometry cannot be read by
+    the server at all.
+
+    **Why the windows splice deltas rather than sum their own gains.** Summing a
+    per-window :func:`elevation_gain` resets the hysteresis reference and
+    re-smooths the series at every boundary, which read 766 m where the recording
+    reads 858 m on 200 m rollers — a 92 m loss on exactly the case this is meant
+    to leave alone. Composing the steps into one series and accumulating ONCE
+    makes the all-relief case bit-identical to the recording, which is the
+    property that makes this safe. Splicing steps rather than elevations also
+    disposes of the offset between the two sources for free: barometric drift
+    puts them at different levels, and only their steps are ever used.
+    """
+    if not terrain or len(terrain) != len(recorded):
+        return elevation_gain(recorded, distances_km)
+    if len(recorded) < 3:
+        return elevation_gain(recorded, distances_km)
+
+    per = _terrain_window_samples(distances_km, len(recorded), window_m)
+    series = [recorded[0]]
+    for lo in range(0, len(recorded) - 1, per):
+        # One sample PAST the window's own end, so consecutive windows share a
+        # boundary sample and every step in the track is contributed exactly
+        # once. Slicing ``[lo:lo + per]`` instead drops the step across each
+        # boundary — 39 of them on a 20 km track at this window size, which is
+        # enough on its own to stop the all-relief case being the exact no-op
+        # the paragraph above claims.
+        hi = min(len(recorded), lo + per + 1)
+        window = terrain[lo:hi]
+        flat = len(window) >= 3 and (max(window) - min(window)) < relief_m
+        source = window if flat else recorded[lo:hi]
+        for previous, current in zip(source, source[1:]):
+            series.append(series[-1] + (current - previous))
+
+    return elevation_gain(series, distances_km)
+
+
+def _terrain_window_samples(
+    distances_km: Optional[List[float]], count: int, window_m: float
+) -> int:
+    """How many samples span *window_m* of travel, at least 3.
+
+    Derived from the distance axis where there is one, so a 1 Hz walk and a
+    sparse planned route ask the relief question over the same length of ground
+    rather than the same number of points — the mistake that erased planned
+    routes in #376.
+    """
+    if distances_km and len(distances_km) >= 2:
+        travelled_m = (distances_km[-1] - distances_km[0]) * 1000.0
+        if travelled_m > 0:
+            spacing_m = travelled_m / max(1, count - 1)
+            return max(3, int(round(window_m / spacing_m)))
+    return max(3, count // 2)
+
+
 @dataclass
 class TrackMetrics:
     distance: float               # metres
