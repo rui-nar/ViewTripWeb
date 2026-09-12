@@ -26,6 +26,7 @@ from models.db import get_session
 from sqlmodel import select
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 
 from api.deps import get_current_user
@@ -41,6 +42,7 @@ from src.exceptions.errors import RateLimitError
 from src.gpx.importer import (
     GPXImportError,
     candidates as gpx_candidates,
+    guard_declared_size,
     guard_upload_size,
     gpx_track_to_points,
     parse_gpx_bytes,
@@ -401,20 +403,65 @@ def add_activities(
     }
 
 
-def _read_gpx_upload(contents: bytes):
-    """Size-guard, parse, and list what the file holds — or raise a 422.
+async def _read_gpx_upload(file: UploadFile):
+    """Size-guard, read, parse, and list what the file holds — or raise 422.
 
-    The guard runs before the parse on purpose: gpxpy's object tree is ten to
-    fifteen times the bytes on the wire, so a limit applied afterwards is a
-    limit that has already cost the memory it was meant to save.
+    Three things are load-bearing about the order here.
+
+    The guard consults the upload's DECLARED size first, so an oversized body
+    is refused without being pulled into memory at all. Reading it first and
+    measuring afterwards — which is what this did — grew the process by the
+    whole file before deciding it was too big.
+
+    The bytes are re-checked after reading, because a declared size is a
+    claim and some clients do not send one.
+
+    And the parse runs in a worker thread. gpxpy is pure Python and entirely
+    synchronous: a 40k-point ride costs 1.25 s and a file at the size limit
+    4.5 s, and on the event loop that is 4.5 s in which this instance serves
+    nobody. Both GPX routes were the only ``async def`` handlers in this
+    module doing their own CPU work; the upload paths in journal.py and
+    memories.py already hand off the same way.
     """
     try:
+        if file.size is not None:
+            guard_declared_size(file.size)
+        contents = await file.read()
         guard_upload_size(contents)
-        gpx = parse_gpx_bytes(contents)
+        gpx, found = await run_in_threadpool(_parse_and_list, contents)
     except GPXImportError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                              detail={"errors": exc.errors})
+    return gpx, found
+
+
+def _parse_and_list(contents: bytes):
+    """The synchronous half, for :func:`run_in_threadpool`."""
+    gpx = parse_gpx_bytes(contents)
     return gpx, gpx_candidates(gpx)
+
+
+def _import_fingerprint(candidate, start_dt):
+    """The value that decides whether this track is already in the trip.
+
+    The file's OWN start time is used whenever it has one, never the time the
+    request carried. The form only carries HH:MM, and devices start recording
+    mid-minute, so fingerprinting the supplied value gave the same file two
+    identities: import it once from the preview (07:33) and once with the form
+    left alone (07:33:12) and the second copy sailed past the duplicate check.
+
+    Falls back to the supplied start for a file with no clock — a planned route
+    — because there the date IS the distinguishing fact: the same route ridden
+    on two days is two activities, which is the whole reason time is in the
+    fingerprint at all. Returns None when neither is available, meaning "cannot
+    be judged" rather than "no duplicate".
+    """
+    span = candidate.time_span
+    basis = span[0] if span else start_dt
+    if basis is None:
+        return None
+    return track_fingerprint(((p.lat, p.lng) for p in candidate.points),
+                             basis.isoformat())
 
 
 def _resolve_times(candidate, date, start_time, end_time):
@@ -426,22 +473,23 @@ def _resolve_times(candidate, date, start_time, end_time):
     user type it in.
     """
     supplied = (date, start_time, end_time)
-    if all(v is None for v in supplied) and candidate.started_at is not None:
-        start_dt = candidate.started_at
-        end_dt = candidate.ended_at
-        if end_dt is None or end_dt <= start_dt:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={"errors": ["The file's timestamps do not cover a "
-                                   "period of time; please supply a date and "
-                                   "start and end times."]})
-        return start_dt, end_dt
-
-    if any(v is None for v in supplied):
+    span = candidate.time_span
+    if all(v is None for v in supplied):
+        if span is not None:
+            # Same accessor the preview reported from, so a file the preview
+            # said had a clock cannot be refused here for not having one.
+            return span
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"errors": ["This file has no timestamps, so it needs a "
                                "date, a start time and an end time."]})
+
+    if any(v is None for v in supplied):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"errors": ["A date, a start time and an end time go "
+                               "together — supply all three, or none to "
+                               "take them from the file."]})
 
     try:
         day = datetime.strptime(date, "%Y-%m-%d").date()
@@ -495,51 +543,63 @@ async def inspect_gpx_file(
         row = resolve_project(sess, user_info_id, name, owner, min_role="editor")
         project_row_id = row.id
 
-    contents = await file.read()
-    gpx, found = _read_gpx_upload(contents)
+    gpx, found = await _read_gpx_upload(file)
 
     if not found:
         return {"candidates": [], "errors": validate_for_import(gpx)}
 
-    out = []
-    for candidate in found:
-        metrics = recompute_track_metrics(candidate.points)
-        out.append({
-            "index": candidate.index,
-            "name": candidate.name,
-            "activity_type": candidate.activity_type,
-            "point_count": candidate.point_count,
-            "distance_m": metrics.distance,
-            "is_route": candidate.is_route,
-            "has_times": candidate.has_times,
-            "started_at": (candidate.started_at.isoformat()
-                           if candidate.started_at else None),
-            "ended_at": (candidate.ended_at.isoformat()
-                         if candidate.ended_at else None),
-            "elapsed_seconds": candidate.elapsed_seconds,
-            "moving_seconds": candidate.moving_seconds,
-            "elevation_gain_m": metrics.total_elevation_gain,
-            "elevation_gain_estimated": True,
-            "errors": validate_candidate(candidate),
-        })
+    out = await run_in_threadpool(_describe_candidates, found)
 
     duplicate = None
     if len(found) == 1 and not out[0]["errors"]:
-        only = found[0]
-        started = only.started_at.isoformat() if only.started_at else None
-        existing = None
-        with get_session() as sess:
-            existing = _existing_import(
-                sess, project_row_id,
-                track_fingerprint(((p.lat, p.lng) for p in only.points), started))
-        if existing is not None:
-            duplicate = {"activity_id": existing.id, "name": existing.name}
+        fingerprint = _import_fingerprint(found[0], None)
+        if fingerprint is not None:
+            with get_session() as sess:
+                existing = _existing_import(sess, project_row_id, fingerprint)
+            if existing is not None:
+                duplicate = {"activity_id": existing.id,
+                             "name": existing.name}
 
     return {
         "candidates": out,
         "suggested_name": gpx_suggested_name(gpx, found[0], file.filename),
         "duplicate_of": duplicate,
     }
+
+
+def _describe_candidates(found):
+    """Summarise each candidate. Synchronous and O(points), so off the loop.
+
+    A candidate that cannot be imported is not measured: distance and moving
+    time are full passes over the points, and spending 4.5 s computing them
+    for a track the answer will reject anyway is work nobody asked for.
+    """
+    out = []
+    for candidate in found:
+        errors = validate_candidate(candidate)
+        metrics = (recompute_track_metrics(candidate.points) if not errors
+                   else None)
+        span = candidate.time_span
+        out.append({
+            "index": candidate.index,
+            "name": candidate.name,
+            "activity_type": candidate.activity_type,
+            "point_count": candidate.point_count,
+            "distance_m": metrics.distance if metrics else 0.0,
+            "is_route": candidate.is_route,
+            "has_times": candidate.has_times,
+            "started_at": (span[0].isoformat() if span else None),
+            "ended_at": (span[1].isoformat() if span else None),
+            "elapsed_seconds": candidate.elapsed_seconds,
+            "moving_seconds": (candidate.moving_seconds if not errors
+                               else None),
+            "elevation_gain_m": (metrics.total_elevation_gain if metrics
+                                 else None),
+            "elevation_gain_estimated": True,
+            "errors": errors,
+        })
+    return out
+
 
 
 @router.post("/{name}/activities/import-gpx", response_model=GPXImportOut,
@@ -576,8 +636,7 @@ async def import_gpx_activity(
         owner_id = row.user_info_id
         project_row_id = row.id
 
-    contents = await file.read()
-    gpx, found = _read_gpx_upload(contents)
+    gpx, found = await _read_gpx_upload(file)
 
     # track_index stays None unless the caller chose one, so a file holding
     # several tracks is still refused rather than quietly importing the first.
@@ -589,6 +648,11 @@ async def import_gpx_activity(
     candidate = found[track_index or 0]
 
     start_dt, end_dt = _resolve_times(candidate, date, start_time, end_time)
+    # start_date is documented as ISO-8601 UTC, and a file may carry any
+    # offset it likes. Normalising here keeps the column honest and keeps two
+    # exports of one ride — 05:33Z and 07:33+02:00 — the same instant.
+    start_dt = start_dt.astimezone(timezone.utc)
+    end_dt = end_dt.astimezone(timezone.utc)
     elapsed_time = int((end_dt - start_dt).total_seconds())
     moving_time = candidate.moving_seconds
     if moving_time is None:
@@ -603,8 +667,7 @@ async def import_gpx_activity(
 
     points = candidate.points
     metrics = recompute_track_metrics(points)
-    fingerprint = track_fingerprint(
-        ((p.lat, p.lng) for p in points), start_dt.isoformat())
+    fingerprint = _import_fingerprint(candidate, start_dt)
 
     resolved_name = (activity_name
                      or gpx_suggested_name(gpx, candidate, file.filename)
@@ -652,7 +715,8 @@ async def import_gpx_activity(
         # Refuse a file this trip already holds. The same track legitimately
         # belongs to two different trips, so the check is scoped to this one's
         # timeline rather than to the global activity table.
-        duplicate = _existing_import(sess, project_row_id, fingerprint)
+        duplicate = (_existing_import(sess, project_row_id, fingerprint)
+                     if fingerprint is not None else None)
         if duplicate is not None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

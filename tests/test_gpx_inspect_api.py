@@ -31,15 +31,16 @@ _START = datetime(2024, 8, 12, 7, 33, 0, tzinfo=timezone.utc)
 
 
 def _timed_track(count=40, name="Morning ride", activity_type="cycling",
-                 step_m=14.0, seconds=1):
+                 step_m=14.0, seconds=1, start=None, offset="Z"):
     """A recorded track that knows its own name, type and clock."""
     parts = [_HEADER, "<trk>", f"<name>{name}</name>",
              f"<type>{activity_type}</type>", "<trkseg>"]
-    when = _START
+    when = start or _START
     for i in range(count):
         lat = 46.0 + i * (step_m / 111320.0)
         parts.append(f'<trkpt lat="{lat}" lon="6.0"><ele>{500 + i}</ele>'
-                     f'<time>{when.strftime("%Y-%m-%dT%H:%M:%SZ")}</time></trkpt>')
+                     f'<time>{when.strftime("%Y-%m-%dT%H:%M:%S")}{offset}'
+                     f'</time></trkpt>')
         when += timedelta(seconds=seconds)
     parts += ["</trkseg>", "</trk>", "</gpx>"]
     return "".join(parts).encode("utf-8")
@@ -302,3 +303,195 @@ class TestImportTrustsTheFile:
 
         assert resp.status_code == 422
         assert any("limit is 12 MB" in e for e in resp.json()["detail"]["errors"])
+
+
+class TestTheDryRunStaysOffTheEventLoop:
+    def test_inspect_does_not_block_the_loop(self, env):
+        """gpxpy is pure Python and entirely synchronous. Parsing a 40k-point
+        ride costs over a second, and on the event loop that is a second in
+        which this instance serves nobody — with no rate limit, and a route the
+        client calls on every file pick.
+
+        Asserted by racing a ticker against the request: if the handler holds
+        the loop, the ticker starves.
+        """
+        import asyncio
+
+        import api.activities as activities_mod
+
+        content = _timed_track(count=20000)   # ~0.56 s of sync work
+        gaps = []
+
+        async def drive():
+            async def ticker():
+                last = asyncio.get_event_loop().time()
+                try:
+                    while True:
+                        await asyncio.sleep(0.005)
+                        now = asyncio.get_event_loop().time()
+                        gaps.append(now - last)
+                        last = now
+                except asyncio.CancelledError:
+                    raise
+
+            class _Upload:
+                """Enough of UploadFile for the handler, without a server."""
+                filename = "track.gpx"
+                size = len(content)
+
+                async def read(self):
+                    return content
+
+            beat = asyncio.create_task(ticker())
+            await asyncio.sleep(0.02)
+            await activities_mod.inspect_gpx_file(
+                name="Trip",
+                current_user={"sub": str(self._owner)},
+                file=_Upload(),
+                owner=None,
+            )
+            # The ticker has to be given a turn AFTER the call to record the gap
+            # it just sat through; cancelling straight away loses the evidence.
+            await asyncio.sleep(0.02)
+            beat.cancel()
+            try:
+                await beat
+            except asyncio.CancelledError:
+                pass
+
+        client, _engine, ids, _ = env
+        self._owner = ids["owner"]
+        asyncio.run(drive())
+
+        assert gaps, "the ticker never ran"
+        # 0.56 s of parsing sits behind this call. Held on the loop the ticker
+        # starves for all of it; handed to a worker thread the gaps stay at the
+        # 5 ms sleep. 0.25 s separates those two worlds with room for a loaded
+        # machine on either side.
+        assert max(gaps) < 0.25, (
+            f"the event loop stalled for {max(gaps):.2f}s during inspect; the "
+            f"synchronous parse must run in a worker thread"
+        )
+
+
+class TestOneFingerprintPerFile:
+    def test_a_file_is_recognised_whether_or_not_the_form_echoes_its_times(self, env):
+        """The form carries HH:MM and devices start recording mid-minute, so
+        fingerprinting the SUPPLIED time gave one file two identities: import it
+        from the preview and then again with the form untouched, and the second
+        copy sailed past the duplicate check."""
+        client, *_ = env
+        mid_minute = datetime(2024, 8, 12, 7, 33, 12, tzinfo=timezone.utc)
+        content = _timed_track(start=mid_minute)
+
+        first = _import(client, content=content, date="2024-08-12",
+                        start_time="07:33", end_time="07:34")
+        assert first.status_code == 200, first.text
+
+        again = _import(client, content=content)
+
+        assert again.status_code == 409, (
+            "the same file must be recognised however its times were supplied"
+        )
+        assert again.json()["detail"]["activity_id"] == \
+            first.json()["activity_id"]
+
+    def test_the_preview_agrees_with_what_the_import_enforces(self, env):
+        client, *_ = env
+        mid_minute = datetime(2024, 8, 12, 7, 33, 12, tzinfo=timezone.utc)
+        content = _timed_track(start=mid_minute)
+        _import(client, content=content, date="2024-08-12",
+                start_time="07:33", end_time="07:34")
+
+        body = _inspect(client, content=content).json()
+
+        assert body["duplicate_of"] is not None, (
+            "the preview must flag what the import will refuse"
+        )
+
+    def test_the_same_route_on_two_days_stays_two_activities(self, env):
+        """A file with no clock is distinguished by the date it is given — which
+        is why the time is in the fingerprint at all."""
+        client, *_ = env
+
+        monday = _import(client, content=_route(), date="2024-06-03",
+                         start_time="09:00", end_time="10:00")
+        tuesday = _import(client, content=_route(), date="2024-06-04",
+                          start_time="09:00", end_time="10:00")
+
+        assert monday.status_code == 200, monday.text
+        assert tuesday.status_code == 200, tuesday.text
+
+
+class TestThePreviewAndImportAgree:
+    def test_a_backwards_clock_step_does_not_split_them(self, env):
+        """A device resyncing its clock leaves the last stamp before the first.
+        The preview reported a span from earliest to latest and said the file
+        was fine; the import took first and last, found no span, and refused —
+        a form that prefills happily and then will not submit."""
+        client, *_ = env
+        xml = (_HEADER + "<trk><trkseg>"
+               '<trkpt lat="46.0" lon="6.0">'
+               "<time>2024-08-12T07:33:00Z</time></trkpt>"
+               '<trkpt lat="46.001" lon="6.0">'
+               "<time>2024-08-12T07:34:00Z</time></trkpt>"
+               '<trkpt lat="46.002" lon="6.0">'
+               # Earlier than the FIRST stamp, not merely out of order: this is
+               # what made first/last disagree with earliest/latest.
+               "<time>2024-08-12T07:32:00Z</time></trkpt>"
+               "</trkseg></trk></gpx>").encode()
+
+        previewed = _inspect(client, content=xml).json()["candidates"][0]
+        assert previewed["errors"] == []
+        assert previewed["elapsed_seconds"] == 120
+
+        imported = _import(client, content=xml)
+
+        assert imported.status_code == 200, imported.text
+
+    def test_a_partial_form_says_what_is_actually_wrong(self, env):
+        """The file has timestamps; telling the user it has none is a lie about
+        which of their fields is the problem."""
+        client, *_ = env
+
+        resp = _import(client, date="2024-06-01")
+
+        assert resp.status_code == 422
+        message = " ".join(resp.json()["detail"]["errors"]).lower()
+        assert "go together" in message
+        assert "no timestamps" not in message
+
+
+class TestStoredInstantsAreUtc:
+    def test_a_file_offset_is_normalised(self, env):
+        """start_date is documented as ISO-8601 UTC, and a file may carry any
+        offset. Two exports of one ride — 05:33Z and 07:33+02:00 — have to land
+        on the same instant, or they are two activities to the duplicate check
+        and the timezone column is a lie."""
+        client, engine, *_ = env
+        local = _timed_track(start=datetime(2024, 8, 12, 7, 33,
+                                            tzinfo=timezone(timedelta(hours=2))),
+                             offset="+02:00")
+
+        resp = _import(client, content=local)
+
+        assert resp.status_code == 200, resp.text
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, resp.json()["activity_id"])
+        assert row.start_date.startswith("2024-08-12T05:33"), row.start_date
+
+
+class TestUnusableCandidatesAreNotMeasured:
+    def test_a_rejected_candidate_reports_no_metrics(self, env):
+        """Distance and moving time are full passes over the points. Spending
+        them on a track the answer already rejects is work nobody asked for."""
+        client, *_ = env
+        xml = (_HEADER + "<trk><trkseg>"
+               '<trkpt lat="46.0" lon="6.0"/>'
+               "</trkseg></trk></gpx>").encode()
+
+        only = _inspect(client, content=xml).json()["candidates"][0]
+
+        assert only["errors"] != []
+        assert only["elevation_gain_m"] is None
+        assert only["moving_seconds"] is None
