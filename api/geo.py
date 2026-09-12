@@ -494,6 +494,37 @@ def _features_for(track: _PreparedTrack, level: int, box: tuple | None):
 
 _track_cache: Dict[tuple, tuple] = {}
 
+# One in-flight preparation per trip — see the use site in serve_simplified_geo.
+# Separate from _geo_cache_lock, which is held only for dict access: this one is
+# held across the whole build, and sharing them would serialise every cache read
+# behind one trip's decode.
+_track_build_locks: Dict[tuple, Lock] = {}
+_track_build_locks_guard = Lock()
+
+# A lock is tiny, but a dict keyed by every project an API process ever serves
+# grows without bound, which is the shape of failure that OOM-killed this
+# container on ordinary traffic before (#209). Unlocked entries are not in use,
+# so they are dropped when the dict gets large; recreating one costs an insert.
+_TRACK_BUILD_LOCKS_MAX = 256
+
+
+def _track_build_lock(key: tuple) -> Lock:
+    """The build lock for *key*, created on first use.
+
+    A pruned entry can in principle be replaced while another thread still holds
+    a reference to the old object, in which case both build — exactly the
+    behaviour that existed before this lock, for one request, and never
+    incorrect. Not worth refcounting to avoid.
+    """
+    with _track_build_locks_guard:
+        lock = _track_build_locks.get(key)
+        if lock is None:
+            if len(_track_build_locks) >= _TRACK_BUILD_LOCKS_MAX:
+                for idle in [k for k, v in _track_build_locks.items() if not v.locked()]:
+                    del _track_build_locks[idle]
+            lock = _track_build_locks[key] = Lock()
+        return lock
+
 
 def _track_cache_bytes() -> int:
     """Total bytes currently held. Callers must hold ``_geo_cache_lock``."""
@@ -1071,14 +1102,30 @@ def serve_simplified_geo(
     cache_state = "HIT"
     t0 = time.time()
     if track is None:
+        # Reported from the state the request *arrived* in, so a waiter still
+        # reads MISS: the trip was not prepared when it asked, which is what
+        # this header has always meant.
         cache_state = "MISS"
-        gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
-        project = load_project()
-        if project is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-        track = _PreparedTrack(_prepared_lines(project))
-        _track_cache_store(track_key, track, gen)
+        # One preparation per trip at a time. Two cold requests for the same
+        # trip each used to build it in full — measured 3,474 ms each, for one
+        # answer. The loser now waits for the winner's entry instead.
+        #
+        # The wait happens on a threadpool thread (these endpoints are sync
+        # `def`, so Starlette runs them there) and costs no CPU, which is the
+        # whole point: N concurrent cold requests used to mean N times the
+        # decode contending for one GIL, and now mean one build and N-1 threads
+        # parked on a lock.
+        with _track_build_lock(track_key):
+            # The winner may have finished while this request queued.
+            track = _track_cache_get(track_key)
+            if track is None:
+                gen = _geo_generation(owner_id, name)  # before the read, so a bust wins
+                project = load_project()
+                if project is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+                track = _PreparedTrack(_prepared_lines(project))
+                _track_cache_store(track_key, track, gen)
 
     t1 = time.time()
     features = _features_for(track, level, box)

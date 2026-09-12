@@ -884,3 +884,108 @@ def test_the_precomputed_floor_matches_what_a_box_would_have_given():
     assert len(in_one_pass) == len(precomputed)
     assert in_one_pass[0] == precomputed[0]
     assert in_one_pass[-1] == precomputed[-1]
+
+
+# ── one preparation per trip, however many ask at once (issue #369 stage C) ──
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import api.geo as geo_mod
+from api.geo import _track_build_locks
+
+
+def test_two_cold_requests_for_one_trip_prepare_it_once(env, monkeypatch):
+    """The loser of a race waits for the winner's entry instead of rebuilding.
+
+    Both requests used to build the whole trip — measured 3,474 ms each for one
+    answer, two decodes contending for one GIL. What makes this testable is the
+    build being slow: the second request has to arrive while the first is still
+    inside it, so the fixture holds the build open until both are in flight.
+    """
+    client, uid, _sid, _as_user = env
+    _track_build_locks.clear()
+
+    calls = []
+    both_in_flight = threading.Barrier(2, timeout=10)
+    real_prepared_lines = geo_mod._prepared_lines
+
+    def counting_prepared_lines(project):
+        calls.append(project.name)
+        # Only the winner reaches here. Hold it open long enough that the loser
+        # is provably queued on the lock rather than merely late.
+        time.sleep(0.5)
+        return real_prepared_lines(project)
+
+    monkeypatch.setattr(geo_mod, "_prepared_lines", counting_prepared_lines)
+
+    def fetch():
+        both_in_flight.wait()
+        return client.get("/api/geo/project/simplified?name=Trip&zoom=12")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = [f.result() for f in [pool.submit(fetch), pool.submit(fetch)]]
+
+    assert [r.status_code for r in responses] == [200, 200]
+    assert len(calls) == 1, f"trip prepared {len(calls)} times, expected once"
+    # Both get the real payload, not an empty one — the waiter reads the entry
+    # the winner stored.
+    for response in responses:
+        features = response.json()["features"]
+        assert sum(len(f["geometry"]["coordinates"]) for f in features) > 0
+
+
+def test_a_waiter_still_reports_a_miss(env, monkeypatch):
+    """X-Cache describes the state the request arrived in, not who built it.
+
+    A waiter that got its answer from the winner's entry was still a request
+    for an unprepared trip, and reporting HIT would make the header useless for
+    spotting cold trips in a log.
+    """
+    client, uid, _sid, _as_user = env
+    _track_build_locks.clear()
+
+    barrier = threading.Barrier(2, timeout=10)
+    real_prepared_lines = geo_mod._prepared_lines
+
+    def slow_prepared_lines(project):
+        time.sleep(0.5)
+        return real_prepared_lines(project)
+
+    monkeypatch.setattr(geo_mod, "_prepared_lines", slow_prepared_lines)
+
+    def fetch():
+        barrier.wait()
+        return client.get("/api/geo/project/simplified?name=Trip&zoom=12")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = [f.result() for f in [pool.submit(fetch), pool.submit(fetch)]]
+
+    assert {r.headers["X-Cache"] for r in responses} == {"MISS"}
+
+
+def test_the_lock_registry_does_not_grow_without_bound(env):
+    """Unlocked entries are dropped once the dict gets large.
+
+    A lock per project, kept forever, is the same unbounded-growth shape that
+    OOM-killed this container on ordinary traffic (#209).
+    """
+    _track_build_locks.clear()
+    for i in range(geo_mod._TRACK_BUILD_LOCKS_MAX + 50):
+        geo_mod._track_build_lock((1, f"Trip {i}"))
+    assert len(_track_build_locks) <= geo_mod._TRACK_BUILD_LOCKS_MAX
+
+
+def test_a_held_lock_is_never_pruned(env):
+    """Pruning must not drop the entry a build is currently using."""
+    _track_build_locks.clear()
+    held_key = (1, "In flight")
+    held = geo_mod._track_build_lock(held_key)
+    held.acquire()
+    try:
+        for i in range(geo_mod._TRACK_BUILD_LOCKS_MAX + 50):
+            geo_mod._track_build_lock((1, f"Trip {i}"))
+        assert _track_build_locks.get(held_key) is held
+    finally:
+        held.release()
