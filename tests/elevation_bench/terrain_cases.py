@@ -207,25 +207,38 @@ WATCH = [
     # relief verdict fires at all, and a synthetic surface cannot answer it.
     # Unit 2 must, against real tiles over known terrain, before this is wired.
     TerrainCase(
-        "terrain-watch-model-err-corr-1", "flat, model error 1 m over 500 m",
+        "terrain-watch-model-err-corr", "flat, model error 1 m over 500 m",
         ter.flat_plain, {"post_sigma_m": 1.0, "error_length_m": 500.0},
-        note="the realistic case: error correlated over hundreds of metres "
-             "mostly cancels in a range, so flat ground still reads 2.2 m of "
-             "relief against the 5 m threshold and the oracle still fires"),
+        note="give the model its own error and the verdict stops being "
+             "reliable: across the five seeds the flat group reaches 6.39 m of "
+             "apparent relief and the relief group falls to 4.38, so they "
+             "overlap and no threshold orders them"),
     TerrainCase(
-        "terrain-watch-model-err-corr-2", "flat, model error 2 m over 500 m",
-        ter.flat_plain, {"post_sigma_m": 2.0, "error_length_m": 500.0},
-        note="twice that and the margin is gone: flat reads 4.5, a shallow "
-             "valley 6.4, and a 1.5% drag falls to 3.0 -- the drag's no-op "
-             "breaks and the valley stops being corrected"),
+        "terrain-watch-model-err-window-scale", "drag, model error at 200 m",
+        ter.steady_grade, {"post_sigma_m": 1.0, "error_length_m": 200.0},
+        note="the worst correlation length, and not the longest: a drag's "
+             "no-op holds on 5/5 seeds with a perfect model and at 60 m, 4/5 "
+             "at 100 m, 1/5 at 200 m, 2/5 at 500 m, 5/5 independent. Error at "
+             "the WINDOW's own scale is a slope that adds to the terrain's; "
+             "shorter averages out, longer cancels in a range"),
     TerrainCase(
         "terrain-watch-model-err-indep", "flat, INDEPENDENT 1.5 m per post",
         ter.flat_plain, {"post_sigma_m": 1.5},
-        note="the pessimistic bound, and it defeats the statistic outright: "
-             "flat ground reads 6.1 m of apparent relief while a 10 m/100 m "
-             "roller field reads 5.9, so the two cannot even be ORDERED. If "
-             "real tiles look like this, the verdict needs rethinking rather "
-             "than retuning -- which is why this is printed, not gated"),
+        note="the pessimistic bound: 22-27 of 40 windows read relief on "
+             "ground that is flat, and the oracle reports 135-170 m of the "
+             "285 it should remove"),
+    TerrainCase(
+        "terrain-watch-subthreshold-rollers", "4 m/300 m rollers, sparse white",
+        lambda: ter.rollers(300.0, 2.0),
+        {"spacing_m": 40.0, "speed_ms": 5.0, "vertical_kind": "white"},
+        note="the mirror of the noise fix. Relief here is real -- 259 m true, "
+             "and the model's own series reports 194-199 of it -- but under "
+             "the 5 m threshold per window, so the model is substituted and "
+             "then banded with the RECORDING's noise threshold, which steps "
+             "carrying no sensor error do not deserve. Reports 0. Not a "
+             "regression against what ships (0-13, the recording's own "
+             "hysteresis erases it too) but the model knew the answer and the "
+             "single-band pass threw it away. Per-source banding is #412"),
 ]
 
 ALL = FIXED + NO_OP + WATCH

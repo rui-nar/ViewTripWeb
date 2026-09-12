@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Callable, Iterable, List, NamedTuple, Sequence, Tuple
+from typing import Callable, List, NamedTuple, Sequence, Tuple
 
 from src.models.track_edit import elevation_gain
 
@@ -347,6 +347,10 @@ def track_over_segments(
 
     # tau in samples changes with the segment, so build the noise per segment
     # at the rate that segment was recorded at.
+    # Each segment's AR(1) starts from a fresh draw, so joining them naively
+    # steps the error by up to 9 m between two samples 8 m apart — a cliff the
+    # fixture invented, which any bound measured on it would inherit. Carry the
+    # previous segment's last value across the seam instead.
     vertical: List[float] = []
     east: List[float] = []
     north: List[float] = []
@@ -354,9 +358,15 @@ def track_over_segments(
     for index, (length_km, spacing_m, speed_ms) in enumerate(segments):
         steps = max(2, int(length_km * 1000 / spacing_m))
         tau_samples = tau_s * speed_ms / spacing_m
-        vertical.extend(_ar1(steps, sigma_v, tau_samples, seed + offset))
-        east.extend(_ar1(steps, sigma_h, tau_samples, seed + offset + 1))
-        north.extend(_ar1(steps, sigma_h, tau_samples, seed + offset + 2))
+        for series, sigma, key in ((vertical, sigma_v, 0),
+                                   (east, sigma_h, 1),
+                                   (north, sigma_h, 2)):
+            drawn = _ar1(steps, sigma, tau_samples, seed + offset + key)
+            if series:
+                shift = series[-1] - drawn[0]
+                decay = math.exp(-1.0 / max(1e-9, tau_samples))
+                drawn = [d + shift * decay ** i for i, d in enumerate(drawn)]
+            series.extend(drawn)
         offset += 3 + index
     vertical, east, north = vertical[:count], east[:count], north[:count]
 

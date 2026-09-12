@@ -24,6 +24,26 @@ def _row(case):
     return case.label, true, got, bound, verdict
 
 
+#: The seeds the gates use. The watched rows are printed across all of them:
+#: a single draw is how the relief docstring came to claim a 0.2 m margin that
+#: three seeds out of five do not have.
+SEEDS = (3, 11, 17, 29, 41)
+
+
+def _watch_row(case):
+    """A watched row, spread over every seed rather than drawn once."""
+    got = []
+    ships = []
+    for seed in SEEDS:
+        track = case.build(seed)
+        ships.append(elevation_gain(track.recorded, track.distances_km))
+        got.append(terrain_corrected_gain(
+            track.recorded, track.terrain, track.distances_km))
+    track = case.build()
+    return (case.label, track.true_gain, track.model_ceiling,
+            min(ships), max(ships), min(got), max(got))
+
+
 def _terrain_row(case):
     """One terrain-oracle row.
 
@@ -65,8 +85,7 @@ def main() -> None:
             print(f"{label:44} {true:>7.0f} {got:>8.0f} {bound:>10}  {verdict}")
 
     for title, cases in (("TERRAIN ORACLE - corrected", FIXED),
-                         ("TERRAIN ORACLE - must not change", NO_OP),
-                         ("TERRAIN ORACLE - measured, not asserted", WATCH)):
+                         ("TERRAIN ORACLE - must not change", NO_OP)):
         print(f"\n{title}")
         print(f"{'case':40} {'true':>7} {'ceil':>7} {'ships':>7} "
               f"{'got':>7} {'target':>12}  ")
@@ -74,6 +93,14 @@ def main() -> None:
             label, true, ceil, ships, got, bound, verdict = _terrain_row(case)
             print(f"{label:40} {true:>7.0f} {ceil:>7.0f} {ships:>7.0f} "
                   f"{got:>7.0f} {bound:>12}  {verdict}")
+
+    seeds = ", ".join(str(s) for s in SEEDS)
+    print(f"\nTERRAIN ORACLE - measured, not asserted (seeds {seeds})")
+    print(f"{'case':40} {'true':>7} {'ceil':>7} {'ships':>13} {'got':>13}  ")
+    for case in WATCH:
+        label, true, ceil, lo_s, hi_s, lo_g, hi_g = _watch_row(case)
+        print(f"{label:40} {true:>7.0f} {ceil:>7.0f} "
+              f"{f'{lo_s:.0f}-{hi_s:.0f}':>13} {f'{lo_g:.0f}-{hi_g:.0f}':>13}")
 
 
 main()

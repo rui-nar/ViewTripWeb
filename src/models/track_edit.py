@@ -655,25 +655,53 @@ def _relief(window: List[float]) -> float:
       and substituted the model over real hills. The same trap as the 60 m
       elevation smoothing this whole issue is about.
 
-    What decides whether a plain range is safe is not the size of the model's
-    error but its **correlation length**, and the two candidate models behave
-    completely differently over a 500 m window. Measured at the realistic
-    figure — error correlated over ~500 m, sigma 1 m — flat ground reads 2.2 m,
-    a shallow valley 4.2, a 1.5% drag 5.2 and 10 m rollers 8.1, so every case
-    falls on the right side of a 5 m threshold. Model error that is INDEPENDENT
-    per post defeats the statistic outright: at sigma 1.5 flat ground reads
-    6.1 m of apparent relief while a 10 m/100 m roller field reads 5.9, so the
-    two cannot even be ordered, let alone separated.
+    Against a PERFECT model the range separates the cases cleanly, and that is
+    what the gates assert. Relief per 500 m window, over every window of all
+    five benchmark seeds:
 
-    Real DEM error is spatially correlated — a model built from interferometric
-    SAR or stereo imagery varies over hundreds of metres, so adjacent posts
-    share most of their error — which is why this ships. But the margin on the
-    drag case is 0.2 m, and which model real tiles actually follow is an open
-    question a synthetic surface cannot answer. **Unit 2 must measure it against
-    real tiles over known terrain before any of this is wired to an activity.**
-    The sensitivity is printed by ``python -m tests.elevation_bench`` rather than
-    gated, because gating a number nobody has measured would just encode a
-    guess.
+    ===============  ==============     ==========  ===========
+    should read flat                    should read relief
+    ------------------------------     -------------------------
+    flat ground      0.00               1.5% drag   6.95 - 7.78
+    cross-slope      0.71 - 4.20        rollers     8.95 - 9.98
+    shallow valley   1.85 - 2.08
+    ===============  ==============     ==========  ===========
+
+    **Give the model its own error and no threshold separates them.** At sigma
+    1 m correlated over 500 m the flat group reaches 6.39 (the valley) while the
+    relief group falls to 4.38 (the drag) — they overlap, so the verdict is
+    unreliable in both directions. This is not a threshold that wants retuning;
+    the groups are not ordered.
+
+    What governs it is the error's **correlation length against the window**,
+    and the relationship is not monotonic. The drag's no-op survives on 5 of 5
+    seeds with a perfect model, 5 of 5 at 60 m, 4 of 5 at 100 m, **1 of 5 at
+    200 m**, 2 of 5 at 500 m, and 5 of 5 with independent per-post error. Error
+    much shorter than the window averages out inside it; error much longer is a
+    constant offset a range cancels; error at the window's own scale is a slope
+    that adds to or subtracts from the terrain's. That is the same structure as
+    the defect this whole issue is about — sensor drift is inseparable from
+    terrain exactly when their correlation lengths match — reappearing one level
+    up, which is worth knowing before choosing a window length.
+
+    No statistic tried does better once model error is present: a trimmed range,
+    p95-p5, IQR, 2.5 sigma, median-filtered and boxcar ranges at 30-120 m, and
+    the summed absolute 30 m step were all measured and none separates the
+    groups. Smoothing additionally blinds the verdict at its own wavelength —
+    60 m of it took a 10 m/100 m roller field from 8.95 m of relief to 3.99 and
+    substituted the model over real hills, the same trap as the 60 m elevation
+    smoothing this issue is about. So the plain range ships as the simplest
+    thing that is no worse.
+
+    **This is why nothing here is wired to an activity yet.** Unit 2 has to
+    measure a real tileset's error correlation at the 500 m scale against known
+    terrain; if it sits near the window, this verdict needs rethinking rather
+    than retuning, and the window length is the first thing to reconsider. The
+    sensitivity is printed by ``python -m tests.elevation_bench`` across all
+    five seeds rather than gated — gating a number nobody has measured on real
+    tiles would only encode a guess, and quoting one seed of it is how the
+    previous version of this docstring came to claim a 0.2 m margin that three
+    seeds out of five do not have.
     """
     return max(window) - min(window)
 
