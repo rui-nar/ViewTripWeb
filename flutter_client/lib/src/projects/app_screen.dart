@@ -627,7 +627,19 @@ class _AppScreenState extends State<AppScreen> with TickerProviderStateMixin {
           TextButton(
             onPressed: () async {
               messenger.hideCurrentSnackBar();
-              await notifier.deleteLocalActivity(imported.activityId);
+              // The snackbar outlives the screen, and the delete goes through
+              // whichever trip the notifier is pointed at when it is tapped —
+              // which the server does not cross-check against the activity.
+              // Opening another trip inside the six seconds and tapping Undo
+              // would have deleted this row out from under this one.
+              if (notifier.ref != widget.projectRef) return;
+              try {
+                await notifier.deleteLocalActivity(imported.activityId);
+              } catch (_) {
+                if (!mounted) return;
+                messenger.showSnackBar(const SnackBar(
+                    content: Text('Could not undo the import.')));
+              }
             },
             child: const Text('Undo'),
           ),

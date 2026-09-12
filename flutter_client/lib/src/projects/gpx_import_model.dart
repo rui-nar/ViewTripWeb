@@ -82,9 +82,14 @@ class GpxCandidate {
 
   static DateTime? _parseTime(Object? raw) {
     if (raw is! String || raw.isEmpty) return null;
-    // A file may carry any offset; the local wall clock is what the user
-    // recognises as when they set out.
-    return DateTime.tryParse(raw)?.toLocal();
+    // Kept in UTC, deliberately. The server normalises a file's offset to
+    // UTC on import and stores it that way, and the app has no per-activity
+    // timezone yet (issue #365). Showing these in the device's local zone
+    // would put 09:33 in the field for a 07:33Z ride, and the moment the
+    // user touched any field that local wall time would be sent back as
+    // though it were UTC — moving the activity by the offset. Display and
+    // submission stay in one clock until there is a real timezone to hold.
+    return DateTime.tryParse(raw)?.toUtc();
   }
 
   static List<GeoPoint> _decodeOutline(String? encoded) {

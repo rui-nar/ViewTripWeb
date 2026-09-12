@@ -18,7 +18,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Optional
 
 import polyline as polyline_lib
@@ -517,9 +517,15 @@ def _resolve_times(candidate, date, start_time, end_time):
         )
     start_dt = datetime.combine(day, start_clock, tzinfo=timezone.utc)
     end_dt = datetime.combine(day, end_clock, tzinfo=timezone.utc)
-    if end_dt <= start_dt:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                             detail={"errors": ["End time must be after start time."]})
+    if end_dt < start_dt:
+        # An end before the start means the activity ran past midnight: a
+        # night ride leaving at 23:30 and back at 00:30. Refusing it made
+        # every such ride unimportable, since the form carries one date.
+        end_dt += timedelta(days=1)
+    if end_dt == start_dt:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"errors": ["Start and end cannot be the same time."]})
     return start_dt, end_dt
 
 
@@ -627,9 +633,13 @@ def _preview_polyline(points) -> Optional[str]:
     """
     if len(points) < 2:
         return None
-    stride = max(1, len(points) // PREVIEW_POINTS)
+    # Ceiling division: floor let 399 points through a cap of 200, because
+    # 399 // 200 is a stride of 1.
+    stride = -(-len(points) // PREVIEW_POINTS)
     kept = points[::stride]
-    if kept[-1] is not points[-1]:
+    if len(points) % stride != 1:
+        # The stride missed the final point, and a preview that does not end
+        # where the track does looks wrong in a way users notice.
         kept.append(points[-1])
     return polyline_lib.encode([(p.lat, p.lng) for p in kept])
 

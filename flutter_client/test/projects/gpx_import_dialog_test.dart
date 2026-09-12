@@ -500,4 +500,124 @@ void main() {
     expect(tester.getSize(find.byKey(const ValueKey('gpx_name_field'))).width,
         lessThan(360));
   });
+
+  testWidgets('a ride over midnight is a ride, not an error', (tester) async {
+    // Nothing the user does triggers this: the file's own span is 22:30 to
+    // 01:10, and comparing minutes-past-midnight refused it outright while the
+    // form still said "read from the file".
+    final recorder = _Recorder();
+    await tester.pumpWidget(_harness(
+      recorder,
+      client: recorder.client(
+          inspect: _inspectBody(candidates: [
+        _candidate(
+            startedAt: '2024-08-12T22:30:00Z',
+            endedAt: '2024-08-13T01:10:00Z'),
+      ])),
+    ));
+    await _openAndPick(tester);
+
+    expect(find.byKey(const ValueKey('gpx_crosses_midnight_note')),
+        findsOneWidget);
+    expect(find.textContaining('cannot be the same time'), findsNothing);
+    expect(_confirmButton(tester).onPressed, isNotNull,
+        reason: 'a night ride must be importable');
+  });
+
+  testWidgets('an edited time is sent as the same clock the server reads',
+      (tester) async {
+    // The field shows, and posts, the file's own UTC wall time. Showing the
+    // device's local time instead sent 09:33 for a 07:33Z ride, which the
+    // server stores as 09:33Z — the activity moves by the offset, silently.
+    final recorder = _Recorder();
+    await tester.pumpWidget(_harness(recorder));
+    await _openAndPick(tester);
+
+    // Touch the date and accept it: enough to flip the form to "edited".
+    await tester.tap(find.byKey(const ValueKey('gpx_date_field')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'OK'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('gpx_import_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(recorder.field('start_time'), '07:33');
+    expect(recorder.field('end_time'), '10:37');
+    expect(recorder.field('date'), '2024-08-12');
+  });
+
+  testWidgets('a file whose only track is unusable says why, on the pick step',
+      (tester) async {
+    final recorder = _Recorder();
+    await tester.pumpWidget(_harness(
+      recorder,
+      client: recorder.client(
+          inspect: _inspectBody(candidates: [
+        _candidate(errors: const ['Track has fewer than 2 points (1).']),
+      ])),
+    ));
+    await _openAndPick(tester);
+
+    expect(find.text('Track has fewer than 2 points (1).'), findsOneWidget);
+    expect(find.byKey(const ValueKey('gpx_pick_file')), findsOneWidget,
+        reason: 'a review step that can never be submitted is a dead end');
+  });
+
+  testWidgets('a server that cannot be reached leaves a way out',
+      (tester) async {
+    // The spinner used to keep turning with Cancel disabled, and the only
+    // escape was tapping the barrier.
+    final recorder = _Recorder();
+    await tester.pumpWidget(_harness(
+      recorder,
+      client: MockClient((_) async => throw http.ClientException('offline')),
+    ));
+    await _openAndPick(tester);
+
+    expect(find.textContaining('Could not reach the server'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, 'Cancel'))
+            .onPressed,
+        isNotNull);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('a failed import leaves the review step usable', (tester) async {
+    final recorder = _Recorder();
+    var calls = 0;
+    await tester.pumpWidget(_harness(
+      recorder,
+      client: MockClient((request) async {
+        calls++;
+        if (request.url.path.endsWith('/gpx/inspect')) {
+          return http.Response(_inspectBody(), 200);
+        }
+        throw http.ClientException('offline');
+      }),
+    ));
+    await _openAndPick(tester);
+    await tester.tap(find.byKey(const ValueKey('gpx_import_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(calls, 2);
+    expect(find.text('Import this track?'), findsOneWidget);
+    expect(_confirmButton(tester).onPressed, isNotNull,
+        reason: 'the user must be able to try again');
+  });
+
+  testWidgets('an unrecognised type says what it needs', (tester) async {
+    final recorder = _Recorder();
+    await tester.pumpWidget(_harness(
+      recorder,
+      client: recorder.client(
+          inspect: _inspectBody(candidates: [_candidate(type: null)])),
+    ));
+    await _openAndPick(tester);
+
+    // An Import button sitting dead with no explanation is its own small
+    // cruelty; every other missing field says "Required".
+    expect(find.textContaining("The file doesn't say"), findsOneWidget);
+    expect(_confirmButton(tester).onPressed, isNull);
+  });
 }

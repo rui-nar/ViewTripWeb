@@ -200,13 +200,27 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
       return;
     }
 
+    final importable =
+        inspection.candidates.where((c) => c.isImportable).toList();
+    if (importable.isEmpty) {
+      // Every track in the file is unusable. Opening the review step on one
+      // of them showed a form that could never be submitted and never said
+      // why; the reasons belong where the file was picked.
+      setState(() {
+        _stage = _Stage.pick;
+        _serverErrors = [
+          for (final candidate in inspection.candidates) ...candidate.errors,
+        ];
+      });
+      return;
+    }
+
     setState(() {
       _inspection = inspection;
-      if (inspection.needsAChoice) {
+      if (importable.length > 1) {
         _stage = _Stage.choose;
       } else {
-        _choose(inspection.candidates.firstWhere((c) => c.isImportable,
-            orElse: () => inspection.candidates.first));
+        _choose(importable.first);
       }
     });
   }
@@ -215,6 +229,11 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
   void _choose(GpxCandidate candidate) {
     _chosen = candidate;
     _stage = _Stage.review;
+    // Every field is derived below, so nothing may survive from a candidate
+    // reviewed before this one — including a rejection the server gave for
+    // it, which would otherwise sit under a different track's form.
+    _serverErrors = null;
+    _genericError = null;
     _nameController.text = candidate.name ?? _inspection?.suggestedName ?? '';
     _activityType = candidate.activityType;
     final started = candidate.startedAt;
@@ -237,11 +256,29 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
   bool get _timesComplete =>
       _date != null && _startTime != null && _endTime != null;
 
+  /// True when the end time lands before the start, which means the
+  /// activity ran past midnight. Said out loud rather than left to be
+  /// discovered, since the date field shows only the starting day.
+  bool get _crossesMidnight {
+    final start = _startTime;
+    final end = _endTime;
+    if (start == null || end == null) return false;
+    return end.hour * 60 + end.minute < start.hour * 60 + start.minute;
+  }
+
+  /// True unless the two times are the same instant.
+  ///
+  /// An end BEFORE the start is not an error: a night ride leaving at 23:30
+  /// and returning at 00:30 is the ordinary shape of a night ride, and
+  /// comparing minutes-past-midnight refused it outright — including when
+  /// the times came from the file and the user had touched nothing. The
+  /// server rolls such an end onto the next day; only a zero-length
+  /// activity is genuinely wrong.
   bool get _timeOrderValid {
     final start = _startTime;
     final end = _endTime;
     if (start == null || end == null) return true;
-    return end.hour * 60 + end.minute > start.hour * 60 + start.minute;
+    return end != start;
   }
 
   bool get _canSubmit =>
@@ -268,7 +305,10 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _stage = _fileBytes == null ? _Stage.pick : _stage;
+          // Back to a stage the user can act from. Staying in `reading` or
+          // `submitting` left a spinner turning with Cancel disabled and no
+          // way out of the dialog at all.
+          _stage = _chosen == null ? _Stage.pick : _Stage.review;
           _genericError = 'Could not reach the server: '
               '${e.toString().replaceFirst('Exception: ', '')}';
         });
@@ -573,10 +613,16 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
       DropdownButtonFormField<String>(
         key: const ValueKey('gpx_type_field'),
         initialValue: _activityType,
-        decoration: const InputDecoration(
-            labelText: 'Activity type',
-            isDense: true,
-            border: OutlineInputBorder()),
+        decoration: InputDecoration(
+          labelText: 'Activity type',
+          isDense: true,
+          border: const OutlineInputBorder(),
+          // Unrecognised <type> arrives null, and an Import button sitting
+          // dead with no explanation is its own small cruelty.
+          errorText: _activityType == null
+              ? "The file doesn't say — please pick one"
+              : null,
+        ),
         items: [
           for (final (value, label) in _kActivityTypes)
             DropdownMenuItem(
@@ -629,9 +675,16 @@ class _GpxImportDialogState extends State<GpxImportDialog> {
       ),
       if (!_timeOrderValid) ...[
         const SizedBox(height: 6),
-        Text('End time must be after start time.',
+        Text('Start and end cannot be the same time.',
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: theme.colorScheme.error)),
+      ],
+      if (_crossesMidnight) ...[
+        const SizedBox(height: 6),
+        Text('Ends the next day.',
+            key: const ValueKey('gpx_crosses_midnight_note'),
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
       ],
       if (candidate.hasTimes && _timesUntouched) ...[
         const SizedBox(height: 6),
