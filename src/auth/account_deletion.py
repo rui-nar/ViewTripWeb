@@ -102,13 +102,18 @@ def delete_user_and_data(sess: Session, user_info_id: int) -> None:
             touched_project_ids.update(sess.exec(
                 select(DBProjectItem.project_id).where(column.in_(ids_))
             ).all())
+    # Bump before the deletes, not after: bump_lock_version issues a Core
+    # UPDATE, which autoflushes whatever is pending, so bumping last would take
+    # the item rows before the project row — the inverse of save_project's
+    # order, and the lock-order inversion issue #398 documents. Harmless on
+    # SQLite (single writer) but free to get right here.
+    for touched in touched_project_ids:
+        bump_lock_version(sess, touched)
     if authored_journal_ids:
         _delete_all(DBProjectItem, DBProjectItem.journal_id.in_(authored_journal_ids))
         _delete_all(DBJournalEntry, DBJournalEntry.id.in_(authored_journal_ids))
     if activity_ids:
         _delete_all(DBProjectItem, DBProjectItem.activity_id.in_(activity_ids))
-    for touched in touched_project_ids:
-        bump_lock_version(sess, touched)
     _delete_all(DBProjectMember, DBProjectMember.user_info_id == user_info_id)
     _delete_all(DBProjectInvite, DBProjectInvite.created_by == user_info_id)
     # Pending invites (issue #110) point at the sender via invited_by, so they
