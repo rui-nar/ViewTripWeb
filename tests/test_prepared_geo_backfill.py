@@ -43,8 +43,9 @@ def db(monkeypatch):
     )
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(db_module, "engine", engine)
-    # The job module binds the engine at import time.
-    monkeypatch.setattr(jobs, "engine", engine)
+    # The resume cursor is module state; a test that inherited another's would
+    # start mid-range and silently skip rows.
+    monkeypatch.setattr(jobs, "_resume_after_id", 0)
     return engine
 
 
@@ -164,3 +165,74 @@ def test_it_cannot_overwrite_a_write_that_landed_while_it_prepared(db, monkeypat
     monkeypatch.setattr(jobs, "prepare_polyline", real_prepare)
     assert jobs.sweep_unprepared_geometry() == 1
     assert _rows(db)[800].version == PREPARED_GEO_VERSION
+
+
+def test_unpreparable_rows_at_the_head_cannot_starve_the_backlog(db):
+    """The blocking finding from the review of #413/#414.
+
+    A row that can never be prepared never gets a prepared row, so it stays a
+    candidate forever. The first version ordered by id with a LIMIT and no
+    cursor, so enough of them at the head of the id order meant every run read
+    the same rows, prepared nothing, and never reached the backlog behind them —
+    silently, since it only logged when it made progress.
+
+    Single-point tracks rather than encrypted ones on purpose: envelopes are now
+    filtered in SQL, so they would pass this test for the wrong reason. A track
+    with one GPS fix is the realistic unpreparable row SQL cannot see — it
+    decodes fine and yields nothing drawable — which is exactly what the cursor
+    is for.
+
+    (Not a garbage string: polyline.decode is lenient enough that most garbage
+    decodes to a few points and prepares successfully, which is how the first
+    draft of this test passed for the wrong reason.)
+    """
+    single_fix = polyline_lib.encode([(45.0, 7.0)])
+    for i in range(4):
+        _add(db, 1000 + i, single_fix)
+    _add(db, 2000, _encoded(7))
+
+    per_run = [jobs.sweep_unprepared_geometry(limit=2) for _ in range(4)]
+
+    assert 2000 in _rows(db), f"good row never reached; prepared per run: {per_run}"
+    assert sum(per_run) == 1
+
+
+def test_the_cursor_wraps_so_a_later_pass_starts_over(db):
+    """A short batch means the end was reached; the next run begins again."""
+    for i in range(3):
+        _add(db, 3000 + i, _encoded(i))
+
+    assert jobs.sweep_unprepared_geometry(limit=2) == 2  # full batch: resumes after
+    assert jobs.sweep_unprepared_geometry(limit=2) == 1  # short batch: wraps
+    assert jobs._resume_after_id == 0
+
+
+def test_an_encrypted_envelope_is_never_read(db, monkeypatch):
+    """Filtered in SQL, so its ciphertext never reaches prepare_polyline at all."""
+    _add(db, 4000, "v1.YWJj.ZGVm")
+    _add(db, 4001, _encoded(8))
+    seen = []
+    real = jobs.prepare_polyline
+    monkeypatch.setattr(jobs, "prepare_polyline",
+                        lambda poly: (seen.append(poly), real(poly))[1])
+
+    jobs.sweep_unprepared_geometry()
+
+    assert "v1.YWJj.ZGVm" not in seen
+    assert set(_rows(db)) == {4001}
+
+
+def test_the_envelope_filter_cannot_exclude_a_real_polyline():
+    """The SQL filter's safety argument, checked rather than asserted.
+
+    `NOT LIKE 'v1.%'` is only safe if no encoded polyline can begin with "v1.".
+    The encoding's alphabet is ASCII 63-126, which contains neither "1" nor ".".
+    """
+    import random
+    for seed in range(500):
+        rng = random.Random(seed)
+        pts = [(rng.uniform(-90, 90), rng.uniform(-180, 180))
+               for _ in range(rng.randint(1, 30))]
+        encoded = polyline_lib.encode(pts)
+        assert not encoded.lower().startswith("v1."), encoded
+        assert "1" not in encoded and "." not in encoded
