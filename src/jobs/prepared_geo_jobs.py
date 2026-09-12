@@ -25,6 +25,7 @@ from models.project_db import DBActivity, DBActivityGeoPrepared
 from src.models.prepared_geo import prepare_polyline, store_prepared_if_unchanged
 from src.models.simplify import PREPARED_GEO_VERSION
 from src.utils.logging import get_logger
+from src.utils.metrics import PREPARED_GEOMETRY_BACKLOG, PREPARED_GEOMETRY_OUTCOMES
 
 _log = get_logger(__name__)
 
@@ -82,6 +83,34 @@ def _candidates(sess: Session, limit: int,
     return list(sess.exec(query.order_by(DBActivity.id).limit(limit)).all())
 
 
+def _publish_backlog() -> int | None:
+    """Count the unprepared backlog and publish it as a gauge. None if the count fails.
+
+    Called on EVERY run, including one that found no candidates at all. That
+    path matters most: a sweep that runs, reports success and makes no progress
+    is the failure this job has already shipped twice — once as starvation, once
+    as a cursor that skipped every negative id and so found nothing — and it is
+    invisible to the scheduler's own metrics, which count it a success. A gauge
+    that stops falling is the signal, and unlike a log line it neither spams once
+    the backlog is drained nor goes quiet when the sweep breaks.
+    """
+    try:
+        with get_session() as sess:
+            remaining = sess.exec(text(
+                "SELECT COUNT(*) FROM activity WHERE summary_polyline IS NOT NULL "
+                "AND summary_polyline NOT LIKE 'v1.%' "
+                "AND id NOT IN (SELECT activity_id FROM activity_geo_prepared "
+                "               WHERE version = :version)"
+            ).bindparams(version=PREPARED_GEO_VERSION)).scalar_one()
+    except Exception:  # noqa: BLE001 — a failed count must not undo stored rows
+        # With the traceback: this query failing is abnormal, and a broken one
+        # (a renamed column, say) must be visible rather than summarised away.
+        _log.exception("prepared-geometry sweep could not count the remaining backlog")
+        return None
+    PREPARED_GEOMETRY_BACKLOG.set(remaining)
+    return remaining
+
+
 def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
     """Prepare up to *limit* activities that have no current row. Returns the count.
 
@@ -107,14 +136,24 @@ def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
     _resume_after_id = candidates[-1][0] if len(candidates) == limit else None
 
     if not candidates:
+        _publish_backlog()
         return 0
 
     prepared = 0
     for activity_id, polyline in candidates:
+        # Preparing and storing fail for different reasons and deserve different
+        # treatment. A polyline that does not decode fails identically on every
+        # pass forever — it is unpreparable, not an error, and a traceback each
+        # time would be hundreds of identical ERROR lines a day per such row.
+        # A write that fails is abnormal and gets the traceback.
         try:
             blob = prepare_polyline(polyline)
-            if blob is None:
-                continue
+        except Exception:  # noqa: BLE001 — undecodable input is an outcome, not a fault
+            blob = None
+        if blob is None:
+            PREPARED_GEOMETRY_OUTCOMES.labels(outcome="unpreparable").inc()
+            continue
+        try:
             with get_session() as sess:
                 # One transaction per activity, not one per sweep: preparing is
                 # slow enough that a single long transaction would hold a write
@@ -127,29 +166,16 @@ def sweep_unprepared_geometry(limit: int = MAX_PREPARE_PER_SWEEP) -> int:
                 store_prepared_if_unchanged(sess, activity_id, polyline, blob)
                 sess.commit()
             prepared += 1
+            PREPARED_GEOMETRY_OUTCOMES.labels(outcome="prepared").inc()
         except Exception:  # noqa: BLE001 — one bad row must not cost the batch
-            _log.exception("could not prepare geometry for activity %s", activity_id)
+            PREPARED_GEOMETRY_OUTCOMES.labels(outcome="error").inc()
+            _log.exception("could not store prepared geometry for activity %s", activity_id)
+
+    remaining = _publish_backlog()
 
     if prepared:
-        # Only reported when there was progress to report. With the cursor, a
-        # run that prepares nothing is no longer a sign of a stuck sweep: once
-        # the backlog is drained it is the normal state of any database holding
-        # a few unpreparable rows, and logging it would print the same line
-        # every five minutes forever, making a healthy sweep indistinguishable
-        # from a broken one. Genuine lack of progress shows as "left" not
-        # falling across runs.
-        try:
-            with get_session() as sess:
-                remaining = sess.exec(text(
-                    "SELECT COUNT(*) FROM activity WHERE summary_polyline IS NOT NULL "
-                    "AND summary_polyline NOT LIKE 'v1.%' "
-                    "AND id NOT IN (SELECT activity_id FROM activity_geo_prepared "
-                    "               WHERE version = :version)"
-                ).bindparams(version=PREPARED_GEO_VERSION)).scalar_one()
-            _log.info("prepared geometry for %d activities, %d left "
-                      "(including any that can never be prepared)", prepared, remaining)
-        except Exception:  # noqa: BLE001 — the work is done; a failed count must not undo that
-            _log.info("prepared geometry for %d activities", prepared)
+        _log.info("prepared geometry for %d activities, %s left", prepared,
+                  "unknown" if remaining is None else remaining)
     else:
         _log.debug("prepared-geometry sweep: %d candidates, none preparable", len(candidates))
     return prepared

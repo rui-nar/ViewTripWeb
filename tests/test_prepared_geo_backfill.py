@@ -330,3 +330,129 @@ def test_negative_ids_are_reached_after_the_cursor_wraps(db):
     jobs.sweep_unprepared_geometry(limit=2)  # must start over and find -7
 
     assert set(_rows(db)) == {-7, 10}
+
+
+# ── observability: a stuck sweep must be visible (review of 44e8a8d) ─────────
+
+import logging
+
+from prometheus_client import REGISTRY
+
+
+def _backlog():
+    return REGISTRY.get_sample_value("viewtrip_prepared_geometry_backlog")
+
+
+def _outcomes(outcome: str) -> float:
+    return REGISTRY.get_sample_value(
+        "viewtrip_prepared_geometry_outcomes_total", {"outcome": outcome}) or 0.0
+
+
+def test_the_backlog_gauge_is_published_and_falls(db):
+    for i in range(3):
+        _add(db, 7000 + i, _encoded(20 + i))
+    jobs.sweep_unprepared_geometry(limit=2)
+    assert _backlog() == 1
+    jobs.sweep_unprepared_geometry(limit=2)
+    assert _backlog() == 0
+
+
+def test_the_gauge_is_published_even_when_a_run_finds_nothing(db, monkeypatch):
+    """The path that matters most, and the one first written wrong.
+
+    The previous fix's regression — a cursor that skipped every negative id —
+    produced runs that found NO candidates and returned early. An early return
+    that skipped the gauge would leave it holding a stale value from a healthy
+    past run, and the sweep would look fine. So a run with no candidates must
+    still publish the true backlog.
+    """
+    _add(db, -9, _encoded(30))
+    PREPARED_GEOMETRY_BACKLOG_STALE = 0
+    from src.utils.metrics import PREPARED_GEOMETRY_BACKLOG
+    PREPARED_GEOMETRY_BACKLOG.set(PREPARED_GEOMETRY_BACKLOG_STALE)
+
+    # Simulate the regressed cursor: it believes it is past everything.
+    monkeypatch.setattr(jobs, "_candidates", lambda sess, limit, after_id: [])
+    assert jobs.sweep_unprepared_geometry() == 0
+
+    assert _backlog() == 1, "a run that found nothing left the gauge stale"
+
+
+def test_a_stuck_sweep_shows_as_a_flat_nonzero_backlog(db, monkeypatch):
+    """The failure this job shipped twice, replayed, must be visible.
+
+    Replays the original starvation bug — a cursor that never advances past
+    unpreparable rows at the head — and checks the gauge: it must stay non-zero
+    and flat across runs rather than falling, which is what a dashboard or alert
+    can see even though every run reports success.
+    """
+    single_fix = polyline_lib.encode([(45.0, 7.0)])
+    for i in range(3):
+        _add(db, 8000 + i, single_fix)
+    _add(db, 9000, _encoded(31))
+    monkeypatch.setattr(jobs, "_resume_after_id", None)
+    real = jobs._candidates
+    # KNOWN-BAD cursor: always restart from the head, so the good row is never reached.
+    monkeypatch.setattr(jobs, "_candidates",
+                        lambda sess, limit, after_id: real(sess, limit, None))
+
+    readings = []
+    for _ in range(4):
+        jobs.sweep_unprepared_geometry(limit=2)
+        readings.append(_backlog())
+
+    assert 9000 not in _rows(db)
+    assert readings == [4, 4, 4, 4], f"stuck sweep not visible in the gauge: {readings}"
+
+
+def test_an_undecodable_polyline_is_unpreparable_not_an_error(db, caplog):
+    """It fails identically every pass forever, so it must not log a traceback."""
+    _add(db, 9100, "!!!not a polyline!!!")  # raises OverflowError in decode
+    before = _outcomes("unpreparable")
+    with caplog.at_level(logging.ERROR):
+        jobs.sweep_unprepared_geometry()
+    assert _outcomes("unpreparable") == before + 1
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_a_failed_write_is_counted_as_an_error_and_logged(db, monkeypatch, caplog):
+    _add(db, 9200, _encoded(32))
+    before = _outcomes("error")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(jobs, "store_prepared_if_unchanged", boom)
+    with caplog.at_level(logging.ERROR):
+        assert jobs.sweep_unprepared_geometry() == 0
+    assert _outcomes("error") == before + 1
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+def test_a_failed_backlog_count_does_not_fail_a_successful_run(db, monkeypatch, caplog):
+    """The rows were stored; a count that fails afterwards must not undo that.
+
+    Written because the commit that introduced the `try` claimed it was covered
+    when it was not — replacing its `except` with one that never fires passed
+    every test.
+    """
+    _add(db, 9300, _encoded(33))
+    real_exec_session = jobs.get_session
+    calls = {"n": 0}
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def session_that_fails_on_the_count():
+        calls["n"] += 1
+        with real_exec_session() as sess:
+            if calls["n"] >= 3:  # 1: candidates, 2: the write, 3: the count
+                raise RuntimeError("no such column: summary_polyline")
+            yield sess
+
+    monkeypatch.setattr(jobs, "get_session", session_that_fails_on_the_count)
+    with caplog.at_level(logging.ERROR):
+        assert jobs.sweep_unprepared_geometry() == 1
+    assert 9300 in _rows(db)
+    assert any("could not count" in r.getMessage() and r.exc_info
+               for r in caplog.records), "a broken count must log with a traceback"
