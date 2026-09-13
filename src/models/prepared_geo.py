@@ -147,3 +147,40 @@ def prepare_polyline(summary_polyline: str | None) -> bytes | None:
         return None
     work = working_set(coords)
     return pack_prepared_line(work, vertex_levels(work), line_bbox(work))
+
+
+# Stored in one statement so the check and the write cannot be separated, and
+# with IS rather than = so a NULL polyline compares correctly instead of
+# silently failing the guard.
+_STORE_IF_UNCHANGED = (
+    "INSERT INTO activity_geo_prepared (activity_id, version, blob) "
+    "SELECT :id, :version, :blob "
+    "WHERE (SELECT summary_polyline FROM activity WHERE id = :id) IS :poly "
+    "ON CONFLICT(activity_id) DO UPDATE SET "
+    "  version = excluded.version, blob = excluded.blob"
+)
+
+
+def store_prepared_if_unchanged(sess, activity_id: int, polyline: str | None,
+                                blob: bytes) -> None:
+    """Store *blob* for *activity_id*, but only if its polyline is still *polyline*.
+
+    Both callers that prepare geometry **outside** a write transaction need this
+    — the read path in ``api.geo`` and the backfill sweep — because preparing
+    takes seconds, and a writer can land in between. Without the guard the
+    prepared row would be replaced by geometry read *before* that write, at the
+    current version, so it looks fresh and is served until the next polyline
+    write. For an activity encrypted in that window it is worse: the encrypt
+    path deletes the row, and an unguarded insert puts the **plaintext**
+    geometry back for a track the server is no longer meant to read, which the
+    share route would then serve publicly.
+
+    One implementation rather than two: the guard is the whole correctness
+    argument, and a second copy is how one of them ends up without it.
+
+    Callers commit; this does not, so a batch is one transaction.
+    """
+    from sqlalchemy import text
+
+    sess.exec(text(_STORE_IF_UNCHANGED).bindparams(
+        id=activity_id, version=PREPARED_GEO_VERSION, blob=blob, poly=polyline))

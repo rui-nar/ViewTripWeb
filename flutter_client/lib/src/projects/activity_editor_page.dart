@@ -39,6 +39,9 @@ TrackEditModel modelForActivity(Map<String, dynamic> activity) {
   return TrackEditModel.fromEncoded(poly, pairs);
 }
 
+/// What the editor's AppBar folds into its overflow menu on a phone.
+enum _EditorMenuAction { reset }
+
 class ActivityEditorPage extends StatefulWidget {
   final ProjectNotifier notifier;
   final Map<String, dynamic> activity;
@@ -73,6 +76,8 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// id and never came from Strava, so there is no Strava original to reset to —
   /// reset only undoes edits made since the piece was created (issue #131).
   bool get _isLocal => _activityId < 0;
+
+  String get _resetLabel => _isLocal ? 'Reset track' : 'Reset to Strava';
 
   /// True when this track came out of a GPX file rather than from Strava.
   ///
@@ -155,13 +160,14 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
       PointMenuAction(
         label: 'Split here',
         icon: Icons.call_split,
-        enabled: _c.canSplitAt(index),
+        // Not while another write is in flight: it could not go out beside it.
+        enabled: !_saving && _c.canSplitAt(index),
         onSelected: (ctx, i) => _confirmSplit(i),
       ),
       PointMenuAction(
         label: 'Cut & add transport',
         icon: Icons.alt_route,
-        enabled: _c.canCutForTransport(index),
+        enabled: !_saving && _c.canCutForTransport(index),
         onSelected: (ctx, i) => _confirmCutForTransport(i),
       ),
       PointMenuAction(
@@ -182,6 +188,24 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// SplitRequest.lock_version mismatched.
   bool _isStaleVersionConflict(Object e) => e is ApiException && e.statusCode == 409;
 
+  /// Close this editor with [result], whatever has been opened over it since
+  /// the write started.
+  ///
+  /// A save, reset or split can land while a menu or dialog is up — Save and ⋮
+  /// tapped in the same frame both go through, and the map stays live while
+  /// Save spins. A bare pop would close that instead and hand it the editor's
+  /// result, which it cannot take; the save's catch then reported a save that
+  /// had succeeded as failed and left the editor open (#407 review). [route]
+  /// is the editor's own, captured before the await. If it is already leaving
+  /// the navigator there is nothing to close, and popping anyway would take
+  /// the screen under it with it.
+  void _closeEditor(
+      NavigatorState navigator, ModalRoute<Object?>? route, Object? result) {
+    if (route == null || !route.isActive) return;
+    navigator.popUntil((r) => r == route);
+    navigator.pop(result);
+  }
+
   /// Tell the user their edit was rejected because the activity changed
   /// elsewhere, and close the editor: it's holding a now-stale copy, and
   /// reopening it (activity_panel.dart always re-fetches on open) is the only
@@ -190,12 +214,13 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   /// project_segment_crud_mixin.dart).
   void _handleStaleVersionConflict(
     ScaffoldMessengerState messenger, NavigatorState navigator,
+    ModalRoute<Object?>? route,
   ) {
     messenger.showSnackBar(const SnackBar(
       content: Text('This activity changed elsewhere. Close and reopen the '
           'editor to see the latest version, then try again.'),
     ));
-    navigator.pop(false);
+    _closeEditor(navigator, route, false);
   }
 
   Future<void> _save() async {
@@ -203,16 +228,17 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.saveActivityTrack(
           _activityId, _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Save failed: $e')));
@@ -252,20 +278,64 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   }
 
   Future<void> _reset() async {
+    // Disabling Reset only takes effect on the next rebuild; a tap in the same
+    // frame as Save still arrives here, and must not send a second write.
+    if (_saving) return;
     final pieces = _splitPiecesRemovedByReset;
     if (pieces > 0 && !await _confirmResetRemovesPieces(pieces)) return;
     if (!mounted) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.resetActivityTrack(_activityId);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       messenger.showSnackBar(SnackBar(content: Text('Reset failed: $e')));
+    }
+  }
+
+  /// The phone AppBar's overflow menu, opened and awaited by the page itself.
+  ///
+  /// Not a PopupMenuButton: the button leaves the bar when the window widens
+  /// past 720 px, and a PopupMenuButton that has gone drops whatever is picked
+  /// in the menu it left open, so Reset became a dead tap (#407 review). This
+  /// State outlives the button, and looks again for a write that started while
+  /// the menu was up — Save tapped in the same frame as ⋮ still opens it.
+  Future<void> _openMoreOptions(BuildContext buttonContext) async {
+    final button = buttonContext.findRenderObject()! as RenderBox;
+    final overlay = Navigator.of(buttonContext).overlay!.context
+        .findRenderObject()! as RenderBox;
+    final action = await showMenu<_EditorMenuAction>(
+      context: context,
+      // Over the button, as PopupMenuButton places it by default.
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(
+          button.localToGlobal(Offset.zero, ancestor: overlay),
+          button.localToGlobal(button.size.bottomRight(Offset.zero),
+              ancestor: overlay),
+        ),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: _EditorMenuAction.reset,
+          child: ListTile(
+            leading: const Icon(Icons.restore),
+            title: Text(_resetLabel),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ],
+    );
+    if (!mounted || action == null || _saving) return;
+    switch (action) {
+      case _EditorMenuAction.reset:
+        _reset();
     }
   }
 
@@ -298,19 +368,28 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
       ),
     );
     if (ok != true || !mounted) return;
+    // Backstop for the entry disabled in _actionsForPoint: a write that got
+    // going while this was being confirmed has to land first, and the user
+    // confirmed this, so say why nothing happens rather than drop it.
+    if (_saving) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Wait for the save to finish, then try again.')));
+      return;
+    }
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.splitActivity(_activityId, index,
           payload: _c.toSavePayload(), lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop(true);
+      _closeEditor(navigator, route, true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Split failed: $e')));
@@ -344,21 +423,30 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
       ),
     );
     if (ok != true || !mounted) return;
+    // Backstop for the entry disabled in _actionsForPoint: a write that got
+    // going while this was being confirmed has to land first, and the user
+    // confirmed this, so say why nothing happens rather than drop it.
+    if (_saving) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Wait for the save to finish, then try again.')));
+      return;
+    }
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final route = ModalRoute.of(context);
     try {
       await widget.notifier.splitActivity(_activityId, index,
           dropBoundary: true,
           payload: _c.toSavePayload(),
           lockVersion: _lockVersion);
       if (!mounted) return;
-      navigator.pop({'openSegmentFor': _activityId});
+      _closeEditor(navigator, route, {'openSegmentFor': _activityId});
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       if (_isStaleVersionConflict(e)) {
-        _handleStaleVersionConflict(messenger, navigator);
+        _handleStaleVersionConflict(messenger, navigator, route);
         return;
       }
       messenger.showSnackBar(SnackBar(content: Text('Cut failed: $e')));
@@ -369,17 +457,26 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final pts = _c.points;
+    // The app's phone/wide breakpoint (app_screen, day_carousel, the add FAB).
+    // The editor is a full-screen route, so the screen's width is the AppBar's.
+    final compact = MediaQuery.sizeOf(context).width < 720;
 
     return Scaffold(
       appBar: AppBar(
         title: LayoutBuilder(builder: (context, constraints) {
+          final name = '${widget.activity['name'] ?? 'Activity'}';
           final title = Text(
-            'Edit — ${widget.activity['name'] ?? 'Activity'}',
+            // On a phone "Edit — " took 49 of the title's 120 px at 360 px
+            // (measured in Roboto) to say what Save, the point handles and the
+            // hint below already say; the name is what tells one track from
+            // another (#407). A screen reader still hears the whole title.
+            compact ? name : 'Edit — $name',
+            semanticsLabel: 'Edit — $name',
             style: theme.textTheme.titleMedium,
             overflow: TextOverflow.ellipsis,
           );
           // The AppBar gives the title whatever the actions leave it, and on a
-          // phone showing Reset that is sometimes less than the badge's own
+          // phone with large text that is sometimes less than the badge's own
           // 24 px. A Row cannot hand space back, so below the point where the
           // name would get any at all the badge stands down instead of
           // overflowing into the actions.
@@ -405,11 +502,11 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
           );
         }),
         actions: [
-          if (_isEdited)
+          if (_isEdited && !compact)
             TextButton.icon(
               onPressed: _saving ? null : _reset,
               icon: const Icon(Icons.restore, size: 18),
-              label: Text(_isLocal ? 'Reset track' : 'Reset to Strava'),
+              label: Text(_resetLabel),
               style: TextButton.styleFrom(
                 foregroundColor: theme.colorScheme.onSurfaceVariant,
               ),
@@ -422,6 +519,23 @@ class _ActivityEditorPageState extends State<ActivityEditorPage> {
               onPressed: _save,
             ),
           ),
+          // On a phone the labelled Reset button took nearly all of the title
+          // slot (#407): measured in Roboto with a back button, the title got
+          // 0 px at 320, 18 at 360 and 70 at 412, and "Edit — " alone is 49.
+          // There Reset moves behind the overflow menu rather than shrinking
+          // to a bare icon: it throws the edits away and closes the editor,
+          // without asking unless pieces go with it, so the tap that commits
+          // to it should land on its label and not on an unlabelled glyph
+          // sitting next to Save.
+          if (_isEdited && compact)
+            Builder(
+              builder: (buttonContext) => IconButton(
+                icon: const Icon(Icons.more_vert),
+                tooltip: 'More options',
+                onPressed:
+                    _saving ? null : () => _openMoreOptions(buttonContext),
+              ),
+            ),
         ],
       ),
       body: Column(

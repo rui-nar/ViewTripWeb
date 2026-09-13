@@ -178,6 +178,12 @@ class SharedProjectNotifier extends ProjectNotifier {
   @override
   bool get loadOwnerExtras => false;
 
+  /// A share link is addressed by token, and after /meta its ref is only the
+  /// trip's name — indistinguishable from the viewer's own trip of that name.
+  /// Persisting here overwrote that trip's saved filter and selection (#409).
+  @override
+  bool get persistsUiState => false;
+
   @override
   String photoThumbUrl(String memId, String uuid) =>
       '$apiBaseUrl/api/share/$token/photos/$memId/$uuid/thumb';

@@ -766,3 +766,40 @@ def test_the_migration_downgrades(db_path):
     command.upgrade(cfg, "head")
     command.downgrade(cfg, _PREVIOUS_HEAD)
     assert _columns(db_path, "activity_geo_prepared") == []
+
+
+def test_the_read_path_cannot_overwrite_a_write_that_landed_while_it_prepared(env, monkeypatch):
+    """The race the adversarial review of #394 caught, pinned on the path it was in.
+
+    A cold open prepares unprepared activities outside any transaction and then
+    writes the rows back. A writer landing in between has already changed the
+    polyline; an unguarded write-back would store geometry built from the value
+    read *before* that write, at the current version, where it looks fresh and
+    is served on every later cold open.
+
+    Until this test existed, nothing caught the guard going missing on this
+    path: with the compare-and-swap neutered, every other test in this file
+    still passed. The sweep in stage B2 got a test for the same race first, which
+    is how the gap here was found.
+    """
+    client, uid, engine = env
+    assert _row(engine, 111) is None
+    real_prepare = geo_mod.prepare_polyline
+    moved = polyline_lib.encode([(46.0 + i * 0.0001, 8.0 + i * 0.0001) for i in range(80)])
+
+    def prepare_then_let_a_writer_in(polyline):
+        blob = real_prepare(polyline)
+        with Session(engine) as sess:
+            row = sess.get(DBActivity, 111)
+            if row.summary_polyline != moved:
+                row.summary_polyline = moved
+                sess.add(row)
+                sess.commit()
+        return blob
+
+    monkeypatch.setattr(geo_mod, "prepare_polyline", prepare_then_let_a_writer_in)
+    assert _get(client, 12).status_code == 200
+
+    # The write-back was refused for 111, so no row claims to be current for
+    # geometry that is no longer that activity's.
+    assert _row(engine, 111) is None

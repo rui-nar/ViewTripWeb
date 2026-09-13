@@ -11,6 +11,7 @@ from scalar_fastapi import get_scalar_api_reference
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.exceptions.errors import APIError, AuthenticationError, QuotaExceeded
+from src.jobs.prepared_geo_jobs import sweep_unprepared_geometry
 from src.jobs.route_jobs import (
     sweep_degraded_segments,
     sweep_orphaned_jobs,
@@ -148,6 +149,14 @@ async def lifespan(_app: FastAPI):
     # slot (src.jobs.upstream_slots) on every single run rather than by chance.
     _scheduler.add_job(sweep_stale_resolver_segments, "cron", minute=20,
                        id="stale_resolver_retry", replace_existing=True)
+    # Prepared geometry for activities that predate issue #369: everything
+    # written since derives its blob beside the polyline, so this only ever
+    # drains a backlog and then no-ops. Five minutes rather than hourly because
+    # it is purely local CPU in bounded slices with nothing upstream to
+    # compete for, and the sooner it drains the sooner legacy trips stop paying
+    # the cost on their first open.
+    _scheduler.add_job(sweep_unprepared_geometry, "interval", minutes=5,
+                       id="prepared_geometry_backfill", replace_existing=True)
     # One listener covers every job — current and future — with run counts,
     # duration and a last-success timestamp (issue #125).
     _scheduler.add_listener(record_job_event, JOB_EVENT_MASK)
