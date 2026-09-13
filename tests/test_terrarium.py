@@ -276,6 +276,43 @@ def test_a_write_does_not_trip_over_another_process_writing_the_same_tile(tmp_pa
     assert sorted(p.name for p in tile_dir.iterdir()) == ["0.png", "0.png.part"]
 
 
+def test_a_rename_refused_because_another_process_holds_the_tile_is_not_an_error(
+        tmp_path, monkeypatch):
+    # On Windows, os.replace onto a file another process has open for reading
+    # raises PermissionError. That process wrote the same tile, so the write is
+    # already done: the temporary is dropped and the read carries on.
+    from tests.elevation_bench import tile_reader
+
+    def held_open(src, dst):
+        with open(dst, "wb") as handle:
+            with open(src, "rb") as tmp:
+                handle.write(tmp.read())
+        raise PermissionError(5, "Access is denied", dst)
+
+    monkeypatch.setattr(tile_reader.os, "replace", held_open)
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+
+    assert TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(
+        1.0, 1.0) == pytest.approx(7.0)
+    tile_dir = tmp_path / "terrarium" / "0" / "0"
+    assert sorted(p.name for p in tile_dir.iterdir()) == ["0.png"]
+
+
+def test_a_refused_rename_with_no_tile_on_disk_still_raises(tmp_path, monkeypatch):
+    from tests.elevation_bench import tile_reader
+
+    def refused(src, dst):
+        raise PermissionError(5, "Access is denied", dst)
+
+    monkeypatch.setattr(tile_reader.os, "replace", refused)
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+
+    with pytest.raises(PermissionError):
+        TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(1.0, 1.0)
+    tile_dir = tmp_path / "terrarium" / "0" / "0"
+    assert list(tile_dir.iterdir()) == []
+
+
 def test_the_memory_cache_is_bounded():
     fetch = FakeFetch({(2, x, y): tile_png(lambda px, py: 1.0)
                        for x in range(4) for y in range(4)})

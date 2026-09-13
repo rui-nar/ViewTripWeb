@@ -338,6 +338,13 @@ class TerrariumReader:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(raw)
             os.replace(partial, path)
+        except PermissionError:
+            # On Windows a rename onto a file another process has open fails.
+            # That process wrote the same tile, so the copy already on disk is
+            # the one this write would have produced.
+            os.remove(partial)
+            if not os.path.exists(path):
+                raise
         except BaseException:
             if os.path.exists(partial):
                 os.remove(partial)
