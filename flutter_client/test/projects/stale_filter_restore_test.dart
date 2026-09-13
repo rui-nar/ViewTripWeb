@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'package:viewtrip_client/src/api/client.dart';
 import 'package:viewtrip_client/src/core/project_ref.dart';
@@ -584,6 +585,80 @@ void main() {
       });
     }
 
+    group('a reload of the same trip', () {
+      // Imports, Undo and Retry reload the trip in place. load() empties the
+      // activities but not dayMeta, so the filter badge and the sheet's tag
+      // and sleeping chips stay up while /meta is out — seconds, on a slow
+      // network (#178).
+      test('keeps the filter on while /meta is out, and a tap adds to it',
+          () async {
+        final service = _Service(_Trip()..activities.add(hike(2)));
+        final notifier = await _loaded(service);
+        notifier.setFilters(activityTypes: {'hike'});
+        await pumpEventQueue();
+
+        service.metaGate = Completer<void>();
+        final reload = notifier.load(_ref);
+        expect(notifier.activityTypeFilter, {'hike'},
+            reason: 'the badge does not blink off for a reload');
+
+        notifier.setFilters(sleeping: {'Hotel'}); // the user taps meanwhile
+        service.metaGate!.complete();
+        await reload;
+        await pumpEventQueue();
+
+        expect(notifier.activityTypeFilter, {'hike'},
+            reason: 'resetting at load start, the tap saved over it');
+        expect(notifier.sleepingFilter, {'Hotel'});
+        final next = await _loaded(service);
+        expect(next.activityTypeFilter, {'hike'});
+        expect(next.sleepingFilter, {'Hotel'});
+      });
+
+      test('keeps the filter through a failed load and its Retry', () async {
+        projectDataCache.resetForTest(); // no cached copy: the load fails
+        final service = _Service(_Trip()..activities.add(hike(2)));
+        final notifier = await _loaded(service);
+        notifier.setFilters(activityTypes: {'hike'});
+        await pumpEventQueue();
+
+        service.offline = true;
+        await notifier.load(_ref);
+        await pumpEventQueue();
+        expect(notifier.error, isNotNull);
+        expect(notifier.activityTypeFilter, {'hike'});
+
+        // Retry, on a network still slow enough to leave the sheet up: a
+        // failed load must not have made the retry look like another trip.
+        service.offline = false;
+        service.metaGate = Completer<void>();
+        final retry = notifier.load(_ref);
+        expect(notifier.activityTypeFilter, {'hike'},
+            reason: 'still on while the retry is out');
+        service.metaGate!.complete();
+        await retry;
+        await pumpEventQueue();
+        expect(notifier.error, isNull);
+        expect(notifier.activityTypeFilter, {'hike'});
+      });
+    });
+
+    test('with no account signed in, a trip switch still drops the filter',
+        () async {
+      // With nothing saved there is no saved state to say a filter is still
+      // this trip's, so a load with no key always resets.
+      api.clearToken();
+      final service = _Service(_Trip()..activities.add(hike(2)));
+      final notifier = await _loaded(service);
+      notifier.setFilters(activityTypes: {'hike'});
+
+      service.name = 'Other';
+      await notifier.load(const ProjectRef(name: 'Other'));
+      await pumpEventQueue();
+
+      expect(notifier.hasActiveFilter, isFalse);
+    });
+
     test('with no account signed in, nothing is saved or restored', () async {
       api.clearToken();
       final notifier = await _loaded(_Service(_Trip()));
@@ -686,10 +761,49 @@ void main() {
 
         final prefs = await SharedPreferences.getInstance();
         expect(prefs.getString(legacyKey), isNotNull,
-            reason: 'left for an online load to claim');
+            reason: 'an offline load neither reads nor deletes it');
         expect(prefs.getString('project_ui_state_$_me:$_me:Japan'),
             isNot(contains('anniversary-secret')));
+
+        // Back online. The tap above gave the trip state of its own, so the
+        // old key is no longer this trip's to claim — but it is not left
+        // behind for another account's same-named trip to claim either.
+        service.offline = false;
+        await offline.load(mine);
+        await pumpEventQueue();
+        expect(offline.hasActiveFilter, isFalse);
+        expect(offline.selectedDay, _day1, reason: 'the offline tap stands');
+        expect(prefs.getString(legacyKey), isNull,
+            reason: 'removed as a leftover once this trip has its own state');
       });
+
+      for (final (label, store) in [
+        ('throws, as a full localStorage does', _RefusingStore.throwing),
+        ('reports failure, as a failed Android commit does',
+            _RefusingStore.failing),
+      ]) {
+        test('survives a migration write the store $label', () async {
+          // The plugin puts a value in its in-memory cache before it calls the
+          // store, so reading the new key back cannot confirm the write: the
+          // old key was deleted, and after a reload neither was left.
+          final backing = store({
+            'flutter.$legacyKey': jsonEncode({
+              'activityTypes': ['hike'],
+              'selectedDay': _day1,
+            }),
+          });
+          SharedPreferences.resetStatic();
+          SharedPreferencesStorePlatform.instance = backing;
+
+          final own = await _loaded(myJapan(), ref: mine);
+          expect(own.activityTypeFilter, {'hike'});
+
+          // What the next page load will find: the store, not the cache.
+          final persisted = await backing.getAll();
+          expect(persisted.containsKey('flutter.$legacyKey'), isTrue,
+              reason: 'nothing was written, so nothing may be deleted');
+        });
+      }
 
       test('restores when your own trip is opened from the projects list',
           () async {
@@ -777,4 +891,23 @@ void main() {
       expect((await _stored())['sleeping'], isEmpty);
     });
   });
+}
+
+/// A store that refuses every write, the way a full localStorage or a failed
+/// Android commit does.
+class _RefusingStore extends InMemorySharedPreferencesStore {
+  _RefusingStore.throwing(super.data)
+      : _throws = true,
+        super.withData();
+  _RefusingStore.failing(super.data)
+      : _throws = false,
+        super.withData();
+
+  final bool _throws;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (_throws) throw Exception('QuotaExceededError');
+    return false;
+  }
 }

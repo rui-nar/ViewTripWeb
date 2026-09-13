@@ -753,14 +753,21 @@ class ProjectNotifier extends ChangeNotifier
     return own ? 'project_ui_state_${ref.name}' : null;
   }
 
+  /// The saved-state key the in-memory filters belong to; see [load].
+  String? _heldStateKey;
+
   @override
   void saveUiState() => unawaited(_saveUiState());
 
-  Future<void> _saveUiState() async {
+  /// Whether the state reached storage. `containsKey` cannot say: the plugin
+  /// updates its in-memory cache before it calls the store, so a write that
+  /// the store refuses (a full localStorage, a failed Android commit) still
+  /// reads back until the next page load.
+  Future<bool> _saveUiState() async {
     final ref = this.ref;
-    if (ref == null) return;
+    if (ref == null) return false;
     final key = _uiStateKey(ref);
-    if (key == null) return;
+    if (key == null) return false;
     try {
       final data = <String, dynamic>{
         'selectedDay': selectedDay,
@@ -774,11 +781,12 @@ class ProjectNotifier extends ChangeNotifier
         'sources': filters.sources.toList(),
       };
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(key, jsonEncode(data));
+      return await prefs.setString(key, jsonEncode(data));
     } catch (_) {
       // Best-effort only — this is fire-and-forget from every selection/filter
       // mutator, so a plugin/storage failure here must never surface as an
       // unhandled async error (e.g. a browser blocking storage access).
+      return false;
     }
   }
 
@@ -808,12 +816,15 @@ class ProjectNotifier extends ChangeNotifier
       // key's values would be applied raw — and that key is not per account,
       // so they may be another account's tags and sleeping modes, offered as
       // chips and saved under this account on the next tap.
-      final legacyKey = raw == null && !offlineFromCache
-          ? _legacyUiStateKey(ref)
-          : null;
-      if (legacyKey != null) raw = prefs.getString(legacyKey);
+      final oldKey = offlineFromCache ? null : _legacyUiStateKey(ref);
+      final hasOld = oldKey != null && prefs.containsKey(oldKey);
+      final migrating = raw == null && hasOld;
+      // Both keys: this trip already has state of its own (say, a tap during
+      // an offline first open), so the old one is only a leftover — removed
+      // below rather than left for another account's same-named trip to claim.
+      final leftover = raw != null && hasOld;
+      if (migrating) raw = prefs.getString(oldKey);
       if (raw == null) return;
-      final migrating = legacyKey != null;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
       final saved = ProjectFilters(
@@ -880,8 +891,9 @@ class ProjectNotifier extends ChangeNotifier
       // badge lights up for a filter the user never re-ticked.
       //
       // State read from the old key is written under the new one the same
-      // way, and the old key deleted once that write has landed — otherwise
-      // it would be read again on every open until something else saved.
+      // way, and the old key deleted only once the store has confirmed that
+      // write — otherwise it would be read again on every open, and deleting
+      // it after a refused write would lose it outright.
       //
       // This has to run LAST. _saveUiState builds its payload synchronously
       // before its first await, and load() nulls the four selection fields
@@ -889,11 +901,10 @@ class ProjectNotifier extends ChangeNotifier
       // those nulls and destroy the saved day/activity/segment/memory that the
       // restores just above are in the middle of reading back.
       if (pruned || migrating) {
-        await _saveUiState();
-        if (legacyKey != null && prefs.containsKey(key)) {
-          await prefs.remove(legacyKey);
-        }
+        final written = await _saveUiState();
+        if (migrating && written) await prefs.remove(oldKey);
       }
+      if (leftover) await prefs.remove(oldKey);
     } catch (_) {
       // Malformed/missing prefs — restore is best-effort only.
     }
@@ -984,14 +995,21 @@ class ProjectNotifier extends ChangeNotifier
     _stopPhotoPolling();
     final token = _loadTrack.begin(ref);
     this.ref = ref;
-    // Filters come back from restore, never from whatever this notifier held
-    // last. It is app-wide and outlives a logout, so keeping them for "the same
-    // trip" handed one account's filter to the next one to open a trip of that
-    // name and owner, and kept any trip with nothing saved narrowed by the
-    // previous trip's filter with selectedDays emptied below — every day
-    // filtered out (#409 review). Nothing persisted is lost: every setFilters
-    // saves, and restore re-applies it.
-    resetFilters();
+    // Filters are kept only while they belong to the same saved state: the
+    // same account's view of the same trip. This notifier is app-wide and
+    // outlives a logout, so keeping them for "the same trip" by name and owner
+    // handed one account's filter to the next, and a trip switch kept the last
+    // trip's filter with selectedDays emptied below (#409 review). Resetting on
+    // every load instead lost a filter changed during a same-trip reload —
+    // after an import, an Undo or a Retry the sheet's chips stay up while
+    // /meta is out, and a tap saved over the reset set.
+    //
+    // A null key (nothing is saved: no account, or a share link) always
+    // resets, because there is no saved state to say the filters are still
+    // this trip's. A failed load leaves the key held, so its Retry keeps them.
+    final stateKey = _uiStateKey(ref);
+    if (stateKey == null || stateKey != _heldStateKey) resetFilters();
+    _heldStateKey = stateKey;
     // Zoom refetching is armed only once this load's own geometry lands, and
     // never carries across projects: this notifier is a single app-wide
     // provider, so a bucket left from the previous trip would let a refetch
