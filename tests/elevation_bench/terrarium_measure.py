@@ -646,12 +646,12 @@ def site_outcome(lidar: Lidar, lines, model) -> Dict:
             lat, lon = from_utm_array(pe, pn)
             modelled = model.at(lat, lon)
             perfect = lidar.at(pe, pn)
-            if np.isnan(modelled).any():
-                model_gaps += 1
+            model_gap = bool(np.isnan(modelled).any())
+            lidar_gap = bool(np.isnan(perfect).any())
+            model_gaps += model_gap
+            lidar_gaps += lidar_gap
+            if model_gap or lidar_gap:
                 continue                               # counted as a shortfall
-            if np.isnan(perfect).any():
-                lidar_gaps += 1
-                continue
             runs += 1
             for g in window_gates:
                 isolated, lost, added, relief = window_harm(truth, modelled, dist, g)
