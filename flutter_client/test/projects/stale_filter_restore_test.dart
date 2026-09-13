@@ -765,16 +765,44 @@ void main() {
         expect(prefs.getString('project_ui_state_$_me:$_me:Japan'),
             isNot(contains('anniversary-secret')));
 
-        // Back online. The tap above gave the trip state of its own, so the
-        // old key is no longer this trip's to claim — but it is not left
-        // behind for another account's same-named trip to claim either.
+        // Back online. The tap above gave the trip state of its own, which is
+        // what restores; the old key is not read, and is not deleted either.
         service.offline = false;
         await offline.load(mine);
         await pumpEventQueue();
-        expect(offline.hasActiveFilter, isFalse);
+        expect(offline.offlineFromCache, isFalse);
+        expect(offline.hasActiveFilter, isFalse,
+            reason: "the tap's state wins, and it has no filter");
         expect(offline.selectedDay, _day1, reason: 'the offline tap stands');
-        expect(prefs.getString(legacyKey), isNull,
-            reason: 'removed as a leftover once this trip has its own state');
+        expect(prefs.getString(legacyKey), isNotNull,
+            reason: 'nothing deletes a key no restore has claimed');
+      });
+
+      test("is left for another account's trip when one already has state",
+          () async {
+        // Account 4 opens its own "Japan" offline and taps, so its trip has
+        // state of its own before it ever reads the old key. Deleting the old
+        // key as a leftover then threw away state account 3 had not yet
+        // claimed.
+        projectDataCache.resetForTest();
+        SharedPreferences.setMockInitialValues({legacyKey: legacyState});
+        signInAs(4);
+        final service = myJapan();
+        projectDataCache.onMetaFetched(mine, service._payload());
+        service.offline = true;
+        final theirs = await _loaded(service, ref: mine);
+        theirs.selectDay(_day2);
+        await pumpEventQueue();
+        service.offline = false;
+        await theirs.load(mine);
+        await pumpEventQueue();
+        expect(theirs.selectedDay, _day2);
+
+        signInAs(_me);
+        final own = await _loaded(myJapan(), ref: mine);
+        expect(own.activityTypeFilter, {'hike'});
+        expect(own.selectedDay, _day1);
+        expect(own.selectedActivityId, '2');
       });
 
       for (final (label, store) in [
@@ -782,10 +810,14 @@ void main() {
         ('reports failure, as a failed Android commit does',
             _RefusingStore.failing),
       ]) {
-        test('survives a migration write the store $label', () async {
+        test('survives a migration write the store $label, and a second load',
+            () async {
           // The plugin puts a value in its in-memory cache before it calls the
           // store, so reading the new key back cannot confirm the write: the
-          // old key was deleted, and after a reload neither was left.
+          // old key was deleted, and after a page load neither was left. The
+          // same refused write also sits in the cache for the rest of the
+          // session, so a second load (an import, an Undo, a Retry) sees the
+          // new key there — and must not take that as leave to delete the old.
           final backing = store({
             'flutter.$legacyKey': jsonEncode({
               'activityTypes': ['hike'],
@@ -799,9 +831,18 @@ void main() {
           expect(own.activityTypeFilter, {'hike'});
 
           // What the next page load will find: the store, not the cache.
-          final persisted = await backing.getAll();
+          var persisted = await backing.getAll();
           expect(persisted.containsKey('flutter.$legacyKey'), isTrue,
               reason: 'nothing was written, so nothing may be deleted');
+
+          await own.load(mine);
+          await pumpEventQueue();
+          persisted = await backing.getAll();
+          expect(persisted.containsKey('flutter.project_ui_state_$_me:$_me:Japan'),
+              isFalse,
+              reason: 'the store refused every write');
+          expect(persisted.containsKey('flutter.$legacyKey'), isTrue,
+              reason: 'the only stored copy survives the second load');
         });
       }
 

@@ -744,9 +744,16 @@ class ProjectNotifier extends ChangeNotifier
   }
 
   /// The name-only key UI state lived under before [_uiStateKey]. Only ever
-  /// read for the signed-in account's own trip, and only online; the first
-  /// such restore moves it to [_uiStateKey] and deletes it, so state saved
-  /// before the upgrade restores once, for whichever account opens it first.
+  /// read for the signed-in account's own trip, and only online, when that trip
+  /// has no state under [_uiStateKey] yet; that restore moves it across and
+  /// deletes it once the store confirms the write, so state saved before the
+  /// upgrade restores once, for whichever account claims it first.
+  ///
+  /// Nothing else deletes it. A trip that already has state of its own (a tap
+  /// during an offline first open, say) never reads it, and it stays behind
+  /// for another account's same-named trip to claim: deleting a key nobody has
+  /// claimed lost state outright, once when the cache held a write the store
+  /// had refused, and once when it was another account's (#409 review).
   String? _legacyUiStateKey(ProjectRef ref) {
     final self = api.tokenUserId;
     final own = ref.ownerId == null || ref.ownerId == self;
@@ -819,10 +826,6 @@ class ProjectNotifier extends ChangeNotifier
       final oldKey = offlineFromCache ? null : _legacyUiStateKey(ref);
       final hasOld = oldKey != null && prefs.containsKey(oldKey);
       final migrating = raw == null && hasOld;
-      // Both keys: this trip already has state of its own (say, a tap during
-      // an offline first open), so the old one is only a leftover — removed
-      // below rather than left for another account's same-named trip to claim.
-      final leftover = raw != null && hasOld;
       if (migrating) raw = prefs.getString(oldKey);
       if (raw == null) return;
       final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -904,7 +907,6 @@ class ProjectNotifier extends ChangeNotifier
         final written = await _saveUiState();
         if (migrating && written) await prefs.remove(oldKey);
       }
-      if (leftover) await prefs.remove(oldKey);
     } catch (_) {
       // Malformed/missing prefs — restore is best-effort only.
     }
