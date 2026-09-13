@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import math
+import sys
 
 import pytest
 from PIL import Image
@@ -311,6 +312,52 @@ def test_a_refused_rename_with_no_tile_on_disk_still_raises(tmp_path, monkeypatc
         TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(1.0, 1.0)
     tile_dir = tmp_path / "terrarium" / "0" / "0"
     assert list(tile_dir.iterdir()) == []
+
+
+def test_a_temporary_a_scanner_holds_open_does_not_turn_a_done_write_into_an_error(
+        tmp_path, monkeypatch):
+    # The rename was refused because another process wrote the tile, AND the
+    # temporary cannot be removed because something (an antivirus scanner) has it
+    # open. The tile is on disk, so the read carries on; the removal's own error
+    # must not escape in place of that outcome.
+    from tests.elevation_bench import tile_reader
+
+    def held_open(src, dst):
+        with open(dst, "wb") as handle:
+            with open(src, "rb") as tmp:
+                handle.write(tmp.read())
+        raise PermissionError(5, "Access is denied", dst)
+
+    def scanned(path):
+        raise PermissionError(32, "being used by another process", path)
+
+    monkeypatch.setattr(tile_reader.os, "replace", held_open)
+    monkeypatch.setattr(tile_reader.os, "remove", scanned)
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+
+    assert TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(
+        1.0, 1.0) == pytest.approx(7.0)
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="only Windows refuses a rename onto an open file")
+def test_a_real_open_handle_on_the_tile_is_tolerated(tmp_path, monkeypatch):
+    # No monkeypatched os calls: another reader really holds the tile open while
+    # this one, which checked the disk before that tile was written, writes it.
+    from tests.elevation_bench import tile_reader
+
+    png = tile_png(lambda px, py: 7.0)
+    tile_dir = tmp_path / "terrarium" / "0" / "0"
+    tile_dir.mkdir(parents=True)
+    (tile_dir / "0.png").write_bytes(png)
+    monkeypatch.setattr(tile_reader.TerrariumReader, "_read_disk",
+                        lambda self, z, x, y: None)
+    fetch = FakeFetch({(0, 0, 0): png})
+
+    with open(tile_dir / "0.png", "rb"):
+        assert TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(
+            1.0, 1.0) == pytest.approx(7.0)
+    assert sorted(p.name for p in tile_dir.iterdir()) == ["0.png"]
 
 
 def test_the_memory_cache_is_bounded():

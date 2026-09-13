@@ -342,13 +342,21 @@ class TerrariumReader:
             # On Windows a rename onto a file another process has open fails.
             # That process wrote the same tile, so the copy already on disk is
             # the one this write would have produced.
-            os.remove(partial)
+            _discard(partial)
             if not os.path.exists(path):
                 raise
         except BaseException:
-            if os.path.exists(partial):
-                os.remove(partial)
+            _discard(partial)
             raise
+
+
+def _discard(partial: str) -> None:
+    """Best-effort removal of a temporary tile. A scanner holding the file open
+    must not replace the error that brought us here with its own."""
+    try:
+        os.remove(partial)
+    except OSError:
+        pass
 
 
 def sample_along(

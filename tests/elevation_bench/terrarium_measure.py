@@ -124,7 +124,12 @@ HORIZONTAL_TAU_S = 60.0
 #: and carry a few tenths of a metre of short-term noise; an earlier "barometric"
 #: class (1 m over 10 minutes, no short-term noise) matched no real sensor.
 #:
-#: The last two exist because a gate on the recording's short-term noise looked
+#: How much a phone drifts, and how fast, is not known from real recordings; the
+#: "less" and "slower" phone classes bracket it, because a gate that reads
+#: disagreement with the model keeps less of the benefit as the drift shrinks.
+#:
+#: The smoothed and rounded classes exist because a gate on the recording's
+#: short-term noise looked
 #: like it separated the classes, and only did because none of them was encoded
 #: the way devices encode altitude: a phone that smooths its own altitude keeps
 #: all its drift but measures almost no noise, and whole-metre rounding gives a
@@ -133,6 +138,9 @@ RECORDINGS = (
     ("phone drift", 4.0, 60.0, 0.0, 0.0, 0.0),
     ("phone drift + 3 m white", 4.0, 60.0, 3.0, 0.0, 0.0),
     ("phone drift, smoothed over 25 m", 4.0, 60.0, 0.0, 25.0, 0.0),
+    ("phone, less drift: 3 m / 60 s", 3.0, 60.0, 0.0, 0.0, 0.0),
+    ("phone, less drift: 2 m / 60 s", 2.0, 60.0, 0.0, 0.0, 0.0),
+    ("phone, slower drift: 4 m / 300 s", 4.0, 300.0, 0.0, 0.0, 0.0),
     ("barometer, 1 m / 1 h + 0.2 m", 1.0, 3600.0, 0.2, 0.0, 0.0),
     ("barometer, 2 m / 3 h + 0.3 m", 2.0, 10800.0, 0.3, 0.0, 0.0),
     ("clean", 0.0, 60.0, 0.0, 0.0, 0.0),
@@ -152,7 +160,10 @@ WORSE_M = 2.0
 #:   is ENCODED, not the drift that makes phantom climb.
 #: * ``drift`` — substitute a window only when the recording disagrees with the
 #:   model across it by more than the margin, in m (range of recording minus
-#:   model over the window the oracle judges). That disagreement IS the drift.
+#:   model over the window the oracle judges). For a drifting recording that
+#:   disagreement is mostly the drift; for a GOOD recording it is the model's own
+#:   error, so this gate lets substitution through exactly where the model is
+#:   wrong. The 6 m margin was chosen on this data.
 GATES = (("noise", 0.30), ("drift", 4.0), ("drift", 6.0))
 
 
@@ -402,7 +413,24 @@ def _tile_lines(e_km: int, n_km: int):
     return _grid_lines(e0 + 50, e0 + 1950, n0 + 50, n0 + 1950)
 
 
-#: (label, what the ground is, lidar tiles, transects)
+def _embankment(height_m: float):
+    """Add two trapezoidal embankments to the LIDAR only — ground the model does
+    not have, taller than the drift gate's margin. Crest 10 m wide, 1:1.5
+    sides, one north-south at E 391700 (crossed by every east-west Tempelhofer
+    line) and one east-west at N 5814850 (crossed by every north-south line)."""
+    def edit(lidar: "Lidar") -> None:
+        rows, cols = lidar.grid.shape
+        run = 1.5 * height_m
+        def profile(offset):
+            return height_m * np.clip((5.0 + run - np.abs(offset)) / run, 0.0, 1.0)
+        east = lidar.e0 + np.arange(cols) + 0.5
+        north = lidar.n0 + np.arange(rows) + 0.5
+        lidar.grid = lidar.grid + np.maximum(profile(east - 391700.0)[None, :],
+                                             profile(north - 5814850.0)[:, None])
+    return edit
+
+
+#: (label, what the ground is, lidar tiles, transects[, edit to the lidar])
 SITES = [
     # The park interior: a rectangle at least 60 m inside Tempelhofer Feld on
     # every side, chosen once against the park's outline, so that no street,
@@ -412,11 +440,19 @@ SITES = [
     ("Tempelhofer Feld", "flat open, park interior",
      [(390, 5814), (392, 5814)],
      _grid_lines(391004.0, 392344.0, 5814350.0, 5815374.0)),
+    # The same lines with 8 m embankments the model does not have: SYNTHETIC,
+    # because the question — what happens where a good recording disagrees with
+    # the model by more than the drift gate's margin — needs ground that is
+    # certainly missing from the model, at a height chosen rather than found.
+    ("Tempelhofer + 8 m embankment", "SYNTHETIC: ground the model lacks",
+     [(390, 5814), (392, 5814)],
+     _grid_lines(391004.0, 392344.0, 5814350.0, 5815374.0), _embankment(8.0)),
     # A second flat open site, so the airfield figure is not one place's: the
     # strip between the southern runway's berms (below) and the service
-    # buildings to the north, 60 m or more from both and from any wood, scrub or
-    # apron in OSM. Its north-south lines are only 280 m, so lines are 50 m
-    # apart rather than 100 to keep the site's length comparable.
+    # buildings, over 100 m from the berms' flanks and 58 m or more from any
+    # building, wood, scrub or apron in OSM. Its north-south lines are only
+    # 280 m, so lines are 50 m apart rather than 100 to keep the site's length
+    # comparable.
     ("Tegel airfield", "flat open, runways and grass",
      [(382, 5824), (384, 5824)],
      _grid_lines(383020.0, 384400.0, 5824680.0, 5824960.0, step=50.0)),
@@ -479,7 +515,7 @@ def _splice(base, modelled, lo: int, hi: int):
     return out
 
 
-def window_harm(truth, modelled, dist):
+def window_harm(truth, modelled, dist, drift_m: float = 0.0):
     """What one substituted window does to a line's gain, in metres.
 
     A run total nets phantom removed in one window against real climb erased in
@@ -494,8 +530,11 @@ def window_harm(truth, modelled, dist):
       context. The isolated figure alone cannot show a substitution that invents
       climb, which is how it harms a flat line.
 
-    Independent of the recording class: the oracle's choice of window and the
-    steps it splices depend only on the model.
+    Ungated, this is independent of the recording class: the oracle's choice of
+    window and the steps it splices depend only on the model. With ``drift_m``
+    it is the drift gate's choice for a CLEAN recording, whose disagreement with
+    the model is exactly the model's own error: it shows which windows the gate
+    lets through when the recording did not need correcting.
     """
     n = len(truth)
     truth_gain = elevation_gain(list(truth), dist)
@@ -506,6 +545,10 @@ def window_harm(truth, modelled, dist):
         m = modelled[span]
         if len(m) < 3 or _relief(list(m)) >= TERRAIN_RELIEF_M:
             continue                                   # recording kept
+        if drift_m > 0:
+            disagreement = truth[span] - m
+            if disagreement.max() - disagreement.min() <= drift_m:
+                continue                               # gated: recording kept
         window_dist = dist[lo:hi]
         isolated = max(isolated,
                        elevation_gain(list(truth[lo:hi]), window_dist)
@@ -575,7 +618,9 @@ def site_outcome(lidar: Lidar, lines, model) -> Dict:
     """
     h_tau = HORIZONTAL_TAU_S * SPEED_MS / SAMPLE_M
     tallies = {label: _new_tally() for label, *_ in RECORDINGS}
-    windows = {"isolated": 0.0, "lost": 0.0, "added": 0.0, "relief": 0}
+    window_gates = [0.0] + [value for kind, value in GATES if kind == "drift"]
+    windows = {g: {"isolated": 0.0, "lost": 0.0, "added": 0.0, "relief": 0}
+               for g in window_gates}
     lines_valid = runs = model_gaps = lidar_gaps = 0
     for index, (e, n) in enumerate(lines):
         truth = lidar.at(e, n)
@@ -608,11 +653,13 @@ def site_outcome(lidar: Lidar, lines, model) -> Dict:
                 lidar_gaps += 1
                 continue
             runs += 1
-            isolated, lost, added, relief = window_harm(truth, modelled, dist)
-            windows["isolated"] = max(windows["isolated"], isolated)
-            windows["lost"] = max(windows["lost"], lost)
-            windows["added"] = max(windows["added"], added)
-            windows["relief"] += relief
+            for g in window_gates:
+                isolated, lost, added, relief = window_harm(truth, modelled, dist, g)
+                w = windows[g]
+                w["isolated"] = max(w["isolated"], isolated)
+                w["lost"] = max(w["lost"], lost)
+                w["added"] = max(w["added"], added)
+                w["relief"] += relief
             terrain = list(modelled)
             for label, sigma_v, tau_s, white_m, smooth_m, round_m in RECORDINGS:
                 t = tallies[label]
@@ -682,8 +729,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     os.makedirs(CACHE, exist_ok=True)
 
-    sites = [(label, kind, Lidar(tiles), lines)
-             for label, kind, tiles, lines in SITES]
+    sites = []
+    for label, kind, tiles, lines, *edit in SITES:
+        lidar = Lidar(tiles)
+        for change in edit:
+            change(lidar)
+        sites.append((label, kind, lidar, lines))
 
     for key in args.models:
         model = MODELS[key]()
@@ -696,8 +747,11 @@ def main(argv=None) -> int:
             if o["runs"] != expected:
                 # Refuse a PARTIAL site as firmly as an empty one: one failed tile
                 # once took a site from 92 runs to 20, and the row still printed.
-                source = ("the model is missing data" if o["model_gaps"]
-                          else "the lidar has a gap along a drifted path")
+                source = " and ".join(
+                    part for part, gaps in (
+                        ("the model is missing data", o["model_gaps"]),
+                        ("the lidar has a gap along a drifted path", o["lidar_gaps"]))
+                    if gaps)
                 raise SystemExit(
                     f"{model.name} measured {o['runs']} of {expected} runs at "
                     f"{site_label}: {source}. Refusing to print rows that would "
@@ -755,8 +809,10 @@ def main(argv=None) -> int:
                              f"{float(np.median(v)):.2f}/{max(v):.2f}")
             print(f"  {label:32s} " + "  ".join(cells))
 
-        print("  WINDOWS the oracle substitutes, worst over every run (the same for "
-              "every recording class, ungated).\n"
+        print("  WINDOWS the oracle substitutes, worst over every run. 'ungated' is "
+              "the same for every recording class; 'drift d' is what the drift gate "
+              "lets through for a CLEAN recording, whose disagreement with the model "
+              "is the model's own error.\n"
               "    isolated  real climb lost, the window measured on its own\n"
               "    lost/added  the window spliced into the true line: climb lost "
               "and climb invented, in context\n"
@@ -764,10 +820,11 @@ def main(argv=None) -> int:
               f"SUMMED over all runs (lines x {len(SEEDS)} seeds); the "
               "per-window count on the true path is HARM under VERDICTS")
         for site_label, kind, o in results:
-            w = o["windows"]
-            print(f"  {site_label:18s} isolated {w['isolated']:4.1f} m  lost "
-                  f"{w['lost']:4.1f} m  added {w['added']:4.1f} m  relief "
-                  f"{w['relief']:4d}")
+            for g, w in o["windows"].items():
+                gate = "ungated" if g == 0 else f"drift {g:g}"
+                print(f"  {site_label:18s} {gate:8s} isolated {w['isolated']:4.1f} m  "
+                      f"lost {w['lost']:4.1f} m  added {w['added']:4.1f} m  relief "
+                      f"{w['relief']:4d}")
 
         print("  VERDICTS per window on the true path (diagnostic). MISSED FIX "
               "leaves the recording alone - no worse than today. HARM swaps the "
