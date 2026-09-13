@@ -329,7 +329,32 @@ def test_a_rate_limit_or_timeout_is_never_stored_as_absence(
         f"HTTP {status} was persisted as a missing tile")
 
 
-@pytest.mark.parametrize("status", [403, 404])
+@pytest.mark.parametrize("status", [400, 401, 405])
+def test_a_malformed_request_is_loud_not_missing(status, tmp_path, monkeypatch):
+    """A 400 or 401 means the request is wrong. Swallowed into "no data", a
+    misconfigured URL would look exactly like a world without terrain and never
+    be noticed — so it raises, is not retried, and nothing is persisted."""
+    import tests.elevation_bench.tile_reader as tr
+
+    calls = []
+
+    def get(url, timeout):
+        calls.append(url)
+        return FakeResponse(status)
+
+    monkeypatch.setattr(tr.requests, "get", get)
+    with pytest.raises(tr.TileConfigurationError):
+        tr.fetch_terrarium_tile(13, 4400, 2688)
+    assert len(calls) == 1, "a request that cannot succeed was retried"
+
+    reader = TerrariumReader(str(tmp_path), zoom=0,
+                             fetch=tr.fetch_terrarium_tile)
+    with pytest.raises(tr.TileConfigurationError):
+        reader.elevation(1.0, 1.0)
+    assert not any(tmp_path.rglob("*.png"))
+
+
+@pytest.mark.parametrize("status", [403, 404, 410])
 def test_only_403_and_404_mean_the_tile_is_not_there(status, monkeypatch):
     import tests.elevation_bench.tile_reader as tr
 

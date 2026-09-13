@@ -90,8 +90,18 @@ SAMPLE_M = 5.0
 SPEED_MS = 5.0
 PATH_SMOOTH_M = 100.0
 HORIZONTAL_SIGMA_M = 5.0
-#: (vertical sigma m, correlation time s) — phone-class altitude drift.
-RECORDING_NOISE = ((4.0, 60.0), (2.5, 20.0))
+#: (label, vertical drift sigma m, drift correlation s, extra white noise m).
+#:
+#: The first version measured only phone-class drift, which is exactly the
+#: recording the oracle is built to help, and so could not see the case it
+#: harms: a CLEAN recording has almost no phantom climb to remove, and
+#: substituting the terrain model then adds the model's own error as climb.
+RECORDINGS = (
+    ("phone drift", 4.0, 60.0, 0.0),
+    ("phone drift + 3 m white", 4.0, 60.0, 3.0),
+    ("barometric", 1.0, 600.0, 0.0),
+    ("clean", 0.0, 60.0, 0.0),
+)
 SEEDS = (0, 1, 2, 3)
 
 
@@ -266,10 +276,13 @@ class Gedtm30:
     name = "GEDTM30 v1.2 (bare earth)"
     URL = ("/vsicurl/https://s3.opengeohub.org/global/dtm/v1.2/"
            "gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif")
-    BOUNDS = (13.15, 52.38, 13.70, 52.55)          # west, south, east, north
+    # Must cover every site. An earlier window stopped at 52.55 N, missed
+    # Luebars at 52.62 N entirely, and the site then reported 0 of 0 runs rather
+    # than failing — the silent drop that biases a table without saying so.
+    BOUNDS = (13.15, 52.38, 13.70, 52.66)          # west, south, east, north
 
     def __init__(self):
-        path = os.path.join(CACHE, "gedtm30_berlin.npz")
+        path = os.path.join(CACHE, "gedtm30_berlin_v2.npz")
         if not os.path.exists(path):
             try:
                 import rasterio
@@ -329,9 +342,18 @@ SITES = [
     # The park interior: a rectangle at least 60 m inside Tempelhofer Feld on
     # every side, chosen once against the park's outline, so that no street,
     # house or railway reaches a transect. It straddles two lidar tiles.
-    ("Tempelhofer Feld", "open flat, park interior",
+    # The eastern edge was 392354, which left only 51 m to the park boundary on
+    # that side; 392345 restores the stated 60 m.
+    ("Tempelhofer Feld", "flat open, park interior",
      [(390, 5814), (392, 5814)],
-     _grid_lines(391004.0, 392354.0, 5814350.0, 5815375.0)),
+     _grid_lines(391004.0, 392345.0, 5814350.0, 5815375.0)),
+    # Open ROLLING ground, the case "open ground" in the first verdict was
+    # wrongly generalised to from one dead-flat airfield. Two full tiles, so the
+    # village of Luebars and the Tegeler Fliess stream woods are included as
+    # well as the fields: this is a mixed rural site, not a clean one.
+    ("Luebars", "rolling fields, village, woods",
+     [(386, 5830), (388, 5830)],
+     _grid_lines(386050.0, 389950.0, 5830050.0, 5831950.0)),
     ("Mitte", "flat, dense city", [(390, 5818)], _tile_lines(390, 5818)),
     ("Grunewald", "flat-ish, forest", [(378, 5814)], _tile_lines(378, 5814)),
     ("Teufelsberg", "relief, rubble hill", [(380, 5816)], _tile_lines(380, 5816)),
@@ -369,11 +391,44 @@ def verdicts(truth, model, window_m: float, threshold_m: float) -> Dict[str, int
     return counts
 
 
-def outcome(lidar: Lidar, lines, model, sigma_v: float, tau_s: float) -> Dict:
+def _window_harm(truth, modelled, dist):
+    """Real climb the oracle substitutes away, window by window.
+
+    A run total nets phantom removed in one window against real climb erased in
+    another, so "no run erased climb" can hide local harm. For every window the
+    oracle hands to the model (the model reads no relief there), the loss is what
+    the gain PIPELINE reports over the truth minus what it reports over the model.
+
+    Through the pipeline, not a raw sum of steps: 1 m lidar sampled every 5 m
+    steps over every kerb, and a raw sum books those as climb nobody made, which
+    inflated this figure several-fold in the first version. Reported in metres
+    only — dividing by a line's total gain produced figures like 640% on city
+    streets whose whole line climbs 3 m, which say nothing.
+    """
+    n = len(truth)
+    worst = 0.0
+    real_relief_substituted = 0
+    for lo, hi in _terrain_windows(dist, n, TERRAIN_WINDOW_M):
+        span = _relief_span(lo, hi, n, TERRAIN_WINDOW_M, dist)
+        m = modelled[span]
+        if len(m) < 3 or _relief(list(m)) >= TERRAIN_RELIEF_M:
+            continue                                   # recording kept
+        window_dist = dist[lo:hi]
+        true_up = elevation_gain(list(truth[lo:hi]), window_dist)
+        model_up = elevation_gain(list(modelled[lo:hi]), window_dist)
+        worst = max(worst, true_up - model_up)
+        if _relief(list(truth[span])) >= TERRAIN_RELIEF_M:
+            real_relief_substituted += 1
+    return worst, real_relief_substituted
+
+
+def outcome(lidar: Lidar, lines, model, sigma_v: float, tau_s: float,
+            white_m: float) -> Dict:
     """The shipped oracle end to end, against what the lidar says was climbed."""
     tau_samples = tau_s * SPEED_MS / SAMPLE_M
     totals = {"truth": 0.0, "recording": 0.0, "oracle": 0.0, "perfect": 0.0}
-    worse = erased = runs = 0
+    worse = erased = runs = substituted_relief = 0
+    worst_window = 0.0
     for index, (e, n) in enumerate(lines):
         truth = lidar.at(e, n)
         if np.isnan(truth).any():
@@ -382,8 +437,16 @@ def outcome(lidar: Lidar, lines, model, sigma_v: float, tau_s: float) -> Dict:
         dist = [i * SAMPLE_M / 1000.0 for i in range(count)]
         truth_gain = elevation_gain(list(truth), dist)
         for seed in SEEDS:
-            base = 1000 * index + seed
-            recording = truth + np.array(_ar1(count, sigma_v, tau_samples, base))
+            # Distinct streams per line, seed and component. The first version
+            # used base, base+1, base+2 with base = 1000*index + seed, so seed 1's
+            # vertical noise was seed 0's easting drift and the "four seeds" were
+            # not four independent draws.
+            base = (1000 * index + seed) * 10
+            vertical = np.array(_ar1(count, sigma_v, tau_samples, base))
+            if white_m > 0:
+                rng = np.random.default_rng(base + 3)
+                vertical = vertical + rng.normal(0.0, white_m, count)
+            recording = truth + vertical
             pe = _smooth(e + np.array(_ar1(count, HORIZONTAL_SIGMA_M,
                                            tau_samples, base + 1)), PATH_SMOOTH_M)
             pn = _smooth(n + np.array(_ar1(count, HORIZONTAL_SIGMA_M,
@@ -403,9 +466,17 @@ def outcome(lidar: Lidar, lines, model, sigma_v: float, tau_s: float) -> Dict:
                 list(recording), list(perfect), dist)
             worse += abs(oracle_gain - truth_gain) > abs(
                 recorded_gain - truth_gain) + 1.0
-            erased += oracle_gain < truth_gain - 10.0
+            # Erasure is judged against what the user would have seen otherwise,
+            # not against the truth alone: a recording whose own hysteresis band
+            # already sits below the truth is not the oracle's doing.
+            erased += oracle_gain < min(truth_gain, recorded_gain) - 10.0
+            w_worst, w_relief = _window_harm(truth, modelled, dist)
+            worst_window = max(worst_window, w_worst)
+            substituted_relief += w_relief
             runs += 1
-    totals.update(worse=worse, erased=erased, runs=runs)
+    totals.update(worse=worse, erased=erased, runs=runs,
+                  worst_window=worst_window,
+                  substituted_relief=substituted_relief)
     return totals
 
 
@@ -423,22 +494,34 @@ def main(argv=None) -> int:
         model = MODELS[key]()
         print(f"\n=== {model.name}  (window {TERRAIN_WINDOW_M:.0f} m, "
               f"relief threshold {TERRAIN_RELIEF_M:.0f} m)")
-        print("  OUTCOME — the shipped oracle end to end. 'removed' is the share "
-              "of the recording's excess over the truth taken away. 'worse' "
-              "counts runs further from the truth than the recording alone; "
-              "'erased' counts runs more than 10 m BELOW the truth.")
-        for sigma_v, tau_s in RECORDING_NOISE:
-            print(f"  recording drift sigma {sigma_v} m over {tau_s:.0f} s")
-            print(f"  {'site':18s} {'truth':>7s} {'recorded':>9s} {'oracle':>7s} "
-                  f"{'perfect':>8s} {'removed':>8s} {'worse':>9s} {'erased':>9s}")
-            for label, kind, lidar, lines in sites:
-                o = outcome(lidar, lines, model, sigma_v, tau_s)
+        print("  OUTCOME - the shipped oracle end to end. 'removed' = share of the "
+              "recording's excess over truth taken away (flagged when over 100% or "
+              "negative). 'worse' = runs further from truth than the recording. "
+              "'erased' = runs more than 10 m below BOTH truth and recording. "
+              "'worst win' = most real climb lost in one substituted window.")
+        for label, sigma_v, tau_s, white_m in RECORDINGS:
+            print(f"  recording: {label}")
+            print(f"  {'site':18s} {'truth':>6s} {'rec':>6s} {'oracle':>6s} "
+                  f"{'removed':>9s} {'worse':>8s} {'erased':>7s} "
+                  f"{'worst win':>9s} {'relief subst':>12s}")
+            for site_label, kind, lidar, lines in sites:
+                o = outcome(lidar, lines, model, sigma_v, tau_s, white_m)
                 excess = o["recording"] - o["truth"]
-                removed = ((o["recording"] - o["oracle"]) / excess * 100
-                           if excess > 0 else float("nan"))
-                print(f"  {label:18s} {o['truth']:7.0f} {o['recording']:9.0f} "
-                      f"{o['oracle']:7.0f} {o['perfect']:8.0f} {removed:7.0f}% "
-                      f"{o['worse']:4d}/{o['runs']:<4d}{o['erased']:4d}/{o['runs']}")
+                if excess > 0:
+                    pct = (o["recording"] - o["oracle"]) / excess * 100
+                    flag = "" if 0 <= pct <= 100 else " !"
+                    removed = f"{pct:5.0f}%{flag}"
+                else:
+                    removed = "n/a"
+                if o["runs"] == 0:
+                    raise SystemExit(
+                        f"{model.name} measured no runs at {site_label}: the "
+                        f"model does not cover the site. Refusing to print a "
+                        f"row that would read as a result.")
+                print(f"  {site_label:18s} {o['truth']:6.0f} {o['recording']:6.0f} "
+                      f"{o['oracle']:6.0f} {removed:>9s} "
+                      f"{o['worse']:3d}/{o['runs']:<4d}{o['erased']:3d}/{o['runs']:<4d}"
+                      f"{o['worst_window']:6.1f} m {o['substituted_relief']:9d}")
                 sys.stdout.flush()
 
         print("  VERDICTS per window (diagnostic). MISSED FIX leaves the recording "

@@ -98,6 +98,15 @@ class TransientTileError(Exception):
     """The server could not send a tile right now. Not the same as absent."""
 
 
+class TileConfigurationError(Exception):
+    """The request itself is wrong — a bad URL, a missing credential.
+
+    Neither absence nor a passing outage, so it is not swallowed into "no data":
+    a misconfigured endpoint quietly returning nothing looks exactly like a
+    world with no terrain, and would never be noticed.
+    """
+
+
 def decode_terrarium(r: int, g: int, b: int) -> float:
     """Elevation in metres from one terrarium pixel: ``R*256 + G + B/256 - 32768``."""
     return (r * 256 + g + b / 256.0) - 32768.0
@@ -135,14 +144,16 @@ def fetch_terrarium_tile(z: int, x: int, y: int,
         else:
             if resp.status_code == 200:
                 return resp.content
-            if resp.status_code in (403, 404):
+            if resp.status_code in (403, 404, 410):
                 # S3 answers 403 for a key that is not there when listing is
-                # not allowed, so both mean "no such tile" — and only these two.
+                # not allowed; 410 says gone. These — and only these — mean
+                # "no such tile".
                 return MISSING
             if resp.status_code not in _TRANSIENT_STATUS and resp.status_code < 500:
-                # Some other refusal. Not evidence the tile is absent, so it
-                # must not be remembered as absence either.
-                raise TransientTileError(
+                # 400, 401 and the like: the request is wrong, and asking again
+                # will not change that. Raised loudly rather than retried, and
+                # not caught as transient, so it cannot pass for "no data".
+                raise TileConfigurationError(
                     f"terrarium tile {z}/{x}/{y} refused: HTTP {resp.status_code}")
             last = f"HTTP {resp.status_code}"
         if attempt < MAX_RETRIES - 1:
