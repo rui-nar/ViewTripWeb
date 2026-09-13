@@ -743,9 +743,10 @@ class ProjectNotifier extends ChangeNotifier
     return 'project_ui_state_$self:${ref.ownerId ?? self}:${ref.name}';
   }
 
-  /// The name-only key UI state lived under before [_uiStateKey]. Read, never
-  /// written, and only for the signed-in account's own trip, so state saved
-  /// before the upgrade still restores once.
+  /// The name-only key UI state lived under before [_uiStateKey]. Only ever
+  /// read for the signed-in account's own trip, and only online; the first
+  /// such restore moves it to [_uiStateKey] and deletes it, so state saved
+  /// before the upgrade restores once, for whichever account opens it first.
   String? _legacyUiStateKey(ProjectRef ref) {
     final self = api.tokenUserId;
     final own = ref.ownerId == null || ref.ownerId == self;
@@ -802,10 +803,17 @@ class ProjectNotifier extends ChangeNotifier
       // issue #283: also reject a same-ref load that superseded this one
       // while awaiting prefs, which a bare ref comparison can't detect.
       if (!_isCurrent(token, loadRef)) return;
-      final legacyKey = _legacyUiStateKey(ref);
-      final raw = prefs.getString(key) ??
-          (legacyKey == null ? null : prefs.getString(legacyKey));
+      var raw = prefs.getString(key);
+      // Not offline: an offline restore does not prune (below), so the old
+      // key's values would be applied raw — and that key is not per account,
+      // so they may be another account's tags and sleeping modes, offered as
+      // chips and saved under this account on the next tap.
+      final legacyKey = raw == null && !offlineFromCache
+          ? _legacyUiStateKey(ref)
+          : null;
+      if (legacyKey != null) raw = prefs.getString(legacyKey);
       if (raw == null) return;
+      final migrating = legacyKey != null;
       final data = jsonDecode(raw) as Map<String, dynamic>;
 
       final saved = ProjectFilters(
@@ -871,12 +879,21 @@ class ProjectNotifier extends ChangeNotifier
       // new import, another hike, a re-added tag): the list narrows and the
       // badge lights up for a filter the user never re-ticked.
       //
+      // State read from the old key is written under the new one the same
+      // way, and the old key deleted once that write has landed — otherwise
+      // it would be read again on every open until something else saved.
+      //
       // This has to run LAST. _saveUiState builds its payload synchronously
       // before its first await, and load() nulls the four selection fields
       // before fetching — so saving here from anywhere above would persist
       // those nulls and destroy the saved day/activity/segment/memory that the
       // restores just above are in the middle of reading back.
-      if (pruned) saveUiState();
+      if (pruned || migrating) {
+        await _saveUiState();
+        if (legacyKey != null && prefs.containsKey(key)) {
+          await prefs.remove(legacyKey);
+        }
+      }
     } catch (_) {
       // Malformed/missing prefs — restore is best-effort only.
     }
@@ -966,17 +983,15 @@ class ProjectNotifier extends ChangeNotifier
     final name = ref.name;
     _stopPhotoPolling();
     final token = _loadTrack.begin(ref);
-    final previous = this.ref;
     this.ref = ref;
-    // Filters belong to the trip they were set on. This notifier is app-wide,
-    // so without this a trip with nothing saved — or one whose restore is
-    // skipped — kept the previous trip's filter, with selectedDays emptied
-    // below: every day filtered out on a trip the filter never belonged to
-    // (#409 review). A reload of the same trip keeps them; restore re-applies
-    // what was saved either way.
-    if (previous?.name != ref.name || previous?.ownerId != ref.ownerId) {
-      resetFilters();
-    }
+    // Filters come back from restore, never from whatever this notifier held
+    // last. It is app-wide and outlives a logout, so keeping them for "the same
+    // trip" handed one account's filter to the next one to open a trip of that
+    // name and owner, and kept any trip with nothing saved narrowed by the
+    // previous trip's filter with selectedDays emptied below — every day
+    // filtered out (#409 review). Nothing persisted is lost: every setFilters
+    // saves, and restore re-applies it.
+    resetFilters();
     // Zoom refetching is armed only once this load's own geometry lands, and
     // never carries across projects: this notifier is a single app-wide
     // provider, so a bucket left from the previous trip would let a refetch

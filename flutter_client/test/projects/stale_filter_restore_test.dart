@@ -524,20 +524,65 @@ void main() {
 
     test('another account on this browser neither inherits nor erases yours',
         () async {
-      await saveMyJapan();
+      // One notifier throughout, as the app has: it is created once and a
+      // logout does not clear it.
+      final service = myJapan();
+      final notifier = await _loaded(service, ref: mine);
+      notifier.setFilters(activityTypes: {'hike'});
+      notifier.selectActivity(2);
+      await pumpEventQueue();
 
-      signInAs(4); // someone else, with an own "Japan" and no hikes in it
-      final theirOwn = await _loaded(
-          _Service(_Trip(), name: 'Japan', callerRole: 'owner'),
-          ref: mine);
-      expect(theirOwn.hasActiveFilter, isFalse);
-      expect(theirOwn.selectedActivityId, isNull);
-      theirOwn.selectDay(_day2);
+      // Someone else signs in, in the same tab, and opens their own "Japan" —
+      // which has no hikes, so applying your state to it would prune 'hike'.
+      signInAs(4);
+      service.trip.activities.removeWhere((a) => a['id'] == 2);
+      await notifier.load(mine);
+      await pumpEventQueue();
+      expect(notifier.hasActiveFilter, isFalse, reason: 'not theirs to inherit');
+      expect(notifier.selectedActivityId, isNull);
+      notifier.selectDay(_day2);
       await pumpEventQueue();
 
       signInAs(_me);
-      await expectMyJapanIntact();
+      service.trip.activities.add(hike(2));
+      await notifier.load(mine);
+      await pumpEventQueue();
+      expect(notifier.activityTypeFilter, {'hike'});
+      expect(notifier.selectedActivityId, '2');
     });
+
+    for (final (label, ref, first) in [
+      ("a companion's trip from the projects list",
+          const ProjectRef(name: 'Japan', ownerId: 7), 7),
+      ('an own trip of the same name, deep-linked', mine, _me),
+    ]) {
+      test('after a logout, the next account to open $label inherits nothing',
+          () async {
+        // Owner 7 filters their "Japan" to Hotel nights and logs out; a
+        // companion logs in in the same tab and opens the same trip, same name
+        // and owner. Keeping filters for "the same trip" handed them 7's
+        // filter, and the trip still has Hotel nights, so no pruning would
+        // ever take it off again once their next tap saved it.
+        final service = _Service(_Trip(), name: 'Japan');
+        signInAs(first);
+        final notifier = await _loaded(service, ref: ref);
+        notifier.setFilters(sleeping: {'Hotel'});
+        await pumpEventQueue();
+
+        signInAs(4);
+        await notifier.load(ref);
+        await pumpEventQueue();
+        expect(notifier.sleepingFilter, isEmpty);
+        expect(notifier.hasActiveFilter, isFalse);
+
+        notifier.selectDay(_day1);
+        await pumpEventQueue();
+        await notifier.load(ref);
+        await pumpEventQueue();
+        expect(notifier.sleepingFilter, isEmpty,
+            reason: "and nothing of the last account's was saved as theirs");
+      });
+    }
 
     test('with no account signed in, nothing is saved or restored', () async {
       api.clearToken();
@@ -574,8 +619,7 @@ void main() {
         'selectedActivityId': '2',
       });
 
-      test('restores for your own trip, and the old key is never written',
-          () async {
+      test('restores for your own trip, and moves to the new key', () async {
         SharedPreferences.setMockInitialValues({legacyKey: legacyState});
 
         final own = await _loaded(myJapan(), ref: mine);
@@ -583,16 +627,68 @@ void main() {
         expect(own.selectedDay, _day1);
         expect(own.selectedActivityId, '2');
 
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString(legacyKey), isNull,
+            reason: 'claimed by the first restore, not read on every open');
+
         own.selectDay(_day2);
         await pumpEventQueue();
-        final prefs = await SharedPreferences.getInstance();
-        expect(prefs.getString(legacyKey), legacyState,
-            reason: 'read once for the upgrade, never written');
-
-        // From here on the trip reads its own key, not the old one.
         final next = await _loaded(myJapan(), ref: mine);
         expect(next.selectedDay, _day2);
         expect(next.activityTypeFilter, {'hike'});
+      });
+
+      test('is read once even when the restore changes nothing', () async {
+        // Nothing stale and no tap: before, only a pruning restore or a user
+        // action wrote the new key, so the old one was read again every time.
+        SharedPreferences.setMockInitialValues({
+          legacyKey: jsonEncode({
+            'activityTypes': ['hike'],
+            'selectedDay': _day1,
+          }),
+        });
+
+        await _loaded(myJapan(), ref: mine);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString(legacyKey), isNull);
+
+        // Another account's own "Japan" no longer finds it.
+        signInAs(4);
+        final theirs = await _loaded(myJapan(), ref: mine);
+        expect(theirs.hasActiveFilter, isFalse);
+
+        signInAs(_me);
+        final again = await _loaded(myJapan(), ref: mine);
+        expect(again.activityTypeFilter, {'hike'});
+        expect(again.selectedDay, _day1);
+      });
+
+      test('is not read on an offline load', () async {
+        // Offline restores do not prune, and the old key is not per account:
+        // its tags and sleeping modes could be another account's, applied raw,
+        // offered as chips and saved as this account's on the next tap.
+        projectDataCache.resetForTest();
+        SharedPreferences.setMockInitialValues({
+          legacyKey: jsonEncode({
+            'tags': ['anniversary-secret'],
+            'sleeping': ['Friend'],
+          }),
+        });
+        final service = myJapan();
+        projectDataCache.onMetaFetched(mine, service._payload());
+        service.offline = true;
+
+        final offline = await _loaded(service, ref: mine);
+        expect(offline.offlineFromCache, isTrue);
+        expect(offline.hasActiveFilter, isFalse);
+        offline.selectDay(_day1);
+        await pumpEventQueue();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString(legacyKey), isNotNull,
+            reason: 'left for an online load to claim');
+        expect(prefs.getString('project_ui_state_$_me:$_me:Japan'),
+            isNot(contains('anniversary-secret')));
       });
 
       test('restores when your own trip is opened from the projects list',
