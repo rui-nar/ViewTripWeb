@@ -31,6 +31,27 @@ class ApiClient {
   /// this class (e.g. ProjectsNotifier on web where dart:io is unavailable).
   String? get tokenForUpload => _token;
 
+  /// The signed-in account's user id, from the token's `sub` claim, or null
+  /// with no token or one that does not parse. Not verified — the server does
+  /// that on every request; this only says whose session the device holds.
+  ///
+  /// Read from the token rather than the profile because it is there the
+  /// moment a session is restored, offline included, while the profile's id
+  /// is not: a restored session starts as `User.restored` (id ''), and
+  /// /api/auth/me echoes the JWT payload, which has no `id` claim either.
+  int? get tokenUserId {
+    final parts = _token?.split('.');
+    if (parts == null || parts.length != 3) return null;
+    try {
+      final payload = jsonDecode(
+          utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
+      final sub = payload is Map ? payload['sub'] : null;
+      return sub == null ? null : int.tryParse(sub.toString());
+    } catch (_) {
+      return null;
+    }
+  }
+
   Map<String, String> get _headers => {
     'Content-Type': 'application/json',
     if (_token != null) 'Authorization': 'Bearer $_token',

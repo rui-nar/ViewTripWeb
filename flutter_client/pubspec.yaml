@@ -76,6 +76,9 @@ dev_dependencies:
   # the abstract interface tests have to implement since file_picker 12.
   cross_file: ^0.3.5
   flutter_lints: ^6.0.0
+  # Referenced directly by the saved-UI-state tests, which stand in a store that
+  # refuses writes to prove a failed save deletes nothing (#409).
+  shared_preferences_platform_interface: ^2.4.2
   # Regenerates the Android launcher icons from the assets/app_icon*.png layers.
   # Not part of any build — run by hand when the brand mark changes:
   #   python scripts/generate_icons.py && dart run flutter_launcher_icons

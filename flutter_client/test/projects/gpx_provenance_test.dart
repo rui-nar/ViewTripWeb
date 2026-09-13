@@ -183,19 +183,45 @@ void main() {
       expect(notifier.selectedDays, {'2024-06-02'});
     });
 
-    test('the guard reaches the source dimension and no further, for now', () {
-      // Tags restore as saved, stale or not. That is the same trap one
-      // dimension over, not intended design: tags match on *effective* tags,
-      // so intersecting them with availableTags could drop a filter that does
-      // match, and it needs its own look — issue #409. This asserts where the
-      // line currently falls, so moving it is a deliberate act.
+    test('the guard reaches every dimension, not the source alone', () {
+      // Until #409 this asserted the opposite: tags restored as saved while a
+      // stale source was dropped, because tags match on *effective* tags and
+      // it was not yet shown that pruning them against availableTags is safe.
+      // It is — stale_filter_restore_test.dart pins why — so the line now
+      // falls past every dimension, and a stale value in any of them is
+      // dropped and reported.
       final notifier = _notifierWith([_activity(day: '2024-06-01')]);
 
-      notifier.restoreFilters(
-          const ProjectFilters(tags: {'beach'}, sources: {'gpx'}));
+      final pruned = notifier.restoreFilters(const ProjectFilters(
+        tags: {'beach'},
+        sleeping: {'Hotel'},
+        activityTypes: {'hike'},
+        transport: {'flight'},
+        sources: {'gpx'},
+      ));
 
-      expect(notifier.tagFilter, {'beach'});
+      expect(pruned, isTrue);
+      expect(notifier.tagFilter, isEmpty);
+      expect(notifier.sleepingFilter, isEmpty);
+      expect(notifier.activityTypeFilter, isEmpty);
+      expect(notifier.transportFilter, isEmpty);
       expect(notifier.sourceFilter, isEmpty);
+      expect(notifier.hasActiveFilter, isFalse);
+    });
+
+    test('and reports nothing pruned when every value still resolves', () {
+      // A day with no sleeping mode filters as 'No data', so that is held too.
+      final notifier = _notifierWith([_activity(day: '2024-06-01')]);
+
+      final pruned = notifier.restoreFilters(const ProjectFilters(
+        sleeping: {'No data'},
+        activityTypes: {'ride'},
+        sources: {'strava'},
+      ));
+
+      expect(pruned, isFalse);
+      expect(notifier.activeFilterCount, 3);
+      expect(notifier.selectedDays, {'2024-06-01'});
     });
 
     test('clearing every filter clears the source too', () {

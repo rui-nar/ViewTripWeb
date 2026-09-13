@@ -15,8 +15,11 @@ import 'package:viewtrip_client/src/core/project_ref.dart';
 import 'package:viewtrip_client/src/projects/project_notifier.dart';
 import 'package:viewtrip_client/src/projects/project_service.dart';
 
+import '../helpers/signed_in.dart';
+
 const _ref = ProjectRef(name: 'Trip');
-const _key = 'project_ui_state_Trip';
+// Account 3's own trip: UI state is keyed by account, owner and name (#409).
+const _key = 'project_ui_state_3:3:Trip';
 
 Map<String, dynamic> _emptyGeo() =>
     {'type': 'FeatureCollection', 'features': <dynamic>[]};
@@ -72,6 +75,8 @@ Map<String, dynamic> _activity({required int id, String? source}) => {
     };
 
 void main() {
+  setUp(() => signInAs(3));
+
   test('the stale source is dropped AND taken out of storage', () async {
     // The fixture carries a selection too. load() nulls the selection fields
     // before fetching and _saveUiState builds its payload synchronously, so a
