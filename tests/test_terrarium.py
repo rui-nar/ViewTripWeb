@@ -260,6 +260,22 @@ def test_absence_is_remembered_on_disk_too(tmp_path):
     assert later.calls == []
 
 
+def test_a_write_does_not_trip_over_another_process_writing_the_same_tile(tmp_path):
+    # Two measurement processes once fetched the same tile, wrote the same fixed
+    # "{tile}.part" and renamed it; one crashed. A leftover temporary under the
+    # old fixed name — here a directory, so it cannot be overwritten or renamed —
+    # must not stop a write.
+    tile_dir = tmp_path / "terrarium" / "0" / "0"
+    tile_dir.mkdir(parents=True)
+    (tile_dir / "0.png.part").mkdir()
+    fetch = FakeFetch({(0, 0, 0): tile_png(lambda px, py: 7.0)})
+
+    assert TerrariumReader(str(tmp_path), zoom=0, fetch=fetch).elevation(
+        1.0, 1.0) == pytest.approx(7.0)
+    assert (tile_dir / "0.png").exists()
+    assert sorted(p.name for p in tile_dir.iterdir()) == ["0.png", "0.png.part"]
+
+
 def test_the_memory_cache_is_bounded():
     fetch = FakeFetch({(2, x, y): tile_png(lambda px, py: 1.0)
                        for x in range(4) for y in range(4)})

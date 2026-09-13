@@ -20,12 +20,14 @@ treated them as if they were:
 * **Relief read as flat** swaps the model in over a real hill. That can erase
   climb that happened. **Harm.**
 
-Counting both as "misreads" made a safe partial fix look like a failed design:
-the headline "26 of 26 flat windows misread" in a city was entirely the harmless
-kind. So the primary output here is the **outcome** — what the shipped oracle
-reports end to end against the truth, whether it ever does worse than the
-recording alone, and whether it ever erases real climb — with the per-window
-verdicts kept as a diagnostic and their two kinds named for what they are.
+Counting both as "misreads" made a missed fix look like a failure: the headline
+"26 of 26 flat windows misread" in a city was entirely the harmless kind. But
+"relief read as flat" is not the only harm either. On a recording that did not
+need correcting, ANY substitution replaces good data with the model's own error,
+in either direction. So the primary output here is the **outcome** — what the
+shipped oracle reports end to end against the truth, for recordings of every
+quality, in metres per kilometre — with the per-window verdicts kept as a
+diagnostic and their two kinds named for what they are.
 
 Ground truth
 ------------
@@ -33,24 +35,36 @@ Berlin's DGM1: airborne lidar, BARE EARTH, 1 m grid, licensed dl-de/zero-2-0,
 https://gdi.berlin.de/data/dgm1/atom/. The sites separate causes that a flat
 test would conflate:
 
-* **Tempelhofer Feld** — a former airfield. Transects are confined to a
-  rectangle kept at least 60 m inside the park on every side. An earlier version
-  used a whole 2 km lidar tile and called it "open, no buildings, no trees"; most
-  of that tile is streets, houses and the Ringbahn, and most of the misreads it
-  reported came from them.
+* **Tempelhofer Feld**, **Tegel airfield** — flat open ground. Transects are
+  confined to rectangles inside each airfield. An earlier version used a whole
+  2 km lidar tile at Tempelhof and called it "open, no buildings, no trees"; most
+  of that tile is streets, houses and the Ringbahn. Two airfields rather than
+  one, because a single site's figure is a handful of independent 500 m patches.
+  Both are still Berlin, on one Copernicus tile.
+* **Luebars** — MIXED rural ground: by OpenStreetMap land use about a quarter
+  fields and meadow, a third village and allotments, a quarter wood and wetland.
+  Not "rolling farmland"; its lines that are mostly field fare no better.
 * **Mitte** — flat ground under a dense city.
 * **Grunewald** — flat-ish ground under forest.
 * **Teufelsberg**, **Mueggelberge** — real relief.
 
 "Truth" for a gain is the gain pipeline applied to the lidar itself, so every
 figure is compared like for like and the pipeline's own smoothing floor cancels.
+A line with any gap in the lidar (a site's edge at the Berlin border) is dropped,
+and the report says how many.
 
 The recording
 -------------
-The oracle never sees a perfect path. Each transect is recorded the way unit 1
-models a phone: AR(1) vertical drift, AR(1) horizontal drift, and the path
-smoothed over 100 m of ground before the model is read. Two drift settings, four
-seeds each.
+The oracle never sees a perfect path. Each transect is recorded with AR(1)
+vertical drift, optional white noise, and AR(1) horizontal drift on a fixed
+60 s scale (the path comes from GPS whatever the altimeter is), smoothed over
+100 m of ground before the model is read. Five recording classes, from a
+drifting phone to a clean track, four seeds each — see :data:`RECORDINGS`.
+
+"Worse" is counted per LINE, not per line and seed: the four seeds share a
+line's terrain, and a line's terrain explains five to ten times more of the
+spread than its seed does, so line x seed counts overstate how many independent
+cases agree.
 """
 from __future__ import annotations
 
@@ -73,6 +87,7 @@ import requests
 from src.models.track_edit import (
     TERRAIN_RELIEF_M,
     TERRAIN_WINDOW_M,
+    _noise_estimate,
     _relief,
     _relief_span,
     _terrain_windows,
@@ -90,19 +105,33 @@ SAMPLE_M = 5.0
 SPEED_MS = 5.0
 PATH_SMOOTH_M = 100.0
 HORIZONTAL_SIGMA_M = 5.0
+HORIZONTAL_TAU_S = 60.0
 #: (label, vertical drift sigma m, drift correlation s, extra white noise m).
 #:
 #: The first version measured only phone-class drift, which is exactly the
 #: recording the oracle is built to help, and so could not see the case it
 #: harms: a CLEAN recording has almost no phantom climb to remove, and
-#: substituting the terrain model then adds the model's own error as climb.
+#: substituting the terrain model then replaces good data with the model's own
+#: error, in either direction. The barometers drift with the weather over hours
+#: and carry a few tenths of a metre of short-term noise; an earlier "barometric"
+#: class (1 m over 10 minutes, no short-term noise) matched no real sensor.
 RECORDINGS = (
     ("phone drift", 4.0, 60.0, 0.0),
     ("phone drift + 3 m white", 4.0, 60.0, 3.0),
-    ("barometric", 1.0, 600.0, 0.0),
+    ("barometer, 1 m / 1 h + 0.2 m", 1.0, 3600.0, 0.2),
+    ("barometer, 2 m / 3 h + 0.3 m", 2.0, 10800.0, 0.3),
     ("clean", 0.0, 60.0, 0.0),
 )
 SEEDS = (0, 1, 2, 3)
+#: A line is "worse" when, averaged over its seeds, the oracle's total lands this
+#: much further from the truth than the recording's. Transects are 0.6-4 km; the
+#: 1 m first used counted rounding as harm (the median "worse" run was 1.3 m).
+WORSE_M = 2.0
+#: Candidate gates on recording quality: substitute only when the recording's own
+#: measured noise (``_noise_estimate``) exceeds the threshold. Not shipped —
+#: measured here because whether such a gate can separate the classes is the
+#: next decision.
+GATES = (0.15, 0.30)
 
 
 # ── Coordinates, vectorised ──────────────────────────────────────────────────
@@ -189,19 +218,33 @@ class Lidar:
 class Terrarium:
     name = "terrarium z13"
 
+    #: A z13 tile over central Berlin, which the tileset certainly has. A
+    #: misspelt bucket, path or extension answers 404 exactly as an ocean tile
+    #: does, so without this check a misconfigured URL reads as a world without
+    #: terrain.
+    KNOWN_TILE = (13, 4400, 2686)
+
     def __init__(self, zoom: int = 13):
         self.zoom = zoom
         self.reader = TerrariumReader(os.path.join(CACHE, "tiles"), zoom=zoom)
         self._grids: Dict[Tuple[int, int], object] = {}
+        if self.reader.tile_grid(*self.KNOWN_TILE) is None:
+            raise SystemExit(
+                f"terrarium tile {self.KNOWN_TILE} is missing: the tileset URL is "
+                f"wrong or the service is down, not a world without terrain")
 
     def _grid(self, tx: int, ty: int):
         key = (tx, ty)
-        if key not in self._grids:
-            tile = self.reader.tile_grid(self.zoom, tx, ty)
-            self._grids[key] = (np.full((TILE_SIZE, TILE_SIZE), np.nan)
-                                if tile is None else
-                                np.asarray(tile, dtype=np.float64).reshape(
-                                    TILE_SIZE, TILE_SIZE))
+        if key in self._grids:
+            return self._grids[key]
+        tile = self.reader.tile_grid(self.zoom, tx, ty)
+        if tile is None:
+            # Not remembered here: the reader already remembers a truly absent
+            # tile, and a tile that failed transiently must be asked for again
+            # rather than read as NaN for the rest of the run.
+            return np.full((TILE_SIZE, TILE_SIZE), np.nan)
+        self._grids[key] = np.asarray(tile, dtype=np.float64).reshape(
+            TILE_SIZE, TILE_SIZE)
         return self._grids[key]
 
     def _pixels(self, gx, gy):
@@ -342,16 +385,24 @@ SITES = [
     # The park interior: a rectangle at least 60 m inside Tempelhofer Feld on
     # every side, chosen once against the park's outline, so that no street,
     # house or railway reaches a transect. It straddles two lidar tiles.
-    # The eastern edge was 392354, which left only 51 m to the park boundary on
-    # that side; 392345 restores the stated 60 m.
+    # Measured against OSM relation 7317281 the margins were 51 m (east, at
+    # 392354) and then 59.6 m north and 59.8 m east; the edges below clear 60 m.
     ("Tempelhofer Feld", "flat open, park interior",
      [(390, 5814), (392, 5814)],
-     _grid_lines(391004.0, 392345.0, 5814350.0, 5815375.0)),
-    # Open ROLLING ground, the case "open ground" in the first verdict was
-    # wrongly generalised to from one dead-flat airfield. Two full tiles, so the
-    # village of Luebars and the Tegeler Fliess stream woods are included as
-    # well as the fields: this is a mixed rural site, not a clean one.
-    ("Luebars", "rolling fields, village, woods",
+     _grid_lines(391004.0, 392344.0, 5814350.0, 5815374.0)),
+    # A second flat open site, so the airfield figure is not one place's:
+    # runways and the grass between them. Checked against OSM buildings, wood,
+    # scrub and apron: nothing within 68 m of the rectangle. A wider rectangle
+    # first proposed (382500-385200 E) ran into the terminal and the housing
+    # and shops by Kurt-Schumacher-Platz.
+    ("Tegel airfield", "flat open, runways and grass",
+     [(382, 5824), (384, 5824)],
+     _grid_lines(383030.0, 384300.0, 5824250.0, 5824850.0)),
+    # MIXED rural ground. It was added as "rolling farmland", but by OSM land use
+    # it is about 23% field and meadow, 35% village and allotments and 27% wood
+    # and wetland, and the lines that are mostly field do no better than the
+    # rest. Lines reaching past the Berlin border have no lidar and are dropped.
+    ("Luebars", "mixed rural: village, fields, woods",
      [(386, 5830), (388, 5830)],
      _grid_lines(386050.0, 389950.0, 5830050.0, 5831950.0)),
     ("Mitte", "flat, dense city", [(390, 5818)], _tile_lines(390, 5818)),
@@ -391,93 +442,156 @@ def verdicts(truth, model, window_m: float, threshold_m: float) -> Dict[str, int
     return counts
 
 
-def _window_harm(truth, modelled, dist):
-    """Real climb the oracle substitutes away, window by window.
+def _splice(base, modelled, lo: int, hi: int):
+    """``base`` with one window's steps taken from ``modelled``: what the oracle
+    does to that window, left in the context of the whole line."""
+    out = np.array(base, dtype=np.float64)
+    out[lo:hi] = base[lo] + (modelled[lo:hi] - modelled[lo])
+    out[hi:] = base[hi:] + (out[hi - 1] - base[hi - 1])
+    return out
+
+
+def window_harm(truth, modelled, dist):
+    """What one substituted window does to a line's gain, in metres.
 
     A run total nets phantom removed in one window against real climb erased in
-    another, so "no run erased climb" can hide local harm. For every window the
-    oracle hands to the model (the model reads no relief there), the loss is what
-    the gain PIPELINE reports over the truth minus what it reports over the model.
+    another, so it can hide local harm. For every window the oracle hands to the
+    model (the model reads no relief there) this reports:
 
-    Through the pipeline, not a raw sum of steps: 1 m lidar sampled every 5 m
-    steps over every kerb, and a raw sum books those as climb nobody made, which
-    inflated this figure several-fold in the first version. Reported in metres
-    only — dividing by a line's total gain produced figures like 640% on city
-    streets whose whole line climbs 3 m, which say nothing.
+    * ``isolated`` — the pipeline over that window of truth, minus over that
+      window of model: real climb LOST, with the window's edges as fresh starts
+      for the pipeline's hysteresis and smoothing;
+    * ``lost`` / ``added`` — the same window's model steps spliced into the
+      otherwise true line, and the whole line's gain compared: loss AND gain, in
+      context. The isolated figure alone cannot show a substitution that invents
+      climb, which is how it harms a flat line.
+
+    Independent of the recording class: the oracle's choice of window and the
+    steps it splices depend only on the model.
     """
     n = len(truth)
-    worst = 0.0
-    real_relief_substituted = 0
+    truth_gain = elevation_gain(list(truth), dist)
+    isolated = lost = added = 0.0
+    relief = 0
     for lo, hi in _terrain_windows(dist, n, TERRAIN_WINDOW_M):
         span = _relief_span(lo, hi, n, TERRAIN_WINDOW_M, dist)
         m = modelled[span]
         if len(m) < 3 or _relief(list(m)) >= TERRAIN_RELIEF_M:
             continue                                   # recording kept
         window_dist = dist[lo:hi]
-        true_up = elevation_gain(list(truth[lo:hi]), window_dist)
-        model_up = elevation_gain(list(modelled[lo:hi]), window_dist)
-        worst = max(worst, true_up - model_up)
+        isolated = max(isolated,
+                       elevation_gain(list(truth[lo:hi]), window_dist)
+                       - elevation_gain(list(modelled[lo:hi]), window_dist))
+        delta = elevation_gain(list(_splice(truth, modelled, lo, hi)),
+                               dist) - truth_gain
+        lost = max(lost, -delta)
+        added = max(added, delta)
         if _relief(list(truth[span])) >= TERRAIN_RELIEF_M:
-            real_relief_substituted += 1
-    return worst, real_relief_substituted
+            relief += 1
+    return isolated, lost, added, relief
 
 
-def outcome(lidar: Lidar, lines, model, sigma_v: float, tau_s: float,
-            white_m: float) -> Dict:
-    """The shipped oracle end to end, against what the lidar says was climbed."""
-    tau_samples = tau_s * SPEED_MS / SAMPLE_M
-    totals = {"truth": 0.0, "recording": 0.0, "oracle": 0.0, "perfect": 0.0}
-    worse = erased = runs = substituted_relief = 0
-    worst_window = 0.0
+def _new_tally():
+    return {"truth": 0.0, "recording": 0.0, "oracle": 0.0, "km": 0.0,
+            "added": 0.0, "path_added": 0.0, "erased": 0, "line_excess": [],
+            "gated": {g: {"oracle": 0.0, "added": 0.0, "line_excess": []}
+                      for g in GATES}}
+
+
+def site_outcome(lidar: Lidar, lines, model) -> Dict:
+    """The shipped oracle end to end, for every recording class at one site.
+
+    The drifted path — and so the model read along it — depends only on the line
+    and the seed, never on the recording class, so it is read once per run and
+    every class is scored against the same terrain.
+    """
+    h_tau = HORIZONTAL_TAU_S * SPEED_MS / SAMPLE_M
+    tallies = {label: _new_tally() for label, *_ in RECORDINGS}
+    windows = {"isolated": 0.0, "lost": 0.0, "added": 0.0, "relief": 0}
+    lines_valid = runs = 0
     for index, (e, n) in enumerate(lines):
         truth = lidar.at(e, n)
         if np.isnan(truth).any():
-            continue
+            continue                                   # no lidar: past the border
+        lines_valid += 1
         count = len(e)
         dist = [i * SAMPLE_M / 1000.0 for i in range(count)]
+        km = (count - 1) * SAMPLE_M / 1000.0
         truth_gain = elevation_gain(list(truth), dist)
+        line_excess = {label: [] for label in tallies}
+        gated_excess = {label: {g: [] for g in GATES} for label in tallies}
         for seed in SEEDS:
-            # Distinct streams per line, seed and component. The first version
-            # used base, base+1, base+2 with base = 1000*index + seed, so seed 1's
-            # vertical noise was seed 0's easting drift and the "four seeds" were
-            # not four independent draws.
+            # Distinct streams per line, seed and component: 10 * (1000 i + s)
+            # plus a component digit. The first version used base, base+1,
+            # base+2 with base = 1000 i + s, so seed 1's vertical noise was seed
+            # 0's easting drift.
             base = (1000 * index + seed) * 10
-            vertical = np.array(_ar1(count, sigma_v, tau_samples, base))
-            if white_m > 0:
-                rng = np.random.default_rng(base + 3)
-                vertical = vertical + rng.normal(0.0, white_m, count)
-            recording = truth + vertical
-            pe = _smooth(e + np.array(_ar1(count, HORIZONTAL_SIGMA_M,
-                                           tau_samples, base + 1)), PATH_SMOOTH_M)
-            pn = _smooth(n + np.array(_ar1(count, HORIZONTAL_SIGMA_M,
-                                           tau_samples, base + 2)), PATH_SMOOTH_M)
+            pe = _smooth(e + np.array(_ar1(count, HORIZONTAL_SIGMA_M, h_tau,
+                                           base + 1)), PATH_SMOOTH_M)
+            pn = _smooth(n + np.array(_ar1(count, HORIZONTAL_SIGMA_M, h_tau,
+                                           base + 2)), PATH_SMOOTH_M)
             lat, lon = from_utm_array(pe, pn)
             modelled = model.at(lat, lon)
             perfect = lidar.at(pe, pn)
             if np.isnan(modelled).any() or np.isnan(perfect).any():
-                continue
-            recorded_gain = elevation_gain(list(recording), dist)
-            oracle_gain = terrain_corrected_gain(list(recording), list(modelled),
-                                                 dist)
-            totals["truth"] += truth_gain
-            totals["recording"] += recorded_gain
-            totals["oracle"] += oracle_gain
-            totals["perfect"] += terrain_corrected_gain(
-                list(recording), list(perfect), dist)
-            worse += abs(oracle_gain - truth_gain) > abs(
-                recorded_gain - truth_gain) + 1.0
-            # Erasure is judged against what the user would have seen otherwise,
-            # not against the truth alone: a recording whose own hysteresis band
-            # already sits below the truth is not the oracle's doing.
-            erased += oracle_gain < min(truth_gain, recorded_gain) - 10.0
-            w_worst, w_relief = _window_harm(truth, modelled, dist)
-            worst_window = max(worst_window, w_worst)
-            substituted_relief += w_relief
+                continue                               # counted as a shortfall
             runs += 1
-    totals.update(worse=worse, erased=erased, runs=runs,
-                  worst_window=worst_window,
-                  substituted_relief=substituted_relief)
-    return totals
+            isolated, lost, added, relief = window_harm(truth, modelled, dist)
+            windows["isolated"] = max(windows["isolated"], isolated)
+            windows["lost"] = max(windows["lost"], lost)
+            windows["added"] = max(windows["added"], added)
+            windows["relief"] += relief
+            for label, sigma_v, tau_s, white_m in RECORDINGS:
+                t = tallies[label]
+                vertical = np.array(_ar1(count, sigma_v,
+                                         tau_s * SPEED_MS / SAMPLE_M, base))
+                if white_m > 0:
+                    rng = np.random.default_rng(base + 3)
+                    vertical = vertical + rng.normal(0.0, white_m, count)
+                recording = list(truth + vertical)
+                recorded_gain = elevation_gain(recording, dist)
+                oracle_gain = terrain_corrected_gain(recording, list(modelled),
+                                                     dist)
+                path_gain = terrain_corrected_gain(recording, list(perfect), dist)
+                rec_err = abs(recorded_gain - truth_gain)
+                excess = abs(oracle_gain - truth_gain) - rec_err
+                t["truth"] += truth_gain
+                t["recording"] += recorded_gain
+                t["oracle"] += oracle_gain
+                t["km"] += km
+                t["added"] += excess
+                t["path_added"] += abs(path_gain - truth_gain) - rec_err
+                # Erasure is judged against what the user would have seen
+                # otherwise, not the truth alone: a recording whose own band
+                # already sits below the truth is not the oracle's doing.
+                t["erased"] += oracle_gain < min(truth_gain, recorded_gain) - 10.0
+                line_excess[label].append(excess)
+                noise = _noise_estimate(recording)[0]
+                for g in GATES:
+                    gated = oracle_gain if noise > g else recorded_gain
+                    gated_excess[label][g].append(abs(gated - truth_gain) - rec_err)
+                    t["gated"][g]["oracle"] += gated
+                    t["gated"][g]["added"] += abs(gated - truth_gain) - rec_err
+        for label, t in tallies.items():
+            if line_excess[label]:
+                t["line_excess"].append(float(np.mean(line_excess[label])))
+                for g in GATES:
+                    t["gated"][g]["line_excess"].append(
+                        float(np.mean(gated_excess[label][g])))
+    return {"tallies": tallies, "windows": windows, "lines": len(lines),
+            "lines_valid": lines_valid, "runs": runs}
+
+
+def _removed(recording: float, truth: float, oracle: float) -> str:
+    excess = recording - truth
+    if excess <= 0:
+        return "n/a"
+    pct = (recording - oracle) / excess * 100
+    return f"{pct:5.0f}%" + ("" if 0 <= pct <= 100 else " !")
+
+
+def _worse(line_excess) -> str:
+    return f"{sum(x > WORSE_M for x in line_excess)}/{len(line_excess)}"
 
 
 def main(argv=None) -> int:
@@ -494,38 +608,70 @@ def main(argv=None) -> int:
         model = MODELS[key]()
         print(f"\n=== {model.name}  (window {TERRAIN_WINDOW_M:.0f} m, "
               f"relief threshold {TERRAIN_RELIEF_M:.0f} m)")
-        print("  OUTCOME - the shipped oracle end to end. 'removed' = share of the "
-              "recording's excess over truth taken away (flagged when over 100% or "
-              "negative). 'worse' = runs further from truth than the recording. "
-              "'erased' = runs more than 10 m below BOTH truth and recording. "
-              "'worst win' = most real climb lost in one substituted window.")
-        for label, sigma_v, tau_s, white_m in RECORDINGS:
+        results = []
+        for site_label, kind, lidar, lines in sites:
+            o = site_outcome(lidar, lines, model)
+            expected = o["lines_valid"] * len(SEEDS)
+            if o["runs"] != expected:
+                # Refuse a PARTIAL site as firmly as an empty one: one failed tile
+                # once took a site from 92 runs to 20, and the row still printed.
+                raise SystemExit(
+                    f"{model.name} measured {o['runs']} of {expected} runs at "
+                    f"{site_label}: the model is missing data along some lines. "
+                    f"Refusing to print rows that would read as a result.")
+            results.append((site_label, kind, o))
+
+        print("  OUTCOME - the shipped oracle end to end.\n"
+              "    removed  share of the recording's excess over truth taken away "
+              "(! when over 100% or negative)\n"
+              "    m/km     how much further from truth the oracle lands than the "
+              "recording, per km (negative = closer)\n"
+              f"    worse    LINES whose seed-averaged total lands more than "
+              f"{WORSE_M:.0f} m further from truth\n"
+              "    erased   runs more than 10 m below both truth and recording\n"
+              "    path     m/km when the LIDAR is substituted along the same "
+              "drifted path: what the path alone costs\n"
+              "    gate g   the same, substituting only when the recording's "
+              "measured noise exceeds g m")
+        for label, *_ in RECORDINGS:
             print(f"  recording: {label}")
-            print(f"  {'site':18s} {'truth':>6s} {'rec':>6s} {'oracle':>6s} "
-                  f"{'removed':>9s} {'worse':>8s} {'erased':>7s} "
-                  f"{'worst win':>9s} {'relief subst':>12s}")
-            for site_label, kind, lidar, lines in sites:
-                o = outcome(lidar, lines, model, sigma_v, tau_s, white_m)
-                excess = o["recording"] - o["truth"]
-                if excess > 0:
-                    pct = (o["recording"] - o["oracle"]) / excess * 100
-                    flag = "" if 0 <= pct <= 100 else " !"
-                    removed = f"{pct:5.0f}%{flag}"
-                else:
-                    removed = "n/a"
-                if o["runs"] == 0:
-                    raise SystemExit(
-                        f"{model.name} measured no runs at {site_label}: the "
-                        f"model does not cover the site. Refusing to print a "
-                        f"row that would read as a result.")
-                print(f"  {site_label:18s} {o['truth']:6.0f} {o['recording']:6.0f} "
-                      f"{o['oracle']:6.0f} {removed:>9s} "
-                      f"{o['worse']:3d}/{o['runs']:<4d}{o['erased']:3d}/{o['runs']:<4d}"
-                      f"{o['worst_window']:6.1f} m {o['substituted_relief']:9d}")
-                sys.stdout.flush()
+            header = (f"  {'site':17s} {'lines':>5s} {'truth':>6s} {'rec':>6s} "
+                      f"{'oracle':>6s} {'removed':>8s} {'m/km':>6s} {'worse':>6s} "
+                      f"{'erased':>6s} {'path':>6s}")
+            for g in GATES:
+                header += f" | gate {g:.2f}: {'removed':>8s} {'m/km':>6s} {'worse':>6s}"
+            print(header)
+            for site_label, kind, o in results:
+                t = o["tallies"][label]
+                row = (f"  {site_label:17s} {o['lines_valid']:2d}/{o['lines']:<2d} "
+                       f"{t['truth']:6.0f} {t['recording']:6.0f} {t['oracle']:6.0f} "
+                       f"{_removed(t['recording'], t['truth'], t['oracle']):>8s} "
+                       f"{t['added'] / t['km']:+6.2f} {_worse(t['line_excess']):>6s} "
+                       f"{t['erased']:3d}/{o['runs']:<3d}"
+                       f"{t['path_added'] / t['km']:+6.2f}")
+                for g in GATES:
+                    gt = t["gated"][g]
+                    row += (f" |            "
+                            f"{_removed(t['recording'], t['truth'], gt['oracle']):>8s} "
+                            f"{gt['added'] / t['km']:+6.2f} "
+                            f"{_worse(gt['line_excess']):>6s}")
+                print(row)
+            sys.stdout.flush()
+
+        print("  WINDOWS the oracle substitutes, worst over every run (the same for "
+              "every recording class).\n"
+              "    isolated  real climb lost, the window measured on its own\n"
+              "    lost/added  the window spliced into the true line: climb lost "
+              "and climb invented, in context\n"
+              "    relief    substituted windows where the truth HAS relief")
+        for site_label, kind, o in results:
+            w = o["windows"]
+            print(f"  {site_label:17s} isolated {w['isolated']:4.1f} m  lost "
+                  f"{w['lost']:4.1f} m  added {w['added']:4.1f} m  relief "
+                  f"{w['relief']:4d}")
 
         print("  VERDICTS per window (diagnostic). MISSED FIX leaves the recording "
-              "alone — no worse than today. HARM swaps the model in over a hill.")
+              "alone - no worse than today. HARM swaps the model in over a hill.")
         for label, kind, lidar, lines in sites:
             total: Dict[str, int] = {}
             errors = []
@@ -540,7 +686,7 @@ def main(argv=None) -> int:
                     total[k] = total.get(k, 0) + v
                 errors.append(float(np.std(modelled - truth)))
             sd = float(np.median(errors)) if errors else float("nan")
-            print(f"  {label:18s} {kind:26s} error sd {sd:5.2f} m  "
+            print(f"  {label:17s} {kind:36s} error sd {sd:5.2f} m  "
                   + "  ".join(f"{k} {v}" for k, v in total.items()))
             sys.stdout.flush()
     return 0

@@ -3,11 +3,11 @@
 **Measurement tooling, not production code.** It was written as the production
 reader for the flatness oracle in
 :func:`src.models.track_edit.terrain_corrected_gain`, and the measurement it
-enabled — ``terrarium_measure.py`` beside it — found that no commercially usable
-global terrain model is accurate enough for that oracle to fire reliably. With
-nothing in the application ever going to call it, keeping it under ``src/``
-would be speculative code. It lives here so the measurement stays reproducible,
-and so it is ready if the question is ever reopened with better data.
+enabled — ``terrarium_measure.py`` beside it — found this tileset (~30 m SRTM
+underneath) reads real relief as flat too often to substitute safely; Copernicus
+GLO-30 does better. With nothing in the application calling it, keeping it under
+``src/`` would be speculative code. It lives here so the measurement stays
+reproducible.
 
 It reads the Mapzen/AWS "terrain tiles" in terrarium encoding: plain
 ``{z}/{x}/{y}.png`` on a public S3 bucket, no token, open licence with
@@ -39,6 +39,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import tempfile
 import time
 from array import array
 from collections import OrderedDict
@@ -152,7 +153,10 @@ def fetch_terrarium_tile(z: int, x: int, y: int,
             if resp.status_code not in _TRANSIENT_STATUS and resp.status_code < 500:
                 # 400, 401 and the like: the request is wrong, and asking again
                 # will not change that. Raised loudly rather than retried, and
-                # not caught as transient, so it cannot pass for "no data".
+                # not caught as transient, so it cannot pass for "no data". This
+                # does NOT catch a misspelt bucket, path or extension: S3 answers
+                # those with 404, indistinguishable from an absent tile, so a
+                # caller that must have data checks a tile known to exist.
                 raise TileConfigurationError(
                     f"terrarium tile {z}/{x}/{y} refused: HTTP {resp.status_code}")
             last = f"HTTP {resp.status_code}"
@@ -325,11 +329,19 @@ class TerrariumReader:
             return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # Write-then-rename, so a crash mid-write cannot leave a truncated PNG
-        # that decodes as "no tile" for ever after.
-        partial = f"{path}.part"
-        with open(partial, "wb") as handle:
-            handle.write(raw)
-        os.replace(partial, path)
+        # that decodes as "no tile" for ever after. The temporary name is unique:
+        # a fixed "{path}.part" let two processes fetching the same tile write
+        # and rename one file, and one of them crashed.
+        fd, partial = tempfile.mkstemp(dir=os.path.dirname(path),
+                                       suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+            os.replace(partial, path)
+        except BaseException:
+            if os.path.exists(partial):
+                os.remove(partial)
+            raise
 
 
 def sample_along(
